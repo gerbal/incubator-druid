@@ -20,46 +20,49 @@
 package org.apache.druid.query.scan;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Function;
 import com.google.common.base.Functions;
 import com.google.common.collect.Iterables;
 import com.google.inject.Inject;
+import org.apache.druid.frame.allocation.MemoryAllocatorFactory;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.UOE;
 import org.apache.druid.java.util.common.guava.BaseSequence;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.common.guava.Sequences;
+import org.apache.druid.query.CacheStrategy;
+import org.apache.druid.query.FrameSignaturePair;
 import org.apache.druid.query.GenericQueryMetricsFactory;
+import org.apache.druid.query.OrderBy;
 import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryMetrics;
 import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QueryToolChest;
 import org.apache.druid.query.aggregation.MetricManipulationFn;
-import org.apache.druid.segment.VirtualColumn;
-import org.apache.druid.segment.column.ColumnCapabilities;
+import org.apache.druid.query.cache.CacheKeyBuilder;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.utils.CloseableUtils;
 
+import javax.annotation.Nullable;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 public class ScanQueryQueryToolChest extends QueryToolChest<ScanResultValue, ScanQuery>
 {
-  private static final TypeReference<ScanResultValue> TYPE_REFERENCE = new TypeReference<ScanResultValue>()
-  {
-  };
+  private static final byte SCAN_QUERY = 0x13;
+  private static final byte CACHE_STRATEGY_VERSION = 0x1;
+  private static final TypeReference<ScanResultValue> TYPE_REFERENCE = new TypeReference<>() {};
 
-  private final ScanQueryConfig scanQueryConfig;
   private final GenericQueryMetricsFactory queryMetricsFactory;
 
   @Inject
   public ScanQueryQueryToolChest(
-      final ScanQueryConfig scanQueryConfig,
       final GenericQueryMetricsFactory queryMetricsFactory
   )
   {
-    this.scanQueryConfig = scanQueryConfig;
     this.queryMetricsFactory = queryMetricsFactory;
   }
 
@@ -86,10 +89,7 @@ public class ScanQueryQueryToolChest extends QueryToolChest<ScanResultValue, Sca
         newLimit = originalQuery.getScanRowsLimit() + originalQuery.getScanRowsOffset();
       }
 
-      // Ensure "legacy" is a non-null value, such that all other nodes this query is forwarded to will treat it
-      // the same way, even if they have different default legacy values.
-      final ScanQuery queryToRun = originalQuery.withNonNullLegacy(scanQueryConfig)
-                                                .withOffset(0)
+      final ScanQuery queryToRun = originalQuery.withOffset(0)
                                                 .withLimit(newLimit);
 
       final Sequence<ScanResultValue> results;
@@ -154,46 +154,127 @@ public class ScanQueryQueryToolChest extends QueryToolChest<ScanResultValue, Sca
   @Override
   public RowSignature resultArraySignature(final ScanQuery query)
   {
-    if (query.getColumns() == null || query.getColumns().isEmpty()) {
-      // Note: if no specific list of columns is provided, then since we can't predict what columns will come back, we
-      // unfortunately can't do array-based results. In this case, there is a major difference between standard and
-      // array-based results: the standard results will detect and return _all_ columns, whereas the array-based results
-      // will include none of them.
-      return RowSignature.empty();
-    } else {
-      final RowSignature.Builder builder = RowSignature.builder();
+    return query.getRowSignature();
+  }
 
-      if (query.withNonNullLegacy(scanQueryConfig).isLegacy()) {
-        builder.add(ScanQueryEngine.LEGACY_TIMESTAMP_KEY, null);
-      }
-
-      for (String columnName : query.getColumns()) {
-        // With the Scan query we only know the columnType for virtual columns. Let's report those, at least.
-        final ColumnType columnType;
-
-        final VirtualColumn virtualColumn = query.getVirtualColumns().getVirtualColumn(columnName);
-        if (virtualColumn != null) {
-          final ColumnCapabilities capabilities = virtualColumn.capabilities(c -> null, columnName);
-          columnType = capabilities != null ? capabilities.toColumnType() : null;
-        } else {
-          // Unknown type. In the future, it would be nice to have a way to fill these in.
-          columnType = null;
-        }
-
-        builder.add(columnName, columnType);
-      }
-
-      return builder.build();
-    }
+  /**
+   * This batches the fetched {@link ScanResultValue}s which have similar signatures and are consecutives. In best case
+   * it would return a single frame, and in the worst case, it would return as many frames as the number of {@link ScanResultValue}
+   * passed.
+   */
+  @Override
+  public Optional<Sequence<FrameSignaturePair>> resultsAsFrames(
+      final ScanQuery query,
+      final Sequence<ScanResultValue> resultSequence,
+      MemoryAllocatorFactory memoryAllocatorFactory,
+      boolean useNestedForUnknownTypes
+  )
+  {
+    final RowSignature defaultRowSignature = resultArraySignature(query);
+    return Optional.of(
+        Sequences.simple(
+            new ScanResultValueFramesIterable(
+                resultSequence,
+                memoryAllocatorFactory,
+                useNestedForUnknownTypes,
+                defaultRowSignature,
+                rowSignature -> getResultFormatMapper(query.getResultFormat(), rowSignature.getColumnNames())
+            )
+        )
+    );
   }
 
   @Override
   public Sequence<Object[]> resultsAsArrays(final ScanQuery query, final Sequence<ScanResultValue> resultSequence)
   {
-    final List<String> fields = resultArraySignature(query).getColumnNames();
-    final Function<?, Object[]> mapper;
+    final Function<?, Object[]> mapper = getResultFormatMapper(query.getResultFormat(), resultArraySignature(query).getColumnNames());
 
-    switch (query.getResultFormat()) {
+    return resultSequence.flatMap(
+        result -> {
+          // Generics? Where we're going, we don't need generics.
+          final List rows = (List) result.getEvents();
+          final Iterable arrays = Iterables.transform(rows, (Function) mapper);
+          return Sequences.simple(arrays);
+        }
+    );
+  }
+
+  @Override
+  public CacheStrategy<ScanResultValue, ScanResultValue, ScanQuery> getCacheStrategy(
+      final ScanQuery query,
+      @Nullable final ObjectMapper objectMapper
+  )
+  {
+    return new CacheStrategy<>()
+    {
+      @Override
+      public boolean isCacheable(ScanQuery query, boolean willMergeRunners, boolean segmentLevel)
+      {
+        // Currently, there is no bijective mapping from ScanResultValue to Result<BySegmentResultValueClass<ScanResultValue>>.
+        // This means queries will fail if:
+        //   - A query is issued with bySegment:true
+        //   - Segment-level cache is enabled on the broker (in which case it sends bySegment queries to data nodes).
+        return !query.context().isBySegment() && (!segmentLevel || willMergeRunners);
+      }
+
+      @Override
+      public byte[] computeCacheKey(ScanQuery query)
+      {
+        CacheKeyBuilder builder = new CacheKeyBuilder(SCAN_QUERY)
+            .appendByte(CACHE_STRATEGY_VERSION)
+            .appendCacheable(query.getVirtualColumns())
+            .appendString(query.getResultFormat().toString())
+            .appendLong(query.getScanRowsOffset())
+            .appendLong(query.getScanRowsLimit())
+            .appendCacheable(query.getFilter())
+            .appendStrings(query.getColumns() != null ? query.getColumns() : List.of())
+            .appendCacheable(query.getTimeOrder());
+
+        List<OrderBy> orderBys = query.getOrderBys();
+        if (orderBys != null) {
+          builder.appendCacheables(orderBys);
+        }
+
+        List<ColumnType> columnTypes = query.getColumnTypes();
+        if (columnTypes != null) {
+          builder.appendCacheables(columnTypes);
+        }
+
+        return builder.build();
+      }
+
+      @Override
+      public byte[] computeResultLevelCacheKey(ScanQuery query)
+      {
+        // Use the same key as segment-level cache no result-level transformations like aggregations
+        return computeCacheKey(query);
+      }
+
+      @Override
+      public TypeReference<ScanResultValue> getCacheObjectClazz()
+      {
+        return TYPE_REFERENCE;
+      }
+
+      @Override
+      public Function<ScanResultValue, ScanResultValue> prepareForCache(boolean isResultLevelCache)
+      {
+        return input -> input;
+      }
+
+      @Override
+      public Function<ScanResultValue, ScanResultValue> pullFromCache(boolean isResultLevelCache)
+      {
+        return input -> input;
+      }
+    };
+  }
+
+  private static Function<?, Object[]> getResultFormatMapper(ScanQuery.ResultFormat resultFormat, List<String> fields)
+  {
+    Function<?, Object[]> mapper;
+
+    switch (resultFormat) {
       case RESULT_FORMAT_LIST:
         mapper = (Map<String, Object> row) -> {
           final Object[] rowArray = new Object[fields.size()];
@@ -220,16 +301,8 @@ public class ScanQueryQueryToolChest extends QueryToolChest<ScanResultValue, Sca
         };
         break;
       default:
-        throw new UOE("Unsupported resultFormat for array-based results: %s", query.getResultFormat());
+        throw new UOE("Unsupported resultFormat for array-based results: %s", resultFormat);
     }
-
-    return resultSequence.flatMap(
-        result -> {
-          // Generics? Where we're going, we don't need generics.
-          final List rows = (List) result.getEvents();
-          final Iterable arrays = Iterables.transform(rows, (Function) mapper);
-          return Sequences.simple(arrays);
-        }
-    );
+    return mapper;
   }
 }

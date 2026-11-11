@@ -21,14 +21,20 @@ package org.apache.druid.indexing.overlord.supervisor;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.SettableFuture;
 import org.apache.druid.indexing.overlord.DataSourceMetadata;
-import org.apache.druid.indexing.overlord.supervisor.autoscaler.LagStats;
+import org.apache.druid.indexing.overlord.supervisor.autoscaler.SupervisorTaskAutoScaler;
 import org.apache.druid.segment.incremental.ParseExceptionReport;
 
 import javax.annotation.Nullable;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * An interface representing a general supervisor for managing ingestion tasks. For streaming ingestion use cases,
+ * see {@link StreamSupervisor}.
+ */
 public interface Supervisor
 {
   void start();
@@ -41,10 +47,30 @@ public interface Supervisor
    */
   void stop(boolean stopGracefully);
 
+  /**
+   * Starts non-graceful shutdown of the supervisor and returns a future that completes when shutdown is complete.
+   */
+  default ListenableFuture<Void> stopAsync()
+  {
+    SettableFuture<Void> stopFuture = SettableFuture.create();
+    try {
+      stop(false);
+      stopFuture.set(null);
+    }
+    catch (Exception e) {
+      stopFuture.setException(e);
+    }
+    return stopFuture;
+  }
+
   SupervisorReport getStatus();
 
   SupervisorStateManager.State getState();
 
+  /**
+   * Returns all stats from stream consumer. If {@code includeOnlyStreamConsumerStats} is true,
+   * returns only stream platform stats, like Kafka metrics.
+   */
   default Map<String, Map<String, Object>> getStats()
   {
     return ImmutableMap.of();
@@ -61,23 +87,14 @@ public interface Supervisor
     return null; // default implementation for interface compatability; returning null since true or false is misleading
   }
 
-  void reset(DataSourceMetadata dataSourceMetadata);
+  default SupervisorTaskAutoScaler createAutoscaler(SupervisorSpec spec)
+  {
+    return spec.createAutoscaler(this);
+  }
 
   /**
-   * The definition of checkpoint is not very strict as currently it does not affect data or control path.
-   * On this call Supervisor can potentially checkpoint data processed so far to some durable storage
-   * for example - Kafka/Kinesis Supervisor uses this to merge and handoff segments containing at least the data
-   * represented by {@param currentCheckpoint} DataSourceMetadata
-   *
-   * @param taskGroupId        unique Identifier to figure out for which sequence to do checkpointing
-   * @param checkpointMetadata metadata for the sequence to currently checkpoint
+   * Resets any stored metadata by the supervisor.
+   * @param dataSourceMetadata optional dataSource metadata.
    */
-  void checkpoint(int taskGroupId, DataSourceMetadata checkpointMetadata);
-
-  /**
-   * Computes maxLag, totalLag and avgLag
-   */
-  LagStats computeLagStats();
-
-  int getActiveTaskGroupsCount();
+  void reset(@Nullable DataSourceMetadata dataSourceMetadata);
 }

@@ -19,7 +19,6 @@
 
 package org.apache.druid.query.spec;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Supplier;
 import org.apache.druid.java.util.common.guava.Accumulator;
 import org.apache.druid.java.util.common.guava.Sequence;
@@ -32,6 +31,8 @@ import org.apache.druid.query.Queries;
 import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryPlus;
 import org.apache.druid.query.QueryRunner;
+import org.apache.druid.query.SegmentDescriptor;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.context.ResponseContext;
 import org.apache.druid.segment.SegmentMissingException;
 
@@ -46,9 +47,6 @@ public class SpecificSegmentQueryRunner<T> implements QueryRunner<T>
   private final QueryRunner<T> base;
   private final SpecificSegmentSpec specificSpec;
 
-  @VisibleForTesting
-  static final String CTX_SET_THREAD_NAME = "setProcessingThreadNames";
-
   public SpecificSegmentQueryRunner(
       QueryRunner<T> base,
       SpecificSegmentSpec specificSpec
@@ -61,20 +59,26 @@ public class SpecificSegmentQueryRunner<T> implements QueryRunner<T>
   @Override
   public Sequence<T> run(final QueryPlus<T> input, final ResponseContext responseContext)
   {
+    final SegmentDescriptor descriptor = Queries.narrowToQuery(specificSpec.getDescriptor(), input.getQuery());
+    if (descriptor == null) {
+      // Nothing to read, since the query does not overlap this segment.
+      return Sequences.empty();
+    }
+
     final QueryPlus<T> queryPlus = input.withQuery(
         Queries.withSpecificSegments(
             input.getQuery(),
-            Collections.singletonList(specificSpec.getDescriptor())
+            Collections.singletonList(descriptor)
         )
     );
 
-    final boolean setName = input.getQuery().context().getBoolean(CTX_SET_THREAD_NAME, true);
+    final boolean setName = input.getQuery().context().getOrDefault(QueryContextParameters.SET_PROCESSING_THREAD_NAMES);
 
     final Query<T> query = queryPlus.getQuery();
 
     final Thread currThread = setName ? Thread.currentThread() : null;
     final String currThreadName = setName ? currThread.getName() : null;
-    final String newName = setName ? query.getType() + "_" + query.getDataSource() + "_" + query.getIntervals() : null;
+    final String newName = setName ? "processing_" + query.getId() : null;
 
     final Sequence<T> baseSequence;
 
@@ -89,7 +93,7 @@ public class SpecificSegmentQueryRunner<T> implements QueryRunner<T>
       baseSequence = base.run(queryPlus, responseContext);
     }
 
-    Sequence<T> segmentMissingCatchingSequence = new Sequence<T>()
+    Sequence<T> segmentMissingCatchingSequence = new Sequence<>()
     {
       @Override
       public <OutType> OutType accumulate(final OutType initValue, final Accumulator<OutType, T> accumulator)
@@ -120,7 +124,7 @@ public class SpecificSegmentQueryRunner<T> implements QueryRunner<T>
 
       private <OutType> Yielder<OutType> makeYielder(final Yielder<OutType> yielder)
       {
-        return new Yielder<OutType>()
+        return new Yielder<>()
         {
           @Override
           public OutType get()

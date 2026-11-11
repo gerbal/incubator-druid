@@ -1,6 +1,7 @@
 ---
 id: data-formats
-title: "Data formats"
+title: Source input formats
+sidebar_label: Source input formats
 ---
 
 <!--
@@ -22,12 +23,12 @@ title: "Data formats"
   ~ under the License.
   -->
 
-Apache Druid can ingest denormalized data in JSON, CSV, or a delimited form such as TSV, or any custom format. While most examples in the documentation use data in JSON format, it is not difficult to configure Druid to ingest any other delimited data.
+Apache&circledR; Druid can ingest denormalized data in JSON, CSV, or a delimited form such as TSV, or any custom format. While most examples in the documentation use data in JSON format, it is not difficult to configure Druid to ingest any other delimited data.
 We welcome any contributions to new formats.
 
 This page lists all default and core extension data formats supported by Druid.
 For additional data formats supported with community extensions,
-please see our [community extensions list](../development/extensions.md#community-extensions).
+please see our [community extensions list](../configuration/extensions.md#community-extensions).
 
 ## Formatting data
 
@@ -69,17 +70,80 @@ Besides text formats, Druid also supports binary formats such as [Orc](#orc) and
 
 ## Custom formats
 
-Druid supports custom data formats and can use the Regex parser or the JavaScript parsers to parse these formats. Using any of these parsers for
-parsing data is less efficient than writing a native Java parser or using an external stream processor. We welcome contributions of new parsers.
+Druid supports custom text data formats and can use the Regex input format to parse them. However, be aware doing this to
+parse data is less efficient than writing a native Java `InputFormat` extension, or using an external stream processor. We welcome contributions of new input formats.
+
+## Regex engine configuration
+
+The `regex` input format supports configurable regex engines using the runtime property:
+
+```properties
+druid.regex.engine=JAVA
+```
+
+Supported values:
+
+| Value    | Description                                                              |
+|----------|--------------------------------------------------------------------------|
+| `JAVA`   | Uses Java's built-in `java.util.regex.Pattern` engine.                   |
+| `RE2J`   | Uses `Google's RE2/J` regex engine with linear-time matching guarantees. |
+
+Default value:
+
+```properties
+druid.regex.engine=JAVA
+```
+
+### RE2/J engine
+
+Setting:
+
+```properties
+druid.regex.engine=RE2J
+```
+
+enables the RE2/J regex engine for ingestion task `regex` input formats.
+
+RE2/J helps protect against catastrophic backtracking and Regular Expression Denial of Service (ReDoS) attacks by guaranteeing linear-time regex evaluation.
+
+### Compatibility differences
+
+RE2/J does not support all Java regex features.
+
+Unsupported or partially supported features include:
+- back references
+- look behind assertions
+- some advanced backtracking behavior
+
+Patterns using unsupported constructs will fail during regex compilation.
+
+### Example of catastrophic backtracking
+
+The following Java regex may cause catastrophic backtracking:
+
+```regex
+^(.*a){20}$
+```
+
+against input such as:
+
+```text
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaX
+```
+
+Using `RE2J` avoids this issue.
+
+### Performance considerations
+
+- `JAVA` may support more advanced regex syntax and behavior.
+- `RE2J` provides safer and more predictable runtime characteristics.
+- For trusted internal ingestion specs, `JAVA` may be preferred for compatibility.
+- For externally supplied regex patterns, `RE2J` is recommended.
+
 
 ## Input format
 
 You can use the `inputFormat` field to specify the data format for your input data.
-
-> `inputFormat` doesn't support all data formats or ingestion methods supported by Druid.
-
-Especially if you want to use the Hadoop ingestion, you still need to use the [Parser](#parser).
-If your data is formatted in some format not listed in this section, please consider using the Parser instead.
 
 All forms of Druid ingestion require some form of schema object. The format of the data to be ingested is specified using the `inputFormat` entry in your [`ioConfig`](ingestion-spec.md#ioconfig).
 
@@ -122,6 +186,7 @@ Configure the CSV `inputFormat` to load CSV data as follows:
 | columns | JSON array | Specifies the columns of the data. The columns should be in the same order with the columns of your data. | yes if `findColumnsFromHeader` is false or missing |
 | findColumnsFromHeader | Boolean | If this is set, the task will find the column names from the header row. Note that `skipHeaderRows` will be applied before finding column names from the header. For example, if you set `skipHeaderRows` to 2 and `findColumnsFromHeader` to true, the task will skip the first two lines and then extract column information from the third line. `columns` will be ignored if this is set to true. | no (default = false if `columns` is set; otherwise null) |
 | skipHeaderRows | Integer | If this is set, the task will skip the first `skipHeaderRows` rows. | no (default = 0) |
+| tryParseNumbers| Boolean| If this is set, the task will attempt to parse numeric strings into long or double data type, in that order. This parsing also applies to values separated by `listDelimiter`. If the value cannot be parsed as a number, it is retained as a string. | no (default = false) |
 
 For example:
 
@@ -147,10 +212,11 @@ Configure the TSV `inputFormat` to load TSV data as follows:
 | columns | JSON array | Specifies the columns of the data. The columns should be in the same order with the columns of your data. | yes if `findColumnsFromHeader` is false or missing |
 | findColumnsFromHeader | Boolean | If this is set, the task will find the column names from the header row. Note that `skipHeaderRows` will be applied before finding column names from the header. For example, if you set `skipHeaderRows` to 2 and `findColumnsFromHeader` to true, the task will skip the first two lines and then extract column information from the third line. `columns` will be ignored if this is set to true. | no (default = false if `columns` is set; otherwise null) |
 | skipHeaderRows | Integer | If this is set, the task will skip the first `skipHeaderRows` rows. | no (default = 0) |
+| tryParseNumbers| Boolean| If this is set, the task will attempt to parse numeric strings into long or double data type, in that order. This parsing also applies to values separated by `listDelimiter`. If the value cannot be parsed as a number, it is retained as a string. | no (default = false) |
 
 Be sure to change the `delimiter` to the appropriate delimiter for your data. Like CSV, you must specify the columns and which subset of the columns you want indexed.
 
- For example:
+For example:
 
 ```json
 "ioConfig": {
@@ -163,76 +229,31 @@ Be sure to change the `delimiter` to the appropriate delimiter for your data. Li
 }
 ```
 
-### Kafka
+### Lines
 
-Configure the Kafka `inputFormat` to load complete kafka records including header, key, and value.
+Configure the Lines `inputFormat` to load line-oriented data where each line is treated as a single field:
 
 | Field | Type | Description | Required |
 |-------|------|-------------|----------|
-| `type` | String | Set value to `kafka`. | yes |
-| `headerLabelPrefix` | String | Custom label prefix for all the header columns. | no (default = "kafka.header.") |
-| `timestampColumnName` | String | Name of the column for the kafka record's timestamp.| no (default = "kafka.timestamp") |
-| `keyColumnName` | String | Name of the column for the kafka record's key.| no (default = "kafka.key") |
-| `headerFormat` | Object | `headerFormat` specifies how to parse the Kafka headers. Supports String types. Because Kafka header values are bytes, the parser decodes them as UTF-8 encoded strings. To change this behavior, implement your own parser based on the encoding style. Change the 'encoding' type in `KafkaStringHeaderFormat` to match your custom implementation. | no |
-| `keyFormat` | [InputFormat](#input-format) | Any existing `inputFormat` used to parse the Kafka key. It only processes the first entry of the input format. For details, see [Specifying data format](../development/extensions-core/kafka-supervisor-reference.md#specifying-data-format). | no |
-| `valueFormat` | [InputFormat](#input-format) | `valueFormat` can be any existing `inputFormat` to parse the Kafka value payload. For details about specifying the input format, see [Specifying data format](../development/extensions-core/kafka-supervisor-reference.md#specifying-data-format). | yes |
+| type | String | Set value to `lines`. | yes |
+
+The Lines input format reads each line from the input as UTF-8 text, and creates a single column named `line` containing the entire line as a string.
+This is useful for reading line-oriented data in a simple form for later processing.
 
 For example:
 
-```
+```json
 "ioConfig": {
   "inputFormat": {
-      "type": "kafka",
-      "headerLabelPrefix": "kafka.header.",
-      "timestampColumnName": "kafka.timestamp",
-      "keyColumnName": "kafka.key",
-      "headerFormat":
-      {
-        "type": "string"
-      },
-      "keyFormat":
-      {
-        "type": "json"
-      },
-      "valueFormat":
-      {
-        "type": "json"
-      }
+    "type": "lines"
   },
   ...
-}
-```
-
-Note the following behaviors:
-
-- If there are conflicts between column names, Druid uses the column names from the payload and ignores the column name from the header or key. This behavior makes it easier to migrate to the the Kafka `inputFormat` from another Kafka ingestion spec without losing data.
-- The Kafka input format fundamentally blends information from the header, key, and value objects from a Kafka record to create a row in Druid. It extracts individual records from the value. Then it augments each value with the corresponding key or header columns.
-- The Kafka input format by default exposes Kafka timestamp `timestampColumnName` to make it available for use as the primary timestamp column. Alternatively you can choose timestamp column from either the key or value payload.
-
-For example, the following `timestampSpec` uses the default Kafka timestamp from the Kafka record:
-
-```json
-"timestampSpec":
-{
-    "column": "kafka.timestamp",
-    "format": "millis"
-}
-```
-
-If you are using "kafka.header." as the prefix for Kafka header columns and there is a timestamp field in the header, the header timestamp serves as the primary timestamp column. For example:
-
-```json
-"timestampSpec":
-{
-    "column": "kafka.header.timestamp",
-    "format": "millis"
 }
 ```
 
 ### ORC
 
 To use the ORC input format, load the Druid Orc extension ( [`druid-orc-extensions`](../development/extensions-core/orc.md)).
-> To upgrade from versions earlier than 0.15.0 to 0.15.0 or new, read [Migration from 'contrib' extension](../development/extensions-core/orc.md#migration-from-contrib-extension).
 
 Configure the ORC `inputFormat` to load ORC data as follows:
 
@@ -354,9 +375,11 @@ If `type` is not included, the avroBytesDecoder defaults to `schema_repo`.
 
 ###### Inline Schema Based Avro Bytes Decoder
 
-> The "schema_inline" decoder reads Avro records using a fixed schema and does not support schema migration. If you
-> may need to migrate schemas in the future, consider one of the other decoders, all of which use a message header that
-> allows the parser to identify the proper Avro schema for reading records.
+:::info
+ The "schema_inline" decoder reads Avro records using a fixed schema and does not support schema migration. If you
+ may need to migrate schemas in the future, consider one of the other decoders, all of which use a message header that
+ allows the parser to identify the proper Avro schema for reading records.
+:::
 
 This decoder can be used if all the input events can be read using the same schema. In this case, specify the schema in the input task JSON itself, as described below.
 
@@ -420,7 +443,7 @@ Note that it is essentially a map of integer schema ID to avro schema object. Th
 
 ##### SchemaRepo Based Avro Bytes Decoder
 
-This Avro bytes decoder first extracts `subject` and `id` from the input message bytes, and then uses them to look up the Avro schema used to decode the Avro record from bytes. For details, see the [schema repo](https://github.com/schema-repo/schema-repo). You need an HTTP service like schema repo to hold the Avro schema. For information on registering a schema on the message producer side, see `org.apache.druid.data.input.AvroStreamInputRowParserTest#testParse()`.
+This Avro bytes decoder first extracts `subject` and `id` from the input message bytes, and then uses them to look up the Avro schema used to decode the Avro record from bytes. For details, see the [schema repo](https://github.com/schema-repo/schema-repo). You need an HTTP service like schema repo to hold the Avro schema. For information on registering a schema on the message producer side, see `org.apache.druid.data.input.avro.AvroStreamInputFormatTest#testParse()`.
 
 | Field | Type | Description | Required |
 |-------|------|-------------|----------|
@@ -456,9 +479,9 @@ For details, see the Schema Registry [documentation](http://docs.confluent.io/cu
 | type | String | Set value to `schema_registry`. | no |
 | url | String | Specifies the URL endpoint of the Schema Registry. | yes |
 | capacity | Integer | Specifies the max size of the cache (default = Integer.MAX_VALUE). | no |
-| urls | Array<String\> | Specifies the URL endpoints of the multiple Schema Registry instances. | yes (if `url` is not provided) |
-| config | Json | To send additional configurations, configured for Schema Registry.  This can be supplied via a [DynamicConfigProvider](../operations/dynamic-config-provider.md) | no |
-| headers | Json | To send headers to the Schema Registry.  This can be supplied via a [DynamicConfigProvider](../operations/dynamic-config-provider.md) | no |
+| urls | ARRAY\<String\> | Specifies the URL endpoints of the multiple Schema Registry instances. | yes (if `url` is not provided) |
+| config | Json | To send additional configurations, configured for Schema Registry. This can be supplied via a [DynamicConfigProvider](../operations/dynamic-config-provider.md) | no |
+| headers | Json | To send headers to the Schema Registry. This can be supplied via a [DynamicConfigProvider](../operations/dynamic-config-provider.md) | no |
 
 For a single schema registry instance, use Field `url` or `urls` for multi instances.
 
@@ -568,7 +591,9 @@ For example:
 
 ### Protobuf
 
-> You need to include the [`druid-protobuf-extensions`](../development/extensions-core/protobuf.md) as an extension to use the Protobuf input format.
+:::info
+ You need to include the [`druid-protobuf-extensions`](../development/extensions-core/protobuf.md) as an extension to use the Protobuf input format.
+:::
 
 Configure the Protobuf `inputFormat` to load Protobuf data as follows:
 
@@ -604,7 +629,343 @@ For example:
 }
 ```
 
-### FlattenSpec
+### Kafka
+
+The `kafka` input format lets you parse the Kafka metadata fields in addition to the Kafka payload value contents.
+It should only be used when ingesting from Apache Kafka. 
+
+The `kafka` input format wraps around the payload parsing input format and augments the data it outputs with the Kafka event timestamp, topic name, event headers, and the key field that itself can be parsed using any available input format.
+
+If there are conflicts between column names in the payload and those created from the metadata, the payload takes precedence.
+This ensures that upgrading a Kafka ingestion to use the Kafka input format (by taking its existing input format and setting it as the `valueFormat`) can be done without losing any of the payload data.  
+
+Configure the Kafka `inputFormat` as follows:
+
+| Field | Type | Description | Required | Default |
+|-------|------|-------------|----------|---------|
+| `type` | String | Set value to `kafka`. | yes ||
+| `valueFormat` | [InputFormat](#input-format) | The [input format](#input-format) to parse the Kafka value payload. | yes ||
+| `timestampColumnName` | String | The name of the column for the Kafka timestamp.| no |`kafka.timestamp`|
+| `topicColumnName` | String |The name of the column for the Kafka topic. This field is useful when ingesting data from multiple topics into same datasource.| no |`kafka.topic`|
+| `headerColumnPrefix` | String | The custom prefix for all the header columns. | no | `kafka.header`|
+| `headerFormat` | Object | Specifies how to parse the Kafka headers. Supports String types. Because Kafka header values are bytes, the parser decodes them as UTF-8 encoded strings. To change this behavior, implement your own parser based on the encoding style. Change the `encoding` type in `KafkaStringHeaderFormat` to match your custom implementation. See [Header format](#header-format) for supported encoding formats.| no ||
+| `keyFormat` | [InputFormat](#input-format) | The [input format](#input-format) to parse the Kafka key. It only processes the first entry of the `inputFormat` field. If your key values are simple strings, you can use the `tsv` format to parse them. Note that for `tsv`,`csv`, and `regex` formats, you need to provide a `columns` array to make a valid input format. Only the first one is used, and its name will be ignored in favor of `keyColumnName`. | no ||
+| `keyColumnName` | String | The name of the column for the Kafka key.| no |`kafka.key`|
+| `partitionColumnName` | String | The name of the column for the Kafka partition number. | no | `kafka.partition` |
+| `offsetColumnName` | String | The name of the column for the Kafka record offset. Ingesting this column enables filtering by offset in `transformSpec`, which is useful for recovering data from a specific offset range. | no | `kafka.offset` |
+
+#### Header format
+
+`headerFormat` supports the following encoding formats:
+   - `ISO-8859-1`: ISO Latin Alphabet No. 1, that is, ISO-LATIN-1.
+   - `US-ASCII`: Seven-bit ASCII. Also known as ISO646-US. The Basic Latin block of the Unicode character set.
+   - `UTF-8`: Eight-bit UCS Transformation Format.
+   - `UTF-16`: Sixteen-bit UCS Transformation Format, byte order identified by an optional byte-order mark.
+   - `UTF-16BE`: Sixteen-bit UCS Transformation Format, big-endian byte order.
+   - `UTF-16LE`: Sixteen-bit UCS Transformation Format, little-endian byte order.
+- `headerColumnPrefix`: Supply a prefix to the Kafka headers to avoid any conflicts with columns from the payload. The default is `kafka.header.`.
+
+#### Example
+
+Using `{ "type": "json" }` as the input format would only parse the payload value.
+To parse the Kafka metadata in addition to the payload, use the `kafka` input format.
+
+For example, consider the following structure for a Kafka message that represents an edit in a development environment:
+
+- **Kafka timestamp**: `1680795276351`
+- **Kafka topic**: `wiki-edits`
+- **Kafka partition**: `0`
+- **Kafka offset**: `12345`
+- **Kafka headers**:
+  - `env=development`
+  - `zone=z1`
+- **Kafka key**: `wiki-edit`
+- **Kafka payload value**: `{"channel":"#sv.wikipedia","timestamp":"2016-06-27T00:00:11.080Z","page":"Salo Toraut","delta":31,"namespace":"Main"}`
+
+You would configure it as follows:
+
+```json
+"ioConfig": {
+  "inputFormat": {
+    "type": "kafka",
+    "valueFormat": {
+      "type": "json"
+    },
+    "timestampColumnName": "kafka.timestamp",
+    "topicColumnName": "kafka.topic",
+    "headerFormat": {
+      "type": "string",
+      "encoding": "UTF-8"
+    },
+    "headerColumnPrefix": "kafka.header.",
+    "keyFormat": {
+      "type": "tsv",
+      "findColumnsFromHeader": false,
+      "columns": ["x"]
+    },
+    "keyColumnName": "kafka.key",
+    "partitionColumnName": "kafka.partition",
+    "offsetColumnName": "kafka.offset"
+  }
+}
+```
+
+You would parse the example message as follows:
+
+```json
+{
+  "channel": "#sv.wikipedia",
+  "timestamp": "2016-06-27T00:00:11.080Z",
+  "page": "Salo Toraut",
+  "delta": 31,
+  "namespace": "Main",
+  "kafka.timestamp": 1680795276351,
+  "kafka.topic": "wiki-edits",
+  "kafka.header.env": "development",
+  "kafka.header.zone": "z1",
+  "kafka.key": "wiki-edit",
+  "kafka.partition": 0,
+  "kafka.offset": 12345
+}
+```
+
+If you want to use `kafka.timestamp` as Druid's primary timestamp (`__time`), specify it as the value for `column` in the `timestampSpec`:
+
+```json
+"timestampSpec": {
+  "column": "kafka.timestamp",
+  "format": "millis"
+}
+```
+
+Similarly, if you want to use a timestamp extracted from the Kafka header:
+
+```json
+"timestampSpec": {
+  "column": "kafka.header.myTimestampHeader",
+  "format": "millis"
+}
+```
+
+Finally, add these Kafka metadata columns to the `dimensionsSpec` or  set your `dimensionsSpec` to auto-detect columns.
+     
+The following supervisor spec demonstrates how to ingest the Kafka header, key, timestamp, and topic into Druid dimensions:
+
+<details>
+<summary>Click to view the example</summary>
+
+```json
+{
+  "type": "kafka",
+  "spec": {
+    "ioConfig": {
+      "type": "kafka",
+      "consumerProperties": {
+        "bootstrap.servers": "localhost:9092"
+      },
+      "topic": "wiki-edits",
+      "inputFormat": {
+        "type": "kafka",
+        "valueFormat": {
+          "type": "json"
+        },
+        "headerFormat": {
+          "type": "string"
+        },
+        "keyFormat": {
+          "type": "tsv",
+          "findColumnsFromHeader": false,
+          "columns": ["x"]
+        }
+      },
+      "useEarliestOffset": true
+    },
+    "dataSchema": {
+      "dataSource": "wikiticker",
+      "timestampSpec": {
+        "column": "timestamp",
+        "format": "posix"
+      },
+      "dimensionsSpec":  "dimensionsSpec": {
+        "useSchemaDiscovery": true,
+        "includeAllDimensions": true
+      },
+      "granularitySpec": {
+        "queryGranularity": "none",
+        "rollup": false,
+        "segmentGranularity": "day"
+      }
+    },
+    "tuningConfig": {
+      "type": "kafka"
+    }
+  }
+}
+```
+</details>
+
+After Druid ingests the data, you can query the Kafka metadata columns as follows:
+
+```sql
+SELECT
+  "kafka.header.env",
+  "kafka.key",
+  "kafka.partition",
+  "kafka.offset",
+  "kafka.timestamp",
+  "kafka.topic"
+FROM "wikiticker"
+```
+
+This query returns:
+
+| `kafka.header.env` | `kafka.key` | `kafka.partition` | `kafka.offset` | `kafka.timestamp` | `kafka.topic` |
+|--------------------|-----------|-------------------|----------------|---------------|---------------|
+| `development`      |`wiki-edit`|`0`|`12345`| `1680795276351`| `wiki-edits`  |
+
+### Kinesis
+
+The `kinesis` input format lets you parse the Kinesis metadata fields in addition to the Kinesis payload value contents.
+It should only be used when ingesting from Kinesis.
+
+The `kinesis` input format wraps around the payload parsing input format and augments the data it outputs with the Kinesis event timestamp and partition key, the `ApproximateArrivalTimestamp ` and `PartitionKey` fields in the Kinesis record.
+
+If there are conflicts between column names in the payload and those created from the metadata, the payload takes precedence.
+This ensures that upgrading a Kinesis ingestion to use the Kinesis input format (by taking its existing input format and setting it as the `valueFormat`) can be done without losing any of the payload data.
+
+Configure the Kinesis `inputFormat` as follows:
+
+| Field | Type | Description                                                                                                                                       | Required | Default             |
+|-------|------|---------------------------------------------------------------------------------------------------------------------------------------------------|----------|---------------------|
+| `type` | String | Set value to `kinesis`. | yes ||
+| `valueFormat` | [InputFormat](#input-format) | The [input format](#input-format) to parse the Kinesis value payload. | yes ||
+| `partitionKeyColumnName` | String | The name of the column for the Kinesis partition key. This field is useful when ingesting data from multiple partitions into the same datasource. | no | `kinesis.partitionKey` |
+| `timestampColumnName` | String | The name of the column for the Kinesis timestamp. | no | `kinesis.timestamp` |
+
+#### Example
+
+Using `{ "type": "json" }` as the input format would only parse the payload value.
+To parse the Kinesis metadata in addition to the payload, use the `kinesis` input format.
+
+For example, consider the following structure for a Kinesis record that represents an edit in a development environment:
+
+- **Kinesis timestamp**: `1680795276351`
+- **Kinesis partition key**: `partition-1`
+- **Kinesis payload value**: `{"channel":"#sv.wikipedia","timestamp":"2016-06-27T00:00:11.080Z","page":"Salo Toraut","delta":31,"namespace":"Main"}`
+
+You would configure it as follows:
+
+```json
+{
+  "ioConfig": {
+    "inputFormat": {
+      "type": "kinesis",
+      "valueFormat": {
+        "type": "json"
+      },
+      "timestampColumnName": "kinesis.timestamp",
+      "partitionKeyColumnName": "kinesis.partitionKey"
+    }
+  }
+}
+```
+
+You would parse the example record as follows:
+
+```json
+{
+  "channel": "#sv.wikipedia",
+  "timestamp": "2016-06-27T00:00:11.080Z",
+  "page": "Salo Toraut",
+  "delta": 31,
+  "namespace": "Main",
+  "kinesis.timestamp": 1680795276351,
+  "kinesis.partitionKey": "partition-1"
+}
+```
+
+If you want to use `kinesis.timestamp` as Druid's primary timestamp (`__time`), specify it as the value for `column` in the `timestampSpec`:
+
+```json
+"timestampSpec": {
+  "column": "kinesis.timestamp",
+  "format": "millis"
+}
+```
+
+Finally, add these Kinesis metadata columns to the `dimensionsSpec` or  set your `dimensionsSpec` to automatically detect columns.
+
+The following supervisor spec demonstrates how to ingest the Kinesis timestamp, and partition key into Druid dimensions:
+
+<details>
+<summary>Click to view the example</summary>
+
+```json
+{
+  "type": "kinesis",
+  "spec": {
+    "ioConfig": {
+      "type": "kinesis",
+      "consumerProperties": {
+        "bootstrap.servers": "localhost:9092"
+      },
+      "topic": "wiki-edits",
+      "inputFormat": {
+        "type": "kinesis",
+        "valueFormat": {
+          "type": "json"
+        },
+        "headerFormat": {
+          "type": "string"
+        },
+        "keyFormat": {
+          "type": "tsv",
+          "findColumnsFromHeader": false,
+          "columns": ["x"]
+        }
+      },
+      "useEarliestOffset": true
+    },
+    "dataSchema": {
+      "dataSource": "wikiticker",
+      "timestampSpec": {
+        "column": "timestamp",
+        "format": "posix"
+      },
+      "dimensionsSpec": {
+        "useSchemaDiscovery": true,
+        "includeAllDimensions": true
+      },
+      "granularitySpec": {
+        "queryGranularity": "none",
+        "rollup": false,
+        "segmentGranularity": "day"
+      }
+    },
+    "tuningConfig": {
+      "type": "kinesis"
+    }
+  }
+}
+```
+</details>
+
+After Druid ingests the data, you can query the Kinesis metadata columns as follows:
+
+```sql
+SELECT
+  "kinesis.timestamp",
+  "kinesis.partitionKey"
+FROM "wikiticker"
+```
+
+This query returns:
+
+| `kinesis.timestamp` | `kinesis.topic` |
+|---------------------|-----------------|
+| `1680795276351`     | `partition-1`   |
+
+## FlattenSpec
 
 You can use the `flattenSpec` object to flatten nested data, as an alternative to the Druid [nested columns](../querying/nested-columns.md) feature, and for nested input formats unsupported by the feature. It is an object within the `inputFormat` object.
 
@@ -635,7 +996,7 @@ After Druid reads the input data records, it applies the flattenSpec before appl
 
 Flattening is only supported for [data formats](data-formats.md) that support nesting, including `avro`, `json`, `orc`, and `parquet`.
 
-#### Field flattening specifications
+### Field flattening specifications
 
 Each entry in the `fields` list can have the following components:
 
@@ -646,7 +1007,7 @@ Each entry in the `fields` list can have the following components:
 | expr | Expression for accessing the field while flattening. For type `path`, this should be [JsonPath](https://github.com/jayway/JsonPath). For type `jq`, this should be [jackson-jq](https://github.com/eiiches/jackson-jq) notation. For other types, this parameter is ignored. | none (required for types `path` and `jq`) |
 | nodes | For `tree` only. Multiple-expression field for accessing the field while flattening, representing the hierarchy of field names to read. For other types, this parameter must not be provided. | none (required for type `tree`) |
 
-#### Notes on flattening
+### Notes on flattening
 
 - For convenience, when defining a root-level field, it is possible to define only the field name, as a string, instead of a JSON object. For example, `{"name": "baz", "type": "root"}` is equivalent to `"baz"`.
 - Enabling `useFieldDiscovery` will only automatically detect "simple" fields at the root level that correspond to data types that Druid supports. This includes strings, numbers, and lists of strings or numbers. Other types will not be automatically detected, and must be specified explicitly in the `fields` list.
@@ -666,963 +1027,4 @@ Each entry in the `fields` list can have the following components:
   | sum()      | Provides the sum value of an array of numbers                       | Double      | &#10003;  |  &#10003;   |   &#10003;   |  &#10003;   |
   | concat(X)  | Provides a concatenated version of the path output with a new item  | like input  | &#10003;  |  &#10007;   |   &#10007;   | &#10007;   |
   | append(X)  | add an item to the json path output array                           | like input  | &#10003;  |  &#10007;   |   &#10007;   | &#10007;   |
-  | keys()     | Provides the property keys (An alternative for terminal tilde ~)    | Set<E\>      | &#10007;  |  &#10007;   |   &#10007;   | &#10007;   |
-
-## Parser
-
-> The Parser is deprecated for [native batch tasks](./native-batch.md), [Kafka indexing service](../development/extensions-core/kafka-ingestion.md),
-and [Kinesis indexing service](../development/extensions-core/kinesis-ingestion.md).
-Consider using the [input format](#input-format) instead for these types of ingestion.
-
-This section lists all default and core extension parsers.
-For community extension parsers, please see our [community extensions list](../development/extensions.md#community-extensions).
-
-### String Parser
-
-`string` typed parsers operate on text based inputs that can be split into individual records by newlines.
-Each line can be further parsed using [`parseSpec`](#parsespec).
-
-| Field | Type | Description | Required |
-|-------|------|-------------|----------|
-| type | String | Set value to `string` for most cases. Otherwise use `hadoopyString` for Hadoop indexing. | yes |
-| parseSpec | JSON Object | Specifies the format, timestamp, and dimensions of the data. | yes |
-
-### Avro Hadoop Parser
-
-> You need to include the [`druid-avro-extensions`](../development/extensions-core/avro.md) as an extension to use the Avro Hadoop Parser.
-
-> See the [Avro Types](../development/extensions-core/avro.md#avro-types) section for how Avro types are handled in Druid
-
-This parser is for [Hadoop batch ingestion](./hadoop.md).
-The `inputFormat` of `inputSpec` in `ioConfig` must be set to `"org.apache.druid.data.input.avro.AvroValueInputFormat"`.
-You may want to set Avro reader's schema in `jobProperties` in `tuningConfig`,
-e.g.: `"avro.schema.input.value.path": "/path/to/your/schema.avsc"` or
-`"avro.schema.input.value": "your_schema_JSON_object"`.
-If the Avro reader's schema is not set, the schema in Avro object container file will be used.
-See [Avro specification](http://avro.apache.org/docs/1.7.7/spec.html#Schema+Resolution) for more information.
-
-| Field | Type | Description | Required |
-|-------|------|-------------|----------|
-| type | String | Set value to `avro_hadoop`. | yes |
-| parseSpec | JSON Object | Specifies the timestamp and dimensions of the data. Should be an "avro" parseSpec. | yes |
-| fromPigAvroStorage | Boolean | Specifies whether the data file is stored using AvroStorage. | no(default == false) |
-
-An Avro parseSpec can contain a [`flattenSpec`](#flattenspec) using either the "root" or "path"
-field types, which can be used to read nested Avro records. The "jq" and "tree" field type is not currently supported
-for Avro.
-
-For example, using Avro Hadoop parser with custom reader's schema file:
-
-```json
-{
-  "type" : "index_hadoop",
-  "spec" : {
-    "dataSchema" : {
-      "dataSource" : "",
-      "parser" : {
-        "type" : "avro_hadoop",
-        "parseSpec" : {
-          "format": "avro",
-          "timestampSpec": <standard timestampSpec>,
-          "dimensionsSpec": <standard dimensionsSpec>,
-          "flattenSpec": <optional>
-        }
-      }
-    },
-    "ioConfig" : {
-      "type" : "hadoop",
-      "inputSpec" : {
-        "type" : "static",
-        "inputFormat": "org.apache.druid.data.input.avro.AvroValueInputFormat",
-        "paths" : ""
-      }
-    },
-    "tuningConfig" : {
-       "jobProperties" : {
-          "avro.schema.input.value.path" : "/path/to/my/schema.avsc"
-      }
-    }
-  }
-}
-```
-
-### ORC Hadoop Parser
-
-> You need to include the [`druid-orc-extensions`](../development/extensions-core/orc.md) as an extension to use the ORC Hadoop Parser.
-
-> If you are considering upgrading from earlier than 0.15.0 to 0.15.0 or a higher version,
-> please read [Migration from 'contrib' extension](../development/extensions-core/orc.md#migration-from-contrib-extension) carefully.
-
-This parser is for [Hadoop batch ingestion](./hadoop.md).
-The `inputFormat` of `inputSpec` in `ioConfig` must be set to `"org.apache.orc.mapreduce.OrcInputFormat"`.
-
-|Field     | Type        | Description                                                                            | Required|
-|----------|-------------|----------------------------------------------------------------------------------------|---------|
-| type | String | Set value to `orc`. | yes |
-|parseSpec | JSON Object | Specifies the timestamp and dimensions of the data (`timeAndDims` and `orc` format) and a `flattenSpec` (`orc` format). | yes|
-
-The parser supports two `parseSpec` formats: `orc` and `timeAndDims`.
-
-`orc` supports auto field discovery and flattening, if specified with a [`flattenSpec`](#flattenspec).
-If no `flattenSpec` is specified, `useFieldDiscovery` will be enabled by default. Specifying a `dimensionSpec` is
-optional if `useFieldDiscovery` is enabled: if a `dimensionSpec` is supplied, the list of `dimensions` it defines will be
-the set of ingested dimensions, if missing the discovered fields will make up the list.
-
-`timeAndDims` parse spec must specify which fields will be extracted as dimensions through the `dimensionSpec`.
-
-[All column types](https://orc.apache.org/docs/types.html) are supported, with the exception of `union` types. Columns of
- `list` type, if filled with primitives, may be used as a multi-value dimension, or specific elements can be extracted with
-`flattenSpec` expressions. Likewise, primitive fields may be extracted from `map` and `struct` types in the same manner.
-Auto field discovery will automatically create a string dimension for every (non-timestamp) primitive or `list` of
-primitives, as well as any flatten expressions defined in the `flattenSpec`.
-
-#### Hadoop job properties
-
-Like most Hadoop jobs, the best outcomes will add `"mapreduce.job.user.classpath.first": "true"` or
-`"mapreduce.job.classloader": "true"` to the `jobProperties` section of `tuningConfig`. Note that it is likely if using
-`"mapreduce.job.classloader": "true"` that you will need to set `mapreduce.job.classloader.system.classes` to include
-`-org.apache.hadoop.hive.` to instruct Hadoop to load `org.apache.hadoop.hive` classes from the application jars instead
-of system jars, e.g.
-
-```json
-...
-    "mapreduce.job.classloader": "true",
-    "mapreduce.job.classloader.system.classes" : "java., javax.accessibility., javax.activation., javax.activity., javax.annotation., javax.annotation.processing., javax.crypto., javax.imageio., javax.jws., javax.lang.model., -javax.management.j2ee., javax.management., javax.naming., javax.net., javax.print., javax.rmi., javax.script., -javax.security.auth.message., javax.security.auth., javax.security.cert., javax.security.sasl., javax.sound., javax.sql., javax.swing., javax.tools., javax.transaction., -javax.xml.registry., -javax.xml.rpc., javax.xml., org.w3c.dom., org.xml.sax., org.apache.commons.logging., org.apache.log4j., -org.apache.hadoop.hbase., -org.apache.hadoop.hive., org.apache.hadoop., core-default.xml, hdfs-default.xml, mapred-default.xml, yarn-default.xml",
-...
-```
-
-This is due to the `hive-storage-api` dependency of the
-`orc-mapreduce` library, which provides some classes under the `org.apache.hadoop.hive` package. If instead using the
-setting `"mapreduce.job.user.classpath.first": "true"`, then this will not be an issue.
-
-#### Examples
-
-##### `orc` parser, `orc` parseSpec, auto field discovery, flatten expressions
-
-```json
-{
-  "type": "index_hadoop",
-  "spec": {
-    "ioConfig": {
-      "type": "hadoop",
-      "inputSpec": {
-        "type": "static",
-        "inputFormat": "org.apache.orc.mapreduce.OrcInputFormat",
-        "paths": "path/to/file.orc"
-      },
-      ...
-    },
-    "dataSchema": {
-      "dataSource": "example",
-      "parser": {
-        "type": "orc",
-        "parseSpec": {
-          "format": "orc",
-          "flattenSpec": {
-            "useFieldDiscovery": true,
-            "fields": [
-              {
-                "type": "path",
-                "name": "nestedDim",
-                "expr": "$.nestedData.dim1"
-              },
-              {
-                "type": "path",
-                "name": "listDimFirstItem",
-                "expr": "$.listDim[1]"
-              }
-            ]
-          },
-          "timestampSpec": {
-            "column": "timestamp",
-            "format": "millis"
-          }
-        }
-      },
-      ...
-    },
-    "tuningConfig": <hadoop-tuning-config>
-    }
-  }
-}
-```
-
-##### `orc` parser, `orc` parseSpec, field discovery with no flattenSpec or dimensionSpec
-
-```json
-{
-  "type": "index_hadoop",
-  "spec": {
-    "ioConfig": {
-      "type": "hadoop",
-      "inputSpec": {
-        "type": "static",
-        "inputFormat": "org.apache.orc.mapreduce.OrcInputFormat",
-        "paths": "path/to/file.orc"
-      },
-      ...
-    },
-    "dataSchema": {
-      "dataSource": "example",
-      "parser": {
-        "type": "orc",
-        "parseSpec": {
-          "format": "orc",
-          "timestampSpec": {
-            "column": "timestamp",
-            "format": "millis"
-          }
-        }
-      },
-      ...
-    },
-    "tuningConfig": <hadoop-tuning-config>
-    }
-  }
-}
-```
-
-##### `orc` parser, `orc` parseSpec, no autodiscovery
-
-```json
-{
-  "type": "index_hadoop",
-  "spec": {
-    "ioConfig": {
-      "type": "hadoop",
-      "inputSpec": {
-        "type": "static",
-        "inputFormat": "org.apache.orc.mapreduce.OrcInputFormat",
-        "paths": "path/to/file.orc"
-      },
-      ...
-    },
-    "dataSchema": {
-      "dataSource": "example",
-      "parser": {
-        "type": "orc",
-        "parseSpec": {
-          "format": "orc",
-          "flattenSpec": {
-            "useFieldDiscovery": false,
-            "fields": [
-              {
-                "type": "path",
-                "name": "nestedDim",
-                "expr": "$.nestedData.dim1"
-              },
-              {
-                "type": "path",
-                "name": "listDimFirstItem",
-                "expr": "$.listDim[1]"
-              }
-            ]
-          },
-          "timestampSpec": {
-            "column": "timestamp",
-            "format": "millis"
-          },
-          "dimensionsSpec": {
-            "dimensions": [
-              "dim1",
-              "dim3",
-              "nestedDim",
-              "listDimFirstItem"
-            ],
-            "dimensionExclusions": [],
-            "spatialDimensions": []
-          }
-        }
-      },
-      ...
-    },
-    "tuningConfig": <hadoop-tuning-config>
-    }
-  }
-}
-```
-
-##### `orc` parser, `timeAndDims` parseSpec
-
-```json
-{
-  "type": "index_hadoop",
-  "spec": {
-    "ioConfig": {
-      "type": "hadoop",
-      "inputSpec": {
-        "type": "static",
-        "inputFormat": "org.apache.orc.mapreduce.OrcInputFormat",
-        "paths": "path/to/file.orc"
-      },
-      ...
-    },
-    "dataSchema": {
-      "dataSource": "example",
-      "parser": {
-        "type": "orc",
-        "parseSpec": {
-          "format": "timeAndDims",
-          "timestampSpec": {
-            "column": "timestamp",
-            "format": "auto"
-          },
-          "dimensionsSpec": {
-            "dimensions": [
-              "dim1",
-              "dim2",
-              "dim3",
-              "listDim"
-            ],
-            "dimensionExclusions": [],
-            "spatialDimensions": []
-          }
-        }
-      },
-      ...
-    },
-    "tuningConfig": <hadoop-tuning-config>
-  }
-}
-
-```
-
-### Parquet Hadoop Parser
-
-> You need to include the [`druid-parquet-extensions`](../development/extensions-core/parquet.md) as an extension to use the Parquet Hadoop Parser.
-
-The Parquet Hadoop parser is for [Hadoop batch ingestion](./hadoop.md) and parses Parquet files directly.
-The `inputFormat` of `inputSpec` in `ioConfig` must be set to `org.apache.druid.data.input.parquet.DruidParquetInputFormat`.
-
-The Parquet Hadoop Parser supports auto field discovery and flattening if provided with a
-[`flattenSpec`](#flattenspec) with the `parquet` `parseSpec`. Parquet nested list and map
-[logical types](https://github.com/apache/parquet-format/blob/master/LogicalTypes.md) _should_ operate correctly with
-JSON path expressions for all supported types.
-
-|Field     | Type        | Description                                                                            | Required|
-|----------|-------------|----------------------------------------------------------------------------------------|---------|
-| type      | String      | Set value to `parquet`. | yes |
-| parseSpec | JSON Object | Specifies the timestamp and dimensions of the data, and optionally, a flatten spec. Valid parseSpec formats are `timeAndDims` and `parquet`. | yes |
-| binaryAsString | Boolean | Specifies if the bytes parquet column which is not logically marked as a string or enum type should be treated as a UTF-8 encoded string. | no(default = false) |
-
-When the time dimension is a [DateType column](https://github.com/apache/parquet-format/blob/master/LogicalTypes.md),
-a format should not be supplied. When the format is UTF8 (String), either `auto` or a explicitly defined
-[format](http://www.joda.org/joda-time/apidocs/org/joda/time/format/DateTimeFormat) is required.
-
-#### Parquet Hadoop Parser vs Parquet Avro Hadoop Parser
-
-Both parsers read from Parquet files, but slightly differently. The main
-differences are:
-
-- The Parquet Hadoop Parser uses a simple conversion while the Parquet Avro Hadoop Parser
-converts Parquet data into avro records first with the `parquet-avro` library and then
-parses avro data using the `druid-avro-extensions` module to ingest into Druid.
-- The Parquet Hadoop Parser sets a hadoop job property
-`parquet.avro.add-list-element-records` to `false` (which normally defaults to `true`), in order to 'unwrap' primitive
-list elements into multi-value dimensions.
-- The Parquet Hadoop Parser supports `int96` Parquet values, while the Parquet Avro Hadoop Parser does not.
-There may also be some subtle differences in the behavior of JSON path expression evaluation of `flattenSpec`.
-
-Based on those differences, we suggest using the Parquet Hadoop Parser over the Parquet Avro Hadoop Parser
-to allow ingesting data beyond the schema constraints of Avro conversion.
-However, the Parquet Avro Hadoop Parser was the original basis for supporting the Parquet format, and as such it is a bit more mature.
-
-#### Examples
-
-##### `parquet` parser, `parquet` parseSpec
-
-```json
-{
-  "type": "index_hadoop",
-  "spec": {
-    "ioConfig": {
-      "type": "hadoop",
-      "inputSpec": {
-        "type": "static",
-        "inputFormat": "org.apache.druid.data.input.parquet.DruidParquetInputFormat",
-        "paths": "path/to/file.parquet"
-      },
-      ...
-    },
-    "dataSchema": {
-      "dataSource": "example",
-      "parser": {
-        "type": "parquet",
-        "parseSpec": {
-          "format": "parquet",
-          "flattenSpec": {
-            "useFieldDiscovery": true,
-            "fields": [
-              {
-                "type": "path",
-                "name": "nestedDim",
-                "expr": "$.nestedData.dim1"
-              },
-              {
-                "type": "path",
-                "name": "listDimFirstItem",
-                "expr": "$.listDim[1]"
-              }
-            ]
-          },
-          "timestampSpec": {
-            "column": "timestamp",
-            "format": "auto"
-          },
-          "dimensionsSpec": {
-            "dimensions": [],
-            "dimensionExclusions": [],
-            "spatialDimensions": []
-          }
-        }
-      },
-      ...
-    },
-    "tuningConfig": <hadoop-tuning-config>
-    }
-  }
-}
-```
-
-##### `parquet` parser, `timeAndDims` parseSpec
-
-```json
-{
-  "type": "index_hadoop",
-  "spec": {
-    "ioConfig": {
-      "type": "hadoop",
-      "inputSpec": {
-        "type": "static",
-        "inputFormat": "org.apache.druid.data.input.parquet.DruidParquetInputFormat",
-        "paths": "path/to/file.parquet"
-      },
-      ...
-    },
-    "dataSchema": {
-      "dataSource": "example",
-      "parser": {
-        "type": "parquet",
-        "parseSpec": {
-          "format": "timeAndDims",
-          "timestampSpec": {
-            "column": "timestamp",
-            "format": "auto"
-          },
-          "dimensionsSpec": {
-            "dimensions": [
-              "dim1",
-              "dim2",
-              "dim3",
-              "listDim"
-            ],
-            "dimensionExclusions": [],
-            "spatialDimensions": []
-          }
-        }
-      },
-      ...
-    },
-    "tuningConfig": <hadoop-tuning-config>
-  }
-}
-
-```
-
-### Parquet Avro Hadoop Parser
-
-> Consider using the [Parquet Hadoop Parser](#parquet-hadoop-parser) over this parser to ingest
-Parquet files. See [Parquet Hadoop Parser vs Parquet Avro Hadoop Parser](#parquet-hadoop-parser-vs-parquet-avro-hadoop-parser)
-for the differences between those parsers.
-
-> You need to include both the [`druid-parquet-extensions`](../development/extensions-core/parquet.md)
-[`druid-avro-extensions`] as extensions to use the Parquet Avro Hadoop Parser.
-
-The Parquet Avro Hadoop Parser is for [Hadoop batch ingestion](./hadoop.md).
-This parser first converts the Parquet data into Avro records, and then parses them to ingest into Druid.
-The `inputFormat` of `inputSpec` in `ioConfig` must be set to `org.apache.druid.data.input.parquet.DruidParquetAvroInputFormat`.
-
-The Parquet Avro Hadoop Parser supports auto field discovery and flattening if provided with a
-[`flattenSpec`](#flattenspec) with the `avro` `parseSpec`. Parquet nested list and map
-[logical types](https://github.com/apache/parquet-format/blob/master/LogicalTypes.md) _should_ operate correctly with
-JSON path expressions for all supported types. This parser sets a hadoop job property
-`parquet.avro.add-list-element-records` to `false` (which normally defaults to `true`), in order to 'unwrap' primitive
-list elements into multi-value dimensions.
-
-Note that the `int96` Parquet value type is not supported with this parser.
-
-|Field     | Type        | Description                                                                            | Required|
-|----------|-------------|----------------------------------------------------------------------------------------|---------|
-| type      | String      | Set value to `parquet-avro`. | yes |
-| parseSpec | JSON Object | Specifies the timestamp and dimensions of the data, and optionally, a flatten spec. Should be `avro`. | yes |
-| binaryAsString | Boolean | Specifies if the bytes parquet column which is not logically marked as a string or enum type should be treated as a UTF-8 encoded string. | no(default = false) |
-
-When the time dimension is a [DateType column](https://github.com/apache/parquet-format/blob/master/LogicalTypes.md),
-a format should not be supplied. When the format is UTF8 (String), either `auto` or
-an explicitly defined [format](http://www.joda.org/joda-time/apidocs/org/joda/time/format/DateTimeFormat) is required.
-
-#### Example
-
-```json
-{
-  "type": "index_hadoop",
-  "spec": {
-    "ioConfig": {
-      "type": "hadoop",
-      "inputSpec": {
-        "type": "static",
-        "inputFormat": "org.apache.druid.data.input.parquet.DruidParquetAvroInputFormat",
-        "paths": "path/to/file.parquet"
-      },
-      ...
-    },
-    "dataSchema": {
-      "dataSource": "example",
-      "parser": {
-        "type": "parquet-avro",
-        "parseSpec": {
-          "format": "avro",
-          "flattenSpec": {
-            "useFieldDiscovery": true,
-            "fields": [
-              {
-                "type": "path",
-                "name": "nestedDim",
-                "expr": "$.nestedData.dim1"
-              },
-              {
-                "type": "path",
-                "name": "listDimFirstItem",
-                "expr": "$.listDim[1]"
-              }
-            ]
-          },
-          "timestampSpec": {
-            "column": "timestamp",
-            "format": "auto"
-          },
-          "dimensionsSpec": {
-            "dimensions": [],
-            "dimensionExclusions": [],
-            "spatialDimensions": []
-          }
-        }
-      },
-      ...
-    },
-    "tuningConfig": <hadoop-tuning-config>
-    }
-  }
-}
-```
-
-### Avro Stream Parser
-
-> You need to include the [`druid-avro-extensions`](../development/extensions-core/avro.md) as an extension to use the Avro Stream Parser.
-
-> See the [Avro Types](../development/extensions-core/avro.md#avro-types) section for how Avro types are handled in Druid
-
-This parser is for [stream ingestion](./index.md#streaming) and reads Avro data from a stream directly.
-
-| Field | Type | Description | Required |
-|-------|------|-------------|----------|
-| type | String | Set value to `avro_stream`. | no |
-| avroBytesDecoder | JSON Object | Specifies [`avroBytesDecoder`](#Avro Bytes Decoder) to decode bytes to Avro record. | yes |
-| parseSpec | JSON Object | Specifies the timestamp and dimensions of the data. Should be an "avro" parseSpec. | yes |
-
-An Avro parseSpec can contain a [`flattenSpec`](#flattenspec) using either the "root" or "path"
-field types, which can be used to read nested Avro records. The "jq" and "tree" field type is not currently supported for Avro.
-
-For example, using Avro stream parser with schema repo Avro bytes decoder:
-
-```json
-"parser" : {
-  "type" : "avro_stream",
-  "avroBytesDecoder" : {
-    "type" : "schema_repo",
-    "subjectAndIdConverter" : {
-      "type" : "avro_1124",
-      "topic" : "${YOUR_TOPIC}"
-    },
-    "schemaRepository" : {
-      "type" : "avro_1124_rest_client",
-      "url" : "${YOUR_SCHEMA_REPO_END_POINT}",
-    }
-  },
-  "parseSpec" : {
-    "format": "avro",
-    "timestampSpec": <standard timestampSpec>,
-    "dimensionsSpec": <standard dimensionsSpec>,
-    "flattenSpec": <optional>
-  }
-}
-```
-
-### Protobuf Parser
-
-> You need to include the [`druid-protobuf-extensions`](../development/extensions-core/protobuf.md) as an extension to use the Protobuf Parser.
-
-This parser is for [stream ingestion](./index.md#streaming) and reads Protocol buffer data from a stream directly.
-
-| Field | Type | Description | Required |
-|-------|------|-------------|----------|
-| type | String | Set value to `protobuf`. | yes |
-| `protoBytesDecoder` | JSON Object | Specifies how to decode bytes to Protobuf record. | yes |
-| parseSpec | JSON Object | Specifies the timestamp and dimensions of the data.  The format must be JSON. See [JSON ParseSpec](#json-parsespec) for more configuration options. Note that `timeAndDims` `parseSpec` is no longer supported. | yes |
-
-Sample spec:
-
-```json
-"parser": {
-  "type": "protobuf",
-  "protoBytesDecoder": {
-    "type": "file",
-    "descriptor": "file:///tmp/metrics.desc",
-    "protoMessageType": "Metrics"
-  },
-  "parseSpec": {
-    "format": "json",
-    "timestampSpec": {
-      "column": "timestamp",
-      "format": "auto"
-    },
-    "dimensionsSpec": {
-      "dimensions": [
-        "unit",
-        "http_method",
-        "http_code",
-        "page",
-        "metricType",
-        "server"
-      ],
-      "dimensionExclusions": [
-        "timestamp",
-        "value"
-      ]
-    }
-  }
-}
-```
-
-See the [extension description](../development/extensions-core/protobuf.md) for
-more details and examples.
-
-#### Protobuf Bytes Decoder
-
-If `type` is not included, the `protoBytesDecoder` defaults to `schema_registry`.
-
-##### File-based Protobuf Bytes Decoder
-
-This Protobuf bytes decoder first read a descriptor file, and then parse it to get schema used to decode the Protobuf record from bytes.
-
-| Field | Type | Description | Required |
-|-------|------|-------------|----------|
-| type | String | Set value to `file`. | yes |
-| descriptor | String | Protobuf descriptor file name in the classpath or URL. | yes |
-| protoMessageType | String | Protobuf message type in the descriptor.  Both short name and fully qualified name are accepted. The parser uses the first message type found in the descriptor if not specified. | no |
-
-Sample spec:
-
-```json
-"protoBytesDecoder": {
-  "type": "file",
-  "descriptor": "file:///tmp/metrics.desc",
-  "protoMessageType": "Metrics"
-}
-```
-
-#### Inline Descriptor Protobuf Bytes Decoder
-
-This Protobuf bytes decoder allows the user to provide the contents of a Protobuf descriptor file inline, encoded as a Base64 string, and then parse it to get schema used to decode the Protobuf record from bytes.
-
-| Field | Type | Description | Required |
-|-------|------|-------------|----------|
-| type | String | Set value to `inline`. | yes |
-| descriptorString | String | A compiled Protobuf descriptor, encoded as a Base64 string. | yes |
-| protoMessageType | String | Protobuf message type in the descriptor.  Both short name and fully qualified name are accepted. The parser uses the first message type found in the descriptor if not specified. | no |
-
-Sample spec:
-
-```json
-"protoBytesDecoder": {
-  "type": "inline",
-  "descriptorString": <Contents of a Protobuf descriptor file encoded as Base64 string>,
-  "protoMessageType": "Metrics"
-}
-```
-
-##### Confluent Schema Registry-based Protobuf Bytes Decoder
-
-This Protobuf bytes decoder first extracts a unique `id` from input message bytes, and then uses it to look up the schema in the Schema Registry used to decode the Avro record from bytes.
-For details, see the Schema Registry [documentation](http://docs.confluent.io/current/schema-registry/docs/) and [repository](https://github.com/confluentinc/schema-registry).
-
-| Field | Type | Description | Required |
-|-------|------|-------------|----------|
-| type | String | Set value to `schema_registry`. | yes |
-| url | String | Specifies the URL endpoint of the Schema Registry. | yes |
-| capacity | Integer | Specifies the max size of the cache (default = Integer.MAX_VALUE). | no |
-| urls | Array<String\> | Specifies the URL endpoints of the multiple Schema Registry instances. | yes (if `url` is not provided) |
-| config | Json | To send additional configurations, configured for Schema Registry. This can be supplied via a [DynamicConfigProvider](../operations/dynamic-config-provider.md).  | no |
-| headers | Json | To send headers to the Schema Registry.  This can be supplied via a [DynamicConfigProvider](../operations/dynamic-config-provider.md) | no |
-
-For a single schema registry instance, use Field `url` or `urls` for multi instances.
-
-Single Instance:
-
-```json
-...
-"protoBytesDecoder": {
-  "url": <schema-registry-url>,
-  "type": "schema_registry"
-}
-...
-```
-
-Multiple Instances:
-
-```json
-...
-"protoBytesDecoder": {
-  "urls": [<schema-registry-url-1>, <schema-registry-url-2>, ...],
-  "type": "schema_registry",
-  "capacity": 100,
-  "config" : {
-       "basic.auth.credentials.source": "USER_INFO",
-       "basic.auth.user.info": "fred:letmein",
-       "schema.registry.ssl.truststore.location": "/some/secrets/kafka.client.truststore.jks",
-       "schema.registry.ssl.truststore.password": "<password>",
-       "schema.registry.ssl.keystore.location": "/some/secrets/kafka.client.keystore.jks",
-       "schema.registry.ssl.keystore.password": "<password>",
-       "schema.registry.ssl.key.password": "<password>",
-         ... 
-  },
-  "headers": {
-      "traceID" : "b29c5de2-0db4-490b-b421",
-      "timeStamp" : "1577191871865",
-      "druid.dynamic.config.provider":{
-           "type":"mapString", 
-           "config":{
-                "registry.header.prop.1":"value.1", 
-                "registry.header.prop.2":"value.2"
-                }
-           }
-      ...
-  }
-}
-...
-```
-
-## ParseSpec
-
-> The Parser is deprecated for [native batch tasks](./native-batch.md), [Kafka indexing service](../development/extensions-core/kafka-ingestion.md),
-and [Kinesis indexing service](../development/extensions-core/kinesis-ingestion.md).
-Consider using the [input format](#input-format) instead for these types of ingestion.
-
-ParseSpecs serve two purposes:
-
-- The String Parser use them to determine the format (i.e., JSON, CSV, TSV) of incoming rows.
-- All Parsers use them to determine the timestamp and dimensions of incoming rows.
-
-If `format` is not included, the parseSpec defaults to `tsv`.
-
-### JSON ParseSpec
-
-Use this with the String Parser to load JSON.
-
-| Field | Type | Description | Required |
-|-------|------|-------------|----------|
-| format | String |`json`| no |
-| timestampSpec | JSON Object | Specifies the column and format of the timestamp. | yes |
-| dimensionsSpec | JSON Object | Specifies the dimensions of the data. | yes |
-| flattenSpec | JSON Object | Specifies flattening configuration for nested JSON data. See [`flattenSpec`](#flattenspec) for more info. | no |
-
-Sample spec:
-
-```json
-"parseSpec": {
-  "format" : "json",
-  "timestampSpec" : {
-    "column" : "timestamp"
-  },
-  "dimensionSpec" : {
-    "dimensions" : ["page","language","user","unpatrolled","newPage","robot","anonymous","namespace","continent","country","region","city"]
-  }
-}
-```
-
-### JSON Lowercase ParseSpec
-
-> The _jsonLowercase_ parser is deprecated and may be removed in a future version of Druid.
-
-This is a special variation of the JSON ParseSpec that lower cases all the column names in the incoming JSON data. This parseSpec is required if you are updating to Druid 0.7.x from Druid 0.6.x, are directly ingesting JSON with mixed case column names, do not have any ETL in place to lower case those column names, and would like to make queries that include the data you created using 0.6.x and 0.7.x.
-
-| Field | Type | Description | Required |
-|-------|------|-------------|----------|
-| format | String | `jsonLowercase` | yes |
-| timestampSpec | JSON Object | Specifies the column and format of the timestamp. | yes |
-| dimensionsSpec | JSON Object | Specifies the dimensions of the data. | yes |
-
-### CSV ParseSpec
-
-Use this with the String Parser to load CSV. Strings are parsed using the com.opencsv library.
-
-| Field | Type | Description | Required |
-|-------|------|-------------|----------|
-| format | String | `csv` | yes |
-| timestampSpec | JSON Object | Specifies the column and format of the timestamp. | yes |
-| dimensionsSpec | JSON Object | Specifies the dimensions of the data. | yes |
-| listDelimiter | String | A custom delimiter for multi-value dimensions. | no (default = ctrl+A) |
-| columns | JSON array | Specifies the columns of the data. | yes |
-
-Sample spec:
-
-```json
-"parseSpec": {
-  "format" : "csv",
-  "timestampSpec" : {
-    "column" : "timestamp"
-  },
-  "columns" : ["timestamp","page","language","user","unpatrolled","newPage","robot","anonymous","namespace","continent","country","region","city","added","deleted","delta"],
-  "dimensionsSpec" : {
-    "dimensions" : ["page","language","user","unpatrolled","newPage","robot","anonymous","namespace","continent","country","region","city"]
-  }
-}
-```
-
-#### CSV Index Tasks
-
-If your input files contain a header, the `columns` field is optional and you don't need to set.
-Instead, you can set the `hasHeaderRow` field to true, which makes Druid automatically extract the column information from the header.
-Otherwise, you must set the `columns` field and ensure that field must match the columns of your input data in the same order.
-
-Also, you can skip some header rows by setting `skipHeaderRows` in your parseSpec. If both `skipHeaderRows` and `hasHeaderRow` options are set,
-`skipHeaderRows` is first applied. For example, if you set `skipHeaderRows` to 2 and `hasHeaderRow` to true, Druid will
-skip the first two lines and then extract column information from the third line.
-
-Note that `hasHeaderRow` and `skipHeaderRows` are effective only for non-Hadoop batch index tasks. Other types of index
-tasks will fail with an exception.
-
-#### Other CSV Ingestion Tasks
-
-The `columns` field must be included and and ensure that the order of the fields matches the columns of your input data in the same order.
-
-### TSV / Delimited ParseSpec
-
-Use this with the String Parser to load any delimited text that does not require special escaping. By default,
-the delimiter is a tab, so this will load TSV.
-
-| Field | Type | Description | Required |
-|-------|------|-------------|----------|
-| format | String | `tsv` | yes |
-| timestampSpec | JSON Object | Specifies the column and format of the timestamp. | yes |
-| dimensionsSpec | JSON Object | Specifies the dimensions of the data. | yes |
-| delimiter | String | A custom delimiter for data values. | no (default = \t) |
-| listDelimiter | String | A custom delimiter for multi-value dimensions. | no (default = ctrl+A) |
-| columns | JSON String array | Specifies the columns of the data. | yes |
-
-Sample spec:
-
-```json
-"parseSpec": {
-  "format" : "tsv",
-  "timestampSpec" : {
-    "column" : "timestamp"
-  },
-  "columns" : ["timestamp","page","language","user","unpatrolled","newPage","robot","anonymous","namespace","continent","country","region","city","added","deleted","delta"],
-  "delimiter":"|",
-  "dimensionsSpec" : {
-    "dimensions" : ["page","language","user","unpatrolled","newPage","robot","anonymous","namespace","continent","country","region","city"]
-  }
-}
-```
-
-Be sure to change the `delimiter` to the appropriate delimiter for your data. Like CSV, you must specify the columns and which subset of the columns you want indexed.
-
-#### TSV (Delimited) Index Tasks
-
-If your input files contain a header, the `columns` field is optional and doesn't need to be set.
-Instead, you can set the `hasHeaderRow` field to true, which makes Druid automatically extract the column information from the header.
-Otherwise, you must set the `columns` field and ensure that field must match the columns of your input data in the same order.
-
-Also, you can skip some header rows by setting `skipHeaderRows` in your parseSpec. If both `skipHeaderRows` and `hasHeaderRow` options are set,
-`skipHeaderRows` is first applied. For example, if you set `skipHeaderRows` to 2 and `hasHeaderRow` to true, Druid will
-skip the first two lines and then extract column information from the third line.
-
-Note that `hasHeaderRow` and `skipHeaderRows` are effective only for non-Hadoop batch index tasks. Other types of index
-tasks will fail with an exception.
-
-#### Other TSV (Delimited) Ingestion Tasks
-
-The `columns` field must be included and and ensure that the order of the fields matches the columns of your input data in the same order.
-
-### Regex ParseSpec
-
-```json
-"parseSpec":{
-  "format" : "regex",
-  "timestampSpec" : {
-    "column" : "timestamp"
-  },
-  "dimensionsSpec" : {
-    "dimensions" : [<your_list_of_dimensions>]
-  },
-  "columns" : [<your_columns_here>],
-  "pattern" : <regex pattern for partitioning data>
-}
-```
-
-The `columns` field must match the columns of your regex matching groups in the same order. If columns are not provided, default
-columns names ("column_1", "column2", ... "column_n") will be assigned. Ensure that your column names include all your dimensions.
-
-### JavaScript ParseSpec
-
-```json
-"parseSpec":{
-  "format" : "javascript",
-  "timestampSpec" : {
-    "column" : "timestamp"
-  },
-  "dimensionsSpec" : {
-    "dimensions" : ["page","language","user","unpatrolled","newPage","robot","anonymous","namespace","continent","country","region","city"]
-  },
-  "function" : "function(str) { var parts = str.split(\"-\"); return { one: parts[0], two: parts[1] } }"
-}
-```
-
-Note with the JavaScript parser that data must be fully parsed and returned as a `{key:value}` format in the JS logic.
-This means any flattening or parsing multi-dimensional values must be done here.
-
-> JavaScript-based functionality is disabled by default. Please refer to the Druid [JavaScript programming guide](../development/javascript.md) for guidelines about using Druid's JavaScript functionality, including instructions on how to enable it.
-
-### TimeAndDims ParseSpec
-
-Use this with non-String Parsers to provide them with timestamp and dimensions information. Non-String Parsers
-handle all formatting decisions on their own, without using the ParseSpec.
-
-| Field | Type | Description | Required |
-|-------|------|-------------|----------|
-| format | String | `timeAndDims` | yes |
-| timestampSpec | JSON Object | Specifies the column and format of the timestamp. | yes |
-| dimensionsSpec | JSON Object | Specifies the dimensions of the data. | yes |
-
-### Orc ParseSpec
-
-Use this with the Hadoop ORC Parser to load ORC files.
-
-| Field | Type | Description | Required |
-|-------|------|-------------|----------|
-| format | String |  `orc`| no |
-| timestampSpec | JSON Object | Specifies the column and format of the timestamp. | yes |
-| dimensionsSpec | JSON Object | Specifies the dimensions of the data. | yes |
-| flattenSpec | JSON Object | Specifies flattening configuration for nested JSON data. See [`flattenSpec`](#flattenspec) for more info. | no |
-
-### Parquet ParseSpec
-
-Use this with the Hadoop Parquet Parser to load Parquet files.
-
-| Field | Type | Description | Required |
-|-------|------|-------------|----------|
-| format | String |  `parquet`| no |
-| timestampSpec | JSON Object | Specifies the column and format of the timestamp. | yes |
-| dimensionsSpec | JSON Object | Specifies the dimensions of the data. | yes |
-| flattenSpec | JSON Object | Specifies flattening configuration for nested JSON data. See [`flattenSpec`](#flattenspec) for more info. | no |
+  | keys()     | Provides the property keys (An alternative for terminal tilde ~)    | Set\<E\>      | &#10007;  |  &#10007;   |   &#10007;   | &#10007;   |

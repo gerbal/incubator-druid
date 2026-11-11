@@ -18,11 +18,14 @@
 
 import { L } from 'druid-query-toolkit';
 import React from 'react';
-import ReactTable from 'react-table';
 
-import { Loader } from '../../../components';
+import {
+  ConsoleTable,
+  Loader,
+  SMALL_TABLE_PAGE_SIZE,
+  SMALL_TABLE_PAGE_SIZE_OPTIONS,
+} from '../../../components';
 import { useQueryManager } from '../../../hooks';
-import { SMALL_TABLE_PAGE_SIZE, SMALL_TABLE_PAGE_SIZE_OPTIONS } from '../../../react-table';
 import type { ColumnMetadata } from '../../../utils';
 import { queryDruidSql } from '../../../utils';
 
@@ -42,18 +45,22 @@ export const DatasourceColumnsTable = React.memo(function DatasourceColumnsTable
 ) {
   const [columnsState] = useQueryManager<string, DatasourceColumnsTableRow[]>({
     initQuery: props.datasource,
-    processQuery: async (datasourceId: string) => {
-      return await queryDruidSql<ColumnMetadata>({
-        query: `SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
+    processQuery: async (datasourceId, signal) => {
+      return await queryDruidSql<ColumnMetadata>(
+        {
+          query: `SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS
           WHERE TABLE_SCHEMA = 'druid' AND TABLE_NAME = ${L(datasourceId)}`,
-      });
+          context: { engine: 'native' },
+        },
+        signal,
+      );
     },
   });
 
   function renderTable() {
     const columns = columnsState.data || [];
     return (
-      <ReactTable
+      <ConsoleTable
         data={columns}
         defaultPageSize={SMALL_TABLE_PAGE_SIZE}
         pageSizeOptions={SMALL_TABLE_PAGE_SIZE_OPTIONS}

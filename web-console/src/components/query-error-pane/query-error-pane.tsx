@@ -16,16 +16,17 @@
  * limitations under the License.
  */
 
+import type { JSX } from 'react';
 import React, { useState } from 'react';
 
-import type { DruidError, RowColumn } from '../../utils';
+import type { DruidError, LineColumn } from '../../utils';
 import { HighlightText } from '../highlight-text/highlight-text';
 
 import './query-error-pane.scss';
 
 export interface QueryErrorPaneProps {
   error: DruidError;
-  moveCursorTo: (rowColumn: RowColumn) => void;
+  moveCursorTo: (position: LineColumn) => void;
   queryString?: string;
   onQueryStringChange?: (newQueryString: string, run?: boolean) => void;
 }
@@ -38,7 +39,7 @@ export const QueryErrorPane = React.memo(function QueryErrorPane(props: QueryErr
     return <div className="query-error-pane">{error.message}</div>;
   }
 
-  const { position, suggestion } = error;
+  const { startLineColumn, suggestion } = error;
   let suggestionElement: JSX.Element | undefined;
   if (suggestion && queryString && onQueryStringChange) {
     const newQuery = suggestion.fn(queryString);
@@ -61,22 +62,26 @@ export const QueryErrorPane = React.memo(function QueryErrorPane(props: QueryErr
   return (
     <div className="query-error-pane">
       {suggestionElement}
-      {error.error && <p>{`Error: ${error.error}`}</p>}
+      {error.error && (
+        <p>{`Error: ${error.category}${
+          error.persona && error.persona !== 'USER' ? ` (${error.persona})` : ''
+        }`}</p>
+      )}
       {error.errorMessageWithoutExpectation && (
         <p>
-          {position ? (
+          {startLineColumn ? (
             <HighlightText
               text={error.errorMessageWithoutExpectation}
-              find={position.match}
-              replace={
+              find={/\(line \[\d+], column \[\d+]\)/}
+              replace={found => (
                 <a
                   onClick={() => {
-                    moveCursorTo(position);
+                    moveCursorTo(startLineColumn);
                   }}
                 >
-                  {position.match}
+                  {found}
                 </a>
-              }
+              )}
             />
           ) : (
             error.errorMessageWithoutExpectation
@@ -95,6 +100,7 @@ export const QueryErrorPane = React.memo(function QueryErrorPane(props: QueryErr
         </p>
       )}
       {error.errorClass && <p>{error.errorClass}</p>}
+      {error.host && <p>{`Host: ${error.host}`}</p>}
     </div>
   );
 });

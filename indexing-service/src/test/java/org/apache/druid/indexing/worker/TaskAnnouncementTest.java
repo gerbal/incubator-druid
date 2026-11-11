@@ -20,20 +20,17 @@
 package org.apache.druid.indexing.worker;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.druid.data.input.impl.NoopInputSource;
+import org.apache.druid.data.input.impl.TimestampSpec;
 import org.apache.druid.indexer.TaskLocation;
 import org.apache.druid.indexer.TaskStatus;
 import org.apache.druid.indexing.common.TestUtils;
-import org.apache.druid.indexing.common.task.RealtimeIndexTask;
+import org.apache.druid.indexing.common.task.IndexTask;
 import org.apache.druid.indexing.common.task.Task;
 import org.apache.druid.indexing.common.task.TaskResource;
-import org.apache.druid.jackson.DefaultObjectMapper;
-import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.segment.indexing.DataSchema;
-import org.apache.druid.segment.indexing.RealtimeIOConfig;
-import org.apache.druid.segment.realtime.FireDepartment;
-import org.easymock.EasyMock;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 public class TaskAnnouncementTest
 {
@@ -48,13 +45,13 @@ public class TaskAnnouncementTest
   @Test
   public void testBackwardsCompatibleSerde() throws Exception
   {
-    final RealtimeIOConfig realtimeIOConfig = EasyMock.createNiceMock(RealtimeIOConfig.class);
-    final Task task = new RealtimeIndexTask(
+    final IndexTask.IndexIOConfig ioConfig = new IndexTask.IndexIOConfig(new NoopInputSource(), null, null, null);
+    final Task task = new IndexTask(
         "theid",
         new TaskResource("rofl", 2),
-        new FireDepartment(
-            new DataSchema("foo", null, new AggregatorFactory[0], null, null, new DefaultObjectMapper()),
-            realtimeIOConfig,
+        new IndexTask.IndexIngestionSpec(
+            DataSchema.builder().withDataSource("foo").withTimestamp(TimestampSpec.DEFAULT).build(),
+            ioConfig,
             null
         ),
         null
@@ -73,15 +70,15 @@ public class TaskAnnouncementTest
         TaskAnnouncement.class
     );
 
-    Assert.assertEquals("theid", statusFromStatus.getId());
-    Assert.assertEquals("theid", statusFromAnnouncement.getId());
-    Assert.assertEquals("theid", announcementFromStatus.getTaskStatus().getId());
-    Assert.assertEquals("theid", announcementFromAnnouncement.getTaskStatus().getId());
+    Assertions.assertEquals("theid", statusFromStatus.getId());
+    Assertions.assertEquals("theid", statusFromAnnouncement.getId());
+    Assertions.assertEquals("theid", announcementFromStatus.getTaskStatus().getId());
+    Assertions.assertEquals("theid", announcementFromAnnouncement.getTaskStatus().getId());
 
-    Assert.assertEquals("theid", announcementFromStatus.getTaskResource().getAvailabilityGroup());
-    Assert.assertEquals("rofl", announcementFromAnnouncement.getTaskResource().getAvailabilityGroup());
+    Assertions.assertEquals("theid", announcementFromStatus.getTaskResource().getAvailabilityGroup());
+    Assertions.assertEquals("rofl", announcementFromAnnouncement.getTaskResource().getAvailabilityGroup());
 
-    Assert.assertEquals(1, announcementFromStatus.getTaskResource().getRequiredCapacity());
-    Assert.assertEquals(2, announcementFromAnnouncement.getTaskResource().getRequiredCapacity());
+    Assertions.assertEquals(1, announcementFromStatus.getTaskResource().getRequiredCapacity());
+    Assertions.assertEquals(2, announcementFromAnnouncement.getTaskResource().getRequiredCapacity());
   }
 }

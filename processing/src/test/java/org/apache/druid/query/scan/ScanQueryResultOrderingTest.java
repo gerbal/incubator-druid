@@ -20,7 +20,6 @@
 package org.apache.druid.query.scan;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSortedSet;
 import com.google.common.collect.Sets;
 import org.apache.druid.java.util.common.DateTimes;
@@ -32,23 +31,25 @@ import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.common.guava.Sequences;
 import org.apache.druid.query.DefaultGenericQueryMetricsFactory;
 import org.apache.druid.query.Druids;
+import org.apache.druid.query.Order;
 import org.apache.druid.query.QueryPlus;
 import org.apache.druid.query.QueryRunner;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.context.ResponseContext;
 import org.apache.druid.query.spec.MultipleIntervalSegmentSpec;
 import org.apache.druid.query.spec.MultipleSpecificSegmentSpec;
 import org.apache.druid.segment.RowAdapter;
-import org.apache.druid.segment.RowBasedSegment;
+import org.apache.druid.segment.TestSegmentUtils.InMemoryTestSegment;
 import org.apache.druid.segment.column.ColumnHolder;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.RowSignature;
+import org.apache.druid.testing.InitializedNullHandlingTest;
 import org.apache.druid.timeline.SegmentId;
 import org.joda.time.DateTime;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -61,11 +62,10 @@ import java.util.stream.IntStream;
 
 /**
  * Tests the order in which Scan query results come back.
- *
+ * <p>
  * Ensures that we have run-to-run stability of result order, which is important for offset-based pagination.
  */
-@RunWith(Parameterized.class)
-public class ScanQueryResultOrderingTest
+public class ScanQueryResultOrderingTest extends InitializedNullHandlingTest
 {
   private static final String DATASOURCE = "datasource";
   private static final String ID_COLUMN = "id";
@@ -85,8 +85,8 @@ public class ScanQueryResultOrderingTest
                                                                 .add(ID_COLUMN, ColumnType.LONG)
                                                                 .build();
 
-  private static final List<RowBasedSegment<Object[]>> SEGMENTS = ImmutableList.of(
-      new RowBasedSegment<>(
+  private static final List<InMemoryTestSegment<Object[]>> SEGMENTS = ImmutableList.of(
+      new InMemoryTestSegment<>(
           SegmentId.of(DATASOURCE, Intervals.of("2000-01-01/P1D"), "1", 0),
           Sequences.simple(
               ImmutableList.of(
@@ -103,7 +103,7 @@ public class ScanQueryResultOrderingTest
           ROW_ADAPTER,
           ROW_SIGNATURE
       ),
-      new RowBasedSegment<>(
+      new InMemoryTestSegment<>(
           SegmentId.of(DATASOURCE, Intervals.of("2000-01-01/P1D"), "1", 1),
           Sequences.simple(
               ImmutableList.of(
@@ -120,7 +120,7 @@ public class ScanQueryResultOrderingTest
           ROW_ADAPTER,
           ROW_SIGNATURE
       ),
-      new RowBasedSegment<>(
+      new InMemoryTestSegment<>(
           SegmentId.of(DATASOURCE, Intervals.of("2000-01-02/P1D"), "1", 0),
           Sequences.simple(
               ImmutableList.of(
@@ -134,16 +134,26 @@ public class ScanQueryResultOrderingTest
       )
   );
 
-  private final List<Integer> segmentToServerMap;
-  private final int limit;
-  private final int batchSize;
-  private final int maxRowsQueuedForOrdering;
-
   private ScanQueryRunnerFactory queryRunnerFactory;
   private List<QueryRunner<ScanResultValue>> segmentRunners;
 
-  @Parameterized.Parameters(name = "Segment-to-server map[{0}], limit[{1}], batchSize[{2}], maxRowsQueuedForOrdering[{3}]")
-  public static Iterable<Object[]> constructorFeeder()
+  /**
+   * One case of the {@link #constructorFeeder()} matrix, supplied as a single test-method parameter.
+   */
+  record ResultOrderingCase(
+      List<Integer> segmentToServerMap,
+      int limit,
+      int batchSize,
+      int maxRowsQueuedForOrdering
+  )
+  {
+  }
+
+  /**
+   * Cases for the tests below. These are {@link ParameterizedTest} rather than a parameterized class
+   * for performance reasons: <a href="https://github.com/apache/maven-surefire/issues/3439">maven-surefire#3439</a>.
+   */
+  public static Iterable<ResultOrderingCase> constructorFeeder()
   {
     // Set number of server equal to number of segments, then try all possible distributions of segments to servers.
     final int numServers = SEGMENTS.size();
@@ -156,7 +166,7 @@ public class ScanQueryResultOrderingTest
 
     // Try every limit up to one past the total number of rows.
     final Set<Integer> limits = new TreeSet<>();
-    final int totalNumRows = SEGMENTS.stream().mapToInt(s -> s.asStorageAdapter().getNumRows()).sum();
+    int totalNumRows = 19;
     for (int i = 0; i <= totalNumRows + 1; i++) {
       limits.add(i);
     }
@@ -165,35 +175,28 @@ public class ScanQueryResultOrderingTest
     final Set<Integer> batchSizes = ImmutableSortedSet.of(1, 2, 100);
     final Set<Integer> maxRowsQueuedForOrderings = ImmutableSortedSet.of(1, 7, 100000);
 
-    return Sets.cartesianProduct(
-        segmentToServerMaps,
-        limits,
-        batchSizes,
-        maxRowsQueuedForOrderings
-    ).stream().map(args -> args.toArray(new Object[0])).collect(Collectors.toList());
+    final List<ResultOrderingCase> constructors = new ArrayList<>();
+
+    for (final List<Integer> segmentToServerMap : segmentToServerMaps) {
+      for (final int limit : limits) {
+        for (final int batchSize : batchSizes) {
+          for (final int maxRowsQueuedForOrdering : maxRowsQueuedForOrderings) {
+            constructors.add(
+                new ResultOrderingCase(segmentToServerMap, limit, batchSize, maxRowsQueuedForOrdering)
+            );
+          }
+        }
+      }
+    }
+
+    return constructors;
   }
 
-  public ScanQueryResultOrderingTest(
-      final List<Integer> segmentToServerMap,
-      final int limit,
-      final int batchSize,
-      final int maxRowsQueuedForOrdering
-  )
-  {
-    this.segmentToServerMap = segmentToServerMap;
-    this.limit = limit;
-    this.batchSize = batchSize;
-    this.maxRowsQueuedForOrdering = maxRowsQueuedForOrdering;
-  }
-
-  @Before
+  @BeforeEach
   public void setUp()
   {
     queryRunnerFactory = new ScanQueryRunnerFactory(
-        new ScanQueryQueryToolChest(
-            new ScanQueryConfig(),
-            new DefaultGenericQueryMetricsFactory()
-        ),
+        new ScanQueryQueryToolChest(DefaultGenericQueryMetricsFactory.instance()),
         new ScanQueryEngine(),
         new ScanQueryConfig()
     );
@@ -201,15 +204,17 @@ public class ScanQueryResultOrderingTest
     segmentRunners = SEGMENTS.stream().map(queryRunnerFactory::createRunner).collect(Collectors.toList());
   }
 
-  @Test
-  public void testOrderNone()
+  @ParameterizedTest
+  @MethodSource("constructorFeeder")
+  public void testOrderNone(final ResultOrderingCase testCase)
   {
     assertResultsEquals(
+        testCase,
         Druids.newScanQueryBuilder()
               .dataSource("ds")
               .intervals(new MultipleIntervalSegmentSpec(Collections.singletonList(Intervals.of("2000/P1D"))))
               .columns(ColumnHolder.TIME_COLUMN_NAME, ID_COLUMN)
-              .order(ScanQuery.Order.NONE)
+              .order(Order.NONE)
               .build(),
         ImmutableList.of(
             101,
@@ -235,15 +240,17 @@ public class ScanQueryResultOrderingTest
     );
   }
 
-  @Test
-  public void testOrderTimeAscending()
+  @ParameterizedTest
+  @MethodSource("constructorFeeder")
+  public void testOrderTimeAscending(final ResultOrderingCase testCase)
   {
     assertResultsEquals(
+        testCase,
         Druids.newScanQueryBuilder()
               .dataSource("ds")
               .intervals(new MultipleIntervalSegmentSpec(Collections.singletonList(Intervals.of("2000/P1D"))))
               .columns(ColumnHolder.TIME_COLUMN_NAME, ID_COLUMN)
-              .order(ScanQuery.Order.ASCENDING)
+              .order(Order.ASCENDING)
               .build(),
         ImmutableList.of(
             101,
@@ -269,15 +276,17 @@ public class ScanQueryResultOrderingTest
     );
   }
 
-  @Test
-  public void testOrderTimeDescending()
+  @ParameterizedTest
+  @MethodSource("constructorFeeder")
+  public void testOrderTimeDescending(final ResultOrderingCase testCase)
   {
     assertResultsEquals(
+        testCase,
         Druids.newScanQueryBuilder()
               .dataSource("ds")
               .intervals(new MultipleIntervalSegmentSpec(Collections.singletonList(Intervals.of("2000/P1D"))))
               .columns(ColumnHolder.TIME_COLUMN_NAME, ID_COLUMN)
-              .order(ScanQuery.Order.DESCENDING)
+              .order(Order.DESCENDING)
               .build(),
         ImmutableList.of(
             8,
@@ -303,9 +312,14 @@ public class ScanQueryResultOrderingTest
     );
   }
 
-  private void assertResultsEquals(final ScanQuery query, final List<Integer> expectedResults)
+  private void assertResultsEquals(
+      final ResultOrderingCase testCase,
+      final ScanQuery query,
+      final List<Integer> expectedResults
+  )
   {
     final List<List<Pair<SegmentId, QueryRunner<ScanResultValue>>>> serverRunners = new ArrayList<>();
+    final List<Integer> segmentToServerMap = testCase.segmentToServerMap();
     for (int i = 0; i <= segmentToServerMap.stream().max(Comparator.naturalOrder()).orElse(0); i++) {
       serverRunners.add(new ArrayList<>());
     }
@@ -324,7 +338,7 @@ public class ScanQueryResultOrderingTest
                      .map(
                          runners ->
                              queryRunnerFactory.getToolchest().mergeResults(
-                                 new QueryRunner<ScanResultValue>()
+                                 new QueryRunner<>()
                                  {
                                    @Override
                                    public Sequence<ScanResultValue> run(
@@ -372,20 +386,20 @@ public class ScanQueryResultOrderingTest
     // Finally: run the query.
     final List<Integer> results = runQuery(
         (ScanQuery) Druids.ScanQueryBuilder.copy(query)
-                                           .limit(limit)
-                                           .batchSize(batchSize)
+                                           .limit(testCase.limit())
+                                           .batchSize(testCase.batchSize())
                                            .build()
                                            .withOverriddenContext(
-                                               ImmutableMap.of(
-                                                   ScanQueryConfig.CTX_KEY_MAX_ROWS_QUEUED_FOR_ORDERING,
-                                                   maxRowsQueuedForOrdering
-                                               )
+                                               QueryContextParameters.MAX_ROWS_QUEUED_FOR_ORDERING,
+                                               testCase.maxRowsQueuedForOrdering()
                                            ),
         brokerRunner
     );
 
-    Assert.assertEquals(
-        expectedResults.stream().limit(limit == 0 ? Long.MAX_VALUE : limit).collect(Collectors.toList()),
+    Assertions.assertEquals(
+        expectedResults.stream()
+                       .limit(testCase.limit() == 0 ? Long.MAX_VALUE : testCase.limit())
+                       .collect(Collectors.toList()),
         results
     );
   }
@@ -397,6 +411,6 @@ public class ScanQueryResultOrderingTest
         brokerRunner.run(QueryPlus.wrap(query))
     ).toList();
 
-    return results.stream().mapToInt(row -> (int) row[1]).boxed().collect(Collectors.toList());
+    return results.stream().mapToInt(row -> ((Number) row[1]).intValue()).boxed().collect(Collectors.toList());
   }
 }

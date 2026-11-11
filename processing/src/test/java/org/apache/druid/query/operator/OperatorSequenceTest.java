@@ -26,8 +26,8 @@ import org.apache.druid.query.rowsandcols.MapOfColumnsRowsAndColumns;
 import org.apache.druid.query.rowsandcols.RowsAndColumns;
 import org.apache.druid.query.rowsandcols.column.ColumnAccessor;
 import org.apache.druid.query.rowsandcols.column.IntArrayColumn;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 @SuppressWarnings("ConstantConditions")
 public class OperatorSequenceTest
@@ -43,7 +43,7 @@ public class OperatorSequenceTest
         .expectColumn("hi", new int[]{1})
         .allColumnsRegistered();
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         1,
         seq.accumulate(
             0,
@@ -54,7 +54,7 @@ public class OperatorSequenceTest
         ).intValue()
     );
 
-    Yielder<Integer> yielder = seq.toYielder(0, new YieldingAccumulator<Integer, RowsAndColumns>()
+    Yielder<Integer> yielder = seq.toYielder(0, new YieldingAccumulator<>()
     {
       @Override
       public Integer accumulate(Integer accumulated, RowsAndColumns in)
@@ -65,11 +65,11 @@ public class OperatorSequenceTest
       }
     });
 
-    Assert.assertFalse(yielder.isDone());
-    Assert.assertEquals(1, yielder.get().intValue());
+    Assertions.assertFalse(yielder.isDone());
+    Assertions.assertEquals(1, yielder.get().intValue());
 
     yielder = yielder.next(0);
-    Assert.assertTrue(yielder.isDone());
+    Assertions.assertTrue(yielder.isDone());
   }
 
   @Test
@@ -86,7 +86,7 @@ public class OperatorSequenceTest
         )
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         120,
         seq.accumulate(
             0,
@@ -101,7 +101,7 @@ public class OperatorSequenceTest
     );
 
     // Never yield
-    Yielder<Integer> yielder = seq.toYielder(0, new YieldingAccumulator<Integer, RowsAndColumns>()
+    Yielder<Integer> yielder = seq.toYielder(0, new YieldingAccumulator<>()
     {
       @Override
       public Integer accumulate(Integer accumulated, RowsAndColumns in)
@@ -114,11 +114,11 @@ public class OperatorSequenceTest
       }
     });
 
-    Assert.assertEquals(120, yielder.get().intValue());
-    Assert.assertTrue(yielder.isDone());
+    Assertions.assertEquals(120, yielder.get().intValue());
+    Assertions.assertTrue(yielder.isDone());
 
     // Yield at the very end...
-    yielder = seq.toYielder(0, new YieldingAccumulator<Integer, RowsAndColumns>()
+    yielder = seq.toYielder(0, new YieldingAccumulator<>()
     {
       @Override
       public Integer accumulate(Integer accumulated, RowsAndColumns in)
@@ -134,19 +134,21 @@ public class OperatorSequenceTest
       }
     });
 
-    Assert.assertEquals(120, yielder.get().intValue());
-    Assert.assertFalse(yielder.isDone());
+    Assertions.assertEquals(120, yielder.get().intValue());
+    Assertions.assertFalse(yielder.isDone());
 
     yielder = yielder.next(0);
-    Assert.assertTrue(yielder.isDone());
+    Assertions.assertTrue(yielder.isDone());
 
-    // Aggregate each RAC and yield.
-    yielder = seq.toYielder(0, new YieldingAccumulator<Integer, RowsAndColumns>()
+    // Aggregate each RAC and yield every other.
+    yielder = seq.toYielder(0, new YieldingAccumulator<>()
     {
       @Override
       public Integer accumulate(Integer accumulated, RowsAndColumns in)
       {
-        this.yield();
+        if (accumulated != 0) {
+          this.yield();
+        }
         final ColumnAccessor col = in.findColumn("hi").toAccessor();
         for (int i = 0; i < col.numRows(); ++i) {
           accumulated += col.getInt(i);
@@ -155,13 +157,13 @@ public class OperatorSequenceTest
       }
     });
 
-    int[] expectedTotals = new int[]{1, 2, 7, 26, 30, 54};
+    int[] expectedTotals = new int[]{3, 33, 84};
 
     for (int expectedTotal : expectedTotals) {
-      Assert.assertEquals(expectedTotal, yielder.get().intValue());
-      Assert.assertFalse(yielder.isDone());
+      Assertions.assertEquals(expectedTotal, yielder.get().intValue());
+      Assertions.assertFalse(yielder.isDone());
       yielder = yielder.next(0);
     }
-    Assert.assertTrue(yielder.isDone());
+    Assertions.assertTrue(yielder.isDone());
   }
 }

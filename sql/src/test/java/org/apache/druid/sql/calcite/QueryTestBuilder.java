@@ -20,28 +20,31 @@
 package org.apache.druid.sql.calcite;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Preconditions;
 import org.apache.druid.query.Query;
+import org.apache.druid.query.QueryContext;
+import org.apache.druid.query.QueryContexts;
+import org.apache.druid.quidem.DruidQTestInfo;
 import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.server.security.AuthConfig;
 import org.apache.druid.server.security.AuthenticationResult;
 import org.apache.druid.server.security.ResourceAction;
 import org.apache.druid.sql.SqlStatementFactory;
+import org.apache.druid.sql.calcite.BaseCalciteQueryTest.ResultMatchMode;
 import org.apache.druid.sql.calcite.BaseCalciteQueryTest.ResultsVerifier;
 import org.apache.druid.sql.calcite.QueryTestRunner.QueryResults;
 import org.apache.druid.sql.calcite.planner.PlannerConfig;
 import org.apache.druid.sql.calcite.util.CalciteTestBase;
 import org.apache.druid.sql.calcite.util.CalciteTests;
-import org.apache.druid.sql.calcite.util.QueryLogHook;
+import org.apache.druid.sql.calcite.util.SqlTestFramework;
 import org.apache.druid.sql.calcite.util.SqlTestFramework.PlannerFixture;
 import org.apache.druid.sql.http.SqlParameter;
-import org.junit.rules.ExpectedException;
 
-import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 /**
  * Gathers per-test information for a SQL query test. Information is of
@@ -68,21 +71,26 @@ public class QueryTestBuilder
    */
   public interface QueryTestConfig
   {
-    QueryLogHook queryLogHook();
-
-    ExpectedException expectedException();
-
     ObjectMapper jsonMapper();
 
     PlannerFixture plannerFixture(PlannerConfig plannerConfig, AuthConfig authConfig);
-    ResultsVerifier defaultResultsVerifier(List<Object[]> expectedResults, RowSignature expectedResultSignature);
+    ResultsVerifier defaultResultsVerifier(List<Object[]> expectedResults, ResultMatchMode expectedResultMatchMode, RowSignature expectedResultSignature);
 
     boolean isRunningMSQ();
+
+    Map<String, Object> baseQueryContext();
+
+    default DruidQTestInfo getQTestInfo()
+    {
+      return null;
+    }
+
+    SqlTestFramework queryFramework();
   }
 
   protected final QueryTestConfig config;
   protected PlannerConfig plannerConfig = BaseCalciteQueryTest.PLANNER_CONFIG_DEFAULT;
-  protected Map<String, Object> queryContext = BaseCalciteQueryTest.QUERY_CONTEXT_DEFAULT;
+  protected Map<String, Object> queryContext;
   protected List<SqlParameter> parameters = CalciteTestBase.DEFAULT_PARAMETERS;
   protected String sql;
   protected AuthenticationResult authenticationResult = CalciteTests.REGULAR_USER_AUTH_RESULT;
@@ -93,20 +101,23 @@ public class QueryTestBuilder
   protected RowSignature expectedResultSignature;
   protected List<ResourceAction> expectedResources;
   protected ResultsVerifier expectedResultsVerifier;
-  @Nullable
-  protected Consumer<ExpectedException> expectedExceptionInitializer;
   protected boolean skipVectorize;
-  protected boolean msqCompatible;
   protected boolean queryCannotVectorize;
-  protected boolean verifyNativeQueries = true;
+  protected Predicate<List<Query<?>>> verifyNativeQueries = xs -> true;
   protected AuthConfig authConfig = new AuthConfig();
   protected PlannerFixture plannerFixture;
   protected String expectedLogicalPlan;
   protected SqlSchema expectedSqlSchema;
+  protected ResultMatchMode expectedResultMatchMode;
 
   public QueryTestBuilder(final QueryTestConfig config)
   {
+    Preconditions.checkNotNull(
+        config.baseQueryContext(),
+        "config's queryContext is null - probably set it to BaseCalciteQueryTest.QUERY_CONTEXT_DEFAULT"
+    );
     this.config = config;
+    this.queryContext = config.baseQueryContext();
   }
 
   public QueryTestBuilder plannerConfig(PlannerConfig plannerConfig)
@@ -117,7 +128,7 @@ public class QueryTestBuilder
 
   public QueryTestBuilder queryContext(Map<String, Object> queryContext)
   {
-    this.queryContext = queryContext;
+    this.queryContext = QueryContexts.override(this.queryContext, queryContext);
     return this;
   }
 
@@ -153,10 +164,17 @@ public class QueryTestBuilder
     return this;
   }
 
+  public QueryTestBuilder expectedResults(final List<Object[]> expectedResults)
+  {
+    return expectedResults(ResultMatchMode.EQUALS, expectedResults);
+  }
+
   public QueryTestBuilder expectedResults(
+      ResultMatchMode expecteMatchMode,
       final List<Object[]> expectedResults
   )
   {
+    this.expectedResultMatchMode = expecteMatchMode;
     this.expectedResults = expectedResults;
     return this;
   }
@@ -169,29 +187,11 @@ public class QueryTestBuilder
     return this;
   }
 
-  public QueryTestBuilder setCustomRunners(
-      List<QueryTestRunner.QueryRunStepFactory> factories
-  )
-  {
-    this.customRunners = new ArrayList<>(factories);
-    return this;
-  }
-
-
   public QueryTestBuilder addCustomVerification(
       QueryTestRunner.QueryVerifyStepFactory factory
   )
   {
     this.customVerifications.add(factory);
-    return this;
-  }
-
-  public QueryTestBuilder setCustomVerifications(
-      List<QueryTestRunner.QueryVerifyStepFactory> factories
-  )
-  {
-    this.customVerifications = new ArrayList<>();
-    this.customVerifications.addAll(factories);
     return this;
   }
 
@@ -215,12 +215,6 @@ public class QueryTestBuilder
     return this;
   }
 
-  public QueryTestBuilder expectedException(Consumer<ExpectedException> expectedExceptionInitializer)
-  {
-    this.expectedExceptionInitializer = expectedExceptionInitializer;
-    return this;
-  }
-
   public QueryTestBuilder skipVectorize()
   {
     return skipVectorize(true);
@@ -232,13 +226,7 @@ public class QueryTestBuilder
     return this;
   }
 
-  public QueryTestBuilder msqCompatible(boolean msqCompatible)
-  {
-    this.msqCompatible = msqCompatible;
-    return this;
-  }
-
-  public QueryTestBuilder verifyNativeQueries(boolean verifyNativeQueries)
+  public QueryTestBuilder verifyNativeQueries(Predicate<List<Query<?>>> verifyNativeQueries)
   {
     this.verifyNativeQueries = verifyNativeQueries;
     return this;
@@ -280,10 +268,9 @@ public class QueryTestBuilder
     return this;
   }
 
-  public QueryTestBuilder expectedSqlSchema(SqlSchema querySchema)
+  public Map<String, Object> getQueryContext()
   {
-    this.expectedSqlSchema = querySchema;
-    return this;
+    return queryContext;
   }
 
   public List<Query<?>> getExpectedQueries()
@@ -319,6 +306,11 @@ public class QueryTestBuilder
   public QueryResults results()
   {
     return build().resultsOnly();
+  }
+
+  public boolean isDecoupledMode()
+  {
+    return QueryContext.of(queryContext).isDecoupledMode();
   }
 
 }

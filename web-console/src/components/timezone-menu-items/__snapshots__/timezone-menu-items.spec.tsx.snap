@@ -1,0 +1,141 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`TimezoneMenuItems matches snapshot 1`] = `
+<ul
+  class="bp6-menu"
+  role="menu"
+>
+  <li
+    class=""
+    role="none"
+  >
+    <a
+      class="bp6-menu-item"
+      label="Etc/UTC"
+      role="menuitem"
+      tabindex="0"
+    >
+      <span
+        aria-hidden="true"
+        class="bp6-menu-item-icon"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-blank"
+          tabindex="-1"
+        >
+          <svg
+            data-icon="blank"
+          />
+        </span>
+      </span>
+      <div
+        class="bp6-text-overflow-ellipsis bp6-fill"
+      >
+        Default
+      </div>
+      <span
+        class="bp6-menu-item-label"
+      >
+        Etc/UTC
+      </span>
+    </a>
+  </li>
+  <li
+    class="bp6-submenu"
+    role="none"
+  >
+    <span
+      class="bp6-popover-target"
+      role="menuitem"
+      tabindex="0"
+    >
+      <a
+        aria-haspopup="menu"
+        class="bp6-menu-item"
+        role="none"
+        tabindex="-1"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-menu-item-icon"
+        >
+          <span
+            aria-hidden="true"
+            class="bp6-icon bp6-icon-blank"
+            tabindex="-1"
+          >
+            <svg
+              data-icon="blank"
+            />
+          </span>
+        </span>
+        <div
+          class="bp6-text-overflow-ellipsis bp6-fill"
+        >
+          Named
+        </div>
+        <span
+          class="bp6-icon bp6-icon-caret-right bp6-submenu-icon"
+        >
+          <svg
+            data-icon="caret-right"
+          />
+        </span>
+      </a>
+    </span>
+    <div
+      aria-live="polite"
+      class="bp6-overlay bp6-overlay-inline"
+    />
+  </li>
+  <li
+    class="bp6-submenu"
+    role="none"
+  >
+    <span
+      class="bp6-popover-target"
+      role="menuitem"
+      tabindex="0"
+    >
+      <a
+        aria-haspopup="menu"
+        class="bp6-menu-item"
+        role="none"
+        tabindex="-1"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-menu-item-icon"
+        >
+          <span
+            aria-hidden="true"
+            class="bp6-icon bp6-icon-blank"
+            tabindex="-1"
+          >
+            <svg
+              data-icon="blank"
+            />
+          </span>
+        </span>
+        <div
+          class="bp6-text-overflow-ellipsis bp6-fill"
+        >
+          Offset
+        </div>
+        <span
+          class="bp6-icon bp6-icon-caret-right bp6-submenu-icon"
+        >
+          <svg
+            data-icon="caret-right"
+          />
+        </span>
+      </a>
+    </span>
+    <div
+      aria-live="polite"
+      class="bp6-overlay bp6-overlay-inline"
+    />
+  </li>
+</ul>
+`;

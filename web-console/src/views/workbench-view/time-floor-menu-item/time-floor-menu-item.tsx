@@ -20,7 +20,6 @@ import { MenuItem } from '@blueprintjs/core';
 import { IconNames } from '@blueprintjs/icons';
 import type { SqlExpression } from 'druid-query-toolkit';
 import { F, SqlFunction } from 'druid-query-toolkit';
-import React from 'react';
 
 import { oneOf, tickIcon } from '../../../utils';
 
@@ -72,9 +71,10 @@ export const TimeFloorMenuItem = function TimeFloorMenuItem(props: TimeFloorMenu
 
   const changeTimeFloor = (duration: string | undefined) => {
     onChange(
-      (duration ? F.timeFloor(innerExpression, duration, origin, timezone) : innerExpression).as(
-        expression.getOutputName(),
-      ),
+      (duration
+        ? F.timeFloor(innerExpression, duration, origin, timezone)
+        : innerExpression
+      ).setAlias(expression.getOutputName()),
     );
   };
 

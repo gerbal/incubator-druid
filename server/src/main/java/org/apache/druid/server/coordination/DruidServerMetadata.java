@@ -31,20 +31,24 @@ import java.util.Objects;
 public class DruidServerMetadata
 {
   private final String name;
+  @Nullable
   private final String hostAndPort;
   @Nullable
   private final String hostAndTlsPort;
   private final long maxSize;
+  private final long storageSize;
   private final String tier;
   private final ServerType type;
   private final int priority;
 
+  // Either hostAndPort or hostAndTlsPort would be null depending on the type of connection.
   @JsonCreator
   public DruidServerMetadata(
       @JsonProperty("name") String name,
-      @JsonProperty("host") String hostAndPort,
+      @JsonProperty("host") @Nullable String hostAndPort,
       @JsonProperty("hostAndTlsPort") @Nullable String hostAndTlsPort,
       @JsonProperty("maxSize") long maxSize,
+      @JsonProperty("storageSize") @Nullable Long storageSize,
       @JsonProperty("type") ServerType type,
       @JsonProperty("tier") String tier,
       @JsonProperty("priority") int priority
@@ -54,6 +58,8 @@ public class DruidServerMetadata
     this.hostAndPort = hostAndPort;
     this.hostAndTlsPort = hostAndTlsPort;
     this.maxSize = maxSize;
+    // for backwards compatibility, fill in storage size from max size
+    this.storageSize = storageSize == null ? maxSize : storageSize;
     this.tier = tier;
     this.type = type;
     this.priority = priority;
@@ -70,6 +76,7 @@ public class DruidServerMetadata
     return getHostAndTlsPort() != null ? getHostAndTlsPort() : getHostAndPort();
   }
 
+  @Nullable
   @JsonProperty("host")
   public String getHostAndPort()
   {
@@ -87,6 +94,12 @@ public class DruidServerMetadata
   public long getMaxSize()
   {
     return maxSize;
+  }
+
+  @JsonProperty
+  public long getStorageSize()
+  {
+    return storageSize;
   }
 
   @JsonProperty
@@ -117,11 +130,6 @@ public class DruidServerMetadata
     return type.isSegmentBroadcastTarget();
   }
 
-  public boolean isSegmentReplicationOrBroadcastTarget()
-  {
-    return isSegmentReplicationTarget() || isSegmentBroadcastTarget();
-  }
-
   @Override
   public boolean equals(Object o)
   {
@@ -146,6 +154,9 @@ public class DruidServerMetadata
     if (maxSize != that.maxSize) {
       return false;
     }
+    if (storageSize != that.storageSize) {
+      return false;
+    }
     if (!Objects.equals(tier, that.tier)) {
       return false;
     }
@@ -158,7 +169,7 @@ public class DruidServerMetadata
   @Override
   public int hashCode()
   {
-    return Objects.hash(name, hostAndPort, hostAndTlsPort, maxSize, tier, type, priority);
+    return Objects.hash(name, hostAndPort, hostAndTlsPort, maxSize, storageSize, tier, type, priority);
   }
 
   @Override
@@ -169,6 +180,7 @@ public class DruidServerMetadata
            ", hostAndPort='" + hostAndPort + '\'' +
            ", hostAndTlsPort='" + hostAndTlsPort + '\'' +
            ", maxSize=" + maxSize +
+           ", storageSize=" + storageSize +
            ", tier='" + tier + '\'' +
            ", type=" + type +
            ", priority=" + priority +

@@ -22,10 +22,12 @@ package org.apache.druid.frame.channel;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
 import org.apache.commons.io.IOUtils;
-import org.apache.druid.frame.Frame;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.concurrent.Execs;
+import org.apache.druid.query.rowsandcols.RowsAndColumns;
+import org.apache.druid.query.rowsandcols.serde.WireTransferableContext;
 
+import javax.annotation.Nullable;
 import java.io.InputStream;
 import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
@@ -33,7 +35,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Channel backed by an {@link InputStream}.
- *
+ * <p>
  * Frame channels are expected to be nonblocking, but InputStreams cannot be read in nonblocking fashion.
  * This implementation deals with that by using an {@link ExecutorService} to read from the stream in a
  * separate thread.
@@ -55,6 +57,8 @@ public class ReadableInputStreamFrameChannel implements ReadableFrameChannel
 
   @GuardedBy("lock")
   private boolean inputStreamError = false;
+
+  private boolean isStarted = false;
 
   private volatile boolean keepReading = true;
 
@@ -88,28 +92,33 @@ public class ReadableInputStreamFrameChannel implements ReadableFrameChannel
 
   /**
    * Create an instance of this class and immediately start reading from the provided InputStream.
+   *
+   * @param inputStream             the input stream to read from
+   * @param id                      identifier for this channel
+   * @param executorService         executor service for reading from the stream
+   * @param framesOnly              if true, expects stream to start at FRAMES part (no MAGIC header)
+   * @param wireTransferableContext context for wire transfer deserialization; may be null if all data uses legacy frames
    */
   public static ReadableInputStreamFrameChannel open(
       InputStream inputStream,
       String id,
       ExecutorService executorService,
-      boolean framesOnly
+      boolean framesOnly,
+      @Nullable WireTransferableContext wireTransferableContext
   )
   {
-    final ReadableInputStreamFrameChannel channel = new ReadableInputStreamFrameChannel(
+    return new ReadableInputStreamFrameChannel(
         inputStream,
-        ReadableByteChunksFrameChannel.create(id, framesOnly),
+        ReadableByteChunksFrameChannel.create(id, framesOnly, wireTransferableContext),
         executorService
     );
-
-    channel.startReading();
-    return channel;
   }
 
   @Override
   public boolean isFinished()
   {
     synchronized (lock) {
+      startReading();
       return delegate.isFinished();
     }
   }
@@ -118,14 +127,16 @@ public class ReadableInputStreamFrameChannel implements ReadableFrameChannel
   public boolean canRead()
   {
     synchronized (lock) {
+      startReading();
       return delegate.canRead();
     }
   }
 
   @Override
-  public Frame read()
+  public RowsAndColumns read()
   {
     synchronized (lock) {
+      startReading();
       return delegate.read();
     }
   }
@@ -134,6 +145,7 @@ public class ReadableInputStreamFrameChannel implements ReadableFrameChannel
   public ListenableFuture<?> readabilityFuture()
   {
     synchronized (lock) {
+      startReading();
       return delegate.readabilityFuture();
     }
   }
@@ -150,6 +162,12 @@ public class ReadableInputStreamFrameChannel implements ReadableFrameChannel
 
   private void startReading()
   {
+
+    // the task to the executor service is submitted only once.
+    if (isStarted) {
+      return;
+    }
+    isStarted = true;
     executorService.submit(() -> {
       int nTry = 1;
       while (true) {
@@ -168,7 +186,7 @@ public class ReadableInputStreamFrameChannel implements ReadableFrameChannel
             ++nTry;
           }
           catch (InterruptedException e) {
-            // close inputstream anyway if the thread interrups
+            // close input stream anyway if the thread interrupts
             IOUtils.closeQuietly(inputStream);
             throw new ISE(e, Thread.currentThread().getName() + "interrupted");
           }
@@ -187,6 +205,8 @@ public class ReadableInputStreamFrameChannel implements ReadableFrameChannel
               if (bytesRead == -1) {
                 inputStreamFinished = true;
                 delegate.doneWriting();
+                // eagerly release input stream resources since everything is read.
+                IOUtils.closeQuietly(inputStream);
                 break;
               } else {
                 ListenableFuture<?> backpressureFuture = delegate.addChunk(Arrays.copyOfRange(buffer, 0, bytesRead));
@@ -197,7 +217,7 @@ public class ReadableInputStreamFrameChannel implements ReadableFrameChannel
                       () -> {
                         synchronized (readMonitor) {
                           keepReading = true;
-                          readMonitor.notify();
+                          readMonitor.notifyAll();
                         }
                       },
                       Execs.directExecutor()
@@ -233,8 +253,7 @@ public class ReadableInputStreamFrameChannel implements ReadableFrameChannel
   private static long nextRetrySleepMillis(final int nTry)
   {
     final double fuzzyMultiplier = Math.min(Math.max(1 + 0.2 * ThreadLocalRandom.current().nextGaussian(), 0), 2);
-    final long sleepMillis = (long) (Math.min(MAX_SLEEP_MILLIS, BASE_SLEEP_MILLIS * Math.pow(2, nTry - 1))
-                                     * fuzzyMultiplier);
-    return sleepMillis;
+    return (long) (Math.min(MAX_SLEEP_MILLIS, BASE_SLEEP_MILLIS * Math.pow(2, nTry - 1))
+                   * fuzzyMultiplier);
   }
 }

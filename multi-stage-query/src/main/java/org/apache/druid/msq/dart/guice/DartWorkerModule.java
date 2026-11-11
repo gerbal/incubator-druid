@@ -1,0 +1,201 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.druid.msq.dart.guice;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.jsontype.NamedType;
+import com.fasterxml.jackson.databind.module.SimpleModule;
+import com.google.common.util.concurrent.MoreExecutors;
+import com.google.inject.Binder;
+import com.google.inject.Inject;
+import com.google.inject.Module;
+import com.google.inject.Provides;
+import com.google.inject.multibindings.ProvidesIntoSet;
+import com.google.inject.name.Named;
+import org.apache.druid.discovery.DruidService;
+import org.apache.druid.discovery.NodeRole;
+import org.apache.druid.guice.Jerseys;
+import org.apache.druid.guice.LazySingleton;
+import org.apache.druid.guice.LifecycleModule;
+import org.apache.druid.guice.ManageLifecycle;
+import org.apache.druid.guice.ManageLifecycleAnnouncements;
+import org.apache.druid.guice.annotations.EscalatedGlobal;
+import org.apache.druid.guice.annotations.LoadScope;
+import org.apache.druid.guice.annotations.Self;
+import org.apache.druid.guice.annotations.Smile;
+import org.apache.druid.initialization.DruidModule;
+import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.common.concurrent.Execs;
+import org.apache.druid.messages.server.MessageRelayResource;
+import org.apache.druid.messages.server.Outbox;
+import org.apache.druid.messages.server.OutboxImpl;
+import org.apache.druid.msq.dart.Dart;
+import org.apache.druid.msq.dart.DartResourcePermissionMapper;
+import org.apache.druid.msq.dart.controller.http.DartQueryInfo;
+import org.apache.druid.msq.dart.controller.messages.ControllerMessage;
+import org.apache.druid.msq.dart.controller.sql.DartSqlEngine;
+import org.apache.druid.msq.dart.worker.DartDataServerQueryHandlerFactory;
+import org.apache.druid.msq.dart.worker.DartSegmentsInputSliceReaderProvider;
+import org.apache.druid.msq.dart.worker.DartWorkerContextFactory;
+import org.apache.druid.msq.dart.worker.DartWorkerContextFactoryImpl;
+import org.apache.druid.msq.dart.worker.DartWorkerRunner;
+import org.apache.druid.msq.dart.worker.DartWorkerService;
+import org.apache.druid.msq.dart.worker.http.DartWorkerResource;
+import org.apache.druid.msq.exec.MemoryIntrospector;
+import org.apache.druid.msq.guice.MSQBinders;
+import org.apache.druid.msq.rpc.ResourcePermissionMapper;
+import org.apache.druid.query.DruidProcessingConfig;
+import org.apache.druid.rpc.ServiceClientFactory;
+import org.apache.druid.server.DruidNode;
+import org.apache.druid.server.security.AuthorizerMapper;
+
+import java.io.File;
+import java.time.Clock;
+import java.util.Collections;
+import java.util.List;
+import java.util.Properties;
+import java.util.concurrent.ExecutorService;
+
+/**
+ * Primary module for workers. Checks {@link DartModules#isDartEnabled(Properties)} before installing itself.
+ */
+@LoadScope(roles = NodeRole.HISTORICAL_JSON_NAME)
+public class DartWorkerModule implements DruidModule
+{
+  private Properties properties;
+
+  @Inject
+  public void setProperties(Properties properties)
+  {
+    this.properties = properties;
+  }
+
+  @Override
+  public void configure(Binder binder)
+  {
+    if (DartModules.isDartEnabled(properties)) {
+      binder.install(new ActualModule());
+    }
+  }
+
+  public static class ActualModule implements Module
+  {
+    @Override
+    public void configure(Binder binder)
+    {
+      Jerseys.addResource(binder, DartWorkerResource.class);
+      LifecycleModule.register(binder, DartWorkerRunner.class);
+
+      binder.bind(DartWorkerContextFactory.class)
+            .to(DartWorkerContextFactoryImpl.class)
+            .in(LazySingleton.class);
+
+      binder.bind(ResourcePermissionMapper.class)
+            .annotatedWith(Dart.class)
+            .to(DartResourcePermissionMapper.class);
+
+      MSQBinders.inputSliceReaderProviderBinder(binder, Dart.class)
+                .addBinding()
+                .to(DartSegmentsInputSliceReaderProvider.class)
+                .in(LazySingleton.class);
+    }
+
+    /**
+     * Advertise {@link DartWorkerService} in node discovery. Contributed from {@link ActualModule}, which is only
+     * installed when Dart is enabled, so advertisement tracks actually running a Dart worker. Merges into the same
+     * {@code @Named("historical")} service set announced by
+     * {@link org.apache.druid.guice.HistoricalServiceModule}.
+     */
+    @ProvidesIntoSet
+    @Named(NodeRole.HISTORICAL_JSON_NAME)
+    public Class<? extends DruidService> getDartWorkerService()
+    {
+      return DartWorkerService.class;
+    }
+
+    @Provides
+    @ManageLifecycle
+    public DartWorkerRunner createWorkerRunner(
+        @Self final DruidNode selfNode,
+        final DartWorkerContextFactory workerFactory,
+        final Outbox<ControllerMessage> outbox,
+        final DruidProcessingConfig processingConfig,
+        @Dart final ResourcePermissionMapper permissionMapper,
+        final MemoryIntrospector memoryIntrospector,
+        final AuthorizerMapper authorizerMapper,
+        final DartWorkerConfig workerConfig
+    )
+    {
+      final ExecutorService exec = Execs.multiThreaded(memoryIntrospector.numTasksInJvm(), "dart-worker-%s");
+      final File baseTempDir =
+          new File(processingConfig.getTmpDir(), StringUtils.format("dart_%s", selfNode.getPortToUse()));
+      return new DartWorkerRunner(
+          workerFactory,
+          MoreExecutors.listeningDecorator(exec),
+          outbox,
+          permissionMapper,
+          authorizerMapper,
+          workerConfig,
+          baseTempDir,
+          Clock.systemUTC(),
+          Execs.scheduledSingleThreaded("dart-worker-reaper-%s")
+      );
+    }
+
+    /**
+     * Create an {@link Outbox}.
+     *
+     * This is {@link ManageLifecycleAnnouncements} scoped so {@link OutboxImpl#stop()} gets called before attempting
+     * to shut down the Jetty server. If this doesn't happen, then server shutdown is delayed by however long it takes
+     * any currently-in-flight {@link MessageRelayResource#httpGetMessagesFromOutbox} to resolve.
+     */
+    @Provides
+    @ManageLifecycleAnnouncements
+    public Outbox<ControllerMessage> createOutbox()
+    {
+      return new OutboxImpl<>();
+    }
+
+    @Provides
+    public DartDataServerQueryHandlerFactory createDataServerQueryHandlerFactory(
+        @EscalatedGlobal ServiceClientFactory serviceClientFactory,
+        @Smile ObjectMapper smileMapper
+    )
+    {
+      return new DartDataServerQueryHandlerFactory(
+          serviceClientFactory,
+          smileMapper
+      );
+    }
+  }
+
+  @Override
+  public List<? extends com.fasterxml.jackson.databind.Module> getJacksonModules()
+  {
+    return Collections.<com.fasterxml.jackson.databind.Module>singletonList(
+        new SimpleModule("DartModule").registerSubtypes(
+            new NamedType(
+                DartQueryInfo.class,
+                DartSqlEngine.NAME
+            )
+        )
+    );
+  }
+}

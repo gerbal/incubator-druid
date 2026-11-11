@@ -81,7 +81,7 @@ public class WrappedImmutableRoaringBitmap implements ImmutableBitmap
   @Override
   public PeekableIntIterator peekableIterator()
   {
-    return bitmap.getIntIterator();
+    return new SeekableRoaringIntIterator(bitmap);
   }
 
   @Override
@@ -112,8 +112,13 @@ public class WrappedImmutableRoaringBitmap implements ImmutableBitmap
   public ImmutableBitmap intersection(ImmutableBitmap otherBitmap)
   {
     WrappedImmutableRoaringBitmap other = (WrappedImmutableRoaringBitmap) otherBitmap;
-    ImmutableRoaringBitmap unwrappedOtherBitmap = other.bitmap;
-    return new WrappedImmutableRoaringBitmap(ImmutableRoaringBitmap.and(bitmap, unwrappedOtherBitmap));
+    return new WrappedImmutableRoaringBitmap(ImmutableRoaringBitmap.and(bitmap, other.bitmap));
   }
 
+  @Override
+  public ImmutableBitmap union(ImmutableBitmap otherBitmap)
+  {
+    WrappedImmutableRoaringBitmap other = (WrappedImmutableRoaringBitmap) otherBitmap;
+    return new WrappedImmutableRoaringBitmap(ImmutableRoaringBitmap.or(bitmap, other.bitmap));
+  }
 }

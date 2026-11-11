@@ -20,19 +20,29 @@
 package org.apache.druid.indexing.kafka.supervisor;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSortedSet;
+import org.apache.druid.common.config.Configs;
 import org.apache.druid.data.input.InputFormat;
+import org.apache.druid.error.InvalidInput;
 import org.apache.druid.indexing.seekablestream.extension.KafkaConfigOverrides;
+import org.apache.druid.indexing.seekablestream.supervisor.BoundedStreamConfig;
 import org.apache.druid.indexing.seekablestream.supervisor.IdleConfig;
+import org.apache.druid.indexing.seekablestream.supervisor.LagAggregator;
 import org.apache.druid.indexing.seekablestream.supervisor.SeekableStreamSupervisorIOConfig;
 import org.apache.druid.indexing.seekablestream.supervisor.autoscaler.AutoScalerConfig;
+import org.apache.druid.jackson.StrictIntegerDeserializer;
 import org.apache.druid.java.util.common.StringUtils;
 import org.joda.time.DateTime;
 import org.joda.time.Period;
 
 import javax.annotation.Nullable;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
 {
@@ -43,19 +53,29 @@ public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
   public static final String KEY_PASSWORD_KEY = "ssl.key.password";
   public static final long DEFAULT_POLL_TIMEOUT_MILLIS = 100;
 
+  public static final boolean DEFAULT_IS_MULTI_TOPIC = false;
+
   private final Map<String, Object> consumerProperties;
   private final long pollTimeout;
   private final KafkaConfigOverrides configOverrides;
+  private final String topic;
+  private final String topicPattern;
+  @Nullable
+  private final ImmutableSortedSet<Integer> partitionIds;
+  private final boolean emitTimeLagMetrics;
+  private final KafkaHeaderBasedFilterConfig headerBasedFilterConfig;
 
   @JsonCreator
   public KafkaSupervisorIOConfig(
       @JsonProperty("topic") String topic,
+      @JsonProperty("topicPattern") String topicPattern,
       @JsonProperty("inputFormat") InputFormat inputFormat,
       @JsonProperty("replicas") Integer replicas,
       @JsonProperty("taskCount") Integer taskCount,
       @JsonProperty("taskDuration") Period taskDuration,
       @JsonProperty("consumerProperties") Map<String, Object> consumerProperties,
       @Nullable @JsonProperty("autoScalerConfig") AutoScalerConfig autoScalerConfig,
+      @Nullable @JsonProperty("lagAggregator") LagAggregator lagAggregator,
       @JsonProperty("pollTimeout") Long pollTimeout,
       @JsonProperty("startDelay") Period startDelay,
       @JsonProperty("period") Period period,
@@ -65,11 +85,18 @@ public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
       @JsonProperty("earlyMessageRejectionPeriod") Period earlyMessageRejectionPeriod,
       @JsonProperty("lateMessageRejectionStartDateTime") DateTime lateMessageRejectionStartDateTime,
       @JsonProperty("configOverrides") KafkaConfigOverrides configOverrides,
-      @JsonProperty("idleConfig") IdleConfig idleConfig
+      @JsonProperty("headerBasedFilterConfig") KafkaHeaderBasedFilterConfig headerBasedFilterConfig,
+      @JsonProperty("idleConfig") IdleConfig idleConfig,
+      @JsonProperty("stopTaskCount") Integer stopTaskCount,
+      @Nullable @JsonProperty("emitTimeLagMetrics") Boolean emitTimeLagMetrics,
+      @Nullable @JsonProperty("serverPriorityToReplicas") Map<Integer, Integer> serverPriorityToReplicas,
+      @Nullable @JsonProperty("boundedStreamConfig") BoundedStreamConfig boundedStreamConfig,
+      @Nullable @JsonProperty("partitionIds")
+      @JsonDeserialize(contentUsing = StrictIntegerDeserializer.class) Set<Integer> partitionIds
   )
   {
     super(
-        Preconditions.checkNotNull(topic, "topic"),
+        checkTopicArguments(topic, topicPattern),
         inputFormat,
         replicas,
         taskCount,
@@ -81,10 +108,15 @@ public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
         lateMessageRejectionPeriod,
         earlyMessageRejectionPeriod,
         autoScalerConfig,
+        Configs.valueOrDefault(lagAggregator, LagAggregator.DEFAULT),
         lateMessageRejectionStartDateTime,
-        idleConfig
+        idleConfig,
+        stopTaskCount,
+        serverPriorityToReplicas,
+        boundedStreamConfig
     );
 
+    this.headerBasedFilterConfig = headerBasedFilterConfig;
     this.consumerProperties = Preconditions.checkNotNull(consumerProperties, "consumerProperties");
     Preconditions.checkNotNull(
         consumerProperties.get(BOOTSTRAP_SERVERS_KEY),
@@ -92,12 +124,103 @@ public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
     );
     this.pollTimeout = pollTimeout != null ? pollTimeout : DEFAULT_POLL_TIMEOUT_MILLIS;
     this.configOverrides = configOverrides;
+    this.topic = topic;
+    this.topicPattern = topicPattern;
+    if (partitionIds != null) {
+      if (partitionIds.isEmpty() || partitionIds.stream().anyMatch(id -> id == null || id < 0)) {
+        throw InvalidInput.exception("partitionIds must contain nonnegative partition IDs and must not be empty");
+      }
+      if (topicPattern != null || boundedStreamConfig != null) {
+        throw InvalidInput.exception("partitionIds requires a single topic and cannot be combined with boundedStreamConfig");
+      }
+    }
+    this.partitionIds = partitionIds == null ? null : ImmutableSortedSet.copyOf(partitionIds);
+    this.emitTimeLagMetrics = Configs.valueOrDefault(emitTimeLagMetrics, false);
   }
 
+  /**
+   * Backwards-compatible overload without {@code headerBasedFilterConfig} (defaults to null), retained so that
+   * callers compiled against the previous signature keep working.
+   */
+  public KafkaSupervisorIOConfig(
+      String topic,
+      String topicPattern,
+      InputFormat inputFormat,
+      Integer replicas,
+      Integer taskCount,
+      Period taskDuration,
+      Map<String, Object> consumerProperties,
+      @Nullable AutoScalerConfig autoScalerConfig,
+      @Nullable LagAggregator lagAggregator,
+      Long pollTimeout,
+      Period startDelay,
+      Period period,
+      Boolean useEarliestOffset,
+      Period completionTimeout,
+      Period lateMessageRejectionPeriod,
+      Period earlyMessageRejectionPeriod,
+      DateTime lateMessageRejectionStartDateTime,
+      KafkaConfigOverrides configOverrides,
+      IdleConfig idleConfig,
+      Integer stopTaskCount,
+      @Nullable Boolean emitTimeLagMetrics,
+      @Nullable Map<Integer, Integer> serverPriorityToReplicas,
+      @Nullable BoundedStreamConfig boundedStreamConfig
+  )
+  {
+    this(
+        topic,
+        topicPattern,
+        inputFormat,
+        replicas,
+        taskCount,
+        taskDuration,
+        consumerProperties,
+        autoScalerConfig,
+        lagAggregator,
+        pollTimeout,
+        startDelay,
+        period,
+        useEarliestOffset,
+        completionTimeout,
+        lateMessageRejectionPeriod,
+        earlyMessageRejectionPeriod,
+        lateMessageRejectionStartDateTime,
+        configOverrides,
+        null,
+        idleConfig,
+        stopTaskCount,
+        emitTimeLagMetrics,
+        serverPriorityToReplicas,
+        boundedStreamConfig,
+        null
+    );
+  }
+
+  /**
+   * Only used in testing or serialization/deserialization
+   */
   @JsonProperty
   public String getTopic()
   {
-    return getStream();
+    return topic;
+  }
+
+  /**
+   * Only used in testing or serialization/deserialization
+   */
+  @JsonProperty
+  public String getTopicPattern()
+  {
+    return topicPattern;
+  }
+
+  @Nullable
+  @JsonProperty
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public Set<Integer> getPartitionIds()
+  {
+    return partitionIds;
   }
 
   @JsonProperty
@@ -124,11 +247,35 @@ public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
     return configOverrides;
   }
 
+  public boolean isMultiTopic()
+  {
+    return topicPattern != null;
+  }
+
+  /**
+   * @return true if supervisor needs to publish the time lag.
+   */
+  @JsonProperty
+  public boolean isEmitTimeLagMetrics()
+  {
+    return emitTimeLagMetrics;
+  }
+
+  @JsonProperty
+  @Nullable
+  public KafkaHeaderBasedFilterConfig getHeaderBasedFilterConfig()
+  {
+    return headerBasedFilterConfig;
+  }
+
+
   @Override
   public String toString()
   {
     return "KafkaSupervisorIOConfig{" +
            "topic='" + getTopic() + '\'' +
+           "topicPattern='" + getTopicPattern() + '\'' +
+           ", partitionIds=" + partitionIds +
            ", replicas=" + getReplicas() +
            ", taskCount=" + getTaskCount() +
            ", taskDuration=" + getTaskDuration() +
@@ -143,8 +290,67 @@ public class KafkaSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
            ", lateMessageRejectionPeriod=" + getLateMessageRejectionPeriod() +
            ", lateMessageRejectionStartDateTime=" + getLateMessageRejectionStartDateTime() +
            ", configOverrides=" + getConfigOverrides() +
+           ", headerBasedFilterConfig=" + headerBasedFilterConfig +
            ", idleConfig=" + getIdleConfig() +
+           ", stopTaskCount=" + getStopTaskCount() +
            '}';
+  }
+
+  private static String checkTopicArguments(String topic, String topicPattern)
+  {
+    if (topic == null && topicPattern == null) {
+      throw InvalidInput.exception("Either topic or topicPattern must be specified");
+    }
+    if (topic != null && topicPattern != null) {
+      throw InvalidInput.exception(
+          "Only one of topic [%s] or topicPattern [%s] must be specified",
+          topic,
+          topicPattern
+      );
+    }
+    return topic != null ? topic : topicPattern;
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (!super.equals(o)) {
+      return false;
+    }
+    KafkaSupervisorIOConfig that = (KafkaSupervisorIOConfig) o;
+    return pollTimeout == that.pollTimeout
+           && emitTimeLagMetrics == that.emitTimeLagMetrics
+           && Objects.equals(consumerProperties, that.consumerProperties)
+           && Objects.equals(configOverrides, that.configOverrides)
+           && Objects.equals(topic, that.topic)
+           && Objects.equals(topicPattern, that.topicPattern)
+           && Objects.equals(partitionIds, that.partitionIds)
+           && Objects.equals(headerBasedFilterConfig, that.headerBasedFilterConfig);
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return Objects.hash(
+        super.hashCode(),
+        consumerProperties,
+        pollTimeout,
+        configOverrides,
+        topic,
+        topicPattern,
+        partitionIds,
+        emitTimeLagMetrics,
+        headerBasedFilterConfig
+    );
+  }
+
+  @Override
+  public KafkaIOConfigBuilder toBuilder()
+  {
+    return new KafkaIOConfigBuilder().copyFrom(this);
   }
 
 }

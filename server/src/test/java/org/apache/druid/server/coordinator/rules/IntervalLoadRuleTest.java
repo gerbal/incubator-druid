@@ -22,63 +22,120 @@ package org.apache.druid.server.coordinator.rules;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
 import org.apache.druid.client.DruidServer;
+import org.apache.druid.error.DruidException;
+import org.apache.druid.error.DruidExceptionMatcher;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.java.util.common.Intervals;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+import java.util.HashMap;
+import java.util.Map;
 
 /**
+ * Unit tests for {@link IntervalLoadRule}
  */
 public class IntervalLoadRuleTest
 {
+  private static final ObjectMapper OBJECT_MAPPER = new DefaultObjectMapper();
+
   @Test
   public void testSerde() throws Exception
   {
     IntervalLoadRule rule = new IntervalLoadRule(
         Intervals.of("0/3000"),
-        ImmutableMap.of(DruidServer.DEFAULT_TIER, 2)
+        ImmutableMap.of(DruidServer.DEFAULT_TIER, 2),
+        null
     );
 
-    ObjectMapper jsonMapper = new DefaultObjectMapper();
-    Rule reread = jsonMapper.readValue(jsonMapper.writeValueAsString(rule), Rule.class);
+    Rule reread = OBJECT_MAPPER.readValue(OBJECT_MAPPER.writeValueAsString(rule), Rule.class);
 
-    Assert.assertEquals(rule, reread);
+    Assertions.assertEquals(rule, reread);
   }
 
   @Test
   public void testSerdeNullTieredReplicants() throws Exception
   {
     IntervalLoadRule rule = new IntervalLoadRule(
-        Intervals.of("0/3000"), null
+        Intervals.of("0/3000"), null, false
     );
 
-    ObjectMapper jsonMapper = new DefaultObjectMapper();
-    Rule reread = jsonMapper.readValue(jsonMapper.writeValueAsString(rule), Rule.class);
+    Rule reread = OBJECT_MAPPER.readValue(OBJECT_MAPPER.writeValueAsString(rule), Rule.class);
 
-    Assert.assertEquals(rule, reread);
-    Assert.assertEquals(
-        ImmutableMap.of(DruidServer.DEFAULT_TIER, DruidServer.DEFAULT_NUM_REPLICANTS),
-        rule.getTieredReplicants()
+    Assertions.assertEquals(rule, reread);
+    Assertions.assertEquals(ImmutableMap.of(), rule.getTieredReplicants());
+  }
+
+  @Test
+  public void testCreatingNegativeTieredReplicants()
+  {
+    DruidExceptionMatcher.assertThat(
+        Assertions.assertThrows(DruidException.class, () ->
+            new IntervalLoadRule(
+                Intervals.of("0/3000"),
+                ImmutableMap.of(DruidServer.DEFAULT_TIER, -1),
+                null
+            )
+        ),
+        DruidExceptionMatcher.invalidInput().expectMessageContains(
+            "Invalid number of replicas for tier [_default_tier]. Value [-1] must be positive."
+        )
     );
   }
 
   @Test
-  public void testMappingNullTieredReplicants() throws Exception
+  public void testNullReplicantValue()
   {
-    String inputJson = "    {\n"
+    // Immutable map does not allow null values
+    Map<String, Integer> tieredReplicants = new HashMap<>();
+    tieredReplicants.put("tier", null);
+
+    DruidExceptionMatcher.assertThat(
+        Assertions.assertThrows(DruidException.class, () ->
+            new IntervalLoadRule(
+                Intervals.of("0/3000"),
+                tieredReplicants,
+                null
+            )
+        ),
+        DruidExceptionMatcher.invalidInput().expectMessageContains(
+            "Invalid number of replicas for tier [tier]. Value must not be null."
+        )
+    );
+  }
+
+  @Test
+  public void testShouldCreateDefaultTier() throws Exception
+  {
+    String inputJson = "     {\n"
                        + "      \"interval\": \"0000-01-01T00:00:00.000-05:50:36/3000-01-01T00:00:00.000-06:00\",\n"
                        + "      \"type\": \"loadByInterval\"\n"
-                       + "    }";
-    String expectedJson = "{\n"
-                          + "      \"interval\": \"0000-01-01T00:00:00.000-05:50:36/3000-01-01T00:00:00.000-06:00\",\n"
-                          + "      \"tieredReplicants\": {\n"
-                          + "        \"" + DruidServer.DEFAULT_TIER + "\": " + DruidServer.DEFAULT_NUM_REPLICANTS + "\n"
-                          + "      },\n"
-                          + "      \"type\": \"loadByInterval\"\n"
-                          + "    }";
-    ObjectMapper jsonMapper = new DefaultObjectMapper();
-    IntervalLoadRule inputIntervalLoadRule = jsonMapper.readValue(inputJson, IntervalLoadRule.class);
-    IntervalLoadRule expectedIntervalLoadRule = jsonMapper.readValue(expectedJson, IntervalLoadRule.class);
-    Assert.assertEquals(expectedIntervalLoadRule, inputIntervalLoadRule);
+                       + "   }";
+    IntervalLoadRule inputIntervalLoadRule = OBJECT_MAPPER.readValue(inputJson, IntervalLoadRule.class);
+    Assertions.assertEquals(ImmutableMap.of(DruidServer.DEFAULT_TIER, DruidServer.DEFAULT_NUM_REPLICANTS), inputIntervalLoadRule.getTieredReplicants());
+  }
+
+  @Test
+  public void testUseDefaultTierAsTrueShouldCreateDefaultTier() throws Exception
+  {
+    String inputJson = "     {\n"
+                       + "      \"interval\": \"0000-01-01T00:00:00.000-05:50:36/3000-01-01T00:00:00.000-06:00\",\n"
+                       + "      \"type\": \"loadByInterval\",\n"
+                       + "      \"useDefaultTierForNull\": \"true\"\n"
+                       + "   }";
+    IntervalLoadRule inputIntervalLoadRule = OBJECT_MAPPER.readValue(inputJson, IntervalLoadRule.class);
+    Assertions.assertEquals(ImmutableMap.of(DruidServer.DEFAULT_TIER, DruidServer.DEFAULT_NUM_REPLICANTS), inputIntervalLoadRule.getTieredReplicants());
+  }
+
+  @Test
+  public void testUseDefaultTierAsFalseShouldCreateEmptyMap() throws Exception
+  {
+    String inputJson = "     {\n"
+                       + "      \"interval\": \"0000-01-01T00:00:00.000-05:50:36/3000-01-01T00:00:00.000-06:00\",\n"
+                       + "      \"type\": \"loadByInterval\",\n"
+                       + "      \"useDefaultTierForNull\": \"false\"\n"
+                       + "   }";
+    IntervalLoadRule inputIntervalLoadRule = OBJECT_MAPPER.readValue(inputJson, IntervalLoadRule.class);
+    Assertions.assertEquals(ImmutableMap.of(), inputIntervalLoadRule.getTieredReplicants());
   }
 }

@@ -16,14 +16,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# remove lib/sql-function-doc.* for back compat cleanup
 rm -rf \
   coverage \
-  lib/react-table.css \
-  lib/sql-docs.js \
-  lib/sql-function-doc.* \
+  src/editor-languages/dsql-docs.ts \
   node_modules \
-  coordinator-console \
-  pages \
-  public \
-  index.html
+  public

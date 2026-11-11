@@ -16,20 +16,30 @@
  * limitations under the License.
  */
 
-import { Column, QueryResult, SqlExpression, SqlQuery, SqlWithQuery } from 'druid-query-toolkit';
+import { Column, QueryResult, SqlExpression, SqlQueryBase } from 'druid-query-toolkit';
 
+import { maybeGetClusterCapacity } from '../../helpers';
 import {
   deepGet,
   deleteKeys,
+  formatDuration,
   formatInteger,
   nonEmptyArray,
   oneOf,
   pluralIfNeeded,
 } from '../../utils';
+import type { AsyncState, AsyncStatusResponse } from '../async-query/async-query';
 import type { DruidEngine } from '../druid-engine/druid-engine';
 import { validDruidEngine } from '../druid-engine/druid-engine';
 import type { QueryContext } from '../query-context/query-context';
 import { Stages } from '../stages/stages';
+import type {
+  MsqTaskPayloadResponse,
+  MsqTaskReportResponse,
+  SegmentLoadWaiterStatus,
+  TaskStatus,
+  WorkerState,
+} from '../task/task';
 
 const IGNORE_CONTEXT_KEYS = [
   '__asyncIdentity__',
@@ -42,13 +52,11 @@ const IGNORE_CONTEXT_KEYS = [
   'sqlReplaceTimeChunks',
 ];
 
-// Hack around the concept that we might get back a SqlWithQuery and will need to unpack it
-function parseSqlQuery(queryString: string): SqlQuery | undefined {
+// Parse any query form, flattening a WITH query so that its select expressions line up with the result columns
+function parseSqlQuery(queryString: string): SqlQueryBase | undefined {
   const q = SqlExpression.maybeParse(queryString);
-  if (!q) return;
-  if (q instanceof SqlWithQuery) return q.flattenWith();
-  if (q instanceof SqlQuery) return q;
-  return;
+  if (!(q instanceof SqlQueryBase)) return;
+  return q.flattenWith();
 }
 
 export interface ExecutionError {
@@ -63,12 +71,19 @@ export interface ExecutionError {
   exceptionStackTrace?: string;
 }
 
-type ExecutionDestination =
+export type ExecutionDestination =
   | {
       type: 'taskReport';
+      numTotalRows?: number;
     }
-  | { type: 'dataSource'; dataSource: string; exists?: boolean }
-  | { type: 'download' };
+  | { type: 'durableStorage'; numTotalRows?: number }
+  | { type: 'dataSource'; dataSource: string; numTotalRows?: number };
+
+export interface ExecutionDestinationPage {
+  id: number;
+  numRows: number;
+  sizeInBytes: number;
+}
 
 export type ExecutionStatus = 'RUNNING' | 'FAILED' | 'SUCCESS';
 
@@ -140,10 +155,11 @@ function formatPendingMessage(
 
   // If there are not enough slots free then there are two cases:
   if (totalNeeded <= totalTaskSlots) {
-    // (1) not enough free, but enough total: "Launched 2/4 tasks. Cluster is currently using 5/6 task slots. Waiting for 1 other task to finish."
+    // (1) not enough free, but enough total: "Launched 2/4 tasks. Cluster is currently using 5/6 task slots. Waiting for 1 task slot to become available."
     const tasksThatNeedToFinish = pendingTasks - availableTaskSlots;
     return (
-      baseMessage + ` Waiting for ${pluralIfNeeded(tasksThatNeedToFinish, 'other task')} to finish.`
+      baseMessage +
+      ` Waiting for ${pluralIfNeeded(tasksThatNeedToFinish, 'task slot')} to become available.`
     );
   } else {
     // (2) not enough total: "Launched 2/4 tasks. Cluster is currently using 2/2 task slots. Add more capacity or reduce maxNumTasks to 2 or lower."
@@ -158,6 +174,7 @@ export interface ExecutionValue {
   engine: DruidEngine;
   id: string;
   sqlQuery?: string;
+  sqlQueryId?: string;
   nativeQuery?: any;
   queryContext?: QueryContext;
   status?: ExecutionStatus;
@@ -166,35 +183,35 @@ export interface ExecutionValue {
   usageInfo?: UsageInfo;
   stages?: Stages;
   destination?: ExecutionDestination;
+  destinationPages?: ExecutionDestinationPage[];
   result?: QueryResult;
   error?: ExecutionError;
   warnings?: ExecutionError[];
   capacityInfo?: CapacityInfo;
-  _payload?: { payload: any; task: string };
+  workers?: Record<string, WorkerState[]>;
+  _payload?: MsqTaskPayloadResponse;
+  segmentStatus?: SegmentLoadWaiterStatus;
 }
 
 export class Execution {
-  static validAsyncStatus(
-    status: string | undefined,
-  ): status is 'INITIALIZED' | 'RUNNING' | 'COMPLETE' | 'FAILED' | 'UNDETERMINED' {
-    return oneOf(status, 'INITIALIZED', 'RUNNING', 'COMPLETE', 'FAILED', 'UNDETERMINED');
+  static USE_TASK_PAYLOAD = true;
+  static USE_TASK_REPORTS = false;
+  static INLINE_DATASOURCE_MARKER = '__query_select';
+
+  static getClusterCapacity: (() => Promise<CapacityInfo | undefined>) | undefined =
+    maybeGetClusterCapacity;
+
+  static validAsyncState(status: string | undefined): status is AsyncState {
+    return oneOf(status, 'ACCEPTED', 'RUNNING', 'FINISHED', 'FAILED');
   }
 
-  static validTaskStatus(
-    status: string | undefined,
-  ): status is 'WAITING' | 'PENDING' | 'RUNNING' | 'FAILED' | 'SUCCESS' {
+  static validTaskStatus(status: string | undefined): status is TaskStatus {
     return oneOf(status, 'WAITING', 'PENDING', 'RUNNING', 'FAILED', 'SUCCESS');
   }
 
-  static normalizeAsyncStatus(
-    state: 'INITIALIZED' | 'RUNNING' | 'COMPLETE' | 'FAILED' | 'UNDETERMINED',
-  ): ExecutionStatus {
+  static normalizeAsyncState(state: AsyncState): ExecutionStatus {
     switch (state) {
-      case 'COMPLETE':
-        return 'SUCCESS';
-
-      case 'INITIALIZED':
-      case 'UNDETERMINED':
+      case 'ACCEPTED':
         return 'RUNNING';
 
       default:
@@ -203,9 +220,7 @@ export class Execution {
   }
 
   // Treat WAITING as PENDING since they are all the same as far as the UI is concerned
-  static normalizeTaskStatus(
-    status: 'WAITING' | 'PENDING' | 'RUNNING' | 'FAILED' | 'SUCCESS',
-  ): ExecutionStatus {
+  static normalizeTaskStatus(status: TaskStatus): ExecutionStatus {
     switch (status) {
       case 'SUCCESS':
       case 'FAILED':
@@ -216,78 +231,66 @@ export class Execution {
     }
   }
 
-  static fromTaskSubmit(
-    taskSubmitResult: { state: any; taskId: string; error: any },
+  static fromAsyncStatus(
+    asyncSubmitResult: AsyncStatusResponse,
     sqlQuery?: string,
     queryContext?: QueryContext,
   ): Execution {
-    const status = Execution.normalizeTaskStatus(taskSubmitResult.state);
+    const { queryId, schema, result, errorDetails, stages, counters, warnings } = asyncSubmitResult;
+
+    let queryResult: QueryResult | undefined;
+    if (schema && result?.sampleRecords) {
+      queryResult = new QueryResult({
+        header: schema.map(
+          s => new Column({ name: s.name, sqlType: s.type, nativeType: s.nativeType }),
+        ),
+        rows: result.sampleRecords,
+      }).inflateDatesFromSqlTypes();
+    }
+
+    let executionError: ExecutionError | undefined;
+    if (errorDetails) {
+      executionError = {
+        taskId: queryId,
+        error: errorDetails as any,
+      };
+    }
+
+    const { createdAt, durationMs, state } = asyncSubmitResult;
     return new Execution({
       engine: 'sql-msq-task',
-      id: taskSubmitResult.taskId,
-      status: taskSubmitResult.error ? 'FAILED' : status,
+      id: queryId,
+      startTime: new Date(createdAt),
+      duration: durationMs >= 0 ? durationMs : undefined,
+      status: Execution.normalizeAsyncState(state),
       sqlQuery,
       queryContext,
-      error: taskSubmitResult.error
-        ? {
-            error: {
-              errorCode: 'AsyncError',
-              errorMessage: JSON.stringify(taskSubmitResult.error),
-            },
-          }
-        : status === 'FAILED'
-        ? {
-            error: {
-              errorCode: 'UnknownError',
-              errorMessage:
-                'Execution failed, there is no detail information, and there is no error in the status response',
-            },
-          }
-        : undefined,
-      destination: undefined,
+      stages: Array.isArray(stages) && counters ? new Stages(stages, counters) : undefined,
+      warnings: Array.isArray(warnings) ? warnings : undefined,
+      error: executionError,
+      destination:
+        typeof result?.dataSource === 'string'
+          ? result.dataSource !== Execution.INLINE_DATASOURCE_MARKER
+            ? {
+                type: 'dataSource',
+                dataSource: result.dataSource,
+                numTotalRows: result.numTotalRows,
+              }
+            : {
+                type: 'taskReport',
+                numTotalRows: result.numTotalRows,
+              }
+          : undefined,
+      destinationPages: result?.pages,
+      result: queryResult,
     });
   }
 
-  static fromTaskStatus(
-    taskStatus: { status: any; task: string },
-    sqlQuery?: string,
-    queryContext?: QueryContext,
-  ): Execution {
-    const status = Execution.normalizeTaskStatus(taskStatus.status.status);
-    return new Execution({
-      engine: 'sql-msq-task',
-      id: taskStatus.task,
-      status: taskStatus.status.error ? 'FAILED' : status,
-      usageInfo: getUsageInfoFromStatusPayload(taskStatus.status),
-      sqlQuery,
-      queryContext,
-      error: taskStatus.status.error
-        ? {
-            error: {
-              errorCode: 'AsyncError',
-              errorMessage: JSON.stringify(taskStatus.status.error),
-            },
-          }
-        : status === 'FAILED'
-        ? {
-            error: {
-              errorCode: 'UnknownError',
-              errorMessage:
-                'Execution failed, there is no detail information, and there is no error in the status response',
-            },
-          }
-        : undefined,
-      destination: undefined,
-    });
+  static fromDartReport(dartReport: MsqTaskReportResponse): Execution {
+    return Execution.fromTaskReport(dartReport).changeEngine('sql-msq-dart');
   }
 
-  static fromTaskPayloadAndReport(
-    taskPayload: { payload: any; task: string },
-    taskReport: {
-      multiStageQuery: { type: string; payload: any; taskId: string };
-      error?: any;
-    },
-  ): Execution {
+  static fromTaskReport(taskReport: MsqTaskReportResponse): Execution {
     // Must have status set for a valid report
     const id = deepGet(taskReport, 'multiStageQuery.taskId');
     const status = deepGet(taskReport, 'multiStageQuery.payload.status.status');
@@ -310,6 +313,11 @@ export class Execution {
     const startTime = new Date(deepGet(taskReport, 'multiStageQuery.payload.status.startTime'));
     const durationMs = deepGet(taskReport, 'multiStageQuery.payload.status.durationMs');
 
+    const segmentLoaderStatus: SegmentLoadWaiterStatus = deepGet(
+      taskReport,
+      'multiStageQuery.payload.status.segmentLoadWaiterStatus',
+    );
+
     let result: QueryResult | undefined;
     const resultsPayload: {
       signature: { name: string; type: string }[];
@@ -324,38 +332,28 @@ export class Execution {
             new Column({ name: sig.name, nativeType: sig.type, sqlType: sqlTypeNames?.[i] }),
         ),
         rows: results,
+        queryDuration: durationMs,
       }).inflateDatesFromSqlTypes();
     }
 
-    let res = new Execution({
+    return new Execution({
       engine: 'sql-msq-task',
       id,
       status: Execution.normalizeTaskStatus(status),
+      segmentStatus: segmentLoaderStatus,
       startTime: isNaN(startTime.getTime()) ? undefined : startTime,
-      duration: typeof durationMs === 'number' ? durationMs : undefined,
+      duration: typeof durationMs === 'number' && durationMs >= 0 ? durationMs : undefined,
       usageInfo: getUsageInfoFromStatusPayload(
         deepGet(taskReport, 'multiStageQuery.payload.status'),
       ),
       stages: Array.isArray(stages)
         ? new Stages(stages, deepGet(taskReport, 'multiStageQuery.payload.counters'))
         : undefined,
+      workers: deepGet(taskReport, 'multiStageQuery.payload.status.workers'),
       error,
       warnings: Array.isArray(warnings) ? warnings : undefined,
-      destination: deepGet(taskPayload, 'payload.spec.destination'),
       result,
-      nativeQuery: deepGet(taskPayload, 'payload.spec.query'),
-
-      _payload: taskPayload,
     });
-
-    if (deepGet(taskPayload, 'payload.sqlQuery')) {
-      res = res.changeSqlQuery(
-        deepGet(taskPayload, 'payload.sqlQuery'),
-        deleteKeys(deepGet(taskPayload, 'payload.sqlQueryContext'), IGNORE_CONTEXT_KEYS),
-      );
-    }
-
-    return res;
   }
 
   static fromResult(engine: DruidEngine, result: QueryResult): Execution {
@@ -370,8 +368,18 @@ export class Execution {
 
   static getProgressDescription(execution: Execution | undefined): string {
     if (!execution?.stages) return 'Loading...';
-    if (!execution.isWaitingForQuery())
-      return 'Query complete, waiting for segments to be loaded...';
+    if (!execution.isWaitingForQuery()) {
+      switch (execution.engine) {
+        case 'sql-msq-task':
+          return 'Query complete, waiting for segments to be loaded...';
+
+        case 'sql-msq-dart':
+          return 'Got a non-running report. Did you reuse a sqlQueryID?';
+
+        default:
+          return 'Query not running.';
+      }
+    }
 
     let ret = execution.stages.getStage(0)?.phase ? 'Running query...' : 'Starting query...';
     if (execution.usageInfo) {
@@ -387,6 +395,7 @@ export class Execution {
   public readonly engine: DruidEngine;
   public readonly id: string;
   public readonly sqlQuery?: string;
+  public readonly sqlQueryId?: string;
   public readonly nativeQuery?: any;
   public readonly queryContext?: QueryContext;
   public readonly status?: ExecutionStatus;
@@ -395,10 +404,13 @@ export class Execution {
   public readonly usageInfo?: UsageInfo;
   public readonly stages?: Stages;
   public readonly destination?: ExecutionDestination;
+  public readonly destinationPages?: ExecutionDestinationPage[];
   public readonly result?: QueryResult;
   public readonly error?: ExecutionError;
   public readonly warnings?: ExecutionError[];
   public readonly capacityInfo?: CapacityInfo;
+  public readonly workers?: Record<string, WorkerState[]>;
+  public readonly segmentStatus?: SegmentLoadWaiterStatus;
 
   public readonly _payload?: { payload: any; task: string };
 
@@ -407,6 +419,7 @@ export class Execution {
     this.id = value.id;
     if (!this.id) throw new Error('must have an id');
     this.sqlQuery = value.sqlQuery;
+    this.sqlQueryId = value.sqlQueryId;
     this.nativeQuery = value.nativeQuery;
     this.queryContext = value.queryContext;
     this.status = value.status;
@@ -415,10 +428,13 @@ export class Execution {
     this.usageInfo = value.usageInfo;
     this.stages = value.stages;
     this.destination = value.destination;
+    this.destinationPages = value.destinationPages;
     this.result = value.result;
     this.error = value.error;
     this.warnings = nonEmptyArray(value.warnings) ? value.warnings : undefined;
     this.capacityInfo = value.capacityInfo;
+    this.workers = value.workers;
+    this.segmentStatus = value.segmentStatus;
 
     this._payload = value._payload;
   }
@@ -428,6 +444,7 @@ export class Execution {
       engine: this.engine,
       id: this.id,
       sqlQuery: this.sqlQuery,
+      sqlQueryId: this.sqlQueryId,
       nativeQuery: this.nativeQuery,
       queryContext: this.queryContext,
       status: this.status,
@@ -436,13 +453,23 @@ export class Execution {
       usageInfo: this.usageInfo,
       stages: this.stages,
       destination: this.destination,
+      destinationPages: this.destinationPages,
       result: this.result,
       error: this.error,
       warnings: this.warnings,
       capacityInfo: this.capacityInfo,
+      workers: this.workers,
+      segmentStatus: this.segmentStatus,
 
       _payload: this._payload,
     };
+  }
+
+  public changeEngine(engine: DruidEngine): Execution {
+    return new Execution({
+      ...this.valueOf(),
+      engine,
+    });
   }
 
   public changeSqlQuery(sqlQuery: string, queryContext?: QueryContext): Execution {
@@ -452,10 +479,21 @@ export class Execution {
     value.queryContext = queryContext;
     const parsedQuery = parseSqlQuery(sqlQuery);
     if (value.result && (parsedQuery || queryContext)) {
-      value.result = value.result.attachQuery({ context: queryContext }, parsedQuery);
+      value.result = value.result.attachQuery(
+        { ...this.nativeQuery, context: queryContext },
+        parsedQuery,
+      );
     }
 
     return new Execution(value);
+  }
+
+  public changeSqlQueryId(sqlQueryId: string | null | undefined): Execution {
+    if (!sqlQueryId) return this;
+    return new Execution({
+      ...this.valueOf(),
+      sqlQueryId,
+    });
   }
 
   public changeDestination(destination: ExecutionDestination): Execution {
@@ -465,10 +503,20 @@ export class Execution {
     });
   }
 
+  public changeDestinationPages(destinationPages: ExecutionDestinationPage[]): Execution {
+    return new Execution({
+      ...this.valueOf(),
+      destinationPages,
+    });
+  }
+
   public changeResult(result: QueryResult): Execution {
     return new Execution({
       ...this.valueOf(),
-      result: result.attachQuery({}, this.sqlQuery ? parseSqlQuery(this.sqlQuery) : undefined),
+      result: result.attachQuery(
+        this.nativeQuery,
+        this.sqlQuery ? parseSqlQuery(this.sqlQuery) : undefined,
+      ),
     });
   }
 
@@ -479,51 +527,53 @@ export class Execution {
     });
   }
 
-  public updateWith(newSummary: Execution): Execution {
-    let nextSummary = newSummary;
-    if (this.sqlQuery && !nextSummary.sqlQuery) {
-      nextSummary = nextSummary.changeSqlQuery(this.sqlQuery, this.queryContext);
-    }
-    if (this.destination && !nextSummary.destination) {
-      nextSummary = nextSummary.changeDestination(this.destination);
+  public updateWithTaskPayload(taskPayload: MsqTaskPayloadResponse): Execution {
+    const value = this.valueOf();
+
+    value._payload = taskPayload;
+    value.destination = {
+      ...value.destination,
+      ...deepGet(taskPayload, 'payload.spec.destination'),
+    };
+    value.nativeQuery = deepGet(taskPayload, 'payload.spec.query');
+
+    let ret = new Execution(value);
+
+    if (deepGet(taskPayload, 'payload.sqlQuery')) {
+      ret = ret.changeSqlQuery(
+        deepGet(taskPayload, 'payload.sqlQuery'),
+        deleteKeys(deepGet(taskPayload, 'payload.sqlQueryContext'), IGNORE_CONTEXT_KEYS),
+      );
     }
 
-    return nextSummary;
+    return ret;
   }
 
-  public attachErrorFromStatus(status: any): Execution {
-    const errorMsg = deepGet(status, 'status.errorMsg');
+  public updateWithAsyncStatus(statusPayload: AsyncStatusResponse): Execution {
+    const value = this.valueOf();
 
-    return new Execution({
-      ...this.valueOf(),
-      error: {
-        error: {
-          errorCode: 'UnknownError',
-          errorMessage: errorMsg,
-        },
-      },
-    });
-  }
+    const { pages, numTotalRows } = statusPayload.result || {};
 
-  public markDestinationDatasourceExists(): Execution {
-    const { destination } = this;
-    if (destination?.type !== 'dataSource') return this;
+    if (!value.destinationPages && pages) {
+      value.destinationPages = pages;
+    }
 
-    return new Execution({
-      ...this.valueOf(),
-      destination: {
-        ...destination,
-        exists: true,
-      },
-    });
+    if (typeof value.destination?.numTotalRows !== 'number' && typeof numTotalRows === 'number') {
+      value.destination = {
+        ...(value.destination || { type: 'taskReport' }),
+        numTotalRows,
+      };
+    }
+
+    return new Execution(value);
   }
 
   public isProcessingData(): boolean {
     const { status, stages } = this;
     return Boolean(
       status === 'RUNNING' &&
-        stages &&
-        stages.getTotalInputForStage(stages.getStage(0), 'rows') > 0,
+      stages &&
+      stages.getTotalInputForStage(stages.getStage(0), 'rows') > 0,
     );
   }
 
@@ -532,15 +582,36 @@ export class Execution {
     return status !== 'SUCCESS' && status !== 'FAILED';
   }
 
-  public isFullyComplete(): boolean {
-    if (this.isWaitingForQuery()) return false;
+  public isWaitingForSegments(): boolean {
+    return Boolean(this.stages && !this.isWaitingForQuery() && this.engine === 'sql-msq-task');
+  }
 
-    const { status, destination } = this;
-    if (status === 'SUCCESS' && destination?.type === 'dataSource') {
-      return Boolean(destination.exists);
+  public getSegmentStatusDescription() {
+    const { segmentStatus } = this;
+
+    let label = '';
+
+    switch (segmentStatus?.state) {
+      case 'INIT':
+        label = 'Waiting for segment loading to start...';
+        break;
+
+      case 'WAITING':
+        label = 'Waiting for segment loading to complete...';
+        break;
+
+      case 'SUCCESS':
+        label = `Segments loaded successfully in ${formatDuration(segmentStatus.duration)}`;
+        break;
+
+      default:
+        break;
     }
 
-    return true;
+    return {
+      label,
+      ...segmentStatus,
+    };
   }
 
   public getIngestDatasource(): string | undefined {
@@ -549,10 +620,12 @@ export class Execution {
     return destination.dataSource;
   }
 
-  public isSuccessfulInsert(): boolean {
-    return Boolean(
-      this.isFullyComplete() && this.getIngestDatasource() && this.status === 'SUCCESS',
-    );
+  public getOutputNumTotalRows(): number | undefined {
+    return this.destination?.numTotalRows;
+  }
+
+  public isSuccessfulIngest(): boolean {
+    return Boolean(this.status === 'SUCCESS' && this.getIngestDatasource());
   }
 
   public getErrorMessage(): string | undefined {
@@ -573,10 +646,10 @@ export class Execution {
   public hasPotentiallyStuckStage(): boolean {
     return Boolean(
       this.status === 'RUNNING' &&
-        this.stages &&
-        this.stages.getPotentiallyStuckStageIndex() >= 0 &&
-        this.usageInfo &&
-        this.usageInfo.pendingTasks > 0,
+      this.stages &&
+      this.stages.getPotentiallyStuckStageIndex() >= 0 &&
+      this.usageInfo &&
+      this.usageInfo.pendingTasks > 0,
     );
   }
 }

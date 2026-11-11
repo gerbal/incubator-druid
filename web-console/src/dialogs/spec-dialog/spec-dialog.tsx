@@ -19,15 +19,17 @@
 import { Button, Classes, Dialog, Intent } from '@blueprintjs/core';
 import * as JSONBig from 'json-bigint-native';
 import React, { useState } from 'react';
-import AceEditor from 'react-ace';
 
-import { validJson } from '../../utils';
+import { CodeEditor } from '../../components';
+import { hjson } from '../../editor-languages/hjson';
+import { AppToaster } from '../../singletons';
+import { offsetToLineColumn } from '../../utils';
 
 import './spec-dialog.scss';
 
 export interface SpecDialogProps {
-  onSubmit: (spec: JSON) => void | Promise<void>;
-  onClose: () => void;
+  onSubmit(spec: JSON): void | Promise<void>;
+  onClose(): void;
   title: string;
   initSpec?: any;
 }
@@ -38,9 +40,23 @@ export const SpecDialog = React.memo(function SpecDialog(props: SpecDialogProps)
     initSpec ? JSONBig.stringify(initSpec, undefined, 2) : '',
   );
 
-  function postSpec(): void {
-    if (!validJson(spec)) return;
-    void onSubmit(JSON.parse(spec));
+  function handleSubmit(): void {
+    let parsed: any;
+    try {
+      parsed = JSONBig.parse(spec);
+    } catch (e) {
+      const position = typeof e.at === 'number' ? offsetToLineColumn(spec, e.at) : undefined;
+      AppToaster.show({
+        intent: Intent.DANGER,
+        message: `Could not parse JSON: ${e.message}${
+          position ? ` (at line ${position.line}, column ${position.column})` : ''
+        }`,
+        timeout: 5000,
+      });
+      return;
+    }
+
+    void onSubmit(parsed);
     onClose();
   }
 
@@ -52,38 +68,19 @@ export const SpecDialog = React.memo(function SpecDialog(props: SpecDialogProps)
       title={title}
       canOutsideClickClose={false}
     >
-      <AceEditor
-        mode="hjson"
-        theme="solarized_dark"
-        className="spec-dialog-textarea placeholder-padding"
+      <CodeEditor
+        language={hjson()}
+        className="spec-dialog-textarea"
         onChange={setSpec}
-        fontSize={12}
-        showPrintMargin={false}
-        showGutter
-        highlightActiveLine
+        showLineNumbers
+        padding={10}
         value={spec}
-        width="100%"
-        setOptions={{
-          showLineNumbers: true,
-          tabSize: 2,
-          newLineMode: 'unix' as any, // newLineMode is incorrectly assumed to be boolean in the typings
-        }}
-        style={{}}
         placeholder="{ JSON spec... }"
-        onLoad={editor => {
-          editor.renderer.setPadding(10);
-          editor.renderer.setScrollMargin(10, 10, 0, 0);
-        }}
       />
       <div className={Classes.DIALOG_FOOTER}>
         <div className={Classes.DIALOG_FOOTER_ACTIONS}>
           <Button text="Close" onClick={onClose} />
-          <Button
-            text="Submit"
-            intent={Intent.PRIMARY}
-            onClick={postSpec}
-            disabled={!validJson(spec)}
-          />
+          <Button text="Submit" intent={Intent.PRIMARY} onClick={handleSubmit} disabled={!spec} />
         </div>
       </div>
     </Dialog>

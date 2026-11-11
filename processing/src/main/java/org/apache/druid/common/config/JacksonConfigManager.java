@@ -24,11 +24,11 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.inject.Inject;
+import org.apache.druid.audit.AuditEntry;
 import org.apache.druid.audit.AuditInfo;
 import org.apache.druid.audit.AuditManager;
 import org.apache.druid.common.config.ConfigManager.SetResult;
 import org.apache.druid.guice.annotations.Json;
-import org.apache.druid.guice.annotations.JsonNonNull;
 import org.apache.druid.java.util.common.jackson.JacksonUtils;
 
 import javax.annotation.Nullable;
@@ -41,21 +41,18 @@ public class JacksonConfigManager
 {
   private final ConfigManager configManager;
   private final ObjectMapper jsonMapper;
-  private final ObjectMapper jsonMapperSkipNull;
   private final AuditManager auditManager;
 
   @Inject
   public JacksonConfigManager(
       ConfigManager configManager,
       @Json ObjectMapper jsonMapper,
-      @JsonNonNull ObjectMapper jsonMapperOnlyNonNullValue,
       AuditManager auditManager
   )
   {
     this.configManager = configManager;
     this.jsonMapper = jsonMapper;
     this.auditManager = auditManager;
-    this.jsonMapperSkipNull = jsonMapperOnlyNonNullValue;
   }
 
   public <T> AtomicReference<T> watch(String key, Class<? extends T> clazz)
@@ -119,31 +116,27 @@ public class JacksonConfigManager
     ConfigSerde configSerde = create(newValue.getClass(), null);
     // Audit and actual config change are done in separate transactions
     // there can be phantom audits and reOrdering in audit changes as well.
-    auditManager.doAudit(key, key, auditInfo, newValue, configSerde);
+    auditManager.doAudit(
+        AuditEntry.builder()
+                  .key(key)
+                  .type(key)
+                  .auditInfo(auditInfo)
+                  .payload(newValue)
+                  .build()
+    );
     return configManager.set(key, configSerde, oldValue, newValue);
   }
 
   @VisibleForTesting
   <T> ConfigSerde<T> create(final Class<? extends T> clazz, final T defaultVal)
   {
-    return new ConfigSerde<T>()
+    return new ConfigSerde<>()
     {
       @Override
       public byte[] serialize(T obj)
       {
         try {
           return jsonMapper.writeValueAsBytes(obj);
-        }
-        catch (JsonProcessingException e) {
-          throw new RuntimeException(e);
-        }
-      }
-
-      @Override
-      public String serializeToString(T obj, boolean skipNull)
-      {
-        try {
-          return skipNull ? jsonMapperSkipNull.writeValueAsString(obj) : jsonMapper.writeValueAsString(obj);
         }
         catch (JsonProcessingException e) {
           throw new RuntimeException(e);
@@ -165,24 +158,13 @@ public class JacksonConfigManager
   @VisibleForTesting
   <T> ConfigSerde<T> create(final TypeReference<? extends T> clazz, final T defaultVal)
   {
-    return new ConfigSerde<T>()
+    return new ConfigSerde<>()
     {
       @Override
       public byte[] serialize(T obj)
       {
         try {
           return jsonMapper.writeValueAsBytes(obj);
-        }
-        catch (JsonProcessingException e) {
-          throw new RuntimeException(e);
-        }
-      }
-
-      @Override
-      public String serializeToString(T obj, boolean skipNull)
-      {
-        try {
-          return skipNull ? jsonMapperSkipNull.writeValueAsString(obj) : jsonMapper.writeValueAsString(obj);
         }
         catch (JsonProcessingException e) {
           throw new RuntimeException(e);

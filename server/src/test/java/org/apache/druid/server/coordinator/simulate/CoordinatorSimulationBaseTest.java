@@ -22,16 +22,24 @@ package org.apache.druid.server.coordinator.simulate;
 import org.apache.druid.client.DruidServer;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.metrics.MetricsVerifier;
+import org.apache.druid.segment.TestDataSource;
 import org.apache.druid.server.coordination.ServerType;
 import org.apache.druid.server.coordinator.CoordinatorDynamicConfig;
 import org.apache.druid.server.coordinator.CreateDataSegments;
+import org.apache.druid.server.coordinator.ServerCloneStatus;
+import org.apache.druid.server.coordinator.loading.SegmentHolder;
+import org.apache.druid.server.coordinator.rules.ForeverBroadcastDistributionRule;
+import org.apache.druid.server.coordinator.rules.ForeverDropRule;
 import org.apache.druid.server.coordinator.rules.ForeverLoadRule;
 import org.apache.druid.server.coordinator.rules.Rule;
+import org.apache.druid.server.coordinator.stats.Dimension;
 import org.apache.druid.timeline.DataSegment;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
 
+import javax.annotation.Nullable;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,11 +51,9 @@ import java.util.Map;
  * the simulation. {@link CoordinatorSimulation#stop()} should not be called as
  * the simulation is stopped when cleaning up after the test in {@link #tearDown()}.
  * <p>
- * Tests that verify balancing behaviour should set
- * {@link CoordinatorDynamicConfig#useBatchedSegmentSampler()} to true.
+ * Tests that verify balancing behaviour use batched segment sampling.
  * Otherwise, the segment sampling is random and can produce repeated values
- * leading to flakiness in the tests. The simulation sets this field to true by
- * default.
+ * leading to flakiness in the tests.
  */
 public abstract class CoordinatorSimulationBaseTest implements
     CoordinatorSimulation.CoordinatorState,
@@ -59,10 +65,10 @@ public abstract class CoordinatorSimulationBaseTest implements
   private CoordinatorSimulation sim;
   private MetricsVerifier metricsVerifier;
 
-  @Before
+  @BeforeEach
   public abstract void setUp();
 
-  @After
+  @AfterEach
   public void tearDown()
   {
     if (sim != null) {
@@ -112,9 +118,27 @@ public abstract class CoordinatorSimulationBaseTest implements
   }
 
   @Override
+  public void setRetentionRules(String datasource, Rule... rules)
+  {
+    sim.coordinator().setRetentionRules(datasource, rules);
+  }
+
+  @Override
   public void loadQueuedSegments()
   {
     sim.cluster().loadQueuedSegments();
+  }
+
+  @Override
+  public List<SegmentHolder> getQueuedSegments(DruidServer server)
+  {
+    return sim.cluster().getQueuedSegments(server);
+  }
+
+  @Override
+  public void loadQueuedSegmentsSkipCallbacks()
+  {
+    sim.cluster().loadQueuedSegmentsSkipCallbacks();
   }
 
   @Override
@@ -136,15 +160,28 @@ public abstract class CoordinatorSimulationBaseTest implements
   }
 
   @Override
+  public void deleteSegments(List<DataSegment> segments)
+  {
+    sim.cluster().deleteSegments(segments);
+  }
+
+  @Override
   public double getLoadPercentage(String datasource)
   {
     return sim.coordinator().getLoadPercentage(datasource);
   }
 
+  @Nullable
+  @Override
+  public ServerCloneStatus getCloneStatus(DruidServer cloneTarget)
+  {
+    return sim.coordinator().getCloneStatus(cloneTarget);
+  }
+
   // Verification methods
   void verifyDatasourceIsFullyLoaded(String datasource)
   {
-    Assert.assertEquals(100.0, getLoadPercentage(datasource), DOUBLE_DELTA);
+    Assertions.assertEquals(100.0, getLoadPercentage(datasource), DOUBLE_DELTA);
   }
 
   @Override
@@ -158,43 +195,27 @@ public abstract class CoordinatorSimulationBaseTest implements
 
   // Utility methods
 
-  /**
-   * Creates a {@link CoordinatorDynamicConfig} with the specified values of:
-   * {@code maxSegmentsToMove, maxSegmentsInNodeLoadingQueue and replicationThrottleLimit}.
-   * The created config always has {@code useBatchedSegmentSampler=true} to avoid
-   * flakiness in tests.
-   *
-   * @see CoordinatorSimulationBaseTest
-   */
-  static CoordinatorDynamicConfig createDynamicConfig(
-      int maxSegmentsToMove,
-      int maxSegmentsInNodeLoadingQueue,
-      int replicationThrottleLimit
-  )
+  static Map<String, Object> filterByServer(DruidServer server)
   {
-    return CoordinatorDynamicConfig.builder()
-                                   .withMaxSegmentsToMove(maxSegmentsToMove)
-                                   .withReplicationThrottleLimit(replicationThrottleLimit)
-                                   .withMaxSegmentsInNodeLoadingQueue(maxSegmentsInNodeLoadingQueue)
-                                   .withUseBatchedSegmentSampler(true)
-                                   .build();
+    return filter(Dimension.SERVER, server.getName());
+  }
+
+  static Map<String, Object> filterByTier(String tier)
+  {
+    return filter(Dimension.TIER, tier);
+  }
+
+  static Map<String, Object> filterByDatasource(String datasource)
+  {
+    return filter(Dimension.DATASOURCE, datasource);
   }
 
   /**
    * Creates a map containing dimension key-values to filter out metric events.
    */
-  static Map<String, Object> filter(String... dimensionValues)
+  static Map<String, Object> filter(Dimension dimension, String value)
   {
-    if (dimensionValues.length < 2 || dimensionValues.length % 2 == 1) {
-      throw new IllegalArgumentException("Dimension key-values must be specified in pairs.");
-    }
-
-    final Map<String, Object> filters = new HashMap<>();
-    for (int i = 0; i < dimensionValues.length; ) {
-      filters.put(dimensionValues[i], dimensionValues[i + 1]);
-      i += 2;
-    }
-    return filters;
+    return Collections.singletonMap(dimension.reportedName(), value);
   }
 
   /**
@@ -204,63 +225,62 @@ public abstract class CoordinatorSimulationBaseTest implements
   static DruidServer createHistorical(int uniqueIdInTier, String tier, long serverSizeMb)
   {
     final String name = tier + "__" + "hist__" + uniqueIdInTier;
-    return new DruidServer(name, name, name, serverSizeMb, ServerType.HISTORICAL, tier, 1);
+    return new DruidServer(name, name, name, serverSizeMb << 20, null, ServerType.HISTORICAL, tier, 1);
   }
 
   // Utility and constant holder classes
-
-  static class DS
-  {
-    static final String WIKI = "wiki";
-    static final String KOALA = "koala";
-  }
 
   static class Tier
   {
     static final String T1 = "tier_t1";
     static final String T2 = "tier_t2";
-    static final String T3 = "tier_t3";
   }
 
   static class Metric
   {
     static final String ASSIGNED_COUNT = "segment/assigned/count";
     static final String MOVED_COUNT = "segment/moved/count";
-    static final String UNMOVED_COUNT = "segment/unmoved/count";
+    static final String MOVE_SKIPPED = "segment/moveSkipped/count";
     static final String DROPPED_COUNT = "segment/dropped/count";
+    static final String DELETED_COUNT = "segment/deleted/count";
     static final String LOAD_QUEUE_COUNT = "segment/loadQueue/count";
+    static final String DROP_QUEUE_COUNT = "segment/dropQueue/count";
+    static final String SUCCESS_ACTIONS = "segment/loadQueue/success";
+    static final String CANCELLED_ACTIONS = "segment/loadQueue/cancelled";
+
+    static final String OVERSHADOWED_COUNT = "segment/overshadowed/count";
   }
 
   static class Segments
   {
     /**
-     * Segments of datasource {@link DS#WIKI}, size 500 MB each,
+     * Segments of datasource {@link TestDataSource#WIKI}, size 500 MB each,
      * spanning 1 day containing 10 partitions each.
      */
     static final List<DataSegment> WIKI_10X1D =
-        CreateDataSegments.ofDatasource(DS.WIKI)
+        CreateDataSegments.ofDatasource(TestDataSource.WIKI)
                           .forIntervals(1, Granularities.DAY)
                           .startingAt("2022-01-01")
                           .withNumPartitions(10)
                           .eachOfSizeInMb(500);
 
     /**
-     * Segments of datasource {@link DS#WIKI}, size 500 MB each,
+     * Segments of datasource {@link TestDataSource#WIKI}, size 500 MB each,
      * spanning 100 days containing 10 partitions each.
      */
     static final List<DataSegment> WIKI_10X100D =
-        CreateDataSegments.ofDatasource(DS.WIKI)
+        CreateDataSegments.ofDatasource(TestDataSource.WIKI)
                           .forIntervals(100, Granularities.DAY)
                           .startingAt("2022-01-01")
                           .withNumPartitions(10)
                           .eachOfSizeInMb(500);
 
     /**
-     * Segments of datasource {@link DS#KOALA}, size 500 MB each,
+     * Segments of datasource {@link TestDataSource#KOALA}, size 500 MB each,
      * spanning 100 days containing 100 partitions each.
      */
     static final List<DataSegment> KOALA_100X100D =
-        CreateDataSegments.ofDatasource(DS.KOALA)
+        CreateDataSegments.ofDatasource(TestDataSource.KOALA)
                           .forIntervals(100, Granularities.DAY)
                           .startingAt("2022-01-01")
                           .withNumPartitions(100)
@@ -289,7 +309,29 @@ public abstract class CoordinatorSimulationBaseTest implements
 
     Rule forever()
     {
-      return new ForeverLoadRule(tieredReplicants);
+      return new ForeverLoadRule(tieredReplicants, null);
+    }
+  }
+
+  /**
+   * Builder for a broadcast rule.
+   */
+  static class Broadcast
+  {
+    static Rule forever()
+    {
+      return new ForeverBroadcastDistributionRule();
+    }
+  }
+
+  /**
+   * Builder for a drop rule.
+   */
+  static class Drop
+  {
+    static Rule forever()
+    {
+      return new ForeverDropRule();
     }
   }
 }

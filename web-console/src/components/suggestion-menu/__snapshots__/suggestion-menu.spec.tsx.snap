@@ -1,8 +1,8 @@
-// Jest Snapshot v1, https://goo.gl/fbAQLP
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
 
-exports[`SuggestionMenu matches snapshot 1`] = `
+exports[`SuggestionMenu matches snapshot when empty 1`] = `
 <ul
-  class="bp4-menu suggestion-menu"
+  class="suggestion-menu bp6-menu"
   role="menu"
 >
   <li
@@ -10,12 +10,37 @@ exports[`SuggestionMenu matches snapshot 1`] = `
     role="none"
   >
     <a
-      class="bp4-menu-item bp4-popover-dismiss"
+      aria-disabled="true"
+      class="bp6-menu-item bp6-disabled"
+      role="menuitem"
+      tabindex="-1"
+    >
+      <div
+        class="bp6-text-overflow-ellipsis bp6-fill"
+      >
+        (empty)
+      </div>
+    </a>
+  </li>
+</ul>
+`;
+
+exports[`SuggestionMenu matches snapshot with something 1`] = `
+<ul
+  class="suggestion-menu bp6-menu"
+  role="menu"
+>
+  <li
+    class=""
+    role="none"
+  >
+    <a
+      class="bp6-menu-item bp6-popover-dismiss"
       role="menuitem"
       tabindex="0"
     >
       <div
-        class="bp4-fill bp4-text-overflow-ellipsis"
+        class="bp6-text-overflow-ellipsis bp6-fill"
       >
         dog
       </div>
@@ -26,12 +51,12 @@ exports[`SuggestionMenu matches snapshot 1`] = `
     role="none"
   >
     <a
-      class="bp4-menu-item bp4-popover-dismiss"
+      class="bp6-menu-item bp6-popover-dismiss"
       role="menuitem"
       tabindex="0"
     >
       <div
-        class="bp4-fill bp4-text-overflow-ellipsis"
+        class="bp6-text-overflow-ellipsis bp6-fill"
       >
         cat
       </div>
@@ -42,59 +67,50 @@ exports[`SuggestionMenu matches snapshot 1`] = `
     role="none"
   >
     <a
-      class="bp4-menu-item bp4-popover-dismiss"
+      class="bp6-menu-item bp6-popover-dismiss"
       role="menuitem"
       tabindex="0"
     >
       <div
-        class="bp4-fill bp4-text-overflow-ellipsis"
+        class="bp6-text-overflow-ellipsis bp6-fill"
       >
         skunk
       </div>
     </a>
   </li>
   <li
-    class="bp4-submenu"
+    class="bp6-submenu"
     role="none"
   >
     <span
-      class="bp4-popover-wrapper"
+      class="bp6-popover-target"
+      role="menuitem"
+      tabindex="0"
     >
-      <span
-        aria-haspopup="true"
-        class="bp4-popover-target"
+      <a
+        aria-haspopup="menu"
+        class="bp6-menu-item"
+        role="none"
+        tabindex="-1"
       >
-        <a
-          class="bp4-menu-item"
-          role="menuitem"
-          tabindex="0"
+        <div
+          class="bp6-text-overflow-ellipsis bp6-fill"
         >
-          <div
-            class="bp4-fill bp4-text-overflow-ellipsis"
-          >
-            Fruit
-          </div>
-          <span
-            aria-hidden="true"
-            class="bp4-icon bp4-icon-caret-right bp4-submenu-icon"
-            icon="caret-right"
-          >
-            <svg
-              data-icon="caret-right"
-              height="16"
-              role="img"
-              viewBox="0 0 16 16"
-              width="16"
-            >
-              <path
-                d="M11 8c0-.15-.07-.28-.17-.37l-4-3.5A.495.495 0 006 4.5v7a.495.495 0 00.83.37l4-3.5c.1-.09.17-.22.17-.37z"
-                fill-rule="evenodd"
-              />
-            </svg>
-          </span>
-        </a>
-      </span>
+          Fruit
+        </div>
+        <span
+          class="bp6-icon bp6-icon-caret-right bp6-submenu-icon"
+        >
+          <svg
+            data-icon="caret-right"
+          />
+        </span>
+      </a>
     </span>
+    <div
+      aria-live="polite"
+      class="bp6-overlay bp6-overlay-inline"
+    />
   </li>
 </ul>
 `;

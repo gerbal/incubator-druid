@@ -19,26 +19,30 @@
 
 package org.apache.druid.server.router;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import org.apache.druid.discovery.DruidLeaderClient;
-import org.apache.druid.jackson.DefaultObjectMapper;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
+import io.netty.handler.codec.http.DefaultHttpResponse;
+import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.handler.codec.http.HttpVersion;
+import org.apache.druid.client.coordinator.CoordinatorClient;
+import org.apache.druid.client.coordinator.NoopCoordinatorClient;
+import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.http.client.response.StringFullResponseHolder;
+import org.apache.druid.rpc.HttpResponseException;
 import org.apache.druid.server.coordinator.rules.ForeverDropRule;
 import org.apache.druid.server.coordinator.rules.ForeverLoadRule;
 import org.apache.druid.server.coordinator.rules.IntervalDropRule;
 import org.apache.druid.server.coordinator.rules.PeriodLoadRule;
 import org.apache.druid.server.coordinator.rules.Rule;
 import org.easymock.EasyMock;
-import org.jboss.netty.handler.codec.http.HttpResponseStatus;
 import org.joda.time.Period;
-import org.junit.Assert;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -49,101 +53,115 @@ public class CoordinatorRuleManagerTest
   private static final String DATASOURCE1 = "datasource1";
   private static final String DATASOURCE2 = "datasource2";
   private static final List<Rule> DEFAULT_RULES = ImmutableList.of(
-      new ForeverLoadRule(ImmutableMap.of("__default", 2))
+      new ForeverLoadRule(ImmutableMap.of("__default", 2), null)
   );
 
-  @org.junit.Rule
-  public ExpectedException expectedException = ExpectedException.none();
-
-  private final ObjectMapper objectMapper = new DefaultObjectMapper();
   private final TieredBrokerConfig tieredBrokerConfig = new TieredBrokerConfig();
 
   @Test
   public void testAddingToRulesMapThrowingError()
   {
     final CoordinatorRuleManager manager = new CoordinatorRuleManager(
-        objectMapper,
         () -> tieredBrokerConfig,
         mockClient()
     );
     final Map<String, List<Rule>> rules = manager.getRules();
-    expectedException.expect(UnsupportedOperationException.class);
-    rules.put("testKey", Collections.emptyList());
+    Assertions.assertThrows(
+        UnsupportedOperationException.class,
+        () -> rules.put("testKey", Collections.emptyList())
+    );
   }
 
   @Test
   public void testAddingToRulesListThrowingError()
   {
     final CoordinatorRuleManager manager = new CoordinatorRuleManager(
-        objectMapper,
         () -> tieredBrokerConfig,
         mockClient()
     );
     manager.poll();
     final Map<String, List<Rule>> rules = manager.getRules();
-    expectedException.expect(UnsupportedOperationException.class);
-    rules.get(DATASOURCE1).add(new ForeverDropRule());
+    Assertions.assertThrows(
+        UnsupportedOperationException.class,
+        () -> rules.get(DATASOURCE1).add(new ForeverDropRule())
+    );
   }
+
+  @Test
+  public void test_poll_throwsException_ifCoordinatorApiReturnsNotOk()
+  {
+    final CoordinatorClient client = EasyMock.niceMock(CoordinatorClient.class);
+    EasyMock.expect(client.getRulesForAllDatasources()).andThrow(
+        new RuntimeException(
+            new HttpResponseException(
+                new StringFullResponseHolder(
+                    new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.INTERNAL_SERVER_ERROR),
+                    StandardCharsets.UTF_8
+                )
+            )
+        )
+    );
+    EasyMock.replay(client);
+
+    final CoordinatorRuleManager manager = new CoordinatorRuleManager(
+        () -> tieredBrokerConfig,
+        client
+    );
+
+    Assertions.assertThrows(ISE.class, manager::poll);
+  }
+
 
   @Test
   public void testGetRulesWithUnknownDatasourceReturningDefaultRule()
   {
     final CoordinatorRuleManager manager = new CoordinatorRuleManager(
-        objectMapper,
         () -> tieredBrokerConfig,
         mockClient()
     );
     manager.poll();
     final List<Rule> rules = manager.getRulesWithDefault("unknown");
-    Assert.assertEquals(DEFAULT_RULES, rules);
+    Assertions.assertEquals(DEFAULT_RULES, rules);
   }
 
   @Test
   public void testGetRulesWithKnownDatasourceReturningAllRulesWithDefaultRule()
   {
     final CoordinatorRuleManager manager = new CoordinatorRuleManager(
-        objectMapper,
         () -> tieredBrokerConfig,
         mockClient()
     );
     manager.poll();
     final List<Rule> rules = manager.getRulesWithDefault(DATASOURCE2);
     final List<Rule> expectedRules = new ArrayList<>();
-    expectedRules.add(new ForeverLoadRule(null));
+    expectedRules.add(new ForeverLoadRule(null, null));
     expectedRules.add(new IntervalDropRule(Intervals.of("2020-01-01/2020-01-02")));
     expectedRules.addAll(DEFAULT_RULES);
-    Assert.assertEquals(expectedRules, rules);
+    Assertions.assertEquals(expectedRules, rules);
   }
 
-  private DruidLeaderClient mockClient()
+  private CoordinatorClient mockClient()
   {
     final Map<String, List<Rule>> rules = ImmutableMap.of(
         DATASOURCE1,
-        ImmutableList.of(new ForeverLoadRule(null)),
+        ImmutableList.of(new ForeverLoadRule(null, null)),
         DATASOURCE2,
-        ImmutableList.of(new ForeverLoadRule(null), new IntervalDropRule(Intervals.of("2020-01-01/2020-01-02"))),
+        ImmutableList.of(new ForeverLoadRule(null, null), new IntervalDropRule(Intervals.of("2020-01-01/2020-01-02"))),
         "datasource3",
         ImmutableList.of(
-            new PeriodLoadRule(new Period("P1M"), true, null),
+            new PeriodLoadRule(new Period("P1M"), true, null, null),
             new ForeverDropRule()
         ),
         TieredBrokerConfig.DEFAULT_RULE_NAME,
-        ImmutableList.of(new ForeverLoadRule(ImmutableMap.of("__default", 2)))
+        ImmutableList.of(new ForeverLoadRule(ImmutableMap.of("__default", 2), null))
     );
-    final StringFullResponseHolder holder = EasyMock.niceMock(StringFullResponseHolder.class);
-    EasyMock.expect(holder.getStatus())
-            .andReturn(HttpResponseStatus.OK);
-    try {
-      EasyMock.expect(holder.getContent())
-              .andReturn(objectMapper.writeValueAsString(rules));
-      final DruidLeaderClient client = EasyMock.niceMock(DruidLeaderClient.class);
-      EasyMock.expect(client.go(EasyMock.anyObject()))
-              .andReturn(holder);
-      EasyMock.replay(holder, client);
-      return client;
-    }
-    catch (IOException | InterruptedException e) {
-      throw new RuntimeException(e);
-    }
+    return new NoopCoordinatorClient()
+    {
+      @Override
+      public ListenableFuture<Map<String, List<Rule>>> getRulesForAllDatasources()
+      {
+        return Futures.immediateFuture(rules);
+      }
+    };
   }
 }

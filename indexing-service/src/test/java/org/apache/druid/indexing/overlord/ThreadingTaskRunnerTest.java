@@ -19,84 +19,68 @@
 
 package org.apache.druid.indexing.overlord;
 
-import com.google.common.collect.ImmutableList;
+import com.google.common.base.Optional;
+import org.apache.commons.io.IOUtils;
+import org.apache.druid.indexer.TaskLocation;
 import org.apache.druid.indexer.TaskState;
 import org.apache.druid.indexer.TaskStatus;
 import org.apache.druid.indexing.common.MultipleFileTaskReportFileWriter;
 import org.apache.druid.indexing.common.TaskStorageDirTracker;
 import org.apache.druid.indexing.common.TaskToolbox;
 import org.apache.druid.indexing.common.TaskToolboxFactory;
-import org.apache.druid.indexing.common.actions.TaskActionClient;
 import org.apache.druid.indexing.common.config.TaskConfig;
-import org.apache.druid.indexing.common.task.AbstractTask;
+import org.apache.druid.indexing.common.task.NoopTask;
+import org.apache.druid.indexing.common.task.Task;
 import org.apache.druid.indexing.common.task.TestAppenderatorsManager;
 import org.apache.druid.indexing.worker.config.WorkerConfig;
 import org.apache.druid.jackson.DefaultObjectMapper;
+import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.common.concurrent.Execs;
+import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.server.DruidNode;
 import org.apache.druid.tasklogs.NoopTaskLogs;
-import org.joda.time.Period;
-import org.junit.Assert;
-import org.junit.Test;
-import org.mockito.ArgumentMatchers;
-import org.mockito.Mockito;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 
 public class ThreadingTaskRunnerTest
 {
+  private static final Logger log = new Logger(ThreadingTaskRunnerTest.class);
 
-  @Test
-  public void testTaskStatusWhenTaskThrowsExceptionWhileRunning() throws ExecutionException, InterruptedException
+  private ThreadingTaskRunner runner;
+
+  @BeforeEach
+  public void setup()
   {
-    final TaskConfig taskConfig = new TaskConfig(
-        null,
-        null,
-        null,
-        null,
-        ImmutableList.of(),
-        false,
-        new Period("PT0S"),
-        new Period("PT10S"),
-        ImmutableList.of(),
-        false,
-        false,
-        TaskConfig.BATCH_PROCESSING_MODE_DEFAULT.name(),
-        null,
-        false,
-        null
-    );
-    ThreadingTaskRunner runner = new ThreadingTaskRunner(
+    final TaskConfig taskConfig = ForkingTaskRunnerTest.makeDefaultTaskConfigBuilder().build();
+    final WorkerConfig workerConfig = new WorkerConfig();
+    runner = new ThreadingTaskRunner(
         mockTaskToolboxFactory(),
         taskConfig,
-        new WorkerConfig(),
+        workerConfig,
         new NoopTaskLogs(),
         new DefaultObjectMapper(),
         new TestAppenderatorsManager(),
         new MultipleFileTaskReportFileWriter(),
-        new DruidNode("middleManager", "host", false, 8091, null, true, false),
-        new TaskStorageDirTracker(taskConfig)
+        new DruidNode("druid/indexer", "host", false, 8091, null, true, false),
+        TaskStorageDirTracker.fromConfigs(workerConfig, taskConfig)
     );
+  }
 
-    Future<TaskStatus> statusFuture = runner.run(new AbstractTask("id", "datasource", null)
+  @Test
+  public void testTaskStatusWhenTaskThrowsExceptionWhileRunning() throws ExecutionException, InterruptedException
+  {
+    Future<TaskStatus> statusFuture = runner.run(new NoopTask(null, null, null, 1L, 0L, Map.of())
     {
-      @Override
-      public String getType()
-      {
-        return "test";
-      }
-
-      @Override
-      public boolean isReady(TaskActionClient taskActionClient)
-      {
-        return true;
-      }
-
-      @Override
-      public void stopGracefully(TaskConfig taskConfig)
-      {
-      }
-
       @Override
       public TaskStatus runTask(TaskToolbox toolbox)
       {
@@ -104,18 +88,111 @@ public class ThreadingTaskRunnerTest
       }
     });
 
-    TaskStatus status = statusFuture.get();
-    Assert.assertEquals(TaskState.FAILED, status.getStatusCode());
-    Assert.assertEquals(
-        "Failed with an exception. See indexer logs for more details.",
+    final TaskStatus status = statusFuture.get();
+    Assertions.assertEquals(TaskState.FAILED, status.getStatusCode());
+    Assertions.assertEquals(
+        "Failed with exception [Task failure test]. See indexer logs for details.",
         status.getErrorMsg()
     );
   }
 
+  @Test
+  public void test_streamTaskLogs_ofRunningTask_readsFromTaskLogFile() throws Exception
+  {
+    final CountDownLatch taskHasStarted = new CountDownLatch(1);
+    final CountDownLatch finishTask = new CountDownLatch(1);
+    final Task indexerTask = new NoopTask(null, null, null, 1L, 0L, Map.of())
+    {
+      @Override
+      public TaskStatus runTask(TaskToolbox toolbox) throws Exception
+      {
+        log.info("Running test task[%s]", getId());
+
+        taskHasStarted.countDown();
+        finishTask.await();
+
+        return TaskStatus.success(getId());
+      }
+    };
+
+    // Submit the task and wait for it to start
+    final Future<TaskStatus> statusFuture = runner.run(indexerTask);
+    taskHasStarted.await();
+
+    // Stream and verify the contents of the task logs
+    final Optional<InputStream> logStream = runner.streamTaskLog(indexerTask.getId(), 0);
+    Assertions.assertTrue(logStream.isPresent());
+
+    try (final InputStream in = logStream.get()) {
+      final String fullTaskLogs = IOUtils.toString(in, StandardCharsets.UTF_8);
+      Assertions.assertTrue(
+          fullTaskLogs.contains(
+              StringUtils.format("Running test task[%s]", indexerTask.getId())
+          )
+      );
+    }
+
+    // Finish the task and verify status
+    finishTask.countDown();
+    Assertions.assertEquals(
+        TaskStatus.success(indexerTask.getId()),
+        statusFuture.get()
+    );
+
+    // Verify that task logs cannot be streamed anymore as task has finished
+    Assertions.assertFalse(
+        runner.streamTaskLog(indexerTask.getId(), 0).isPresent()
+    );
+  }
+
+  @Test
+  public void testTaskLocationUsesAdvertisedPlaintextPort() throws Exception
+  {
+    final TaskConfig taskConfig = ForkingTaskRunnerTest.makeDefaultTaskConfigBuilder().build();
+    final WorkerConfig workerConfig = new WorkerConfig();
+    runner = new ThreadingTaskRunner(
+        mockTaskToolboxFactory(),
+        taskConfig,
+        workerConfig,
+        new NoopTaskLogs(),
+        new DefaultObjectMapper(),
+        new TestAppenderatorsManager(),
+        new MultipleFileTaskReportFileWriter(),
+        new DruidNode("druid/indexer", "host", false, 8091, null, null, true, false, null, 9091),
+        TaskStorageDirTracker.fromConfigs(workerConfig, taskConfig)
+    );
+
+    final List<TaskLocation> locations = new CopyOnWriteArrayList<>();
+    runner.registerListener(
+        new TaskRunnerListener()
+        {
+          @Override
+          public String getListenerId()
+          {
+            return "testTaskLocationUsesAdvertisedPlaintextPort";
+          }
+
+          @Override
+          public void locationChanged(final Task task, final TaskLocation newLocation)
+          {
+            locations.add(newLocation);
+          }
+
+          @Override
+          public void statusChanged(final Task task, final TaskStatus status)
+          {
+          }
+        },
+        Execs.directExecutor()
+    );
+
+    final TaskStatus status = runner.run(new NoopTask(null, null, null, 1L, 0L, Map.of())).get();
+    Assertions.assertEquals(TaskState.SUCCESS, status.getStatusCode());
+    Assertions.assertEquals(List.of(TaskLocation.create("host", 9091, -1)), locations);
+  }
+
   private static TaskToolboxFactory mockTaskToolboxFactory()
   {
-    TaskToolboxFactory factory = Mockito.mock(TaskToolboxFactory.class);
-    Mockito.when(factory.build(ArgumentMatchers.any())).thenReturn(Mockito.mock(TaskToolbox.class));
-    return factory;
+    return new TestTaskToolboxFactory(new TestTaskToolboxFactory.Builder());
   }
 }

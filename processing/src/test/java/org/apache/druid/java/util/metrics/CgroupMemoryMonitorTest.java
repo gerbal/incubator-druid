@@ -19,38 +19,32 @@
 
 package org.apache.druid.java.util.metrics;
 
-import com.google.common.collect.ImmutableMap;
 import org.apache.druid.java.util.common.FileUtils;
-import org.apache.druid.java.util.emitter.core.Event;
 import org.apache.druid.java.util.metrics.cgroups.CgroupDiscoverer;
 import org.apache.druid.java.util.metrics.cgroups.ProcCgroupDiscoverer;
 import org.apache.druid.java.util.metrics.cgroups.TestUtils;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
-import org.junit.rules.TemporaryFolder;
+import org.apache.druid.testing.TemporaryFolderExtension;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.List;
 
 public class CgroupMemoryMonitorTest
 {
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
-  @Rule
-  public TemporaryFolder temporaryFolder = new TemporaryFolder();
+  @RegisterExtension
+  public final TemporaryFolderExtension temporaryFolder = TemporaryFolderExtension.testCaseScoped();
   private File procDir;
   private File cgroupDir;
   private CgroupDiscoverer discoverer;
 
-  @Before
+  @BeforeEach
   public void setUp() throws IOException
   {
-    cgroupDir = temporaryFolder.newFolder();
-    procDir = temporaryFolder.newFolder();
+    cgroupDir = temporaryFolder.newFolder("cgroupDir");
+    procDir = temporaryFolder.newFolder("procDir");
     discoverer = new ProcCgroupDiscoverer(procDir.toPath());
     TestUtils.setUpCgroups(procDir, cgroupDir);
     final File memoryDir = new File(
@@ -61,15 +55,16 @@ public class CgroupMemoryMonitorTest
     FileUtils.mkdirp(memoryDir);
     TestUtils.copyResource("/memory.stat", new File(memoryDir, "memory.stat"));
     TestUtils.copyResource("/memory.numa_stat", new File(memoryDir, "memory.numa_stat"));
+    TestUtils.copyResource("/memory.usage_in_bytes", new File(memoryDir, "memory.usage_in_bytes"));
+    TestUtils.copyResource("/memory.limit_in_bytes", new File(memoryDir, "memory.limit_in_bytes"));
   }
 
   @Test
   public void testMonitor()
   {
-    final CgroupMemoryMonitor monitor = new CgroupMemoryMonitor(discoverer, ImmutableMap.of(), "some_feed");
+    final CgroupMemoryMonitor monitor = new CgroupMemoryMonitor(discoverer, "some_feed");
     final StubServiceEmitter emitter = new StubServiceEmitter("service", "host");
-    Assert.assertTrue(monitor.doMonitor(emitter));
-    final List<Event> actualEvents = emitter.getEvents();
-    Assert.assertEquals(44, actualEvents.size());
+    Assertions.assertTrue(monitor.doMonitor(emitter));
+    Assertions.assertEquals(46, emitter.getNumEmittedEvents());
   }
 }

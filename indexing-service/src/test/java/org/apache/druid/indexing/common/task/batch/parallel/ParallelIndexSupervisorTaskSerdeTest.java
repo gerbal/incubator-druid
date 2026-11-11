@@ -20,29 +20,25 @@
 package org.apache.druid.indexing.common.task.batch.parallel;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.data.input.impl.CsvInputFormat;
 import org.apache.druid.data.input.impl.DimensionsSpec;
 import org.apache.druid.data.input.impl.LocalInputSource;
 import org.apache.druid.data.input.impl.TimestampSpec;
+import org.apache.druid.indexer.granularity.UniformGranularitySpec;
 import org.apache.druid.indexer.partitions.HashedPartitionsSpec;
 import org.apache.druid.indexer.partitions.PartitionsSpec;
 import org.apache.druid.indexer.partitions.SingleDimensionPartitionsSpec;
 import org.apache.druid.indexing.common.TestUtils;
 import org.apache.druid.indexing.common.task.Task;
 import org.apache.druid.indexing.common.task.TaskResource;
+import org.apache.druid.indexing.common.task.TuningConfigBuilder;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.granularity.Granularities;
-import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.LongSumAggregatorFactory;
 import org.apache.druid.segment.indexing.DataSchema;
-import org.apache.druid.segment.indexing.granularity.UniformGranularitySpec;
-import org.hamcrest.CoreMatchers;
 import org.joda.time.Interval;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import javax.annotation.Nullable;
 import java.io.File;
@@ -54,22 +50,8 @@ import java.util.Map;
 
 public class ParallelIndexSupervisorTaskSerdeTest
 {
-  static {
-    NullHandling.initializeForTests();
-  }
-
-  private static final ObjectMapper OBJECT_MAPPER = createObjectMapper();
+  private static final ObjectMapper OBJECT_MAPPER = new TestUtils().getTestObjectMapper();
   private static final List<Interval> INTERVALS = Collections.singletonList(Intervals.of("2018/2019"));
-
-  private static ObjectMapper createObjectMapper()
-  {
-    TestUtils testUtils = new TestUtils();
-    ObjectMapper objectMapper = testUtils.getTestObjectMapper();
-    return objectMapper;
-  }
-
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
 
   @Test
   public void serde() throws IOException
@@ -83,25 +65,24 @@ public class ParallelIndexSupervisorTaskSerdeTest
         .build();
 
     String json = OBJECT_MAPPER.writeValueAsString(task);
-    Assert.assertEquals(task, OBJECT_MAPPER.readValue(json, Task.class));
+    Assertions.assertEquals(task, OBJECT_MAPPER.readValue(json, Task.class));
   }
 
   @Test
   public void forceGuaranteedRollupWithHashPartitionsMissingNumShards()
   {
-    Integer numShards = null;
     ParallelIndexSupervisorTask task = new ParallelIndexSupervisorTaskBuilder()
         .ingestionSpec(
             new ParallelIndexIngestionSpecBuilder()
                 .forceGuaranteedRollup(true)
-                .partitionsSpec(new HashedPartitionsSpec(null, numShards, null))
+                .partitionsSpec(new HashedPartitionsSpec(null, null, null))
                 .inputIntervals(INTERVALS)
                 .build()
         )
         .build();
 
     PartitionsSpec partitionsSpec = task.getIngestionSchema().getTuningConfig().getPartitionsSpec();
-    Assert.assertThat(partitionsSpec, CoreMatchers.instanceOf(HashedPartitionsSpec.class));
+    Assertions.assertTrue(partitionsSpec instanceof HashedPartitionsSpec);
   }
 
   @Test
@@ -119,24 +100,25 @@ public class ParallelIndexSupervisorTaskSerdeTest
         .build();
 
     PartitionsSpec partitionsSpec = task.getIngestionSchema().getTuningConfig().getPartitionsSpec();
-    Assert.assertThat(partitionsSpec, CoreMatchers.instanceOf(HashedPartitionsSpec.class));
+    Assertions.assertTrue(partitionsSpec instanceof HashedPartitionsSpec);
   }
 
   @Test
   public void forceGuaranteedRollupWithSingleDimPartitionsMissingDimension()
   {
-    expectedException.expect(IllegalArgumentException.class);
-    expectedException.expectMessage("partitionDimensions must be specified");
-
-    new ParallelIndexSupervisorTaskBuilder()
-        .ingestionSpec(
-            new ParallelIndexIngestionSpecBuilder()
-                .forceGuaranteedRollup(true)
-                .partitionsSpec(new SingleDimensionPartitionsSpec(1, null, null, true))
-                .inputIntervals(INTERVALS)
-                .build()
-        )
-        .build();
+    final IllegalArgumentException exception = Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () -> new ParallelIndexSupervisorTaskBuilder()
+            .ingestionSpec(
+                new ParallelIndexIngestionSpecBuilder()
+                    .forceGuaranteedRollup(true)
+                    .partitionsSpec(new SingleDimensionPartitionsSpec(1, null, null, true))
+                    .inputIntervals(INTERVALS)
+                    .build()
+            )
+            .build()
+    );
+    Assertions.assertTrue(exception.getMessage().contains("partitionDimensions must be specified"));
   }
 
   @Test
@@ -153,7 +135,7 @@ public class ParallelIndexSupervisorTaskSerdeTest
         .build();
 
     PartitionsSpec partitionsSpec = task.getIngestionSchema().getTuningConfig().getPartitionsSpec();
-    Assert.assertThat(partitionsSpec, CoreMatchers.instanceOf(SingleDimensionPartitionsSpec.class));
+    Assertions.assertTrue(partitionsSpec instanceof SingleDimensionPartitionsSpec);
   }
 
   private static class ParallelIndexSupervisorTaskBuilder
@@ -190,9 +172,8 @@ public class ParallelIndexSupervisorTaskSerdeTest
     );
 
     private final ParallelIndexIOConfig ioConfig = new ParallelIndexIOConfig(
-        null,
         new LocalInputSource(new File("tmp"), "test_*"),
-        new CsvInputFormat(Arrays.asList("ts", "dim", "val"), null, null, false, 0),
+        new CsvInputFormat(Arrays.asList("ts", "dim", "val"), null, null, false, 0, null),
         false,
         null
     );
@@ -229,51 +210,25 @@ public class ParallelIndexSupervisorTaskSerdeTest
 
     ParallelIndexIngestionSpec build()
     {
-      DataSchema dataSchema = new DataSchema(
-          "dataSource",
-          TIMESTAMP_SPEC,
-          DIMENSIONS_SPEC,
-          new AggregatorFactory[]{
-              new LongSumAggregatorFactory("val", "val")
-          },
-          new UniformGranularitySpec(Granularities.DAY, Granularities.MINUTE, inputIntervals),
-          null
-      );
+      DataSchema dataSchema = DataSchema.builder()
+                                        .withDataSource("datasource")
+                                        .withTimestamp(TIMESTAMP_SPEC)
+                                        .withDimensions(DIMENSIONS_SPEC)
+                                        .withAggregators(new LongSumAggregatorFactory("val", "val"))
+                                        .withGranularity(
+                                            new UniformGranularitySpec(
+                                                Granularities.DAY,
+                                                Granularities.MINUTE,
+                                                inputIntervals
+                                            )
+                                        )
+                                        .build();
 
-      ParallelIndexTuningConfig tuningConfig = new ParallelIndexTuningConfig(
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          partitionsSpec,
-          null,
-          null,
-          null,
-          forceGuaranteedRollup,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null,
-          null
-      );
-
+      ParallelIndexTuningConfig tuningConfig = TuningConfigBuilder
+          .forParallelIndexTask()
+          .withPartitionsSpec(partitionsSpec)
+          .withForceGuaranteedRollup(forceGuaranteedRollup)
+          .build();
       return new ParallelIndexIngestionSpec(dataSchema, ioConfig, tuningConfig);
     }
   }

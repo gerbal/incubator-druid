@@ -36,13 +36,15 @@ import org.apache.calcite.avatica.QueryState;
 import org.apache.calcite.avatica.remote.AvaticaRuntimeException;
 import org.apache.calcite.avatica.remote.Service.ErrorResponse;
 import org.apache.calcite.avatica.remote.TypedValue;
-import org.apache.druid.guice.LazySingleton;
+import org.apache.druid.guice.ManageLifecycle;
 import org.apache.druid.guice.annotations.NativeQuery;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.UOE;
+import org.apache.druid.java.util.common.lifecycle.LifecycleStop;
 import org.apache.druid.java.util.common.logger.Logger;
-import org.apache.druid.query.QueryContexts;
+import org.apache.druid.query.QueryConfigProvider;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.server.security.Access;
 import org.apache.druid.server.security.AuthenticationResult;
 import org.apache.druid.server.security.Authenticator;
@@ -56,7 +58,6 @@ import org.joda.time.Interval;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
-
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -70,9 +71,11 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-@LazySingleton
+@ManageLifecycle
 public class DruidMeta extends MetaImpl
 {
+  private static final Logger log = new Logger(DruidMeta.class);
+
   /**
    * Logs any throwable and string format message with args at the error level.
    *
@@ -116,6 +119,18 @@ public class DruidMeta extends MetaImpl
 
   private static final Logger LOG = new Logger(DruidMeta.class);
 
+  private static final ThreadLocal<String> THREAD_LOCAL_REMOTE_ADDRESS = new ThreadLocal<>();
+
+  public static void setThreadLocalRemoteAddress(String remoteAddress)
+  {
+    THREAD_LOCAL_REMOTE_ADDRESS.set(remoteAddress);
+  }
+
+  public static void clearThreadLocalRemoteAddress()
+  {
+    THREAD_LOCAL_REMOTE_ADDRESS.remove();
+  }
+
   /**
    * Items passed in via the connection context which are not query
    * context values. Instead, these are used at connection time to validate
@@ -126,6 +141,7 @@ public class DruidMeta extends MetaImpl
   );
 
   private final SqlStatementFactory sqlStatementFactory;
+  private final QueryConfigProvider queryConfigProvider;
   private final ScheduledExecutorService exec;
   private final AvaticaServerConfig config;
   private final List<Authenticator> authenticators;
@@ -146,6 +162,7 @@ public class DruidMeta extends MetaImpl
   @Inject
   public DruidMeta(
       final @NativeQuery SqlStatementFactory sqlStatementFactory,
+      final QueryConfigProvider queryConfigProvider,
       final AvaticaServerConfig config,
       final ErrorHandler errorHandler,
       final AuthenticatorMapper authMapper
@@ -153,6 +170,7 @@ public class DruidMeta extends MetaImpl
   {
     this(
         sqlStatementFactory,
+        queryConfigProvider,
         config,
         errorHandler,
         Executors.newSingleThreadScheduledExecutor(
@@ -168,6 +186,7 @@ public class DruidMeta extends MetaImpl
 
   public DruidMeta(
       final SqlStatementFactory sqlStatementFactory,
+      final QueryConfigProvider queryConfigProvider,
       final AvaticaServerConfig config,
       final ErrorHandler errorHandler,
       final ScheduledExecutorService exec,
@@ -177,11 +196,21 @@ public class DruidMeta extends MetaImpl
   {
     super(null);
     this.sqlStatementFactory = sqlStatementFactory;
+    this.queryConfigProvider = queryConfigProvider;
     this.config = config;
     this.errorHandler = errorHandler;
     this.exec = exec;
     this.authenticators = authenticators;
     this.fetcherFactory = fetcherFactory;
+  }
+
+  @LifecycleStop
+  public void stop() throws InterruptedException
+  {
+    exec.shutdownNow();
+    if (!exec.awaitTermination(1, TimeUnit.MINUTES)) {
+      log.warn("Timed out waiting for executor to shut down.");
+    }
   }
 
   @Override
@@ -203,7 +232,7 @@ public class DruidMeta extends MetaImpl
     // Don't stringify arrays for JDBC because Avatica needs to handle arrays.
     // When using query context security, all JDBC users must have permission on
     // this context key.
-    contextMap.put(QueryContexts.CTX_SQL_STRINGIFY_ARRAYS, false);
+    QueryContextParameters.SQL_STRINGIFY_ARRAYS.set(contextMap, false);
     try {
       openDruidConnection(ch.id, secret, contextMap);
     }
@@ -250,7 +279,11 @@ public class DruidMeta extends MetaImpl
   {
     try {
       final DruidJdbcStatement druidStatement = getDruidConnection(ch.id)
-          .createStatement(sqlStatementFactory, fetcherFactory);
+          .createStatement(
+              sqlStatementFactory,
+              queryConfigProvider.getContext(),
+              fetcherFactory
+          );
       return new StatementHandle(ch.id, druidStatement.getStatementId(), null);
     }
     catch (Throwable t) {
@@ -272,17 +305,19 @@ public class DruidMeta extends MetaImpl
   {
     try {
       final DruidConnection druidConnection = getDruidConnection(ch.id);
-      final SqlQueryPlus sqlReq = new SqlQueryPlus(
-          sql,
-          druidConnection.sessionContext(),
-          null, // No parameters in this path
-          doAuthenticate(druidConnection)
-      );
+      final SqlQueryPlus sqlReq = SqlQueryPlus.builder()
+                                              .sql(sql)
+                                              .systemDefaultContext(queryConfigProvider.getContext())
+                                              .queryContext(druidConnection.sessionContext())
+                                              .auth(doAuthenticate(druidConnection))
+                                              .buildJdbc();
       final DruidJdbcPreparedStatement stmt = getDruidConnection(ch.id).createPreparedStatement(
           sqlStatementFactory,
           sqlReq,
+          queryConfigProvider.getContext(),
           maxRowCount,
-          fetcherFactory
+          fetcherFactory,
+          THREAD_LOCAL_REMOTE_ADDRESS.get()
       );
       stmt.prepare();
       LOG.debug("Successfully prepared statement [%s] for execution", stmt.getStatementId());
@@ -299,6 +334,12 @@ public class DruidMeta extends MetaImpl
     if (authenticationResult != null) {
       return authenticationResult;
     }
+
+    // Credentials are fixed at openConnection() and cannot be retried under the same
+    // connection id, so a failure here is terminal for this connection. Close it immediately
+    // rather than leaving it to occupy a connection slot until it times out, since it can
+    // never be reclaimed by closeIfEmpty() once a statement exists on it.
+    closeConnection(new ConnectionHandle(druidConnection.getConnectionId()));
 
     // Throw an error. Use the same text that will appear if the user is denied
     // access to any resource within the query. See mapException(). This consistency
@@ -351,9 +392,9 @@ public class DruidMeta extends MetaImpl
       synchronized (druidConnection) {
         final AuthenticationResult authenticationResult = doAuthenticate(druidConnection);
         final SqlQueryPlus sqlRequest = SqlQueryPlus.builder(sql)
-            .auth(authenticationResult)
-            .build();
-        druidStatement.execute(sqlRequest, maxRowCount);
+                                                    .auth(authenticationResult)
+                                                    .buildJdbc();
+        druidStatement.execute(sqlRequest, maxRowCount, THREAD_LOCAL_REMOTE_ADDRESS.get());
         final ExecuteResult result = doFetch(druidStatement, maxRowsInFirstFrame);
         LOG.debug("Successfully prepared statement [%s] and started execution", druidStatement.getStatementId());
         return result;
@@ -396,7 +437,7 @@ public class DruidMeta extends MetaImpl
     throw errorHandler.sanitize(t);
   }
 
-  private ExecuteResult doFetch(AbstractDruidJdbcStatement druidStatement, int maxRows)
+  protected ExecuteResult doFetch(AbstractDruidJdbcStatement druidStatement, int maxRows)
   {
     final Signature signature = druidStatement.getSignature();
     final Frame firstFrame = druidStatement.nextFrame(
@@ -476,7 +517,7 @@ public class DruidMeta extends MetaImpl
     try {
       final DruidJdbcPreparedStatement druidStatement =
           getDruidStatement(statement, DruidJdbcPreparedStatement.class);
-      druidStatement.execute(parameterValues);
+      druidStatement.execute(parameterValues, THREAD_LOCAL_REMOTE_ADDRESS.get());
       ExecuteResult result = doFetch(druidStatement, maxRowsInFirstFrame);
       LOG.debug(
           "Successfully started execution of statement [%s]",
@@ -753,7 +794,7 @@ public class DruidMeta extends MetaImpl
   }
 
   @VisibleForTesting
-  void closeAllConnections()
+  public void closeAllConnections()
   {
     for (String connectionId : ImmutableSet.copyOf(connections.keySet())) {
       closeConnection(new ConnectionHandle(connectionId));

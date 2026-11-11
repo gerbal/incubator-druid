@@ -1,0 +1,55 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`RestrictedMode matches snapshot when in auto capability detection mode 1`] = `
+<span
+  class="restricted-mode bp6-popover-target"
+>
+  <button
+    aria-expanded="false"
+    aria-haspopup="menu"
+    class="bp6-button bp6-intent-warning bp6-minimal"
+    type="button"
+  >
+    <span
+      aria-hidden="true"
+      class="bp6-icon bp6-icon-warning-sign"
+    >
+      <svg
+        data-icon="warning-sign"
+      />
+    </span>
+    <span
+      class="bp6-button-text"
+    >
+      Coordinator/Overlord mode
+    </span>
+  </button>
+</span>
+`;
+
+exports[`RestrictedMode matches snapshot when in manual capability detection mode 1`] = `
+<span
+  class="restricted-mode bp6-popover-target"
+>
+  <button
+    aria-expanded="false"
+    aria-haspopup="menu"
+    class="bp6-button bp6-intent-warning bp6-minimal"
+    type="button"
+  >
+    <span
+      aria-hidden="true"
+      class="bp6-icon bp6-icon-warning-sign"
+    >
+      <svg
+        data-icon="warning-sign"
+      />
+    </span>
+    <span
+      class="bp6-button-text"
+    >
+      Coordinator/Overlord mode
+    </span>
+  </button>
+</span>
+`;

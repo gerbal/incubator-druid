@@ -26,8 +26,10 @@ import com.google.common.primitives.Chars;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
+import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexLiteral;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.rex.RexUtil;
 import org.apache.calcite.sql.SqlCollation;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlOperatorBinding;
@@ -38,12 +40,13 @@ import org.apache.calcite.util.ConversionUtil;
 import org.apache.calcite.util.DateString;
 import org.apache.calcite.util.TimeString;
 import org.apache.calcite.util.TimestampString;
+import org.apache.druid.error.DruidException;
+import org.apache.druid.error.InvalidSqlInput;
 import org.apache.druid.java.util.common.DateTimes;
-import org.apache.druid.java.util.common.IAE;
-import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.StringUtils;
-import org.apache.druid.java.util.emitter.EmittingLogger;
+import org.apache.druid.math.expr.ExprEval;
 import org.apache.druid.math.expr.ExpressionProcessing;
+import org.apache.druid.math.expr.ExpressionProcessingConfig;
 import org.apache.druid.query.ordering.StringComparator;
 import org.apache.druid.query.ordering.StringComparators;
 import org.apache.druid.segment.column.ColumnType;
@@ -76,9 +79,8 @@ import java.util.regex.Pattern;
  */
 public class Calcites
 {
-  private static final EmittingLogger log = new EmittingLogger(Calcites.class);
-  private static final DateTimes.UtcFormatter CALCITE_DATE_PARSER = DateTimes.wrapFormatter(ISODateTimeFormat.dateParser());
-  private static final DateTimes.UtcFormatter CALCITE_TIMESTAMP_PARSER = DateTimes.wrapFormatter(
+  public static final DateTimes.UtcFormatter CALCITE_DATE_PARSER = DateTimes.wrapFormatter(ISODateTimeFormat.dateParser());
+  public static final DateTimes.UtcFormatter CALCITE_TIMESTAMP_PARSER = DateTimes.wrapFormatter(
       new DateTimeFormatterBuilder()
           .append(ISODateTimeFormat.dateParser())
           .appendLiteral(' ')
@@ -100,6 +102,15 @@ public class Calcites
   public static final SqlReturnTypeInference
       ARG1_NULLABLE_ARRAY_RETURN_TYPE_INFERENCE = new Arg1NullableArrayTypeInference();
 
+  public static SqlReturnTypeInference complexReturnTypeWithNullability(ColumnType columnType, boolean nullable)
+  {
+    return opBinding -> RowSignatures.makeComplexType(
+        opBinding.getTypeFactory(),
+        columnType,
+        nullable
+    );
+  }
+
   private Calcites()
   {
     // No instantiation.
@@ -117,7 +128,7 @@ public class Calcites
     final StringBuilder builder = new StringBuilder("'");
     for (int i = 0; i < s.length(); i++) {
       final char c = s.charAt(i);
-      if (Character.isLetterOrDigit(c) || c == ' ') {
+      if (Character.isLetterOrDigit(c) || (c >= 32 && c < 127 && c != '\'' && c != '\\')) {
         builder.append(c);
         if (c > 127) {
           isPlainAscii = false;
@@ -132,9 +143,40 @@ public class Calcites
   }
 
   /**
-   * Convert {@link RelDataType} to the most appropriate {@link ValueType}
-   * Caller who want to coerce all ARRAY types to STRING can set `druid.expressions.allowArrayToStringCast`
-   * runtime property in {@link org.apache.druid.math.expr.ExpressionProcessingConfig}
+   * Returns whether an expression is a literal. Like {@link RexUtil#isLiteral(RexNode, boolean)} but can accept
+   * arrays too.
+   *
+   * @param rexNode    expression
+   * @param allowCast  allow calls to CAST if its argument is literal
+   * @param allowArray allow calls to ARRAY if its arguments are literal
+   */
+  public static boolean isLiteral(RexNode rexNode, boolean allowCast, boolean allowArray)
+  {
+    if (RexUtil.isLiteral(rexNode, allowCast)) {
+      return true;
+    } else if (allowArray && rexNode.isA(SqlKind.ARRAY_VALUE_CONSTRUCTOR)) {
+      for (final RexNode element : ((RexCall) rexNode).getOperands()) {
+        if (!RexUtil.isLiteral(element, allowCast)) {
+          return false;
+        }
+      }
+
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  /**
+   * Convert {@link RelDataType} to the most appropriate {@link ColumnType}, or null if there is no {@link ColumnType}
+   * that is appropriate for this {@link RelDataType}.
+   *
+   * Equivalent to {@link #getValueTypeForRelDataTypeFull(RelDataType)}, except this method returns
+   * {@link ColumnType#STRING} when {@link ColumnType#isArray()} if
+   * {@link ExpressionProcessingConfig#processArraysAsMultiValueStrings()} is set via the server property
+   * {@code druid.expressions.allowArrayToStringCast}.
+   *
+   * @return type, or null if there is no matching type
    */
   @Nullable
   public static ColumnType getColumnTypeForRelDataType(final RelDataType type)
@@ -148,7 +190,13 @@ public class Calcites
   }
 
   /**
-   * Convert {@link RelDataType} to the most appropriate {@link ValueType}
+   * Convert {@link RelDataType} to the most appropriate {@link ColumnType}, or null if there is no {@link ColumnType}
+   * that is appropriate for this {@link RelDataType}.
+   *
+   * Equivalent to {@link #getColumnTypeForRelDataType(RelDataType)}, but ignores
+   * {@link ExpressionProcessingConfig#processArraysAsMultiValueStrings()} (and acts as if it is false).
+   *
+   * @return type, or null if there is no matching type
    */
   @Nullable
   public static ColumnType getValueTypeForRelDataTypeFull(final RelDataType type)
@@ -160,7 +208,7 @@ public class Calcites
       return ColumnType.DOUBLE;
     } else if (isLongType(sqlTypeName)) {
       return ColumnType.LONG;
-    } else if (isStringType(sqlTypeName)) {
+    } else if (isStringType(sqlTypeName) || sqlTypeName == SqlTypeName.NULL) {
       return ColumnType.STRING;
     } else if (SqlTypeName.OTHER == sqlTypeName) {
       if (type instanceof RowSignatures.ComplexSqlType) {
@@ -171,6 +219,9 @@ public class Calcites
       ColumnType elementType = getValueTypeForRelDataTypeFull(type.getComponentType());
       if (elementType != null) {
         return ColumnType.ofArray(elementType);
+      }
+      if (type.getComponentType().getSqlTypeName() == SqlTypeName.NULL) {
+        return ColumnType.LONG_ARRAY;
       }
       return null;
     } else {
@@ -194,15 +245,32 @@ public class Calcites
     return SqlTypeName.TIMESTAMP == sqlTypeName ||
            SqlTypeName.DATE == sqlTypeName ||
            SqlTypeName.BOOLEAN == sqlTypeName ||
-           SqlTypeName.INT_TYPES.contains(sqlTypeName);
+           SqlTypeName.INT_TYPES.contains(sqlTypeName) ||
+           SqlTypeName.UNSIGNED_TYPES.contains(sqlTypeName);
   }
 
+  /**
+   * Returns the natural StringComparator associated with the RelDataType, or null if the type is not convertible to
+   * {@link ColumnType} by {@link #getColumnTypeForRelDataType(RelDataType)}.
+   */
+  @Nullable
   public static StringComparator getStringComparatorForRelDataType(RelDataType dataType)
   {
-    final ColumnType valueType = getColumnTypeForRelDataType(dataType);
-    return getStringComparatorForValueType(valueType);
+    if (dataType.getSqlTypeName() == SqlTypeName.NULL) {
+      return StringComparators.NATURAL;
+    } else {
+      final ColumnType valueType = getColumnTypeForRelDataType(dataType);
+      if (valueType == null) {
+        return null;
+      }
+
+      return getStringComparatorForValueType(valueType);
+    }
   }
 
+  /**
+   * Returns the natural StringComparator associated with the given ColumnType
+   */
   public static StringComparator getStringComparatorForValueType(ColumnType valueType)
   {
     if (valueType.isNumeric()) {
@@ -210,7 +278,7 @@ public class Calcites
     } else if (valueType.is(ValueType.STRING)) {
       return StringComparators.LEXICOGRAPHIC;
     } else {
-      throw new ISE("Unrecognized valueType[%s]", valueType);
+      return StringComparators.NATURAL;
     }
   }
 
@@ -236,8 +304,9 @@ public class Calcites
 
     switch (typeName) {
       case TIMESTAMP:
+      case TIMESTAMP_WITH_LOCAL_TIME_ZONE:
         // Our timestamps are down to the millisecond (precision = 3).
-        dataType = typeFactory.createSqlType(typeName, 3);
+        dataType = typeFactory.createSqlType(typeName, DruidTypeSystem.DEFAULT_TIMESTAMP_PRECISION);
         break;
       case CHAR:
       case VARCHAR:
@@ -263,9 +332,12 @@ public class Calcites
       final boolean nullable
   )
   {
-    final RelDataType dataType = typeFactory.createArrayType(
-        createSqlTypeWithNullability(typeFactory, elementTypeName, nullable),
-        -1
+    final RelDataType dataType = typeFactory.createTypeWithNullability(
+        typeFactory.createArrayType(
+            createSqlTypeWithNullability(typeFactory, elementTypeName, nullable),
+            -1
+        ),
+        true
     );
 
     return dataType;
@@ -313,13 +385,29 @@ public class Calcites
       final int precision
   )
   {
+    return rexBuilder.makeTimestampLiteral(jodaToCalciteTimestampString(dateTime, sessionTimeZone), precision);
+  }
+
+  /**
+   * Calcite expects TIMESTAMP literals to be represented by TimestampStrings in the local time zone.
+   *
+   * @param dateTime        joda timestamp
+   * @param sessionTimeZone session time zone
+   *
+   * @return Calcite style Calendar, appropriate for literals
+   */
+  public static TimestampString jodaToCalciteTimestampString(
+      final DateTime dateTime,
+      final DateTimeZone sessionTimeZone
+  )
+  {
     // Calcite expects TIMESTAMP literals to be represented by TimestampStrings in the session time zone.
     // The TRAILING_ZEROS ... replaceAll is because Calcite doesn't like trailing zeroes in its fractional seconds part.
     final String timestampString = TRAILING_ZEROS
         .matcher(CALCITE_TIMESTAMP_PRINTER.print(dateTime.withZone(sessionTimeZone)))
         .replaceAll("");
 
-    return rexBuilder.makeTimestampLiteral(new TimestampString(timestampString), precision);
+    return new TimestampString(timestampString);
   }
 
   /**
@@ -364,8 +452,8 @@ public class Calcites
   public static DateTime calciteDateTimeLiteralToJoda(final RexNode literal, final DateTimeZone timeZone)
   {
     final SqlTypeName typeName = literal.getType().getSqlTypeName();
-    if (literal.getKind() != SqlKind.LITERAL || (typeName != SqlTypeName.TIMESTAMP && typeName != SqlTypeName.DATE)) {
-      throw new IAE("Expected literal but got[%s]", literal.getKind());
+    if (literal.getKind() != SqlKind.LITERAL) {
+      throw DruidException.defensive("Expected literal but got[%s]", literal.getKind());
     }
 
     if (typeName == SqlTypeName.TIMESTAMP) {
@@ -375,7 +463,7 @@ public class Calcites
       final DateString dateString = (DateString) RexLiteral.value(literal);
       return CALCITE_DATE_PARSER.parse(dateString.toString()).withZoneRetainFields(timeZone);
     } else {
-      throw new IAE("Expected TIMESTAMP or DATE but got[%s]", typeName);
+      throw DruidException.defensive("Expected TIMESTAMP or DATE but got[%s]", typeName);
     }
   }
 
@@ -439,6 +527,32 @@ public class Calcites
   public static String makePrefixedName(final String prefix, final String suffix)
   {
     return StringUtils.format("%s:%s", prefix, suffix);
+  }
+
+  /**
+   * Returns whether a string literal can be used where a number is expected. The parsing follows
+   * {@link ExprEval#computeNumber(String)}, which is how strings are implicitly converted to numbers at runtime.
+   */
+  public static boolean isNumericString(final String value)
+  {
+    return ExprEval.computeNumber(value) != null;
+  }
+
+  /**
+   * Creates the error for a string literal that is used where a number is expected, but cannot be parsed as one
+   * (see {@link #isNumericString(String)}). Such a literal is often a column name written in single quotes instead of
+   * double quotes.
+   *
+   * @param target where the literal is used, such as "Function [APPROX_QUANTILE] argument [column]"
+   * @param value  value of the literal
+   */
+  public static DruidException nonNumericStringLiteralError(final String target, final String value)
+  {
+    return InvalidSqlInput.exception(
+        "%s must be numeric, got string literal ['%s']. If you meant to refer to a column, use double quotes.",
+        target,
+        value
+    );
   }
 
   public static Class<?> sqlTypeNameJdbcToJavaClass(SqlTypeName typeName)

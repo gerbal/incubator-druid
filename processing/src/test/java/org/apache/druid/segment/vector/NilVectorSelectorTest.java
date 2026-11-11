@@ -20,11 +20,10 @@
 package org.apache.druid.segment.vector;
 
 import org.apache.druid.collections.bitmap.WrappedRoaringBitmap;
-import org.apache.druid.common.config.NullHandling;
-import org.apache.druid.segment.QueryableIndexStorageAdapter;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.testing.InitializedNullHandlingTest;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -35,7 +34,7 @@ public class NilVectorSelectorTest extends InitializedNullHandlingTest
   @Test
   public void testDefaultSizedVector()
   {
-    testVectorSize(QueryableIndexStorageAdapter.DEFAULT_VECTOR_SIZE);
+    testVectorSize(QueryContextParameters.VECTOR_SIZE.getLiteralDefault());
   }
 
   @Test
@@ -72,12 +71,12 @@ public class NilVectorSelectorTest extends InitializedNullHandlingTest
       final Object[] objects = nil.getObjectVector();
 
       for (int i = 0; i < offset.getCurrentVectorSize(); i++) {
-        Assert.assertEquals(0, dict[i]);
-        Assert.assertEquals(0L, longs[i]);
-        Assert.assertEquals(0.0, doubles[i], 0.0);
-        Assert.assertEquals(0f, floats[i], 0.0);
-        Assert.assertEquals(NullHandling.sqlCompatible(), nulls[i]);
-        Assert.assertNull(objects[i]);
+        Assertions.assertEquals(0, dict[i]);
+        Assertions.assertEquals(0L, longs[i]);
+        Assertions.assertEquals(0.0, doubles[i], 0.0);
+        Assertions.assertEquals(0f, floats[i], 0.0);
+        Assertions.assertTrue(nulls[i]);
+        Assertions.assertNull(objects[i]);
       }
       offset.advance();
     }

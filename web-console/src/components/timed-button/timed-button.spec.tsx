@@ -16,15 +16,13 @@
  * limitations under the License.
  */
 
-import React from 'react';
-
-import { shallow } from '../../utils/shallow-renderer';
+import { render } from '@testing-library/react';
 
 import { TimedButton } from './timed-button';
 
 describe('TimedButton', () => {
   it('matches snapshot', () => {
-    const timedButton = shallow(
+    const { container } = render(
       <TimedButton
         delays={[{ label: 'timeValue', delay: 1000 }]}
         onRefresh={() => null}
@@ -33,6 +31,6 @@ describe('TimedButton', () => {
       />,
     );
 
-    expect(timedButton).toMatchSnapshot();
+    expect(container.firstChild).toMatchSnapshot();
   });
 });

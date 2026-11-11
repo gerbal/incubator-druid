@@ -1,0 +1,611 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.druid.benchmark.query;
+
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Iterables;
+import org.apache.druid.data.input.impl.AggregateProjectionSpec;
+import org.apache.druid.data.input.impl.ClusteredValueGroupsBaseTableProjectionSpec;
+import org.apache.druid.data.input.impl.DimensionSchema;
+import org.apache.druid.data.input.impl.DimensionsSpec;
+import org.apache.druid.data.input.impl.LongDimensionSchema;
+import org.apache.druid.data.input.impl.StringDimensionSchema;
+import org.apache.druid.java.util.common.IAE;
+import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.common.granularity.Granularities;
+import org.apache.druid.java.util.common.granularity.Granularity;
+import org.apache.druid.query.aggregation.AggregatorFactory;
+import org.apache.druid.query.aggregation.DoubleSumAggregatorFactory;
+import org.apache.druid.query.aggregation.LongSumAggregatorFactory;
+import org.apache.druid.query.aggregation.datasketches.hll.HllSketchBuildAggregatorFactory;
+import org.apache.druid.query.aggregation.datasketches.quantiles.DoublesSketchAggregatorFactory;
+import org.apache.druid.query.aggregation.datasketches.theta.SketchMergeAggregatorFactory;
+import org.apache.druid.query.expression.TestExprMacroTable;
+import org.apache.druid.segment.AutoTypeColumnSchema;
+import org.apache.druid.segment.column.ColumnHolder;
+import org.apache.druid.segment.generator.GeneratorBasicSchemas;
+import org.apache.druid.segment.generator.GeneratorSchemaInfo;
+import org.apache.druid.segment.nested.NestedCommonFormatColumnFormatSpec;
+import org.apache.druid.segment.transform.ExpressionTransform;
+import org.apache.druid.segment.transform.TransformSpec;
+import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
+import org.apache.druid.timeline.partition.LinearShardSpec;
+import org.joda.time.Interval;
+
+import javax.annotation.Nullable;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
+
+public class SqlBenchmarkDatasets
+{
+  private static Map<String, BenchmarkSchema> DATASET_SCHEMAS = new HashMap<>();
+
+  public static String BASIC = "basic";
+  public static String EXPRESSIONS = "expressions";
+  public static String NESTED = "nested";
+  public static String DATASKETCHES = "datasketches";
+  public static String PROJECTIONS = "projections";
+  public static String GROUPER = "grouper";
+  // clustering datasets are not registered statically; they are built on demand by getSchema() from a structured
+  // datasource name (see clusteringDatasource()) so benchmarks can sweep clustering cardinality and layout.
+  public static String CLUSTERING = "clustering";
+
+  // initialize all benchmark dataset schemas to feed the data generators when running benchmarks, add any additional
+  // datasets to this initializer as needed and they will be available to any benchmarks at the table name added here
+  static {
+    // the classic 'basic' schema, string dimension oriented with a few metrics
+    final GeneratorSchemaInfo basicSchema = GeneratorBasicSchemas.SCHEMA_MAP.get(GeneratorBasicSchemas.BASIC_SCHEMA);
+    DATASET_SCHEMAS.put(
+        BASIC,
+        new BenchmarkSchema(
+            Collections.singletonList(makeSegment(BASIC, basicSchema.getDataInterval())),
+            basicSchema,
+            TransformSpec.NONE,
+            makeDimensionsSpec(basicSchema),
+            basicSchema.getAggsArray(),
+            Collections.emptyList(),
+            Granularities.NONE
+        )
+    );
+
+    // expression testbench schema, lots of different column types
+    final GeneratorSchemaInfo expressionsSchema = GeneratorBasicSchemas.SCHEMA_MAP.get(
+        GeneratorBasicSchemas.EXPRESSION_TESTBENCH_SCHEMA
+    );
+    DATASET_SCHEMAS.put(
+        EXPRESSIONS,
+        new BenchmarkSchema(
+            Collections.singletonList(makeSegment(EXPRESSIONS, expressionsSchema.getDataInterval())),
+            expressionsSchema,
+            TransformSpec.NONE,
+            makeDimensionsSpec(expressionsSchema),
+            expressionsSchema.getAggsArray(),
+            Collections.emptyList(),
+            Granularities.NONE
+        )
+    );
+
+    // expressions schema but with transform to create nested column
+    DATASET_SCHEMAS.put(
+        NESTED,
+        new BenchmarkSchema(
+            Collections.singletonList(makeSegment(NESTED, expressionsSchema.getDataInterval())),
+            expressionsSchema,
+            new TransformSpec(
+                null,
+                ImmutableList.of(
+                    new ExpressionTransform(
+                        "nested",
+                        "json_object('long1', long1, 'nesteder', json_object('string1', string1, 'long2', long2, 'double3',double3, 'string5', string5))",
+                        TestExprMacroTable.INSTANCE
+                    )
+                )
+            ),
+            DimensionsSpec.builder().setDimensions(
+                ImmutableList.copyOf(
+                    Iterables.concat(
+                        expressionsSchema.getDimensionsSpecExcludeAggs().getDimensions(),
+                        Collections.singletonList(AutoTypeColumnSchema.of("nested"))
+                    )
+                )
+            ).build(),
+            expressionsSchema.getAggsArray(),
+            Collections.emptyList(),
+            Granularities.NONE
+        )
+    );
+
+    // expressions schema but with some datasketch aggs defined
+    GeneratorSchemaInfo datasketchesSchema = new GeneratorSchemaInfo(
+            expressionsSchema.getColumnSchemas(),
+            ImmutableList.of(
+                new HllSketchBuildAggregatorFactory("hll_string5", "string5", null, null, null, false, true),
+                new SketchMergeAggregatorFactory("theta_string5", "string5", null, null, null, null),
+                new DoublesSketchAggregatorFactory("quantiles_float4", "float4", null, null, null),
+                new DoublesSketchAggregatorFactory("quantiles_long3", "long3", null, null, null)
+            ),
+            expressionsSchema.getDataInterval(),
+            true
+    );
+    DATASET_SCHEMAS.put(
+        DATASKETCHES,
+        new BenchmarkSchema(
+            Collections.singletonList(makeSegment(DATASKETCHES, datasketchesSchema.getDataInterval())),
+            datasketchesSchema,
+            TransformSpec.NONE,
+            makeDimensionsSpec(datasketchesSchema),
+            datasketchesSchema.getAggsArray(),
+            Collections.emptyList(),
+            Granularities.NONE
+        )
+    );
+
+    // expressions schema with projections
+    DATASET_SCHEMAS.put(
+        PROJECTIONS,
+        new BenchmarkSchema(
+            Collections.singletonList(makeSegment(PROJECTIONS, expressionsSchema.getDataInterval())),
+            expressionsSchema,
+            TransformSpec.NONE,
+            makeDimensionsSpec(expressionsSchema),
+            expressionsSchema.getAggsArray(),
+            Arrays.asList(
+                AggregateProjectionSpec.builder("string2_hourly_sums_hll")
+                                       .virtualColumns(
+                                           Granularities.toVirtualColumn(Granularities.HOUR, "__gran")
+                                       )
+                                       .groupingColumns(
+                                           new StringDimensionSchema("string2"),
+                                           new LongDimensionSchema("__gran")
+                                       )
+                                       .aggregators(
+                                           new LongSumAggregatorFactory("long4_sum", "long4"),
+                                           new DoubleSumAggregatorFactory("double2_sum", "double2"),
+                                           new HllSketchBuildAggregatorFactory(
+                                               "hll_string5",
+                                               "string5",
+                                               null,
+                                               null,
+                                               null,
+                                               false,
+                                               true
+                                           )
+                                       )
+                                       .build(),
+                AggregateProjectionSpec.builder("string2_long2_sums")
+                                       .groupingColumns(
+                                           new StringDimensionSchema("string2"),
+                                           new LongDimensionSchema("long2")
+                                       )
+                                       .aggregators(
+                                           new LongSumAggregatorFactory("long4_sum", "long4"),
+                                           new DoubleSumAggregatorFactory("double2_sum", "double2"),
+                                           new HllSketchBuildAggregatorFactory(
+                                               "hll_string5",
+                                               "string5",
+                                               null,
+                                               null,
+                                               null,
+                                               false,
+                                               true
+                                           )
+                                       )
+                                       .build()
+            ),
+            Granularities.NONE
+        )
+    );
+
+    // group-by testing, 2 segments
+    final GeneratorSchemaInfo groupingSchema = GeneratorBasicSchemas.SCHEMA_MAP.get(
+        GeneratorBasicSchemas.GROUPBY_TESTBENCH_SCHEMA
+    );
+    DATASET_SCHEMAS.put(
+        GROUPER,
+        new BenchmarkSchema(
+            Arrays.asList(
+                makeSegment(GROUPER, groupingSchema.getDataInterval(), 0),
+                makeSegment(GROUPER, groupingSchema.getDataInterval(), 1)
+            ),
+            groupingSchema,
+            new TransformSpec(
+                null,
+                ImmutableList.of(
+                    // string array dims
+                    new ExpressionTransform(
+                        "stringArray-Sequential-100_000",
+                        "array(\"string-Sequential-100_000\")",
+                        TestExprMacroTable.INSTANCE
+                    ),
+                    new ExpressionTransform(
+                        "stringArray-Sequential-3_000_000",
+                        "array(\"string-Sequential-10_000_000\")",
+                        TestExprMacroTable.INSTANCE
+                    ),
+                    /*
+                    new ExpressionTransform(
+                        "stringArray-Sequential-1_000_000_000",
+                        "array(\"string-Sequential-1_000_000_000\")",
+                        TestExprMacroTable.INSTANCE
+                    ),*/
+                    new ExpressionTransform(
+                        "stringArray-ZipF-1_000_000",
+                        "array(\"string-ZipF-1_000_000\")",
+                        TestExprMacroTable.INSTANCE
+                    ),
+                    new ExpressionTransform(
+                        "stringArray-Uniform-1_000_000",
+                        "array(\"string-Uniform-1_000_000\")",
+                        TestExprMacroTable.INSTANCE
+                    ),
+
+                    // long array dims
+                    new ExpressionTransform(
+                        "longArray-Sequential-100_000",
+                        "array(\"long-Sequential-100_000\")",
+                        TestExprMacroTable.INSTANCE
+                    ),
+                    new ExpressionTransform(
+                        "longArray-Sequential-3_000_000",
+                        "array(\"long-Sequential-10_000_000\")",
+                        TestExprMacroTable.INSTANCE
+                    ),
+                    /*
+                    new ExpressionTransform(
+                        "longArray-Sequential-1_000_000_000",
+                        "array(\"long-Sequential-1_000_000_000\")",
+                        TestExprMacroTable.INSTANCE
+                    ),*/
+                    new ExpressionTransform(
+                        "longArray-ZipF-1_000_000",
+                        "array(\"long-ZipF-1_000_000\")",
+                        TestExprMacroTable.INSTANCE
+                    ),
+                    new ExpressionTransform(
+                        "longArray-Uniform-1_000_000",
+                        "array(\"long-Uniform-1_000_000\")",
+                        TestExprMacroTable.INSTANCE
+                    ),
+
+                    // nested complex json dim
+                    new ExpressionTransform(
+                        "nested-Sequential-100_000",
+                        "json_object('long1', \"long-Sequential-100_000\", 'nesteder', json_object('long1', \"long-Sequential-100_000\"))",
+                        TestExprMacroTable.INSTANCE
+                    ),
+                    new ExpressionTransform(
+                        "nested-Sequential-3_000_000",
+                        "json_object('long1', \"long-Sequential-10_000_000\", 'nesteder', json_object('long1', \"long-Sequential-10_000_000\"))",
+                        TestExprMacroTable.INSTANCE
+                    ),
+                    /*
+                    new ExpressionTransform(
+                        "nested-Sequential-1_000_000_000",
+                        "json_object('long1', \"long-Sequential-1_000_000_000\", 'nesteder', json_object('long1', \"long-Sequential-1_000_000_000\"))",
+                        TestExprMacroTable.INSTANCE
+                    ),*/
+                    new ExpressionTransform(
+                        "nested-ZipF-1_000_000",
+                        "json_object('long1', \"long-ZipF-1_000_000\", 'nesteder', json_object('long1', \"long-ZipF-1_000_000\"))",
+                        TestExprMacroTable.INSTANCE
+                    ),
+                    new ExpressionTransform(
+                        "nested-Uniform-1_000_000",
+                        "json_object('long1', \"long-Uniform-1_000_000\", 'nesteder', json_object('long1', \"long-Uniform-1_000_000\"))",
+                        TestExprMacroTable.INSTANCE
+                    )
+                )
+            ),
+            makeDimensionsSpec(groupingSchema),
+            groupingSchema.getAggsArray(),
+            Collections.emptyList(),
+            Granularities.NONE
+        )
+    );
+  }
+
+  public static BenchmarkSchema getSchema(String dataset)
+  {
+    if (dataset.startsWith(CLUSTERING + "_")) {
+      return makeClusteringSchema(dataset);
+    }
+    return DATASET_SCHEMAS.get(dataset);
+  }
+
+  /**
+   * Builds the structured datasource (table) name for a clustering benchmark dataset, encoding the segment layout and
+   * the clustering parameters so {@link #getSchema(String)} can reconstruct the {@link BenchmarkSchema} on demand. The
+   * encoded params keep the shared benchmark setup + static-map architecture intact while still allowing the
+   * clustering cardinality and number of clustering columns to be swept as JMH parameters.
+   * <p>
+   * {@code layout} is one of {@code CLUSTERED}, {@code UNCLUSTERED}, or {@code TIME_ORDERED} (see
+   * {@link #makeClusteringSchema}).
+   */
+  public static String clusteringDatasource(String layout, int clusteringCardinality, int numClusteringColumns)
+  {
+    return StringUtils.format(
+        "%s_%s_c%d_k%d",
+        CLUSTERING,
+        layout,
+        clusteringCardinality,
+        numClusteringColumns
+    );
+  }
+
+  /**
+   * Builds a clustering {@link BenchmarkSchema} from a datasource name produced by
+   * {@link #clusteringDatasource(String, int, int)}. The same generated data is laid out three ways for comparison:
+   * <ul>
+   *   <li>{@code CLUSTERED}: V10 clustered base-table segment, partitioned into per-clustering-value groups, ordered
+   *       clustering columns &rarr; {@code __time} &rarr; non-clustering columns (the intended real-world layout);</li>
+   *   <li>{@code UNCLUSTERED}: V10 regular segment with the <em>same</em> clustering-first ordering but no clustered
+   *       grouping &mdash; isolates the cost/benefit of the clustered grouping mechanism at a fixed sort order;</li>
+   *   <li>{@code TIME_ORDERED}: regular (V9) segment with the production-style {@code __time}-first ordering
+   *       ({@code __time} &rarr; clustering columns &rarr; non-clustering columns) &mdash; the "what we run today"
+   *       baseline the clustered layout is being compared against.</li>
+   * </ul>
+   */
+  private static BenchmarkSchema makeClusteringSchema(String dataset)
+  {
+    // Encoded as clustering_<LAYOUT>_c<card>_k<k>. The layout may itself contain underscores (e.g. TIME_ORDERED), so
+    // parse the trailing c<card>/k<k> positionally and treat everything between the prefix and them as the layout.
+    final String[] parts = dataset.split("_");
+    if (parts.length < 4) {
+      throw new IAE("Malformed clustering datasource[%s]", dataset);
+    }
+    final int numClusteringColumns = Integer.parseInt(parts[parts.length - 1].substring(1));
+    final int clusteringCardinality = Integer.parseInt(parts[parts.length - 2].substring(1));
+    final String layout = String.join("_", Arrays.copyOfRange(parts, 1, parts.length - 2));
+
+    final GeneratorSchemaInfo schemaInfo = GeneratorBasicSchemas.makeClusteringSchemaInfo(clusteringCardinality);
+    // generated data dimensions in schema order: [clusterKey1, clusterKey2, dimSecondary, valueLong, valueDouble]
+    final List<DimensionSchema> dataDimensions = schemaInfo.getDimensionsSpec().getDimensions();
+
+    if ("TIME_ORDERED".equals(layout)) {
+      // Regular time-ordered segment: __time first, then the columns in schema order. forceSegmentSortByTime defaults
+      // to true, so schemaInfo.getDimensionsSpec() already yields the __time-first ordering.
+      return new BenchmarkSchema(
+          Collections.singletonList(makeSegment(dataset, schemaInfo.getDataInterval())),
+          schemaInfo,
+          TransformSpec.NONE,
+          schemaInfo.getDimensionsSpec(),
+          new AggregatorFactory[0],
+          Collections.emptyList(),
+          Granularities.NONE,
+          null,
+          false
+      );
+    }
+
+    final boolean clustered = "CLUSTERED".equals(layout);
+    if (!clustered && !"UNCLUSTERED".equals(layout)) {
+      throw new IAE("Unknown clustering layout[%s] in datasource[%s]", layout, dataset);
+    }
+
+    // Ordered columns: clustering prefix, then __time, then the remaining non-clustering columns (clustering columns
+    // -> time -> non-clustering), matching the intended real-world clustered schema ordering.
+    final List<DimensionSchema> columns = new ArrayList<>(dataDimensions.size() + 1);
+    columns.addAll(dataDimensions.subList(0, numClusteringColumns));
+    columns.add(new LongDimensionSchema(ColumnHolder.TIME_COLUMN_NAME));
+    columns.addAll(dataDimensions.subList(numClusteringColumns, dataDimensions.size()));
+    final List<String> clusteringColumns = dataDimensions.subList(0, numClusteringColumns)
+                                                         .stream()
+                                                         .map(DimensionSchema::getName)
+                                                         .collect(Collectors.toList());
+
+    final ClusteredValueGroupsBaseTableProjectionSpec clusterSpec =
+        ClusteredValueGroupsBaseTableProjectionSpec.builder()
+                                                   .columns(columns)
+                                                   .clusteringColumns(clusteringColumns)
+                                                   .build();
+
+    return new BenchmarkSchema(
+        Collections.singletonList(makeSegment(dataset, schemaInfo.getDataInterval())),
+        schemaInfo,
+        TransformSpec.NONE,
+        // clustering columns -> __time -> non-clustering, with forceSegmentSortByTime=false
+        clusterSpec.getDimensionsSpec(),
+        new AggregatorFactory[0],
+        Collections.emptyList(),
+        Granularities.NONE,
+        clustered ? clusterSpec : null,
+        true
+    );
+  }
+
+  private static DataSegment makeSegment(String datasource, Interval interval)
+  {
+    return makeSegment(datasource, interval, 0);
+  }
+
+  private static DataSegment makeSegment(String datasource, Interval interval, int partitionNumber)
+  {
+    return DataSegment.builder(SegmentId.of(datasource, interval, "1", partitionNumber))
+                      .shardSpec(new LinearShardSpec(partitionNumber))
+                      .size(0)
+                      .build();
+  }
+
+  private static DimensionsSpec makeDimensionsSpec(GeneratorSchemaInfo schemaInfo)
+  {
+    return DimensionsSpec.builder().setDimensions(schemaInfo.getDimensionsSpecExcludeAggs().getDimensions()).build();
+  }
+
+  public static class BenchmarkSchema
+  {
+    private final List<DataSegment> dataSegments;
+    private final GeneratorSchemaInfo generatorSchemaInfo;
+    private final TransformSpec transformSpec;
+    private final DimensionsSpec dimensionsSpec;
+    private final AggregatorFactory[] aggregators;
+    private final Granularity queryGranularity;
+    private final List<AggregateProjectionSpec> projections;
+    /**
+     * Optional clustered base-table spec. When non-null the segment is built as clustered value groups. Only used by
+     * the clustering benchmark; null for all classic datasets.
+     */
+    @Nullable
+    private final ClusteredValueGroupsBaseTableProjectionSpec clusterSpec;
+    /**
+     * Whether to build this dataset's segments with the V10 writer (required for clustered segments, and used for the
+     * unclustered comparison layout so the two are an apples-to-apples comparison). False for all classic datasets.
+     */
+    private final boolean useV10;
+
+    public BenchmarkSchema(
+        List<DataSegment> dataSegments,
+        GeneratorSchemaInfo generatorSchemaInfo,
+        TransformSpec transformSpec,
+        DimensionsSpec dimensionSpec,
+        AggregatorFactory[] aggregators,
+        List<AggregateProjectionSpec> projections,
+        Granularity queryGranularity
+    )
+    {
+      this(
+          dataSegments,
+          generatorSchemaInfo,
+          transformSpec,
+          dimensionSpec,
+          aggregators,
+          projections,
+          queryGranularity,
+          null,
+          false
+      );
+    }
+
+    public BenchmarkSchema(
+        List<DataSegment> dataSegments,
+        GeneratorSchemaInfo generatorSchemaInfo,
+        TransformSpec transformSpec,
+        DimensionsSpec dimensionSpec,
+        AggregatorFactory[] aggregators,
+        List<AggregateProjectionSpec> projections,
+        Granularity queryGranularity,
+        @Nullable ClusteredValueGroupsBaseTableProjectionSpec clusterSpec,
+        boolean useV10
+    )
+    {
+      this.dataSegments = dataSegments;
+      this.generatorSchemaInfo = generatorSchemaInfo;
+      this.transformSpec = transformSpec;
+      this.dimensionsSpec = dimensionSpec;
+      this.aggregators = aggregators;
+      this.queryGranularity = queryGranularity;
+      this.projections = projections;
+      this.clusterSpec = clusterSpec;
+      this.useV10 = useV10;
+    }
+
+    public List<DataSegment> getDataSegments()
+    {
+      return dataSegments;
+    }
+
+    public GeneratorSchemaInfo getGeneratorSchemaInfo()
+    {
+      return generatorSchemaInfo;
+    }
+
+    public TransformSpec getTransformSpec()
+    {
+      return transformSpec;
+    }
+
+    public DimensionsSpec getDimensionsSpec()
+    {
+      return dimensionsSpec;
+    }
+
+    public AggregatorFactory[] getAggregators()
+    {
+      return aggregators;
+    }
+
+    public Granularity getQueryGranularity()
+    {
+      return queryGranularity;
+    }
+
+    public List<AggregateProjectionSpec> getProjections()
+    {
+      return projections;
+    }
+
+    @Nullable
+    public ClusteredValueGroupsBaseTableProjectionSpec getClusterSpec()
+    {
+      return clusterSpec;
+    }
+
+    public boolean isUseV10()
+    {
+      return useV10;
+    }
+
+    public BenchmarkSchema convertDimensions(boolean convertToAuto, NestedCommonFormatColumnFormatSpec columnFormatSpec)
+    {
+      return new SqlBenchmarkDatasets.BenchmarkSchema(
+          dataSegments,
+          generatorSchemaInfo,
+          transformSpec,
+          dimensionsSpec.withDimensions(
+              dimensionsSpec.getDimensions()
+                            .stream()
+                            .map(dim -> asDimensionSchema(dim, convertToAuto, columnFormatSpec))
+                            .collect(Collectors.toList())
+          ),
+          aggregators,
+          projections
+              .stream()
+              .map(
+                  projection ->
+                      AggregateProjectionSpec
+                          .builder(projection)
+                          .groupingColumns(
+                              projection.getGroupingColumns()
+                                        .stream()
+                                        .map(dim -> asDimensionSchema(dim, convertToAuto, columnFormatSpec))
+                                        .collect(Collectors.toList())
+                          )
+                          .build()
+              ).collect(Collectors.toList()),
+          queryGranularity,
+          clusterSpec,
+          useV10
+      );
+    }
+
+    private static DimensionSchema asDimensionSchema(DimensionSchema dim, boolean convertToAuto, NestedCommonFormatColumnFormatSpec columnFormatSpec)
+    {
+      if (convertToAuto || dim instanceof AutoTypeColumnSchema) {
+        return new AutoTypeColumnSchema(dim.getName(), null, columnFormatSpec);
+      }
+      return dim;
+    }
+  }
+}

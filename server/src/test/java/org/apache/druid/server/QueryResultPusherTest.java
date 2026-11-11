@@ -1,0 +1,185 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.druid.server;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Throwables;
+import org.apache.druid.jackson.DefaultObjectMapper;
+import org.apache.druid.server.QueryResource.QueryMetricCounter;
+import org.apache.druid.server.QueryResultPusher.ResultsWriter;
+import org.apache.druid.server.QueryResultPusher.Writer;
+import org.apache.druid.server.mocks.MockHttpServletRequest;
+import org.eclipse.jetty.http.HttpHeader;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+import javax.servlet.http.HttpServletRequest;
+import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.Response.ResponseBuilder;
+
+import java.io.OutputStream;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+public class QueryResultPusherTest
+{
+  private static final DruidNode DRUID_NODE = new DruidNode(
+      "broker",
+      "localhost",
+      true,
+      8082,
+      null,
+      true,
+      false);
+
+  @Test
+  public void testClientAcceptsTrailers()
+  {
+    Assertions.assertFalse(QueryResultPusher.clientAcceptsTrailers(requestWithTe(null)));
+    Assertions.assertFalse(QueryResultPusher.clientAcceptsTrailers(requestWithTe("")));
+    Assertions.assertFalse(QueryResultPusher.clientAcceptsTrailers(requestWithTe("gzip, deflate;q=0.5")));
+    Assertions.assertFalse(QueryResultPusher.clientAcceptsTrailers(requestWithTe("trailersx")));
+    Assertions.assertTrue(QueryResultPusher.clientAcceptsTrailers(requestWithTe("trailers")));
+    Assertions.assertTrue(QueryResultPusher.clientAcceptsTrailers(requestWithTe("Trailers")));
+    Assertions.assertTrue(QueryResultPusher.clientAcceptsTrailers(requestWithTe("gzip;q=0.5, trailers")));
+    Assertions.assertTrue(QueryResultPusher.clientAcceptsTrailers(requestWithTe(" trailers ;q=1, gzip")));
+  }
+
+  private static HttpServletRequest requestWithTe(final String te)
+  {
+    final MockHttpServletRequest request = new MockHttpServletRequest();
+    if (te != null) {
+      request.headers.put(HttpHeader.TE.asString(), te);
+    }
+    return request;
+  }
+
+  @Test
+  public void testResultPusherRetainsNestedExceptionBacktraces()
+  {
+
+    HttpServletRequest request = new MockHttpServletRequest();
+    ObjectMapper jsonMapper = new DefaultObjectMapper();
+    ResponseContextConfig responseContextConfig = ResponseContextConfig.newConfig(true);
+    DruidNode selfNode = DRUID_NODE;
+    QueryResource.QueryMetricCounter counter = new NoopQueryMetricCounter();
+    String queryId = "someQuery";
+    MediaType contentType = MediaType.APPLICATION_JSON_TYPE;
+    Map<String, String> extraHeaders = new HashMap<>();
+    AtomicBoolean recordFailureInvoked = new AtomicBoolean();
+
+    String embeddedExceptionMessage = "Embedded Exception Message!";
+    RuntimeException embeddedException = new RuntimeException(embeddedExceptionMessage);
+    RuntimeException topException = new RuntimeException("Where's the party?", embeddedException);
+
+    ResultsWriter resultWriter = new ResultsWriter()
+    {
+
+      @Override
+      public void close()
+      {
+      }
+
+      @Override
+      public ResponseBuilder start()
+      {
+        throw topException;
+      }
+
+      @Override
+      public void recordSuccess(long numBytes)
+      {
+      }
+
+      @Override
+      public void recordFailure(Exception e, long bytesWritten)
+      {
+        Assertions.assertTrue(Throwables.getStackTraceAsString(e).contains(embeddedExceptionMessage));
+        recordFailureInvoked.set(true);
+      }
+
+      @Override
+      public Writer makeWriter(OutputStream out)
+      {
+        return null;
+      }
+
+      @Override
+      public QueryResponse<Object> getQueryResponse()
+      {
+        return null;
+      }
+    };
+    QueryResultPusher pusher = new QueryResultPusher(
+        request,
+        jsonMapper,
+        responseContextConfig,
+        selfNode,
+        counter,
+        queryId,
+        contentType,
+        extraHeaders,
+        Collections.emptyMap())
+    {
+
+      @Override
+      public void writeException(Exception e, OutputStream out)
+      {
+      }
+
+      @Override
+      public ResultsWriter start()
+      {
+        return resultWriter;
+      }
+    };
+
+    pusher.push();
+
+    Assertions.assertTrue(recordFailureInvoked.get(), "recordFailure(e) should have been invoked!");
+  }
+
+  static class NoopQueryMetricCounter implements QueryMetricCounter
+  {
+
+    @Override
+    public void incrementSuccess()
+    {
+    }
+
+    @Override
+    public void incrementFailed()
+    {
+    }
+
+    @Override
+    public void incrementInterrupted()
+    {
+    }
+
+    @Override
+    public void incrementTimedOut()
+    {
+    }
+
+  }
+}

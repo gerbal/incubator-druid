@@ -20,8 +20,8 @@
 package org.apache.druid.segment.data;
 
 import org.apache.druid.java.util.common.io.Closer;
-import org.apache.druid.java.util.common.io.smoosh.FileSmoosher;
 import org.apache.druid.segment.CompressedPools;
+import org.apache.druid.segment.file.SegmentFileBuilder;
 import org.apache.druid.segment.serde.MetaSerdeHelper;
 import org.apache.druid.segment.writeout.SegmentWriteOutMedium;
 
@@ -56,7 +56,9 @@ public class BlockLayoutColumnarFloatsSerializer implements ColumnarFloatsSerial
       SegmentWriteOutMedium segmentWriteOutMedium,
       String filenameBase,
       ByteOrder byteOrder,
-      CompressionStrategy compression
+      CompressionStrategy compression,
+      int fileSizeLimit,
+      Closer closer
   )
   {
     this.columnName = columnName;
@@ -64,11 +66,12 @@ public class BlockLayoutColumnarFloatsSerializer implements ColumnarFloatsSerial
         segmentWriteOutMedium,
         filenameBase,
         compression,
-        CompressedPools.BUFFER_SIZE
+        CompressedPools.BUFFER_SIZE,
+        fileSizeLimit,
+        closer
     );
     this.compression = compression;
     CompressionStrategy.Compressor compressor = compression.getCompressor();
-    Closer closer = segmentWriteOutMedium.getCloser();
     this.endBuffer = compressor.allocateInBuffer(CompressedPools.BUFFER_SIZE, closer).order(byteOrder);
   }
 
@@ -110,11 +113,11 @@ public class BlockLayoutColumnarFloatsSerializer implements ColumnarFloatsSerial
   }
 
   @Override
-  public void writeTo(WritableByteChannel channel, FileSmoosher smoosher) throws IOException
+  public void writeTo(WritableByteChannel channel, SegmentFileBuilder fileBuilder) throws IOException
   {
     writeEndBuffer();
     META_SERDE_HELPER.writeTo(channel, this);
-    flattener.writeTo(channel, smoosher);
+    flattener.writeTo(channel, fileBuilder);
   }
 
   private void writeEndBuffer() throws IOException

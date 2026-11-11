@@ -19,14 +19,13 @@
 
 package org.apache.druid.server;
 
-import com.google.common.collect.ImmutableMap;
-import org.apache.druid.client.DirectDruidClient;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.query.Queries;
 import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryContext;
 import org.apache.druid.query.QueryPlus;
 import org.apache.druid.query.QueryRunner;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.context.ResponseContext;
 import org.apache.druid.server.initialization.ServerConfig;
 
@@ -68,17 +67,27 @@ public class SetAndVerifyContextQueryRunner<T> implements QueryRunner<T>
     newQuery.context().verifyMaxQueryTimeout(
         serverConfig.getMaxQueryTimeout()
     );
-    // DirectDruidClient.QUERY_FAIL_TIME is used by DirectDruidClient and JsonParserIterator to determine when to
+    // queryFailTime is used by DirectDruidClient and JsonParserIterator to determine when to
     // fail with a timeout exception
-    final long failTime;
     final QueryContext context = newQuery.context();
+    final long existingFailTime = context.getOrDefault(QueryContextParameters.QUERY_FAIL_TIME, -1L);
+    long computedFailTime;
     if (context.hasTimeout()) {
-      failTime = this.startTimeMillis + context.getTimeout();
+      computedFailTime = this.startTimeMillis + context.getTimeout();
     } else {
-      failTime = this.startTimeMillis + serverConfig.getMaxQueryTimeout();
+      computedFailTime = this.startTimeMillis + serverConfig.getMaxQueryTimeout();
     }
+    // Clamp overflow
+    if (computedFailTime <= 0) {
+      computedFailTime = Long.MAX_VALUE;
+    }
+    // Never extend an existing deadline. This prevents nested native queries and queued historicals
+    // from pushing the effective timeout past the original deadline.
+    final long failTime = (existingFailTime >= 0)
+        ? Math.min(existingFailTime, computedFailTime)
+        : computedFailTime;
     return newQuery.withOverriddenContext(
-        ImmutableMap.of(DirectDruidClient.QUERY_FAIL_TIME, failTime > 0 ? failTime : Long.MAX_VALUE)
+        QueryContext.ofMap(QueryContextParameters.QUERY_FAIL_TIME, failTime)
     );
   }
 }

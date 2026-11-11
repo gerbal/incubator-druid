@@ -20,10 +20,12 @@
 package org.apache.druid.server.coordinator.simulate;
 
 import org.apache.druid.client.DruidServer;
+import org.apache.druid.segment.TestDataSource;
 import org.apache.druid.server.coordinator.CoordinatorDynamicConfig;
 import org.apache.druid.timeline.DataSegment;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -35,6 +37,7 @@ public class RoundRobinAssignmentTest extends CoordinatorSimulationBaseTest
   private List<DruidServer> historicals;
 
   @Override
+  @BeforeEach
   public void setUp()
   {
     historicals = new ArrayList<>();
@@ -58,7 +61,7 @@ public class RoundRobinAssignmentTest extends CoordinatorSimulationBaseTest
         CoordinatorSimulation.builder()
                              .withDynamicConfig(config)
                              .withBalancer("random")
-                             .withRules(DS.WIKI, Load.on(Tier.T1, 2).forever())
+                             .withRules(TestDataSource.WIKI, Load.on(Tier.T1, 2).forever())
                              .withServers(historicals)
                              .withSegments(Segments.WIKI_10X100D)
                              .build();
@@ -70,7 +73,7 @@ public class RoundRobinAssignmentTest extends CoordinatorSimulationBaseTest
     verifyValue(Metric.ASSIGNED_COUNT, 2000L);
 
     for (DruidServer historical : historicals) {
-      Assert.assertEquals(200, historical.getTotalSegments());
+      Assertions.assertEquals(200, historical.getTotalSegments());
     }
   }
 
@@ -92,8 +95,8 @@ public class RoundRobinAssignmentTest extends CoordinatorSimulationBaseTest
         CoordinatorSimulation.builder()
                              .withDynamicConfig(config)
                              .withBalancer("random")
-                             .withRules(DS.WIKI, Load.on(Tier.T1, 3).forever())
-                             .withRules(DS.KOALA, Load.on(Tier.T1, 1).forever())
+                             .withRules(TestDataSource.WIKI, Load.on(Tier.T1, 3).forever())
+                             .withRules(TestDataSource.KOALA, Load.on(Tier.T1, 1).forever())
                              .withServers(historicals)
                              .withSegments(segments)
                              .build();
@@ -102,10 +105,11 @@ public class RoundRobinAssignmentTest extends CoordinatorSimulationBaseTest
     // Run 1: all segments are assigned and loaded
     runCoordinatorCycle();
     loadQueuedSegments();
-    verifyValue(Metric.ASSIGNED_COUNT, 13000L);
+    verifyValue(Metric.ASSIGNED_COUNT, filterByDatasource(TestDataSource.KOALA), 10000L);
+    verifyValue(Metric.ASSIGNED_COUNT, filterByDatasource(TestDataSource.WIKI), 3000L);
 
     for (DruidServer historical : historicals) {
-      Assert.assertEquals(1300, historical.getTotalSegments());
+      Assertions.assertEquals(1300, historical.getTotalSegments());
     }
   }
 

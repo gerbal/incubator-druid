@@ -19,8 +19,6 @@
 
 package org.apache.druid.math.expr;
 
-import org.apache.druid.common.config.NullHandling;
-
 import javax.annotation.Nullable;
 import java.util.Arrays;
 import java.util.List;
@@ -66,7 +64,29 @@ public class Evals
 
   public static boolean asBoolean(@Nullable String x)
   {
-    return !NullHandling.isNullOrEquivalent(x) && Boolean.parseBoolean(x);
+    return Boolean.parseBoolean(x);
+  }
+
+  /**
+   * Best effort try to turn a value into a boolean:
+   *  {@link Boolean} will be passed directly through
+   *  {@link String} will use {@link #asBoolean(String)}
+   *  {@link Long} will use {@link #asBoolean(long)}
+   *  {@link Number} will use {@link #asBoolean(double)}
+   *  everything else, including null will be false
+   */
+  public static boolean objectAsBoolean(@Nullable Object val)
+  {
+    if (val instanceof Boolean) {
+      return (Boolean) val;
+    } else if (val instanceof String) {
+      return Evals.asBoolean((String) val);
+    } else if (val instanceof Long) {
+      return Evals.asBoolean((Long) val);
+    } else if (val instanceof Number) {
+      return Evals.asBoolean(((Number) val).doubleValue());
+    }
+    return false;
   }
 
   /**

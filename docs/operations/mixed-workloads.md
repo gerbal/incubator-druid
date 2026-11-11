@@ -23,7 +23,7 @@ sidebar_label: Mixed workloads
   ~ under the License.
   -->
 
-If you frequently run concurrent, heterogeneous workloads on your Apache Druid cluster, configure Druid to properly allocate cluster resources to optimize your overall query performance.
+If you frequently run concurrent, heterogeneous workloads on your Apache&circledR; Druid cluster, configure Druid to properly allocate cluster resources to optimize your overall query performance.
 
 Each Druid query consumes a certain amount of cluster resources, such as processing threads, memory buffers for intermediate query results, and HTTP threads for communicating between Brokers and data servers.
 "Heavy" queries that return large results are more resource-intensive than short-running, "light" queries.
@@ -60,7 +60,8 @@ Set the following query laning properties in the `broker/runtime.properties` fil
 * `druid.query.scheduler.laning.strategy` – The strategy used to assign queries to lanes.
 You can use the built-in [“high/low” laning strategy](../configuration/index.md#highlow-laning-strategy), or [define your own laning strategy manually](../configuration/index.md#manual-laning-strategy).
 * `druid.query.scheduler.numThreads` – The total number of queries that can be served per Broker. We recommend setting this value to 1-2 less than `druid.server.http.numThreads`.
-  > The query scheduler by default does not limit the number of queries that a Broker can serve. Setting this property to a bounded number limits the thread count. If the allocated threads are all occupied, any incoming query, including interactive queries, will be rejected with an HTTP 429 status code.
+
+The query scheduler by default does not limit the number of queries that a Broker can serve. Setting this property to a bounded number limits the thread count. If the allocated threads are all occupied, any incoming query, including interactive queries, will be queued on the broker and will timeout after the request stays in the queue for more than the configured timeout. This configured timeout is equal to `MIN(Integer.MAX_VALUE, druid.server.http.maxQueryTimeout)`. If the value of `druid.server.http.maxQueryTimeout` is negative, the request is queued forever. 
 
 ### Lane-specific properties
 
@@ -68,14 +69,14 @@ If you use the __high/low laning strategy__, set the following:
 
 * `druid.query.scheduler.laning.maxLowPercent` – The maximum percent of query threads to handle low priority queries. The remaining query threads are dedicated to high priority queries.
 
-Consider also defining a [prioritization strategy](../configuration/index.md#prioritization-strategies) for the Broker to label queries as high or low priority. Otherwise, manually set the priority for incoming queries on the [query context](../querying/query-context.md).
+Consider also defining a [prioritization strategy](../configuration/index.md#prioritization-strategies) for the Broker to label queries as high or low priority. Otherwise, manually set the priority for incoming queries on the [query context](../querying/query-context-reference.md).
 
 If you use a __manual laning strategy__, set the following:
 
 * `druid.query.scheduler.laning.lanes.{name}` – The limit for how many queries can run in the `name` lane. Define as many named lanes as needed.
 * `druid.query.scheduler.laning.isLimitPercent` – Whether to treat the lane limit as an exact number or a percent of the minimum of `druid.server.http.numThreads` or `druid.query.scheduler.numThreads`.
 
-With manual laning, incoming queries can be labeled with the desired lane in the `lane` parameter of the [query context](../querying/query-context.md).
+With manual laning, incoming queries can be labeled with the desired lane in the `lane` parameter of the [query context](../querying/query-context-reference.md).
 
 See [Query prioritization and laning](../configuration/index.md#query-prioritization-and-laning) for additional details on query laning configuration.
 
@@ -189,6 +190,26 @@ druid.broker.select.tier=highestPriority
 ```
 
 See [Broker configuration](../configuration/index.md#broker-process-configs) for more details on these properties.
+
+#### Restrict Broker visibility to specific tiers
+
+By default, a Broker watches all Historical tiers for segment availability. Use `druid.broker.segment.watchedTiers` to restrict a Broker to only see segments on specific tiers. This provides strict query isolation - segments on unwatched tiers are invisible to the Broker and cannot be queried by it.
+
+Example config for a Broker that only queries Historicals in a tier named "hot":
+```
+druid.broker.segment.watchedTiers=["hot"]
+```
+
+Example config for a Broker that queries multiple tiers:
+```
+druid.broker.segment.watchedTiers=["hot","_default_tier"]
+```
+
+Note the difference between `druid.broker.select.tier` and `druid.broker.segment.watchedTiers`:
+- `druid.broker.select.tier` controls **preference** among visible tiers (which tier to query first)
+- `druid.broker.segment.watchedTiers` controls **visibility** (which tiers the Broker can see at all)
+
+If a segment does not exist on the tiers watched by a Broker, it will not be aware of that segment and queries for that data will return partial or no results.
 
 #### Configure query routing
 

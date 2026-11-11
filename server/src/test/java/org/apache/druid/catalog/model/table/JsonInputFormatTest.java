@@ -28,17 +28,14 @@ import org.apache.druid.catalog.model.table.TableFunction.ParameterDefn;
 import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.data.input.impl.InlineInputSource;
 import org.apache.druid.data.input.impl.JsonInputFormat;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertTrue;
 
 public class JsonInputFormatTest extends BaseExternTableTest
 {
@@ -48,7 +45,7 @@ public class JsonInputFormatTest extends BaseExternTableTest
     TableMetadata table = TableBuilder.external("foo")
         .inputSource(toMap(new InlineInputSource("a\n")))
         .inputFormat(ImmutableMap.of("type", JsonInputFormat.TYPE_KEY))
-        .column("a", Columns.VARCHAR)
+        .column("a", Columns.STRING)
         .build();
     ResolvedTable resolved = registry.resolve(table.spec());
     resolved.validate();
@@ -56,11 +53,11 @@ public class JsonInputFormatTest extends BaseExternTableTest
     InputFormatDefn defn = registry.inputFormatDefnFor(JsonInputFormat.TYPE_KEY);
     InputFormat inputFormat = defn.convertFromTable(new ResolvedExternalTable(resolved));
     JsonInputFormat jsonFormat = (JsonInputFormat) inputFormat;
-    assertNull(jsonFormat.getFlattenSpec());
-    assertTrue(jsonFormat.getFeatureSpec().isEmpty());
-    assertFalse(jsonFormat.isKeepNullColumns());
-    assertFalse(jsonFormat.isAssumeNewlineDelimited());
-    assertFalse(jsonFormat.isUseJsonNodeReader());
+    Assertions.assertNull(jsonFormat.getFlattenSpec());
+    Assertions.assertTrue(jsonFormat.getFeatureSpec().isEmpty());
+    Assertions.assertFalse(jsonFormat.isKeepNullColumns());
+    Assertions.assertFalse(jsonFormat.isAssumeNewlineDelimited());
+    Assertions.assertFalse(jsonFormat.isUseJsonNodeReader());
   }
 
   @Test
@@ -70,8 +67,8 @@ public class JsonInputFormatTest extends BaseExternTableTest
     TableMetadata table = TableBuilder.external("foo")
         .inputSource(toMap(new InlineInputSource("a\n")))
         .inputFormat(formatToMap(format))
-        .column("a", Columns.VARCHAR)
-        .column("b", Columns.BIGINT)
+        .column("a", Columns.STRING)
+        .column("b", Columns.LONG)
         .build();
     ResolvedTable resolved = registry.resolve(table.spec());
     resolved.validate();
@@ -79,11 +76,11 @@ public class JsonInputFormatTest extends BaseExternTableTest
     InputFormatDefn defn = registry.inputFormatDefnFor(JsonInputFormat.TYPE_KEY);
     InputFormat inputFormat = defn.convertFromTable(new ResolvedExternalTable(resolved));
     JsonInputFormat jsonFormat = (JsonInputFormat) inputFormat;
-    assertNull(jsonFormat.getFlattenSpec());
-    assertTrue(jsonFormat.getFeatureSpec().isEmpty());
-    assertTrue(jsonFormat.isKeepNullColumns());
-    assertTrue(jsonFormat.isAssumeNewlineDelimited());
-    assertFalse(jsonFormat.isUseJsonNodeReader());
+    Assertions.assertNull(jsonFormat.getFlattenSpec());
+    Assertions.assertTrue(jsonFormat.getFeatureSpec().isEmpty());
+    Assertions.assertTrue(jsonFormat.isKeepNullColumns());
+    Assertions.assertTrue(jsonFormat.isAssumeNewlineDelimited());
+    Assertions.assertFalse(jsonFormat.isUseJsonNodeReader());
   }
 
   @Test
@@ -91,7 +88,7 @@ public class JsonInputFormatTest extends BaseExternTableTest
   {
     InputFormatDefn defn = registry.inputFormatDefnFor(JsonInputFormat.TYPE_KEY);
     List<ParameterDefn> params = defn.parameters();
-    assertEquals(0, params.size());
+    Assertions.assertEquals(0, params.size());
   }
 
   @Test
@@ -102,10 +99,10 @@ public class JsonInputFormatTest extends BaseExternTableTest
     List<ColumnSpec> columns = Collections.singletonList(new ColumnSpec("a", null, null));
     InputFormat inputFormat = defn.convertFromArgs(args, columns, mapper);
     JsonInputFormat jsonFormat = (JsonInputFormat) inputFormat;
-    assertNull(jsonFormat.getFlattenSpec());
-    assertTrue(jsonFormat.getFeatureSpec().isEmpty());
-    assertFalse(jsonFormat.isKeepNullColumns());
-    assertFalse(jsonFormat.isAssumeNewlineDelimited());
-    assertFalse(jsonFormat.isUseJsonNodeReader());
+    Assertions.assertNull(jsonFormat.getFlattenSpec());
+    Assertions.assertTrue(jsonFormat.getFeatureSpec().isEmpty());
+    Assertions.assertFalse(jsonFormat.isKeepNullColumns());
+    Assertions.assertFalse(jsonFormat.isAssumeNewlineDelimited());
+    Assertions.assertFalse(jsonFormat.isUseJsonNodeReader());
   }
 }

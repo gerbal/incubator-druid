@@ -1,7 +1,7 @@
 ---
 id: tutorial-kafka
-title: "Tutorial: Load streaming data from Apache Kafka"
-sidebar_label: "Load from Apache Kafka"
+title: Load streaming data from Apache Kafka
+sidebar_label: Load from Apache Kafka
 ---
 
 <!--
@@ -24,7 +24,7 @@ sidebar_label: "Load from Apache Kafka"
   -->
 
 
-This tutorial shows you how to load data into Apache Druid from a Kafka stream, using Druid's Kafka indexing service. 
+This tutorial shows you how to load data into Apache&circledR; Druid from a Kafka stream, using Druid's Kafka indexing service. 
 
 The tutorial guides you through the steps to load sample nested clickstream data from the [Koalas to the Max](https://www.koalastothemax.com/) game into a Kafka topic, then ingest the data into Druid.
 
@@ -34,7 +34,7 @@ Before you follow the steps in this tutorial, download Druid as described in the
 
 ## Download and start Kafka
 
-[Apache Kafka](http://kafka.apache.org/) is a high-throughput message bus that works well with Druid. For this tutorial, use Kafka 2.7.0. 
+[Apache Kafka&circledR;](http://kafka.apache.org/) is a high-throughput message bus that works well with Druid. For this tutorial, use Kafka 2.7.0. 
 
 1. To download Kafka, run the following commands in your terminal:
 
@@ -45,9 +45,11 @@ Before you follow the steps in this tutorial, download Druid as described in the
    ```
 2. If you're already running Kafka on the machine you're using for this tutorial, delete or rename the `kafka-logs` directory in `/tmp`.
    
-   > Druid and Kafka both rely on [Apache ZooKeeper](https://zookeeper.apache.org/) to coordinate and manage services. Because Druid is already running, Kafka attaches to the Druid ZooKeeper instance when it starts up.<br />
-   > 
-   > In a production environment where you're running Druid and Kafka on different machines, [start the Kafka ZooKeeper](https://kafka.apache.org/quickstart) before you start the Kafka broker.
+:::info
+ Druid and Kafka both rely on [Apache&circledR; ZooKeeper](https://zookeeper.apache.org/) to coordinate and manage services. Because Druid is already running, Kafka attaches to the Druid ZooKeeper instance when it starts up.<br />
+
+ In a production environment where you're running Druid and Kafka on different machines, [start the Kafka ZooKeeper](https://kafka.apache.org/quickstart) before you start the Kafka broker.
+:::
 
 3. In the Kafka root directory, run this command to start a Kafka broker:
 
@@ -76,8 +78,7 @@ In this section, you download sample data to the tutorial's directory and send t
 2. Download the sample data to your new directory and extract it:
 
    ```bash
-   cd sample-data
-   curl -O https://static.imply.io/example-data/kttm-nested-v2/kttm-nested-v2-2019-08-25.json.gz
+   (cd sample-data && curl -O https://static.imply.io/example-data/kttm-nested-v2/kttm-nested-v2-2019-08-25.json.gz)
    ```
 
 3. In your Kafka root directory, run the following commands to post sample events to the `kttm` Kafka topic:
@@ -113,7 +114,7 @@ To use the console data loader:
 
    ![Data loader parse data](../assets/tutorial-kafka-data-loader-03.png "Data loader parse data")
 
-   The data loader automatically tries to determine the correct parser for the data. For the sample data, it selects input format `json`. You can play around with the different options to get a preview of how Druid parses your data.
+   The data loader automatically tries to determine the correct input format for the data. For the sample data, it selects input format `json`. You can play around with the different options to get a preview of how Druid parses your data.
 
 5. With the `json` input format selected, click **Next: Parse time**. You may need to click **Apply** first.
 
@@ -128,16 +129,7 @@ To use the console data loader:
 
    ![Data loader schema](../assets/tutorial-kafka-data-loader-05.png "Data loader schema")
 
-7. In the **Configure schema** step, you can select data types for the columns and configure [dimensions](../ingestion/data-model.md#dimensions) and [metrics](../ingestion/data-model.md#metrics) to ingest into Druid. The console does most of this for you, but you need to create JSON-type dimensions for the three nested columns in the data. 
-
-    Click **Add dimension** and enter the following information. You can only add one dimension at a time.
-    - Name: `event`, Type: `json`
-    - Name: `agent`, Type: `json`
-    - Name: `geo_ip`, Type: `json`
-  
-    After you create the dimensions, you can scroll to the right in the preview window to see the nested columns:
-
-    ![Nested columns schema](../assets/tutorial-kafka-data-loader-05b.png "Nested columns schema")
+7. In the **Configure schema** step, you can select data types for the columns and configure [dimensions](../ingestion/schema-model.md#dimensions) and [metrics](../ingestion/schema-model.md#metrics) to ingest into Druid. The console does most of this for you. Notice that the dimensions `event`, `agent` and `geo_ip` are of the type `json`. 
 
 8.  Click **Next: Partition** to configure how Druid partitions the data into segments.
 
@@ -171,7 +163,9 @@ To use the console data loader:
 
     When the `kttm-kafka` datasource appears here, you can query it. See [Query your data](#query-your-data) for details.
 
-    > If the datasource doesn't appear after a minute you might not have set the supervisor to read data from the start of the stream&mdash;the `Use earliest offset` setting in the **Tune** step. Go to the **Ingestion** page and terminate the supervisor using the **Actions(...)** menu. [Load the sample data](#load-data-with-the-console-data-loader) again and apply the correct setting when you get to the **Tune** step.
+:::info
+ If the datasource doesn't appear after a minute you might not have set the supervisor to read data from the start of the stream&mdash;the `Use earliest offset` setting in the **Tune** step. Go to the **Ingestion** page and terminate the supervisor using the **Actions(...)** menu. [Load the sample data](#load-data-with-the-console-data-loader) again and apply the correct setting when you get to the **Tune** step.
+:::
 
 ### Submit a supervisor spec
 
@@ -265,13 +259,13 @@ You can also use the Druid API to submit a supervisor spec.
 1. Run the following command to download the sample spec:
 
    ```bash
-   curl -O https://druid.apache.org/docs/latest/assets/files/kttm-kafka-supervisor.json
+   curl -o kttm-kafka-supervisor.json https://raw.githubusercontent.com/apache/druid/master/docs/assets/files/kttm-kafka-supervisor.json
    ```
 
 2. Run the following command to submit the spec in the `kttm-kafka-supervisor.json` file:
 
     ```bash
-    curl -XPOST -H 'Content-Type: application/json' kttm-kafka-supervisor.json http://localhost:8081/druid/indexer/v1/supervisor
+    curl -X POST -H 'Content-Type: application/json' -d @kttm-kafka-supervisor.json http://localhost:8081/druid/indexer/v1/supervisor
     ```
 
     After Druid successfully creates the supervisor, you get a response containing the supervisor ID: `{"id":"kttm-kafka-supervisor-api"}`.
@@ -292,6 +286,4 @@ Check out the [Querying data tutorial](../tutorials/tutorial-query.md) to run so
 
 For more information, see the following topics:
 
-- [Apache Kafka ingestion](../development/extensions-core/kafka-ingestion.md) for more information on loading data from Kafka streams.
-- [Apache Kafka supervisor reference](../development/extensions-core/kafka-supervisor-reference.md) for Kafka supervisor configuration information.
-- [Apache Kafka supervisor operations reference](../development/extensions-core/kafka-supervisor-operations.md) for information on running and maintaining Kafka supervisors for Druid.
+- [Apache Kafka ingestion](../ingestion/kafka-ingestion.md) for information on loading data from Kafka streams and maintaining Kafka supervisors for Druid.

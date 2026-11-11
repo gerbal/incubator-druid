@@ -20,13 +20,22 @@
 package org.apache.druid.indexing.common.task.batch.parallel;
 
 import nl.jqno.equalsverifier.EqualsVerifier;
-import org.junit.Test;
+import org.apache.druid.indexer.report.KillTaskReport;
+import org.apache.druid.indexer.report.TaskReport;
+import org.junit.jupiter.api.Test;
 
 public class PushedSegmentsReportTest
 {
   @Test
   public void testEquals()
   {
-    EqualsVerifier.forClass(PushedSegmentsReport.class).usingGetClass().verify();
+    TaskReport.ReportMap map1 = new TaskReport.ReportMap();
+    TaskReport.ReportMap map2 = new TaskReport.ReportMap();
+    map2.put("killTaskReport", new KillTaskReport("taskId", new KillTaskReport.Stats(1, 2)));
+
+    EqualsVerifier.forClass(PushedSegmentsReport.class)
+                  .usingGetClass()
+                  .withPrefabValues(TaskReport.ReportMap.class, map1, map2)
+                  .verify();
   }
 }

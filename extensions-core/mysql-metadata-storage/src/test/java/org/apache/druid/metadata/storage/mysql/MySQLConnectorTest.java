@@ -20,15 +20,17 @@
 package org.apache.druid.metadata.storage.mysql;
 
 import com.google.common.base.Supplier;
-import com.mysql.jdbc.exceptions.MySQLTransactionRollbackException;
-import com.mysql.jdbc.exceptions.MySQLTransientException;
 import org.apache.druid.metadata.MetadataStorageConnectorConfig;
 import org.apache.druid.metadata.MetadataStorageTablesConfig;
-import org.junit.Assert;
-import org.junit.Test;
+import org.apache.druid.segment.metadata.CentralizedDatasourceSchemaConfig;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.mariadb.jdbc.export.MaxAllowedPacketException;
 
 import java.sql.SQLException;
 import java.sql.SQLTransientConnectionException;
+import java.sql.SQLTransientException;
 
 public class MySQLConnectorTest
 {
@@ -44,63 +46,172 @@ public class MySQLConnectorTest
   private static final Supplier<MetadataStorageConnectorConfig> CONNECTOR_CONFIG_SUPPLIER =
       MetadataStorageConnectorConfig::new;
   private static final Supplier<MetadataStorageTablesConfig> TABLES_CONFIG_SUPPLIER =
-      () -> new MetadataStorageTablesConfig(null, null, null, null, null, null, null, null, null, null, null);
+      () -> MetadataStorageTablesConfig.fromBase(null);
 
+  private CentralizedDatasourceSchemaConfig centralizedDatasourceSchemaConfig;
 
-  @Test
-  public void testIsExceptionTransientMySql()
+  public void initMySQLConnectorTest(CentralizedDatasourceSchemaConfig centralizedDatasourceSchemaConfig)
   {
+    this.centralizedDatasourceSchemaConfig = centralizedDatasourceSchemaConfig;
+  }
+
+  public static Object[][] constructorFeeder()
+  {
+    return new Object[][]{
+        {CentralizedDatasourceSchemaConfig.enabled(false)},
+        {CentralizedDatasourceSchemaConfig.enabled(true)}
+    };
+  }
+
+  @MethodSource("constructorFeeder")
+  @ParameterizedTest(name = "{0}")
+  public void testIsExceptionTransientMySql(CentralizedDatasourceSchemaConfig centralizedDatasourceSchemaConfig)
+  {
+    initMySQLConnectorTest(centralizedDatasourceSchemaConfig);
     MySQLConnector connector = new MySQLConnector(
         CONNECTOR_CONFIG_SUPPLIER,
         TABLES_CONFIG_SUPPLIER,
         new MySQLConnectorSslConfig(),
-        MYSQL_DRIVER_CONFIG
+        MYSQL_DRIVER_CONFIG,
+        centralizedDatasourceSchemaConfig
     );
-    Assert.assertTrue(connector.connectorIsTransientException(new MySQLTransientException()));
-    Assert.assertTrue(connector.connectorIsTransientException(new MySQLTransactionRollbackException()));
-    Assert.assertTrue(
-        connector.connectorIsTransientException(new SQLException("some transient failure", "wtf", 1317))
+    Assertions.assertTrue(
+        connector.connectorIsTransientException(new SQLException("some transient failure", "s0", 1317))
     );
-    Assert.assertFalse(
-        connector.connectorIsTransientException(new SQLException("totally realistic test data", "wtf", 1337))
+    Assertions.assertFalse(
+        connector.connectorIsTransientException(new SQLException("totally realistic test data", "s0", 1337))
     );
-    // this method does not specially handle normal transient exceptions either, since it is not vendor specific
-    Assert.assertFalse(
+    Assertions.assertTrue(
         connector.connectorIsTransientException(new SQLTransientConnectionException("transient"))
     );
   }
 
-  @Test
-  public void testIsExceptionTransientNoMySqlClazz()
+  @MethodSource("constructorFeeder")
+  @ParameterizedTest(name = "{0}")
+  public void testIsExceptionTransientNoMySqlClazz(CentralizedDatasourceSchemaConfig centralizedDatasourceSchemaConfig)
   {
+    initMySQLConnectorTest(centralizedDatasourceSchemaConfig);
     MySQLConnector connector = new MySQLConnector(
         CONNECTOR_CONFIG_SUPPLIER,
         TABLES_CONFIG_SUPPLIER,
         new MySQLConnectorSslConfig(),
-        MARIADB_DRIVER_CONFIG
+        MARIADB_DRIVER_CONFIG,
+        centralizedDatasourceSchemaConfig
     );
     // no vendor specific for MariaDb, so should always be false
-    Assert.assertFalse(connector.connectorIsTransientException(new MySQLTransientException()));
-    Assert.assertFalse(
-        connector.connectorIsTransientException(new SQLException("some transient failure", "wtf", 1317))
+    Assertions.assertFalse(connector.connectorIsTransientException(new SQLTransientException()));
+    Assertions.assertFalse(
+        connector.connectorIsTransientException(new SQLException("some transient failure", "s0", 1317))
     );
-    Assert.assertFalse(
-        connector.connectorIsTransientException(new SQLException("totally realistic test data", "wtf", 1337))
+    Assertions.assertFalse(
+        connector.connectorIsTransientException(new SQLException("totally realistic test data", "s0", 1337))
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         connector.connectorIsTransientException(new SQLTransientConnectionException("transient"))
     );
   }
 
-  @Test
-  public void testLimitClause()
+  @MethodSource("constructorFeeder")
+  @ParameterizedTest(name = "{0}")
+  public void testIsRootCausePacketTooBigException(CentralizedDatasourceSchemaConfig centralizedDatasourceSchemaConfig)
   {
+    initMySQLConnectorTest(centralizedDatasourceSchemaConfig);
     MySQLConnector connector = new MySQLConnector(
         CONNECTOR_CONFIG_SUPPLIER,
         TABLES_CONFIG_SUPPLIER,
         new MySQLConnectorSslConfig(),
-        MYSQL_DRIVER_CONFIG
+        MYSQL_DRIVER_CONFIG,
+        centralizedDatasourceSchemaConfig
     );
-    Assert.assertEquals("LIMIT 100", connector.limitClause(100));
+
+    Assertions.assertTrue(
+        connector.isRootCausePacketTooBigException(new MaxAllowedPacketException("packet too large", false))
+    );
+    Assertions.assertTrue(
+        connector.isRootCausePacketTooBigException(
+            new SQLException("packet too large", new MaxAllowedPacketException("packet too large", false))
+        )
+    );
+
+    // Verify some of the false cases
+    Assertions.assertFalse(
+        connector.isRootCausePacketTooBigException(new SQLException())
+    );
+    Assertions.assertFalse(
+        connector.isRootCausePacketTooBigException(new SQLTransientException())
+    );
+    Assertions.assertFalse(
+        connector.isRootCausePacketTooBigException(new SQLTransientException())
+    );
+  }
+
+  @MethodSource("constructorFeeder")
+  @ParameterizedTest(name = "{0}")
+  public void testIsUniqueConstraintViolation(CentralizedDatasourceSchemaConfig centralizedDatasourceSchemaConfig)
+  {
+    initMySQLConnectorTest(centralizedDatasourceSchemaConfig);
+    MySQLConnector connector = new MySQLConnector(
+        CONNECTOR_CONFIG_SUPPLIER,
+        TABLES_CONFIG_SUPPLIER,
+        new MySQLConnectorSslConfig(),
+        MYSQL_DRIVER_CONFIG,
+        centralizedDatasourceSchemaConfig
+    );
+
+    // MySQL integrity_constraint_violation SQL state (23000)
+    Assertions.assertTrue(connector.isUniqueConstraintViolation(
+        new SQLException("Duplicate entry 'value' for key 'PRIMARY'", "23000")
+    ));
+
+    // Different SQL state should return false
+    Assertions.assertFalse(connector.isUniqueConstraintViolation(
+        new SQLException("some other error", "42S02")
+    ));
+
+    // SQLException wrapped in another exception (tests cause chain traversal)
+    Assertions.assertTrue(connector.isUniqueConstraintViolation(
+        new RuntimeException(new SQLException("Duplicate entry", "23000"))
+    ));
+
+    // Non-SQLException exception
+    Assertions.assertFalse(connector.isUniqueConstraintViolation(new Exception("not a SQLException")));
+  }
+
+  @MethodSource("constructorFeeder")
+  @ParameterizedTest(name = "{0}")
+  public void testLimitClause(CentralizedDatasourceSchemaConfig centralizedDatasourceSchemaConfig)
+  {
+    initMySQLConnectorTest(centralizedDatasourceSchemaConfig);
+    MySQLConnector connector = new MySQLConnector(
+        CONNECTOR_CONFIG_SUPPLIER,
+        TABLES_CONFIG_SUPPLIER,
+        new MySQLConnectorSslConfig(),
+        MYSQL_DRIVER_CONFIG,
+        centralizedDatasourceSchemaConfig
+    );
+    Assertions.assertEquals("LIMIT 100", connector.limitClause(100));
+  }
+
+  @MethodSource("constructorFeeder")
+  @ParameterizedTest(name = "{0}")
+  public void testGetStreamingFetchSize(CentralizedDatasourceSchemaConfig centralizedDatasourceSchemaConfig)
+  {
+    final MySQLConnector mysqlConnector = new MySQLConnector(
+        CONNECTOR_CONFIG_SUPPLIER,
+        TABLES_CONFIG_SUPPLIER,
+        new MySQLConnectorSslConfig(),
+        MYSQL_DRIVER_CONFIG,
+        centralizedDatasourceSchemaConfig
+    );
+    final MySQLConnector mariaDbConnector = new MySQLConnector(
+        CONNECTOR_CONFIG_SUPPLIER,
+        TABLES_CONFIG_SUPPLIER,
+        new MySQLConnectorSslConfig(),
+        MARIADB_DRIVER_CONFIG,
+        centralizedDatasourceSchemaConfig
+    );
+
+    Assertions.assertEquals(Integer.MIN_VALUE, mysqlConnector.getStreamingFetchSize());
+    Assertions.assertEquals(1, mariaDbConnector.getStreamingFetchSize());
   }
 }

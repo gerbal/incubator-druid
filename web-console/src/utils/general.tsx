@@ -16,14 +16,13 @@
  * limitations under the License.
  */
 
-import { Intent } from '@blueprintjs/core';
+import { Classes, Icon, Intent } from '@blueprintjs/core';
 import type { IconName } from '@blueprintjs/icons';
 import { IconNames } from '@blueprintjs/icons';
 import copy from 'copy-to-clipboard';
-import hasOwnProp from 'has-own-prop';
 import * as JSONBig from 'json-bigint-native';
 import numeral from 'numeral';
-import React from 'react';
+import type { JSX } from 'react';
 
 import { AppToaster } from '../singletons';
 
@@ -33,8 +32,38 @@ export const EMPTY_ARRAY: any[] = [];
 
 export type NumberLike = number | bigint;
 
+export function isNumberLike(x: unknown): x is NumberLike {
+  const t = typeof x;
+  return t === 'number' || t === 'bigint';
+}
+
 export function isNumberLikeNaN(x: NumberLike): boolean {
   return isNaN(Number(x));
+}
+
+/**
+ * Query results and API responses are parsed with JSONBig, so any integer with 16+ digits arrives
+ * as a BigInt. Charting libraries can not do arithmetic on those, so flatten them back to numbers.
+ *
+ * Only the named (measure) columns are converted. Dimension values are left alone because a BigInt
+ * above Number.MAX_SAFE_INTEGER would round, merging distinct categories into one bucket and making
+ * click-to-filter target a value that is not in the data.
+ */
+export function bigIntsToNumbers<T extends Record<string, any>>(
+  rows: T[],
+  measureKeys: string[],
+): T[] {
+  return rows.map(row => {
+    let changed = false;
+    const res: Record<string, any> = { ...row };
+    for (const k of measureKeys) {
+      if (typeof res[k] === 'bigint') {
+        res[k] = Number(res[k]);
+        changed = true;
+      }
+    }
+    return changed ? (res as T) : row;
+  });
 }
 
 export function nonEmptyString(s: unknown): s is string {
@@ -55,13 +84,37 @@ export function isSimpleArray(a: any): a is (string | number | boolean)[] {
   );
 }
 
-export function wait(ms: number): Promise<void> {
-  return new Promise(resolve => {
-    setTimeout(resolve, ms);
+export function arraysEqualByElement<T>(xs: T[], ys: T[]): boolean {
+  return xs.length === ys.length && xs.every((x, i) => x === ys[i]);
+}
+
+export function wait(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error('Aborted'));
+      return;
+    }
+
+    const timeoutId = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+
+    const onAbort = () => {
+      cleanup();
+      reject(new Error('Aborted'));
+    };
+
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      signal?.removeEventListener('abort', onAbort);
+    };
+
+    signal?.addEventListener('abort', onAbort);
   });
 }
 
-export function clamp(n: number, min: number, max: number): number {
+export function clamp(n: number, min = -Infinity, max = Infinity): number {
   return Math.min(Math.max(n, min), max);
 }
 
@@ -84,19 +137,50 @@ export function addOrUpdate<T>(xs: readonly T[], x: T, keyFn: (x: T) => string |
 
 // ----------------------------
 
+export function caseInsensitiveEquals(str1: string | undefined, str2: string | undefined): boolean {
+  return str1?.toLowerCase() === str2?.toLowerCase();
+}
+
 export function caseInsensitiveContains(testString: string, searchString: string): boolean {
   if (!searchString) return true;
   return testString.toLowerCase().includes(searchString.toLowerCase());
 }
 
-export function oneOf<T>(thing: T, ...options: T[]): boolean {
-  return options.includes(thing);
+function validateKnown<T>(allKnownValues: T[], options: T[]): void {
+  options.forEach(o => {
+    if (!allKnownValues.includes(o)) {
+      throw new Error(`allKnownValues (${allKnownValues.join(', ')}) must include '${o}'`);
+    }
+  });
+}
+
+export function oneOf<T>(value: T, ...options: T[]): boolean {
+  return options.includes(value);
+}
+
+export function oneOfKnown<T>(value: T, allKnownValues: T[], ...options: T[]): boolean | undefined {
+  validateKnown(allKnownValues, options);
+  if (options.includes(value)) return true;
+  return allKnownValues.includes(value) ? false : undefined;
 }
 
 export function typeIs<T extends { type?: S }, S = string>(...options: S[]): (x: T) => boolean {
   return x => {
     if (x.type == null) return false;
     return options.includes(x.type);
+  };
+}
+
+export function typeIsKnown<T extends { type?: S }, S = string>(
+  allKnownValues: S[],
+  ...options: S[]
+): (x: T) => boolean | undefined {
+  validateKnown(allKnownValues, options);
+  return x => {
+    const value = x.type;
+    if (value == null) return;
+    if (options.includes(value)) return true;
+    return allKnownValues.includes(value) ? false : undefined;
   };
 }
 
@@ -112,7 +196,7 @@ export function change<T>(xs: readonly T[], from: T, to: T): T[] {
 
 export function countBy<T>(
   array: readonly T[],
-  fn: (x: T, index: number) => string = String,
+  fn: (x: T, index: number) => string | number = String,
 ): Record<string, number> {
   const counts: Record<string, number> = {};
   for (let i = 0; i < array.length; i++) {
@@ -128,7 +212,7 @@ function identity<T>(x: T): T {
 
 export function lookupBy<T, Q = T>(
   array: readonly T[],
-  keyFn: (x: T, index: number) => string = String,
+  keyFn: (x: T, index: number) => string | number = String,
   valueFn?: (x: T, index: number) => Q,
 ): Record<string, Q> {
   if (!valueFn) valueFn = identity as any;
@@ -148,9 +232,28 @@ export function mapRecord<T, Q>(
   const newRecord: Record<string, Q> = {};
   const keys = Object.keys(record);
   for (const key of keys) {
-    newRecord[key] = fn(record[key], key);
+    const mapped = fn(record[key], key);
+    if (typeof mapped === 'undefined') continue;
+    newRecord[key] = mapped;
   }
   return newRecord;
+}
+
+export function mapRecordOrReturn<T>(
+  record: Record<string, T>,
+  fn: (value: T, key: string) => T | undefined,
+): Record<string, T> {
+  const newRecord: Record<string, T> = {};
+  let changed = false;
+  const keys = Object.keys(record);
+  for (const key of keys) {
+    const v = record[key];
+    const mapped = fn(v, key);
+    if (v !== mapped) changed = true;
+    if (typeof mapped === 'undefined') continue;
+    newRecord[key] = mapped;
+  }
+  return changed ? newRecord : record;
 }
 
 export function groupBy<T, Q>(
@@ -166,19 +269,50 @@ export function groupBy<T, Q>(
     buckets[key] = buckets[key] || [];
     buckets[key].push(value);
   }
-  return Object.keys(buckets).map(key => aggregateFn(buckets[key], key));
+  return Object.entries(buckets).map(([key, xs]) => aggregateFn(xs, key));
 }
 
-export function uniq(array: readonly string[]): string[] {
+export function groupByAsMap<T, Q>(
+  array: readonly T[],
+  keyFn: (x: T, index: number) => string | number,
+  aggregateFn: (xs: readonly T[], key: string) => Q,
+): Record<string, Q> {
+  const buckets: Record<string, T[]> = {};
+  const n = array.length;
+  for (let i = 0; i < n; i++) {
+    const value = array[i];
+    const key = keyFn(value, i);
+    buckets[key] = buckets[key] || [];
+    buckets[key].push(value);
+  }
+  return mapRecord(buckets, aggregateFn);
+}
+
+export function uniq<T>(array: readonly T[], by: (t: T) => string = String): T[] {
   const seen: Record<string, boolean> = {};
   return array.filter(s => {
-    if (hasOwnProp(seen, s)) {
+    const key = by(s);
+    if (Object.hasOwn(seen, key)) {
       return false;
     } else {
-      seen[s] = true;
+      seen[key] = true;
       return true;
     }
   });
+}
+
+export function allSameValue<T>(xs: readonly T[]): T | undefined {
+  const sameValue: T | undefined = xs[0];
+  for (let i = 1; i < xs.length; i++) {
+    if (sameValue !== xs[i]) return;
+  }
+  return sameValue;
+}
+
+// ----------------------------
+
+export function formatEmpty(str: string): string {
+  return str === '' ? 'empty' : str;
 }
 
 // ----------------------------
@@ -188,15 +322,35 @@ export function formatInteger(n: NumberLike): string {
 }
 
 export function formatNumber(n: NumberLike): string {
-  return n.toLocaleString('en-US', { maximumFractionDigits: 20 });
+  return (n || 0).toLocaleString('en-US', { maximumFractionDigits: 3 });
 }
 
-export function formatBytes(n: NumberLike): string {
-  return numeral(n).format('0.00 b');
+export function formatNumberAbbreviated(n: NumberLike): string {
+  return (n || 0).toLocaleString('en-US', {
+    notation: 'compact',
+    compactDisplay: 'short',
+    maximumFractionDigits: 2,
+  });
+}
+
+export function formatRate(n: NumberLike) {
+  return numeral(n).format('0,0.0') + '/s';
+}
+
+export function formatBytes(n: NumberLike, useBinaryBytes = false): string {
+  return numeral(n).format(useBinaryBytes ? '0.00 ib' : '0.00 b');
+}
+
+export function formatByteRate(n: NumberLike): string {
+  return numeral(n).format('0.00 b') + '/s';
 }
 
 export function formatBytesCompact(n: NumberLike): string {
   return numeral(n).format('0.00b');
+}
+
+export function formatByteRateCompact(n: NumberLike): string {
+  return numeral(n).format('0.00b') + '/s';
 }
 
 export function formatMegabytes(n: NumberLike): string {
@@ -217,6 +371,22 @@ export function formatMillions(n: NumberLike): string {
   return s + ' M';
 }
 
+export function forceSignInNumberFormatter(
+  formatter: (n: NumberLike) => string,
+): (n: NumberLike) => string {
+  return (n: NumberLike) => {
+    if (n > 0) {
+      return '+' + formatter(n);
+    } else {
+      return formatter(n);
+    }
+  };
+}
+
+function sign(n: NumberLike): string {
+  return n < 0 ? '-' : '';
+}
+
 function pad2(str: string | number): string {
   return ('00' + str).slice(-2);
 }
@@ -226,56 +396,145 @@ function pad3(str: string | number): string {
 }
 
 export function formatDuration(ms: NumberLike): string {
-  const n = Number(ms);
+  const n = Math.abs(Number(ms));
   const timeInHours = Math.floor(n / 3600000);
   const timeInMin = Math.floor(n / 60000) % 60;
   const timeInSec = Math.floor(n / 1000) % 60;
-  return timeInHours + ':' + pad2(timeInMin) + ':' + pad2(timeInSec);
+  return sign(ms) + timeInHours + ':' + pad2(timeInMin) + ':' + pad2(timeInSec);
 }
 
 export function formatDurationWithMs(ms: NumberLike): string {
-  const n = Number(ms);
+  const n = Math.abs(Number(ms));
   const timeInHours = Math.floor(n / 3600000);
   const timeInMin = Math.floor(n / 60000) % 60;
   const timeInSec = Math.floor(n / 1000) % 60;
   return (
-    timeInHours + ':' + pad2(timeInMin) + ':' + pad2(timeInSec) + '.' + pad3(Math.floor(n) % 1000)
+    sign(ms) +
+    timeInHours +
+    ':' +
+    pad2(timeInMin) +
+    ':' +
+    pad2(timeInSec) +
+    '.' +
+    pad3(Math.floor(n) % 1000)
   );
 }
 
+export function formatDurationWithMsIfNeeded(ms: NumberLike): string {
+  return Number(ms) < 1000 ? formatDurationWithMs(ms) : formatDuration(ms);
+}
+
 export function formatDurationHybrid(ms: NumberLike): string {
-  const n = Number(ms);
+  const n = Math.abs(Number(ms));
   if (n < 600000) {
     // anything that looks like 1:23.45 (max 9:59.99)
     const timeInMin = Math.floor(n / 60000);
     const timeInSec = Math.floor(n / 1000) % 60;
     const timeInMs = Math.floor(n) % 1000;
-    return `${timeInMin ? `${timeInMin}:` : ''}${timeInMin ? pad2(timeInSec) : timeInSec}.${pad3(
-      timeInMs,
-    ).slice(0, 2)}s`;
+    return `${sign(ms)}${timeInMin ? `${timeInMin}:` : ''}${
+      timeInMin ? pad2(timeInSec) : timeInSec
+    }.${pad3(timeInMs).slice(0, 2)}s`;
   } else {
-    return formatDuration(n);
+    return formatDuration(ms);
+  }
+}
+
+export function timezoneOffsetInMinutesToString(offsetInMinutes: number, padHour: boolean): string {
+  const sign = offsetInMinutes < 0 ? '-' : '+';
+  const absOffset = Math.abs(offsetInMinutes);
+  const h = Math.floor(absOffset / 60);
+  const m = absOffset % 60;
+  return `${sign}${padHour ? pad2(h) : h}:${pad2(m)}`;
+}
+
+function pluralize(word: string): string {
+  // Ignoring irregular plurals.
+  if (/(s|x|z|ch|sh)$/.test(word)) {
+    return word + 'es';
+  } else if (/([^aeiou])y$/.test(word)) {
+    return word.slice(0, -1) + 'ies';
+  } else if (/(f|fe)$/.test(word)) {
+    return word.replace(/fe?$/, 'ves');
+  } else {
+    return word + 's';
   }
 }
 
 export function pluralIfNeeded(n: NumberLike, singular: string, plural?: string): string {
-  if (!plural) plural = singular + 's';
+  if (!plural) plural = pluralize(singular);
   return `${formatInteger(n)} ${n === 1 ? singular : plural}`;
 }
 
 // ----------------------------
 
-export function validJson(json: string): boolean {
-  try {
-    JSONBig.parse(json);
-    return true;
-  } catch (e) {
-    return false;
+export function partition<T>(xs: T[], predicate: (x: T, i: number) => boolean): [T[], T[]] {
+  const match: T[] = [];
+  const nonMatch: T[] = [];
+
+  for (let i = 0; i < xs.length; i++) {
+    const x = xs[i];
+    if (predicate(x, i)) {
+      match.push(x);
+    } else {
+      nonMatch.push(x);
+    }
   }
+
+  return [match, nonMatch];
 }
 
 export function filterMap<T, Q>(xs: readonly T[], f: (x: T, i: number) => Q | undefined): Q[] {
-  return xs.map(f).filter((x: Q | undefined) => typeof x !== 'undefined') as Q[];
+  return xs.map(f).filter((x: Q | undefined) => typeof x !== 'undefined');
+}
+
+export function filterMapOrReturn<T>(
+  xs: readonly T[],
+  f: (x: T, i: number) => T | undefined,
+): readonly T[] {
+  let changed = false;
+  const newXs = filterMap(xs, (x, i) => {
+    const newX = f(x, i);
+    if (typeof newX === 'undefined' || x !== newX) changed = true;
+    return newX;
+  });
+  return changed ? newXs : xs;
+}
+
+export function filterOrReturn<T>(xs: readonly T[], f: (x: T, i: number) => unknown): readonly T[] {
+  const newXs = xs.filter(f);
+  return newXs.length === xs.length ? xs : newXs;
+}
+
+export function findMap<T, Q>(
+  xs: readonly T[],
+  f: (x: T, i: number) => Q | undefined,
+): Q | undefined {
+  return filterMap(xs, f)[0];
+}
+
+export function minBy<T>(xs: T[], f: (item: T, index: number) => number): T | undefined {
+  if (!xs.length) return undefined;
+
+  let minItem = xs[0];
+  let minValue = f(xs[0], 0);
+
+  for (let i = 1; i < xs.length; i++) {
+    const currentValue = f(xs[i], i);
+    if (currentValue < minValue) {
+      minValue = currentValue;
+      minItem = xs[i];
+    }
+  }
+
+  return minItem;
+}
+
+export function changeByIndex<T>(
+  xs: readonly T[],
+  i: number,
+  f: (x: T, i: number) => T | undefined,
+): T[] {
+  return filterMap(xs, (x, j) => (j === i ? f(x, i) : x));
 }
 
 export function compact<T>(xs: (T | undefined | false | null | '')[]): T[] {
@@ -283,7 +542,20 @@ export function compact<T>(xs: (T | undefined | false | null | '')[]): T[] {
 }
 
 export function assemble<T>(...xs: (T | undefined | false | null | '')[]): T[] {
-  return xs.filter(Boolean) as T[];
+  return compact(xs);
+}
+
+export function removeUndefinedValues<T extends Record<string, any>>(obj: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(obj).filter(([_, value]) => value !== undefined),
+  ) as Partial<T>;
+}
+
+export function moveToEnd<T>(
+  xs: T[],
+  predicate: (value: T, index: number, array: T[]) => unknown,
+): T[] {
+  return xs.filter((x, i, a) => !predicate(x, i, a)).concat(xs.filter(predicate));
 }
 
 export function alphanumericCompare(a: string, b: string): number {
@@ -312,8 +584,12 @@ export function arrangeWithPrefixSuffix(
 
 // ----------------------------
 
+export function copyToClipboard(text: string): void {
+  void copy(text, { format: 'text/plain', fallbackToPrompt: true });
+}
+
 export function copyAndAlert(copyString: string, alertMessage: string): void {
-  copy(copyString, { format: 'text/plain' });
+  copyToClipboard(copyString);
   AppToaster.show({
     message: alertMessage,
     intent: Intent.SUCCESS,
@@ -439,16 +715,14 @@ export function hashJoaat(str: string): number {
   return (hash & 4294967295) >>> 0;
 }
 
-export function objectHash(obj: any): string {
-  return hashJoaat(JSONBig.stringify(obj)).toString(16).padStart(8);
+export const OVERLAY_OPEN_SELECTOR = `.${Classes.PORTAL} .${Classes.OVERLAY_OPEN}`;
+
+export function hasOverlayOpen(): boolean {
+  return Boolean(document.querySelector(OVERLAY_OPEN_SELECTOR));
 }
 
-export function hasPopoverOpen(): boolean {
-  return Boolean(document.querySelector('.bp4-portal .bp4-overlay .bp4-popover2'));
-}
-
-export function checkedCircleIcon(checked: boolean): IconName {
-  return checked ? IconNames.TICK_CIRCLE : IconNames.CIRCLE;
+export function checkedCircleIcon(checked: boolean, exclude?: boolean): IconName {
+  return checked ? (exclude ? IconNames.CROSS_CIRCLE : IconNames.TICK_CIRCLE) : IconNames.CIRCLE;
 }
 
 export function tickIcon(checked: boolean): IconName {
@@ -458,3 +732,44 @@ export function tickIcon(checked: boolean): IconName {
 export function generate8HexId(): string {
   return (Math.random() * 1e10).toString(16).replace('.', '').slice(0, 8);
 }
+
+/**
+ * A position in a text, both 1-based, the way Druid and Hjson errors report them (and the way CodeMirror counts lines)
+ */
+export interface LineColumn {
+  line: number;
+  column: number;
+}
+
+export function offsetToLineColumn(str: string, offset: number): LineColumn | undefined {
+  // Ensure offset is within the string length
+  if (offset < 0 || offset > str.length) return;
+
+  const lines = str.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const lineText = lines[i];
+    if (offset <= lineText.length) {
+      return {
+        line: i + 1,
+        column: offset + 1,
+      };
+    }
+
+    offset -= lineText.length + 1;
+  }
+
+  return;
+}
+
+export function xor(a: unknown, b: unknown): boolean {
+  return Boolean(a ? !b : b);
+}
+
+export function toggle<T>(xs: readonly T[], x: T, eq?: (a: T, b: T) => boolean): T[] {
+  const e = eq || ((a, b) => a === b);
+  return xs.find(_ => e(_, x)) ? xs.filter(d => !e(d, x)) : xs.concat([x]);
+}
+
+export const EXPERIMENTAL_ICON = (
+  <Icon icon={IconNames.LAB_TEST} intent={Intent.WARNING} data-tooltip="Experimental" />
+);

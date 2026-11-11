@@ -68,7 +68,7 @@ public class TieredBrokerHostSelector
 
   private volatile boolean started = false;
 
-  private static final Function<DiscoveryDruidNode, Server> TO_SERVER = new Function<DiscoveryDruidNode, Server>()
+  private static final Function<DiscoveryDruidNode, Server> TO_SERVER = new Function<>()
   {
     @Override
     public Server apply(final DiscoveryDruidNode instance)
@@ -235,12 +235,14 @@ public class TieredBrokerHostSelector
     }
 
     if (brokerServiceName == null) {
-      log.error(
-          "No brokerServiceName found for datasource[%s], intervals[%s]. Using default[%s].",
-          query.getDataSource(),
-          query.getIntervals(),
-          tierConfig.getDefaultBrokerServiceName()
-      );
+      if (query.context().isDebug()) {
+        log.info(
+            "Using default broker service[%s] for query with datasource [%s] and intervals[%s].",
+            tierConfig.getDefaultBrokerServiceName(),
+            query.getDataSource(),
+            query.getIntervals()
+        );
+      }
       brokerServiceName = tierConfig.getDefaultBrokerServiceName();
     }
 
@@ -285,7 +287,7 @@ public class TieredBrokerHostSelector
       }
     }
 
-    // Use defaut if not resolved by strategies
+    // Use default if not resolved by strategies
     if (brokerServiceName == null) {
       brokerServiceName = tierConfig.getDefaultBrokerServiceName();
 
@@ -313,7 +315,7 @@ public class TieredBrokerHostSelector
   {
     return Maps.transformValues(
         servers,
-        new Function<NodesHolder, List<Server>>()
+        new Function<>()
         {
           @Override
           public List<Server> apply(NodesHolder input)

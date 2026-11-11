@@ -16,9 +16,19 @@
  * limitations under the License.
  */
 
-import { Position, Toaster } from '@blueprintjs/core';
+import type { Toaster } from '@blueprintjs/core';
+import { OverlayToaster, Position } from '@blueprintjs/core';
 
-export const AppToaster = Toaster.create({
-  className: 'recipe-toaster',
-  position: Position.TOP,
-});
+let toasterPromise: Promise<Toaster> | undefined;
+
+export const AppToaster = {
+  show(...args: Parameters<Toaster['show']>): void {
+    // The toaster is created on first use so that pages and unit tests that never show a toast
+    // don't create its React root
+    toasterPromise ??= OverlayToaster.create({
+      className: 'recipe-toaster',
+      position: Position.TOP,
+    });
+    void toasterPromise.then(toaster => toaster.show(...args));
+  },
+};

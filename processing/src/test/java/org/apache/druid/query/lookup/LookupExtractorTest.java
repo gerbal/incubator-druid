@@ -21,19 +21,24 @@ package org.apache.druid.query.lookup;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Sets;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.query.extraction.MapLookupExtractor;
-import org.junit.Assert;
-import org.junit.Test;
+import org.apache.druid.testing.InitializedNullHandlingTest;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
+import javax.annotation.Nullable;
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.List;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Map;
+import java.util.Set;
 
-public class LookupExtractorTest
+public class LookupExtractorTest extends InitializedNullHandlingTest
 {
 
   static final Map<String, String> EXPECTED_MAP = ImmutableMap.of(
@@ -47,39 +52,35 @@ public class LookupExtractorTest
       "emptyString"
   );
 
-  static final Map<String, List<String>> EXPECTED_REVERSE_MAP = ImmutableMap.of(
-      "value1",
-      Arrays.asList("key1", "key-1"),
-      "value2",
-      Collections.singletonList("key2"),
-      "emptyString",
-      Collections.singletonList("")
-  );
+  static final Set<String> EXPECTED_REVERSE_SET = ImmutableSet.of("key1", "key-1", "key2", "");
   LookupExtractor lookupExtractor = new MapLookupExtractor(EXPECTED_MAP, false);
 
   @Test
   public void testSerDes() throws IOException
   {
     ObjectMapper mapper = new DefaultObjectMapper();
-    Assert.assertEquals(lookupExtractor, mapper.readerFor(LookupExtractor.class).readValue(mapper.writeValueAsBytes(lookupExtractor)));
+    Assertions.assertEquals(
+        lookupExtractor,
+        mapper.readerFor(LookupExtractor.class).readValue(mapper.writeValueAsBytes(lookupExtractor))
+    );
   }
 
   @Test
   public void testApplyAll()
   {
-    Assert.assertEquals(EXPECTED_MAP, lookupExtractor.applyAll(EXPECTED_MAP.keySet()));
+    Assertions.assertEquals(EXPECTED_MAP, lookupExtractor.applyAll(EXPECTED_MAP.keySet()));
   }
 
   @Test
   public void testApplyAllWithNull()
   {
-    Assert.assertEquals(Collections.emptyMap(), lookupExtractor.applyAll(null));
+    Assertions.assertEquals(Collections.emptyMap(), lookupExtractor.applyAll(null));
   }
 
   @Test
   public void testApplyAllWithEmptySet()
   {
-    Assert.assertEquals(Collections.emptyMap(), lookupExtractor.applyAll(Collections.emptySet()));
+    Assertions.assertEquals(Collections.emptyMap(), lookupExtractor.applyAll(Collections.emptySet()));
   }
 
   @Test
@@ -87,24 +88,28 @@ public class LookupExtractorTest
   {
     Map<String, String> expected = new HashMap<>();
     expected.put("not there", null);
-    Assert.assertEquals(expected, lookupExtractor.applyAll(Collections.singletonList("not there")));
+    Assertions.assertEquals(expected, lookupExtractor.applyAll(Collections.singletonList("not there")));
   }
 
   @Test
-  public void testUnapplyAllWithNull()
+  public void testUnapplyAllWithEmptySet()
   {
-    Assert.assertEquals(Collections.emptyMap(), lookupExtractor.unapplyAll(null));
-  }
-
-  @Test
-  public void testunapplyAllWithEmptySet()
-  {
-    Assert.assertEquals(Collections.emptyMap(), lookupExtractor.unapplyAll(Collections.emptySet()));
+    Assertions.assertEquals(Collections.emptySet(), toSet(lookupExtractor.unapplyAll(Collections.emptySet())));
   }
 
   @Test
   public void testUnapplyAll()
   {
-    Assert.assertEquals(EXPECTED_REVERSE_MAP, lookupExtractor.unapplyAll(EXPECTED_MAP.values()));
+    Assertions.assertEquals(EXPECTED_REVERSE_SET, toSet(lookupExtractor.unapplyAll(new HashSet<>(EXPECTED_MAP.values()))));
+  }
+
+  @Nullable
+  private static <T> Set<T> toSet(@Nullable final Iterator<T> iterator)
+  {
+    if (iterator == null) {
+      return null;
+    } else {
+      return Sets.newHashSet(iterator);
+    }
   }
 }

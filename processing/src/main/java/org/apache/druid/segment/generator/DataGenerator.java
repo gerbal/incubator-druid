@@ -19,14 +19,12 @@
 
 package org.apache.druid.segment.generator;
 
-import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.data.input.MapBasedInputRow;
+import org.apache.druid.data.input.impl.TimestampSpec;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.segment.incremental.IncrementalIndex;
-import org.apache.druid.segment.incremental.IndexSizeExceededException;
 import org.joda.time.Interval;
 
 import java.util.ArrayList;
@@ -102,6 +100,21 @@ public class DataGenerator
     return new MapBasedInputRow(nextTimestamp(), dimensionNames, event);
   }
 
+  public Map<String, Object> nextRaw()
+  {
+    return nextRaw(TimestampSpec.DEFAULT_COLUMN);
+  }
+
+  public Map<String, Object> nextRaw(String timestampColumn)
+  {
+    Map<String, Object> event = new HashMap<>();
+    for (ColumnValueGenerator generator : columnGenerators) {
+      event.put(generator.getSchema().getName(), generator.generateRowValue());
+    }
+    event.put(timestampColumn, nextTimestamp());
+    return event;
+  }
+
   /**
    * Reset this generator to start from the begining of the interval with a new seed.
    *
@@ -119,22 +132,14 @@ public class DataGenerator
       }
     }
 
-    columnGenerators = new ArrayList<>();
-    columnGenerators.addAll(
-        Lists.transform(
-            columnSchemas,
-            new Function<GeneratorColumnSchema, ColumnValueGenerator>()
-            {
-              @Override
-              public ColumnValueGenerator apply(
-                  GeneratorColumnSchema input
-              )
-              {
-                return input.makeGenerator(seed);
-              }
-            }
-        )
-    );
+    // Seed each column with a distinct seed (offset by its position) rather than the same seed for every column.
+    // Columns that use the same underlying distribution implementation would otherwise draw from identically-seeded
+    // RNGs in lockstep and become almost perfectly correlated, which makes cross-column filters + group-bys collapse
+    // to a single group. Offsetting the seed per column keeps the columns independent while remaining deterministic.
+    columnGenerators = new ArrayList<>(columnSchemas.size());
+    for (int i = 0; i < columnSchemas.size(); i++) {
+      columnGenerators.add(columnSchemas.get(i).makeGenerator(seed + i));
+    }
 
     return this;
   }
@@ -191,12 +196,7 @@ public class DataGenerator
   public static void addStreamToIndex(Stream<InputRow> stream, IncrementalIndex index)
   {
     stream.forEachOrdered(row -> {
-      try {
-        index.add(row);
-      }
-      catch (IndexSizeExceededException e) {
-        throw new RuntimeException(e);
-      }
+      index.add(row);
     });
   }
 

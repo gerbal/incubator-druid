@@ -1,7 +1,7 @@
 ---
 id: ingestion-spec
 title: Ingestion spec reference
-sidebar_label: Ingestion spec
+sidebar_label: Ingestion spec reference
 description: Reference for the configuration options in the ingestion spec.
 ---
 
@@ -24,7 +24,7 @@ description: Reference for the configuration options in the ingestion spec.
   ~ under the License.
   -->
 
-All ingestion methods use ingestion tasks to load data into Druid. Streaming ingestion uses ongoing supervisors that run and supervise a set of tasks over time. Native batch and Hadoop-based ingestion use a one-time [task](tasks.md). All types of ingestion use an _ingestion spec_ to configure ingestion.
+All ingestion methods use ingestion tasks to load data into Druid. Streaming ingestion uses ongoing supervisors that run and supervise a set of tasks over time. Native batch uses a one-time [task](tasks.md). Other than with SQL-based ingestion, use an _ingestion spec_ to configure your ingestion.
 
 Ingestion specs consists of three main components:
 
@@ -96,14 +96,12 @@ For more examples, refer to the documentation for each ingestion method.
 
 You can also load data visually, without the need to write an ingestion spec, using the "Load data" functionality
 available in Druid's [web console](../operations/web-console.md). Druid's visual data loader supports
-[Kafka](../development/extensions-core/kafka-ingestion.md),
-[Kinesis](../development/extensions-core/kinesis-ingestion.md), and
+[Kafka](../ingestion/kafka-ingestion.md),
+[Kinesis](../ingestion/kinesis-ingestion.md), and
 [native batch](native-batch.md) mode.
 
 ## `dataSchema`
 
-> The `dataSchema` spec has been changed in 0.17.0. The new spec is supported by all ingestion methods
-except for _Hadoop_ ingestion. See the [Legacy `dataSchema` spec](#legacy-dataschema-spec) for the old spec.
 
 The `dataSchema` is a holder for the following components:
 
@@ -147,7 +145,7 @@ An example `dataSchema` is:
 ### `dataSource`
 
 The `dataSource` is located in `dataSchema` → `dataSource` and is simply the name of the
-[datasource](../design/architecture.md#datasources-and-segments) that data will be written to. An example
+[datasource](../design/storage.md) that data will be written to. An example
 `dataSource` is:
 
 ```
@@ -157,7 +155,7 @@ The `dataSource` is located in `dataSchema` → `dataSource` and is simply the n
 ### `timestampSpec`
 
 The `timestampSpec` is located in `dataSchema` → `timestampSpec` and is responsible for
-configuring the [primary timestamp](./data-model.md#primary-timestamp). An example `timestampSpec` is:
+configuring the [primary timestamp](./schema-model.md#primary-timestamp). An example `timestampSpec` is:
 
 ```
 "timestampSpec": {
@@ -166,10 +164,12 @@ configuring the [primary timestamp](./data-model.md#primary-timestamp). An examp
 }
 ```
 
-> Conceptually, after input data records are read, Druid applies ingestion spec components in a particular order:
-> first [`flattenSpec`](data-formats.md#flattenspec) (if any), then [`timestampSpec`](#timestampspec), then [`transformSpec`](#transformspec),
-> and finally [`dimensionsSpec`](#dimensionsspec) and [`metricsSpec`](#metricsspec). Keep this in mind when writing
-> your ingestion spec.
+:::info
+ Conceptually, after input data records are read, Druid applies ingestion spec components in a particular order:
+ first [`flattenSpec`](data-formats.md#flattenspec) (if any), then [`timestampSpec`](#timestampspec), then [`transformSpec`](#transformspec),
+ and finally [`dimensionsSpec`](#dimensionsspec) and [`metricsSpec`](#metricsspec). Keep this in mind when writing
+ your ingestion spec.
+:::
 
 A `timestampSpec` can have the following components:
 
@@ -186,9 +186,23 @@ Treat `__time` as a millisecond timestamp: the number of milliseconds since Jan 
 ### `dimensionsSpec`
 
 The `dimensionsSpec` is located in `dataSchema` → `dimensionsSpec` and is responsible for
-configuring [dimensions](./data-model.md#dimensions). An example `dimensionsSpec` is:
+configuring [dimensions](./schema-model.md#dimensions).
 
-```
+You can either manually specify the dimensions or take advantage of type-aware schema auto-discovery where you allow Druid to infer all or some of the schema for your data. This means that you don't have to explicitly specify your dimensions and their type. 
+
+:::caution
+When using type-aware schema auto-discovery, Druid discovers the type for all dimensions unless you use the `dimensionExclusions` field to explicitly specify dimensions to ignore. This helps you control storage costs by preventing Druid from unintentionally ingesting dimensions.
+:::
+
+To use type-aware schema auto-discovery, set `useSchemaDiscovery` to `true`. 
+
+Alternatively, you can use the string-based schemaless ingestion where any discovered dimensions are treated as strings. To do so, leave `useSchemaDiscovery` set to `false` (default). Then, set the dimensions list to empty or set the  `includeAllDimensions` property to `true`.
+
+The following `dimensionsSpec` example uses schema auto-discovery (`"useSchemaDiscovery": true`) in conjunction with explicitly defined dimensions to have Druid infer some of the schema for the data:
+
+
+
+```json
 "dimensionsSpec" : {
   "dimensions": [
     "page",
@@ -196,14 +210,18 @@ configuring [dimensions](./data-model.md#dimensions). An example `dimensionsSpec
     { "type": "long", "name": "userId" }
   ],
   "dimensionExclusions" : [],
-  "spatialDimensions" : []
+  "spatialDimensions" : [],
+  "useSchemaDiscovery": true
 }
 ```
 
-> Conceptually, after input data records are read, Druid applies ingestion spec components in a particular order:
-> first [`flattenSpec`](data-formats.md#flattenspec) (if any), then [`timestampSpec`](#timestampspec), then [`transformSpec`](#transformspec),
-> and finally [`dimensionsSpec`](#dimensionsspec) and [`metricsSpec`](#metricsspec). Keep this in mind when writing
-> your ingestion spec.
+
+:::info
+ Conceptually, after input data records are read, Druid applies ingestion spec components in a particular order:
+ first [`flattenSpec`](data-formats.md#flattenspec) (if any), then [`timestampSpec`](#timestampspec), then [`transformSpec`](#transformspec),
+ and finally [`dimensionsSpec`](#dimensionsspec) and [`metricsSpec`](#metricsspec). Keep this in mind when writing
+ your ingestion spec.
+:::
 
 A `dimensionsSpec` can have the following components:
 
@@ -211,8 +229,10 @@ A `dimensionsSpec` can have the following components:
 |------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------|
 | `dimensions`           | A list of [dimension names or objects](#dimension-objects). You cannot include the same column in both `dimensions` and `dimensionExclusions`.<br /><br />If `dimensions` and `spatialDimensions` are both null or empty arrays, Druid treats all columns other than timestamp or metrics that do not appear in `dimensionExclusions` as String-typed dimension columns. See [inclusions and exclusions](#inclusions-and-exclusions) for details.<br /><br />As a best practice, put the most frequently filtered dimensions at the beginning of the dimensions list. In this case, it would also be good to consider [`partitioning`](partitioning.md) by those same dimensions.                                                                                                                                                                                                                                  | `[]`    |
 | `dimensionExclusions`  | The names of dimensions to exclude from ingestion. Only names are supported here, not objects.<br /><br />This list is only used if the `dimensions` and `spatialDimensions` lists are both null or empty arrays; otherwise it is ignored. See [inclusions and exclusions](#inclusions-and-exclusions) below for details.                                                                                                                                                                                                                                                                                                                                               | `[]`    |
-| `spatialDimensions`    | An array of [spatial dimensions](../development/geo.md).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | `[]`    |
-| `includeAllDimensions` | You can set `includeAllDimensions` to true to ingest both explicit dimensions in the `dimensions` field and other dimensions that the ingestion task discovers from input data. In this case, the explicit dimensions will appear first in order that you specify them and the dimensions dynamically discovered will come after. This flag can be useful especially with auto schema discovery using [`flattenSpec`](./data-formats.html#flattenspec). If this is not set and the `dimensions` field is not empty, Druid will ingest only explicit dimensions. If this is not set and the `dimensions` field is empty, all discovered dimensions will be ingested. | false   |
+| `spatialDimensions`    | An array of [spatial dimensions](../querying/geo.md).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | `[]`    |
+| `includeAllDimensions` | Note that this field only applies to string-based schema discovery where Druid ingests dimensions it discovers as strings. This is different from schema auto-discovery where Druid infers the type for data. You can set `includeAllDimensions` to true to ingest both explicit dimensions in the `dimensions` field and other dimensions that the ingestion task discovers from input data. In this case, the explicit dimensions will appear first in the order that you specify them, and the dimensions dynamically discovered will come after. This flag can be useful especially with auto schema discovery using [`flattenSpec`](./data-formats.md#flattenspec). If this is not set and the `dimensions` field is not empty, Druid will ingest only explicit dimensions. If this is not set and the `dimensions` field is empty, all discovered dimensions will be ingested. | false   |
+| `useSchemaDiscovery` | Configure Druid to use schema auto-discovery to discover some or all of the dimensions and types for your data. For any dimensions that aren't a uniform type, Druid ingests them as JSON. You can use this for native batch or streaming ingestion.  | false  | 
+| `forceSegmentSortByTime` | When set to true (the default), segments created by the ingestion job are sorted by `{__time, dimensions[0], dimensions[1], ...}`. When set to false, segments created by the ingestion job are sorted by `{dimensions[0], dimensions[1], ...}`. To include `__time` in the sort order when this parameter is set to `false`, you must include a dimension named `__time` with type `long` explicitly in the `dimensions` list.<br /><br />Setting this to `false` is an experimental feature; see [Sorting](partitioning.md#sorting) for details. | `true` |
 
 #### Dimension objects
 
@@ -223,16 +243,21 @@ Dimension objects can have the following components:
 
 | Field | Description | Default |
 |-------|-------------|---------|
-| type | Either `string`, `long`, `float`, `double`, or `json`. | `string` |
+| type | Either `auto`, `string`, `long`, `float`, `double`, or `json`. For the `auto` type, Druid determines the most appropriate type for the dimension and assigns one of the following: STRING, ARRAY\<String\>, LONG, ARRAY\<LONG\>, DOUBLE, ARRAY\<DOUBLE\>, or COMPLEX\<json\> columns, all sharing a common 'nested' format. When Druid infers the schema with schema auto-discovery, the type is `auto`. | `string` |
 | name | The name of the dimension. This will be used as the field name to read from input records, as well as the column name stored in generated segments.<br /><br />Note that you can use a [`transformSpec`](#transformspec) if you want to rename columns during ingestion time. | none (required) |
 | createBitmapIndex | For `string` typed dimensions, whether or not bitmap indexes should be created for the column in generated segments. Creating a bitmap index requires more storage, but speeds up certain kinds of filtering (especially equality and prefix filtering). Only supported for `string` typed dimensions. | `true` |
-| multiValueHandling | Specify the type of handling for [multi-value fields](../querying/multi-value-dimensions.md). Possible values are `sorted_array`, `sorted_set`, and `array`. `sorted_array` and `sorted_set` order the array upon ingestion. `sorted_set` removes duplicates. `array` ingests data as-is | `sorted_array` |
+| multiValueHandling | For `string` typed dimensions, specifies the type of handling for [multi-value fields](../querying/multi-value-dimensions.md). Possible values are `array` (ingest string arrays as-is), `sorted_array` (sort string arrays during ingestion), and `sorted_set` (sort and de-duplicate string arrays during ingestion). This parameter is ignored for types other than `string`. | `sorted_array` |
+| maxStringLength | For `string` typed dimensions, the maximum number of characters to store per value. Longer values are truncated during ingestion. Does not apply to multi-value string dimensions. Overrides the global [`druid.indexing.formats.maxStringLength`](../configuration/index.md#additional-peon-configuration) property. Value must be >= 0. | `null` (no truncation) |
 
 #### Inclusions and exclusions
 
 Druid will interpret a `dimensionsSpec` in two possible ways: _normal_ or _schemaless_.
 
 Normal interpretation occurs when either `dimensions` or `spatialDimensions` is non-empty. In this case, the combination of the two lists will be taken as the set of dimensions to be ingested, and the list of `dimensionExclusions` will be ignored.
+
+:::info
+ The following description of schemaless refers to  string-based schemaless  where Druid treats dimensions it discovers as strings. We recommend you use schema auto-discovery instead where Druid infers the type for the dimension. For more information, see [`dimensionsSpec`](#dimensionsspec).
+:::
 
 Schemaless interpretation occurs when both `dimensions` and `spatialDimensions` are empty or null. In this case, the set of dimensions is determined in the following way:
 
@@ -244,8 +269,12 @@ Schemaless interpretation occurs when both `dimensions` and `spatialDimensions` 
 6. Any field with the same name as an aggregator from the [metricsSpec](#metricsspec) is excluded.
 7. All other fields are ingested as `string` typed dimensions with the [default settings](#dimension-objects).
 
-> Note: Fields generated by a [`transformSpec`](#transformspec) are not currently considered candidates for
-> schemaless dimension interpretation.
+Additionally, if you have empty columns that you want to include in the string-based schemaless ingestion, you'll need to include the context parameter `storeEmptyColumns` and set it to `true`.
+
+:::info
+ Note: Fields generated by a [`transformSpec`](#transformspec) are not currently considered candidates for
+ schemaless dimension interpretation.
+:::
 
 ### `metricsSpec`
 
@@ -263,23 +292,25 @@ An example `metricsSpec` is:
 ]
 ```
 
-> Generally, when [rollup](./rollup.md) is disabled, you should have an empty `metricsSpec` (because without rollup,
-> Druid does not do any ingestion-time aggregation, so there is little reason to include an ingestion-time aggregator). However,
-> in some cases, it can still make sense to define metrics: for example, if you want to create a complex column as a way of
-> pre-computing part of an [approximate aggregation](../querying/aggregations.md#approximate-aggregations), this can only
-> be done by defining a metric in a `metricsSpec`.
+:::info
+ Generally, when [rollup](./rollup.md) is disabled, you should have an empty `metricsSpec` (because without rollup,
+ Druid does not do any ingestion-time aggregation, so there is little reason to include an ingestion-time aggregator). However,
+ in some cases, it can still make sense to define metrics: for example, if you want to create a complex column as a way of
+ pre-computing part of an [approximate aggregation](../querying/aggregations.md#approximate-aggregations), this can only
+ be done by defining a metric in a `metricsSpec`.
+:::
 
 ### `granularitySpec`
 
-The `granularitySpec` is located in `dataSchema` → `granularitySpec` and is responsible for configuring
-the following operations:
+The `granularitySpec`, located in `dataSchema` → `granularitySpec`, specifies the following:
 
-1. Partitioning a datasource into [time chunks](../design/architecture.md#datasources-and-segments) (via `segmentGranularity`).
-2. Truncating the timestamp, if desired (via `queryGranularity`).
-3. Specifying which time chunks of segments should be created, for batch ingestion (via `intervals`).
-4. Specifying whether ingestion-time [rollup](./rollup.md) should be used or not (via `rollup`).
+1. `segmentGranularity` to partitioning a datasource into [time chunks](../design/storage.md).
+2. `queryGranularity` to optionally truncate the timestamp.
+3. `intervals` to define the time chunks of segments to create for batch ingestion.
+4.  `rollup` to enable ingestion-time [rollup](./rollup.md) or not.
 
-Other than `rollup`, these operations are all based on the [primary timestamp](./data-model.md#primary-timestamp).
+Other than `rollup`, these operations are all based on the [primary timestamp](./schema-model.md#primary-timestamp).
+Use the format from [Query granularities] to specify both `segmentGranualarity` and `queryGranularity`.
 
 An example `granularitySpec` is:
 
@@ -299,7 +330,7 @@ A `granularitySpec` can have the following components:
 | Field | Description | Default |
 |-------|-------------|---------|
 | type |`uniform`| `uniform` |
-| segmentGranularity | [Time chunking](../design/architecture.md#datasources-and-segments) granularity for this datasource. Multiple segments can be created per time chunk. For example, when set to `day`, the events of the same day fall into the same time chunk which can be optionally further partitioned into multiple segments based on other configurations and input size. Any [granularity](../querying/granularities.md) can be provided here. Note that all segments in the same time chunk should have the same segment granularity.| `day` |
+| segmentGranularity | [Time chunking](../design/storage.md) granularity for this datasource. Multiple segments can be created per time chunk. For example, when set to `day`, the events of the same day fall into the same time chunk which can be optionally further partitioned into multiple segments based on other configurations and input size. Any [granularity](../querying/granularities.md) can be provided here. Note that all segments in the same time chunk should have the same segment granularity.<br /><br />Avoid `WEEK` granularity for data partitioning because weeks don't align neatly with months and years, making it difficult to change partitioning by coarser granularity. Instead, opt for other partitioning options such as `DAY` or `MONTH`, which offer more flexibility.| `day` |
 | queryGranularity | The resolution of timestamp storage within each segment. This must be equal to, or finer, than `segmentGranularity`. This will be the finest granularity that you can query at and still receive sensible results, but note that you can still query at anything coarser than this granularity. E.g., a value of `minute` will mean that records will be stored at minutely granularity, and can be sensibly queried at any multiple of minutes (including minutely, 5-minutely, hourly, etc).<br /><br />Any [granularity](../querying/granularities.md) can be provided here. Use `none` to store timestamps as-is, without any truncation. Note that `rollup` will be applied if it is set even when the `queryGranularity` is set to `none`. | `none` |
 | rollup | Whether to use ingestion-time [rollup](./rollup.md) or not. Note that rollup is still effective even when `queryGranularity` is set to `none`. Your data will be rolled up if they have the exactly same timestamp. | `true` |
 | intervals | A list of intervals defining time chunks for segments. Specify interval values using ISO8601 format. For example, `["2021-12-06T21:27:10+00:00/2021-12-07T00:00:00+00:00"]`. If you omit the time, the time defaults to "00:00:00".<br /><br />Druid breaks the list up and rounds off the list values based on the `segmentGranularity`.<br /><br />If `null` or not provided, batch ingestion tasks generally determine which time chunks to output based on the timestamps found in the input data.<br /><br />If specified, batch ingestion tasks may be able to skip a determining-partitions phase, which can result in faster ingestion. Batch ingestion tasks may also be able to request all their locks up-front instead of one by one. Batch ingestion tasks throw away any records with timestamps outside of the specified intervals.<br /><br />Ignored for any form of streaming ingestion. | `null` |
@@ -322,10 +353,12 @@ records during ingestion time. It is optional. An example `transformSpec` is:
 }
 ```
 
-> Conceptually, after input data records are read, Druid applies ingestion spec components in a particular order:
-> first [`flattenSpec`](data-formats.md#flattenspec) (if any), then [`timestampSpec`](#timestampspec), then [`transformSpec`](#transformspec),
-> and finally [`dimensionsSpec`](#dimensionsspec) and [`metricsSpec`](#metricsspec). Keep this in mind when writing
-> your ingestion spec.
+:::info
+ Conceptually, after input data records are read, Druid applies ingestion spec components in a particular order:
+ first [`flattenSpec`](data-formats.md#flattenspec) (if any), then [`timestampSpec`](#timestampspec), then [`transformSpec`](#transformspec),
+ and finally [`dimensionsSpec`](#dimensionsspec) and [`metricsSpec`](#metricsspec). Keep this in mind when writing
+ your ingestion spec.
+:::
 
 #### Transforms
 
@@ -349,12 +382,14 @@ Druid currently includes one kind of built-in transform, the expression transfor
 }
 ```
 
-The `expression` is a [Druid query expression](../misc/math-expr.md).
+The `expression` is a [Druid query expression](../querying/math-expr.md).
 
-> Conceptually, after input data records are read, Druid applies ingestion spec components in a particular order:
-> first [`flattenSpec`](data-formats.md#flattenspec) (if any), then [`timestampSpec`](#timestampspec), then [`transformSpec`](#transformspec),
-> and finally [`dimensionsSpec`](#dimensionsspec) and [`metricsSpec`](#metricsspec). Keep this in mind when writing
-> your ingestion spec.
+:::info
+ Conceptually, after input data records are read, Druid applies ingestion spec components in a particular order:
+ first [`flattenSpec`](data-formats.md#flattenspec) (if any), then [`timestampSpec`](#timestampspec), then [`transformSpec`](#transformspec),
+ and finally [`dimensionsSpec`](#dimensionsspec) and [`metricsSpec`](#metricsspec). Keep this in mind when writing
+ your ingestion spec.
+:::
 
 #### Filter
 
@@ -362,67 +397,55 @@ The `filter` conditionally filters input rows during ingestion. Only rows that p
 ingested. Any of Druid's standard [query filters](../querying/filters.md) can be used. Note that within a
 `transformSpec`, the `transforms` are applied before the `filter`, so the filter can refer to a transform.
 
-### Legacy `dataSchema` spec
+### Projections
 
-> The `dataSchema` spec has been changed in 0.17.0. The new spec is supported by all ingestion methods
-except for _Hadoop_ ingestion. See [`dataSchema`](#dataschema) for the new spec.
+Projections are ingestion/compaction time aggregations that Druid computes on a subset of dimensions and metrics of a segment. They are stored within a segment. The pre-aggregated data reduces the number of rows the query engine needs to process when you run a query. This can speed up queries for query shapes that match a projection.
 
-The legacy `dataSchema` spec has below two more components in addition to the ones listed in the [`dataSchema`](#dataschema) section above.
+Define projections for a new data source in the `projectionsSpec` block during ingestion. To add projections to an existing data source, see [create them afterwards](../querying/projections.md#manually-add-a-projection).
 
-- [input row parser](#parser-deprecated), [flattening of nested data](#flattenspec) (if needed)
+:::info
+Projections you define become a dimension for your datasource. To remove a projection from your datasource, you need to reingest the data with the projection removed. Alternatively, you can use a query context parameter to not use projections for a specific query.
+:::
 
-#### `parser` (Deprecated)
-
-In legacy `dataSchema`, the `parser` is located in the `dataSchema` → `parser` and is responsible for configuring a wide variety of
-items related to parsing input records. The `parser` is deprecated and it is highly recommended to use `inputFormat` instead.
-For details about `inputFormat` and supported `parser` types, see the ["Data formats" page](data-formats.md).
-
-For details about major components of the `parseSpec`, refer to their subsections:
-
-- [`timestampSpec`](#timestampspec), responsible for configuring the [primary timestamp](./data-model.md#primary-timestamp).
-- [`dimensionsSpec`](#dimensionsspec), responsible for configuring [dimensions](./data-model.md#dimensions).
-- [`flattenSpec`](#flattenspec), responsible for flattening nested data formats.
-
-An example `parser` is:
-
-```
-"parser": {
-  "type": "string",
-  "parseSpec": {
-    "format": "json",
-    "flattenSpec": {
-      "useFieldDiscovery": true,
-      "fields": [
-        { "type": "path", "name": "userId", "expr": "$.user.id" }
-      ]
-    },
-    "timestampSpec": {
-      "column": "timestamp",
-      "format": "auto"
-    },
-    "dimensionsSpec": {
+```json
+"projectionsSpec": {
+  "projections": [
+    {
+      "name": "daily_channel_summary",
       "dimensions": [
-        "page",
-        "language",
-        { "type": "long", "name": "userId" }
+        "channel"
+        ],
+      "granularity": "DAY",
+      "metrics": [
+        { 
+          "type": "longSum", 
+          "name": "total_added", 
+          "fieldName": "added" 
+          },
+        { "type": "longSum", 
+        "name": "total_deleted", 
+        "fieldName": "deleted" 
+        },
+        { "type": "longSum", 
+        "name": "total_delta", 
+        "fieldName": "delta" 
+        },
+        { 
+          "type": "cardinality", 
+          "name": "distinct_users", 
+          "fieldName": "user" 
+          }
       ]
     }
-  }
+  ]
 }
 ```
 
-#### `flattenSpec`
-
-In the legacy `dataSchema`, the `flattenSpec` is located in `dataSchema` → `parser` → `parseSpec` → `flattenSpec` and is responsible for
-bridging the gap between potentially nested input data (such as JSON, Avro, etc) and Druid's flat data model.
-See [Flatten spec](./data-formats.md#flattenspec) for more details.
-
 ## `ioConfig`
 
-The `ioConfig` influences how data is read from a source system, such as Apache Kafka, Amazon S3, a mounted
+The `ioConfig` influences how data is read from a source system, such as Apache Kafka&circledR;, Amazon S3, a mounted
 filesystem, or any other supported source system. The `inputFormat` property applies to all
-[ingestion method](./index.md#ingestion-methods) except for Hadoop ingestion. The Hadoop ingestion still
-uses the [`parser`](#parser-deprecated) in the legacy `dataSchema`.
+[ingestion method](./index.md#ingestion-methods).
 The rest of `ioConfig` is specific to each individual ingestion method.
 An example `ioConfig` to read JSON data is:
 
@@ -435,14 +458,27 @@ An example `ioConfig` to read JSON data is:
     ...
 }
 ```
-For more details, see the documentation provided by each [ingestion method](./index.md#ingestion-methods).
+
+For details, see the documentation provided by each [ingestion method](./index.md#ingestion-methods).
 
 ## `tuningConfig`
 
-Tuning properties are specified in a `tuningConfig`, which goes at the top level of an ingestion spec. Some
-properties apply to all [ingestion methods](./index.md#ingestion-methods), but most are specific to each individual
-ingestion method. An example `tuningConfig` that sets all of the shared, common properties to their defaults
-is:
+You specify tuning properties in a `tuningConfig` object, which goes at the top level of an ingestion spec.
+Some properties apply to all [ingestion methods](./index.md#ingestion-methods), but most are specific to each individual ingestion method.
+
+The following table lists the common tuning properties shared among ingestion methods:
+
+|Field|Description|Default|
+|-----|-----------|-------|
+|type|Each ingestion method has its own tuning type code. You must specify the type code that matches your ingestion method. Common options are `index`, `kafka`, and `kinesis`.||
+|maxRowsInMemory|The maximum number of records to store in memory before persisting to disk. Note that this is the number of rows post-rollup, and so it may not be equal to the number of input records. Ingested records will be persisted to disk when either `maxRowsInMemory` or `maxBytesInMemory` are reached (whichever happens first).|`1000000`|
+|maxBytesInMemory|The maximum aggregate size of records, in bytes, to store in the JVM heap before persisting. This is based on a rough estimate of memory usage. Ingested records will be persisted to disk when either `maxRowsInMemory` or `maxBytesInMemory` are reached (whichever happens first). `maxBytesInMemory` also includes heap usage of artifacts created from intermediary persists. This means that after every persist, the amount of `maxBytesInMemory` until the next persist will decrease. If the sum of bytes of all intermediary persisted artifacts exceeds `maxBytesInMemory` the task fails.<br /><br />Setting `maxBytesInMemory` to -1 disables this check, meaning Druid will rely entirely on `maxRowsInMemory` to control memory usage. Setting it to zero means the default value will be used (one-sixth of JVM heap size).<br /><br />Note that the estimate of memory usage is designed to be an overestimate, and can be especially high when using complex ingest-time aggregators, including sketches. If this causes your indexing workloads to persist to disk too often, you can set `maxBytesInMemory` to -1 and rely on `maxRowsInMemory` instead.|One-sixth of max JVM heap size|
+|skipBytesInMemoryOverheadCheck|The calculation of maxBytesInMemory takes into account overhead objects created during ingestion and each intermediate persist. Setting this to true can exclude the bytes of these overhead objects from maxBytesInMemory check.|false|
+|indexSpec|Defines segment storage format options to use at indexing time.|See [`indexSpec`](#indexspec) for more information.|
+|indexSpecForIntermediatePersists|Defines segment storage format options to use at indexing time for intermediate persisted temporary segments.|See [`indexSpec`](#indexspec) for more information.|
+|Other properties|Each ingestion method has its own list of additional tuning properties. See the documentation for each method for a full list: [Kafka indexing service](../ingestion/kafka-ingestion.md#tuning-configuration), [Kinesis indexing service](../ingestion/kinesis-ingestion.md#tuning-configuration), and [Native batch](native-batch.md#tuningconfig).||
+
+The following example shows a `tuningConfig` object that sets all of the shared common properties to their defaults:
 
 ```plaintext
 "tuningConfig": {
@@ -459,36 +495,52 @@ is:
 }
 ```
 
-|Field|Description|Default|
-|-----|-----------|-------|
-|type|Each ingestion method has its own tuning type code. You must specify the type code that matches your ingestion method. Common options are `index`, `hadoop`, `kafka`, and `kinesis`.||
-|maxRowsInMemory|The maximum number of records to store in memory before persisting to disk. Note that this is the number of rows post-rollup, and so it may not be equal to the number of input records. Ingested records will be persisted to disk when either `maxRowsInMemory` or `maxBytesInMemory` are reached (whichever happens first).|`1000000`|
-|maxBytesInMemory|The maximum aggregate size of records, in bytes, to store in the JVM heap before persisting. This is based on a rough estimate of memory usage. Ingested records will be persisted to disk when either `maxRowsInMemory` or `maxBytesInMemory` are reached (whichever happens first). `maxBytesInMemory` also includes heap usage of artifacts created from intermediary persists. This means that after every persist, the amount of `maxBytesInMemory` until the next persist will decrease. If the sum of bytes of all intermediary persisted artifacts exceeds `maxBytesInMemory` the task fails.<br /><br />Setting `maxBytesInMemory` to -1 disables this check, meaning Druid will rely entirely on `maxRowsInMemory` to control memory usage. Setting it to zero means the default value will be used (one-sixth of JVM heap size).<br /><br />Note that the estimate of memory usage is designed to be an overestimate, and can be especially high when using complex ingest-time aggregators, including sketches. If this causes your indexing workloads to persist to disk too often, you can set `maxBytesInMemory` to -1 and rely on `maxRowsInMemory` instead.|One-sixth of max JVM heap size|
-|skipBytesInMemoryOverheadCheck|The calculation of maxBytesInMemory takes into account overhead objects created during ingestion and each intermediate persist. Setting this to true can exclude the bytes of these overhead objects from maxBytesInMemory check.|false|
-|indexSpec|Defines segment storage format options to use at indexing time.|See [`indexSpec`](#indexspec) for more information.|
-|indexSpecForIntermediatePersists|Defines segment storage format options to use at indexing time for intermediate persisted temporary segments.|See [`indexSpec`](#indexspec) for more information.|
-|Other properties|Each ingestion method has its own list of additional tuning properties. See the documentation for each method for a full list: [Kafka indexing service](../development/extensions-core/kafka-supervisor-reference.md#tuningconfig), [Kinesis indexing service](../development/extensions-core/kinesis-ingestion.md#tuningconfig), [Native batch](native-batch.md#tuningconfig), and [Hadoop-based](hadoop.md#tuningconfig).||
-
 ### `indexSpec`
 
-The `indexSpec` object can include the following properties:
+The `indexSpec` object can include the following properties.
+For information on defining an `indexSpec` in a query context, see [SQL-based ingestion reference](../multi-stage-query/reference.md#context-parameters).
 
 |Field|Description|Default|
 |-----|-----------|-------|
 |bitmap|Compression format for bitmap indexes. Should be a JSON object with `type` set to `roaring` or `concise`.|`{"type": "roaring"}`|
-|dimensionCompression|Compression format for dimension columns. Options are `lz4`, `lzf`, `zstd`, or `uncompressed`.|`lz4`|
-|stringDictionaryEncoding|Encoding format for STRING value dictionaries used by STRING and COMPLEX&lt;json&gt; columns. <br /><br />Example to enable front coding: `{"type":"frontCoded", "bucketSize": 4}`<br />`bucketSize` is the number of values to place in a bucket to perform delta encoding. Must be a power of 2, maximum is 128. Defaults to 4.<br /> `formatVersion` can specify older versions for backwards compatibility during rolling upgrades, valid options are `0` and `1`. Defaults to `1`<br /><br />See [Front coding](#front-coding) for more information.|`{"type":"utf8"}`|
+|dimensionCompression|Compression format for dimension columns. One of `lz4`, `lzf`, `zstd`, or `uncompressed`.|`lz4`|
+|stringDictionaryEncoding|Encoding format for string value dictionaries used by STRING and [COMPLEX&lt;json&gt;](../querying/nested-columns.md) columns. To enable front coding, set `stringDictionaryEncoding.type` to `frontCoded`. Optionally, you can specify the `bucketSize` and `formatVersion` properties. See [Front coding](#front-coding) for more information.|`{"type":"utf8"}`|
 |metricCompression|Compression format for primitive type metric columns. Options are `lz4`, `lzf`, `zstd`, `uncompressed`, or `none` (which is more efficient than `uncompressed`, but not supported by older versions of Druid).|`lz4`|
 |longEncoding|Encoding format for long-typed columns. Applies regardless of whether they are dimensions or metrics. Options are `auto` or `longs`. `auto` encodes the values using offset or lookup table depending on column cardinality, and store them with variable size. `longs` stores the value as-is with 8 bytes each.|`longs`|
+|complexMetricCompression|Compression format for complex type metric columns. Options are `lz4`, `lzf`, `zstd`, `uncompressed`. Options other than `uncompressed` are not compatible with Druid versions older than 31, and only applies to complex metrics which do not have specialized column formats.|`uncompressed`|
 |jsonCompression|Compression format to use for nested column raw data. Options are `lz4`, `lzf`, `zstd`, or `uncompressed`.|`lz4`|
 
-##### Front coding
+#### Front coding
 
-Front coding is an experimental feature starting in version 25.0. Front coding is an incremental encoding strategy that Druid can use to store STRING and [COMPLEX&lt;json&gt;](../querying/nested-columns.md) columns. It allows Druid to create smaller UTF-8 encoded segments with very little performance cost.
+Druid stores STRING columns using dictionary encoding for better compression, where each string value is added to a lexicographically sorted dictionary and the actual column just stores a pointer to a dictionary entry.
+Front coding is an optional incremental encoding strategy that lets you further compress STRING and [COMPLEX&lt;json&gt;](../querying/nested-columns.md) columns in Druid with minimal performance impact.
+Front-coded dictionaries can reduce storage and improve performance by optimizing values with a shared common prefix to avoid storing duplicate data.
+For example, if you are tracking website visits, most URLs start with `https://domain.xyz/`, and front coding is able to exploit this pattern for more optimal compression when storing such datasets.
 
-You can enable front coding with all types of ingestion. For information on defining an `indexSpec` in a query context, see [SQL-based ingestion reference](../multi-stage-query/reference.md#context-parameters).
+You can use front coding with all types of ingestion.
 
-> Front coding was originally introduced in Druid 25.0, and an improved 'version 1' was introduced in Druid 26.0, with typically faster read speed and smaller storage size. The current recommendation is to enable it in a staging environment and fully test your use case before using in production. By default, segments created with front coding enabled in Druid 26.0 are not backwards compatible with Druid 25.0, and those created with Druid 25.0 are not compatible with Druid versions older than 25.0. If using front coding in Druid 25.0 and upgrading to Druid 26.0, the `formatVersion` can be specified as `0` keep writing out the older format to enable seamless downgrades to Druid 25.0, and then later changed to `1` (or removed) once determined that rollback is not necessary.
+##### Enable front coding
 
-Beyond these properties, each ingestion method has its own specific tuning properties. See the documentation for each
-[ingestion method](./index.md#ingestion-methods) for details.
+Before you enable front coding for your cluster, review the [Migration guide for front-coded dictionaries](../release-info/migr-front-coded-dict.md).
+It contains important information about compatibility with Druid versions preceding 25.0.0.
+
+To enable front coding, set `indexSpec.stringDictionaryEncoding.type` to `frontCoded` in the `tuningConfig` object of your ingestion spec.
+
+You can specify the following optional properties:
+
+* `bucketSize`: Number of values to place in a bucket to perform delta encoding. Setting this property instructs indexing tasks to write segments using compressed dictionaries of the specified bucket size. You can set it to any power of 2 less than or equal to 128. `bucketSize` defaults to 4.
+* `formatVersion`: Specifies which front coding version to use. Options are 0 and 1 (supported for Druid versions 26.0.0 and higher). `formatVersion` defaults to 1.
+
+For example:
+
+```
+"tuningConfig": {
+  "indexSpec": {
+    "stringDictionaryEncoding": {
+      "type":"frontCoded",
+      "bucketSize": 4,
+      "formatVersion": 1
+    }
+  }
+}
+```

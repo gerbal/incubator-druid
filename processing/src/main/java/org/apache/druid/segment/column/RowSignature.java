@@ -26,6 +26,7 @@ import com.google.common.collect.ImmutableList;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import org.apache.druid.java.util.common.IAE;
+import org.apache.druid.query.InlineDataSource;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.PostAggregator;
 import org.apache.druid.query.dimension.DimensionSpec;
@@ -44,7 +45,7 @@ import java.util.Optional;
  * Type signature for a row in a Druid datasource or query result.
  *
  * @see org.apache.druid.query.QueryToolChest#resultArraySignature which returns signatures for query results
- * @see org.apache.druid.query.InlineDataSource#getRowSignature which returns signatures for inline datasources
+ * @see InlineDataSource#getRowSignature which returns signatures for inline datasources
  */
 public class RowSignature implements ColumnInspector
 {
@@ -135,6 +136,15 @@ public class RowSignature implements ColumnInspector
   public Optional<ColumnType> getColumnType(final int columnNumber)
   {
     return Optional.ofNullable(columnTypes.get(getColumnName(columnNumber)));
+  }
+
+  /**
+   * Returns true if the column is a numeric type ({@link ColumnType#isNumeric()}), otherwise false if the column
+   * is not a numeric type or is not present in the row signature.
+   */
+  public boolean isNumeric(final String columnName)
+  {
+    return getColumnType(columnName).map(ColumnType::isNumeric).orElse(false);
   }
 
   /**
@@ -381,5 +391,45 @@ public class RowSignature implements ColumnInspector
      * Aggregation results may or may not be finalized.
      */
     UNKNOWN
+  }
+
+  /**
+   * Builds a safe {@link RowSignature}.
+   *
+   * The new rowsignature will not contain `null` types - they will be replaced by STRING.
+   */
+  public RowSignature buildSafeSignature(List<String> requestedColumnNames)
+  {
+    Builder builder = new Builder();
+    for (String columnName : requestedColumnNames) {
+      ColumnType columnType = columnTypes.get(columnName);
+      if (columnType == null) {
+        columnType = ColumnType.STRING;
+      }
+      builder.add(columnName, columnType);
+    }
+    return builder.build();
+  }
+
+  /**
+   * Returns the column types in the order they are in.
+   */
+  public List<ColumnType> getColumnTypes()
+  {
+    List<ColumnType> ret = new ArrayList<>();
+    for (String colName : columnNames) {
+      ret.add(columnTypes.get(colName));
+    }
+    return ret;
+  }
+
+  public RowSignature withPrefix(String prefix)
+  {
+    Builder builder = new Builder();
+    for (String columnName : columnNames) {
+      ColumnType columnType = columnTypes.get(columnName);
+      builder.add(prefix + columnName, columnType);
+    }
+    return builder.build();
   }
 }

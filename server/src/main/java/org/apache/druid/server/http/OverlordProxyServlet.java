@@ -21,16 +21,20 @@ package org.apache.druid.server.http;
 
 import com.google.inject.Inject;
 import com.google.inject.Provider;
-import org.apache.druid.client.indexing.IndexingService;
-import org.apache.druid.discovery.DruidLeaderClient;
+import org.apache.druid.common.guava.FutureUtils;
 import org.apache.druid.guice.annotations.Global;
 import org.apache.druid.guice.http.DruidHttpClientConfig;
-import org.apache.druid.java.util.common.ISE;
+import org.apache.druid.rpc.indexing.OverlordClient;
 import org.apache.druid.server.JettyUtils;
+import org.apache.druid.server.initialization.ServerConfig;
+import org.apache.druid.server.initialization.jetty.ResponseIdentityHeaderHandler;
+import org.apache.druid.server.initialization.jetty.StandardResponseHeaderFilterHolder;
 import org.apache.druid.server.security.AuthConfig;
 import org.eclipse.jetty.client.HttpClient;
-import org.eclipse.jetty.client.api.Request;
-import org.eclipse.jetty.proxy.ProxyServlet;
+import org.eclipse.jetty.client.Request;
+import org.eclipse.jetty.client.Response;
+import org.eclipse.jetty.ee8.proxy.ProxyServlet;
+import org.eclipse.jetty.http.HttpField;
 
 import javax.servlet.ServletException;
 import javax.servlet.http.HttpServletRequest;
@@ -41,29 +45,29 @@ import javax.servlet.http.HttpServletResponse;
  */
 public class OverlordProxyServlet extends ProxyServlet
 {
-  private final DruidLeaderClient druidLeaderClient;
+  private final OverlordClient overlordClient;
   private final Provider<HttpClient> httpClientProvider;
   private final DruidHttpClientConfig httpClientConfig;
+  private final ServerConfig serverConfig;
 
   @Inject
   OverlordProxyServlet(
-      @IndexingService DruidLeaderClient druidLeaderClient,
+      OverlordClient overlordClient,
       @Global Provider<HttpClient> httpClientProvider,
-      @Global DruidHttpClientConfig httpClientConfig
+      @Global DruidHttpClientConfig httpClientConfig,
+      ServerConfig serverConfig
   )
   {
-    this.druidLeaderClient = druidLeaderClient;
+    this.overlordClient = overlordClient;
     this.httpClientProvider = httpClientProvider;
     this.httpClientConfig = httpClientConfig;
+    this.serverConfig = serverConfig;
   }
 
   @Override
   protected String rewriteTarget(HttpServletRequest request)
   {
-    final String overlordLeader = druidLeaderClient.findCurrentLeader();
-    if (overlordLeader == null) {
-      throw new ISE("Can't find Overlord leader.");
-    }
+    final String overlordLeader = FutureUtils.getUnchecked(overlordClient.findCurrentLeader(), true).toString();
 
     return JettyUtils.concatenateForRewrite(
         overlordLeader,
@@ -87,6 +91,48 @@ public class OverlordProxyServlet extends ProxyServlet
     return client;
   }
 
+  @Override
+  protected void onServerResponseHeaders(
+      final HttpServletRequest clientRequest,
+      final HttpServletResponse proxyResponse,
+      final Response serverResponse
+  )
+  {
+    ResponseIdentityHeaderHandler.rememberLocalIdentity(clientRequest, proxyResponse);
+    ResponseIdentityHeaderHandler.clearRouterIdentity(proxyResponse);
+    StandardResponseHeaderFilterHolder.deduplicateHeadersInProxyServlet(proxyResponse, serverResponse);
+    super.onServerResponseHeaders(clientRequest, proxyResponse, serverResponse);
+  }
+
+  @Override
+  protected void onProxyResponseFailure(
+      final HttpServletRequest clientRequest,
+      final HttpServletResponse proxyResponse,
+      final Response serverResponse,
+      final Throwable failure
+  )
+  {
+    ResponseIdentityHeaderHandler.restoreLocalIdentity(clientRequest, proxyResponse);
+    super.onProxyResponseFailure(clientRequest, proxyResponse, serverResponse, failure);
+  }
+
+  @Override
+  protected HttpField filterServerResponseHeader(
+      final HttpServletRequest clientRequest,
+      final Response serverResponse,
+      final HttpField field
+  )
+  {
+    // The Coordinator-to-Overlord proxy follows the same all-or-nothing identity contract as Router proxies.
+    if (!ResponseIdentityHeaderHandler.shouldProxyIdentityHeader(
+        serverConfig.isEnableResponseIdentityHeaders(),
+        serverResponse,
+        field
+    )) {
+      return null;
+    }
+    return super.filterServerResponseHeader(clientRequest, serverResponse, field);
+  }
 
   @Override
   protected void sendProxyRequest(

@@ -34,10 +34,8 @@ import it.unimi.dsi.fastutil.bytes.ByteArrays;
 import org.apache.druid.client.cache.CacheConfig;
 import org.apache.druid.client.cache.CachePopulatorStats;
 import org.apache.druid.client.cache.MapCache;
-import org.apache.druid.client.indexing.NoopOverlordClient;
+import org.apache.druid.client.coordinator.NoopCoordinatorClient;
 import org.apache.druid.data.input.AbstractInputSource;
-import org.apache.druid.data.input.Firehose;
-import org.apache.druid.data.input.FirehoseFactory;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.data.input.InputRowListPlusRawValues;
 import org.apache.druid.data.input.InputRowSchema;
@@ -45,10 +43,7 @@ import org.apache.druid.data.input.InputSourceReader;
 import org.apache.druid.data.input.InputStats;
 import org.apache.druid.data.input.MapBasedInputRow;
 import org.apache.druid.data.input.impl.DimensionsSpec;
-import org.apache.druid.data.input.impl.InputRowParser;
-import org.apache.druid.data.input.impl.MapInputRowParser;
 import org.apache.druid.data.input.impl.NoopInputFormat;
-import org.apache.druid.data.input.impl.TimeAndDimsParseSpec;
 import org.apache.druid.data.input.impl.TimestampSpec;
 import org.apache.druid.discovery.DataNodeService;
 import org.apache.druid.discovery.DruidNodeAnnouncer;
@@ -56,37 +51,40 @@ import org.apache.druid.discovery.LookupNodeService;
 import org.apache.druid.indexer.TaskLocation;
 import org.apache.druid.indexer.TaskState;
 import org.apache.druid.indexer.TaskStatus;
+import org.apache.druid.indexer.granularity.UniformGranularitySpec;
 import org.apache.druid.indexing.common.SegmentCacheManagerFactory;
 import org.apache.druid.indexing.common.TaskLock;
 import org.apache.druid.indexing.common.TaskLockType;
-import org.apache.druid.indexing.common.TaskStorageDirTracker;
 import org.apache.druid.indexing.common.TaskToolbox;
 import org.apache.druid.indexing.common.TaskToolboxFactory;
 import org.apache.druid.indexing.common.TestUtils;
 import org.apache.druid.indexing.common.actions.LocalTaskActionClientFactory;
 import org.apache.druid.indexing.common.actions.LockListAction;
-import org.apache.druid.indexing.common.actions.SegmentInsertAction;
+import org.apache.druid.indexing.common.actions.SegmentTransactionalInsertAction;
+import org.apache.druid.indexing.common.actions.TaskActionClient;
 import org.apache.druid.indexing.common.actions.TaskActionClientFactory;
 import org.apache.druid.indexing.common.actions.TaskActionToolbox;
-import org.apache.druid.indexing.common.actions.TaskAuditLogConfig;
 import org.apache.druid.indexing.common.actions.TimeChunkLockTryAcquireAction;
 import org.apache.druid.indexing.common.config.TaskConfig;
+import org.apache.druid.indexing.common.config.TaskConfigBuilder;
 import org.apache.druid.indexing.common.config.TaskStorageConfig;
 import org.apache.druid.indexing.common.task.AbstractFixedIntervalTask;
 import org.apache.druid.indexing.common.task.IndexTask;
 import org.apache.druid.indexing.common.task.IndexTask.IndexIOConfig;
 import org.apache.druid.indexing.common.task.IndexTask.IndexIngestionSpec;
-import org.apache.druid.indexing.common.task.IndexTask.IndexTuningConfig;
 import org.apache.druid.indexing.common.task.KillUnusedSegmentsTask;
+import org.apache.druid.indexing.common.task.NoopTask;
+import org.apache.druid.indexing.common.task.NoopTaskContextEnricher;
 import org.apache.druid.indexing.common.task.NoopTestTaskReportFileWriter;
-import org.apache.druid.indexing.common.task.RealtimeIndexTask;
 import org.apache.druid.indexing.common.task.Task;
 import org.apache.druid.indexing.common.task.TaskResource;
 import org.apache.druid.indexing.common.task.TestAppenderatorsManager;
+import org.apache.druid.indexing.common.task.TuningConfigBuilder;
 import org.apache.druid.indexing.overlord.config.DefaultTaskConfig;
 import org.apache.druid.indexing.overlord.config.TaskLockConfig;
 import org.apache.druid.indexing.overlord.config.TaskQueueConfig;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorManager;
+import org.apache.druid.indexing.test.TestDataSegmentAnnouncer;
 import org.apache.druid.indexing.test.TestIndexerMetadataStorageCoordinator;
 import org.apache.druid.indexing.worker.config.WorkerConfig;
 import org.apache.druid.jackson.DefaultObjectMapper;
@@ -97,70 +95,65 @@ import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.Pair;
 import org.apache.druid.java.util.common.RE;
-import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.common.Stopwatch;
 import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.guava.Comparators;
-import org.apache.druid.java.util.common.jackson.JacksonUtils;
 import org.apache.druid.java.util.common.parsers.CloseableIterator;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
-import org.apache.druid.java.util.metrics.Monitor;
 import org.apache.druid.java.util.metrics.MonitorScheduler;
 import org.apache.druid.metadata.DerbyMetadataStorageActionHandlerFactory;
 import org.apache.druid.metadata.TestDerbyConnector;
 import org.apache.druid.query.DirectQueryProcessingPool;
+import org.apache.druid.query.DruidProcessingConfig;
 import org.apache.druid.query.ForwardingQueryProcessingPool;
 import org.apache.druid.query.QueryRunnerFactoryConglomerate;
 import org.apache.druid.query.SegmentDescriptor;
-import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.DoubleSumAggregatorFactory;
-import org.apache.druid.query.aggregation.LongSumAggregatorFactory;
+import org.apache.druid.query.policy.NoopPolicyEnforcer;
+import org.apache.druid.rpc.indexing.NoopOverlordClient;
 import org.apache.druid.segment.IndexIO;
+import org.apache.druid.segment.IndexMergerV10Factory;
 import org.apache.druid.segment.IndexMergerV9Factory;
 import org.apache.druid.segment.IndexSpec;
-import org.apache.druid.segment.TestHelper;
+import org.apache.druid.segment.SegmentSchemaMapping;
+import org.apache.druid.segment.TestIndex;
 import org.apache.druid.segment.handoff.SegmentHandoffNotifier;
 import org.apache.druid.segment.handoff.SegmentHandoffNotifierFactory;
 import org.apache.druid.segment.indexing.DataSchema;
-import org.apache.druid.segment.indexing.RealtimeIOConfig;
-import org.apache.druid.segment.indexing.RealtimeTuningConfig;
-import org.apache.druid.segment.indexing.granularity.UniformGranularitySpec;
-import org.apache.druid.segment.join.JoinableFactoryWrapperTest;
 import org.apache.druid.segment.join.NoopJoinableFactory;
-import org.apache.druid.segment.loading.DataSegmentArchiver;
-import org.apache.druid.segment.loading.DataSegmentMover;
 import org.apache.druid.segment.loading.DataSegmentPusher;
 import org.apache.druid.segment.loading.LocalDataSegmentKiller;
 import org.apache.druid.segment.loading.LocalDataSegmentPusherConfig;
-import org.apache.druid.segment.realtime.FireDepartment;
-import org.apache.druid.segment.realtime.FireDepartmentTest;
+import org.apache.druid.segment.loading.NoopDataSegmentArchiver;
+import org.apache.druid.segment.metadata.CentralizedDatasourceSchemaConfig;
+import org.apache.druid.segment.realtime.ChatHandlerProvider;
 import org.apache.druid.segment.realtime.appenderator.AppenderatorsManager;
 import org.apache.druid.segment.realtime.appenderator.UnifiedIndexerAppenderatorsManager;
-import org.apache.druid.segment.realtime.firehose.NoopChatHandlerProvider;
 import org.apache.druid.server.DruidNode;
-import org.apache.druid.server.coordination.DataSegmentAnnouncer;
-import org.apache.druid.server.coordination.DataSegmentServerAnnouncer;
 import org.apache.druid.server.coordination.ServerType;
 import org.apache.druid.server.initialization.ServerConfig;
 import org.apache.druid.server.metrics.NoopServiceEmitter;
 import org.apache.druid.server.security.AuthTestUtils;
 import org.apache.druid.testing.InitializedNullHandlingTest;
+import org.apache.druid.testing.TemporaryFolderExtension;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 import org.apache.druid.timeline.partition.NoneShardSpec;
+import org.apache.druid.utils.JvmUtils;
 import org.easymock.EasyMock;
 import org.joda.time.DateTime;
 import org.joda.time.Hours;
 import org.joda.time.Interval;
 import org.joda.time.Period;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import javax.annotation.Nullable;
 import java.io.File;
@@ -179,11 +172,13 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 
-@RunWith(Parameterized.class)
+@ParameterizedClass(name = "taskStorageType={0}")
+@MethodSource("constructFeed")
 public class TaskLifecycleTest extends InitializedNullHandlingTest
 {
   private static final ObjectMapper MAPPER;
   private static final IndexMergerV9Factory INDEX_MERGER_V9_FACTORY;
+  private static final IndexMergerV10Factory INDEX_MERGER_V10_FACTORY;
   private static final IndexIO INDEX_IO;
   private static final TestUtils TEST_UTILS;
 
@@ -191,13 +186,13 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
     TEST_UTILS = new TestUtils();
     MAPPER = TEST_UTILS.getTestObjectMapper();
     INDEX_MERGER_V9_FACTORY = TEST_UTILS.getIndexMergerV9Factory();
+    INDEX_MERGER_V10_FACTORY = TEST_UTILS.getIndexMergerV10Factory();
     INDEX_IO = TEST_UTILS.getTestIndexIO();
   }
 
   private static final String HEAP_TASK_STORAGE = "HeapMemoryTaskStorage";
   private static final String METADATA_TASK_STORAGE = "MetadataTaskStorage";
 
-  @Parameterized.Parameters(name = "taskStorageType={0}")
   public static Collection<String[]> constructFeed()
   {
     return Arrays.asList(new String[][]{{HEAP_TASK_STORAGE}, {METADATA_TASK_STORAGE}});
@@ -208,10 +203,10 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
     this.taskStorageType = taskStorageType;
   }
 
-  @Rule
-  public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+  @RegisterExtension
+  public final TemporaryFolderExtension temporaryFolder = TemporaryFolderExtension.testCaseScoped();
 
-  private static final Ordering<DataSegment> BY_INTERVAL_ORDERING = new Ordering<DataSegment>()
+  private static final Ordering<DataSegment> BY_INTERVAL_ORDERING = new Ordering<>()
   {
     @Override
     public int compare(DataSegment dataSegment, DataSegment dataSegment2)
@@ -234,15 +229,14 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
       ir("2010-01-02T01", "a", "c", 1)
   );
 
-  @Rule
-  public final TestDerbyConnector.DerbyConnectorRule derbyConnectorRule = new TestDerbyConnector.DerbyConnectorRule();
+  private final TestDerbyConnector.DerbyConnectorRule derbyConnectorRule = new TestDerbyConnector.DerbyConnectorRule();
 
   private final String taskStorageType;
 
   private ObjectMapper mapper;
-  private TaskStorageQueryAdapter tsqa = null;
+  private TaskQueryTool tsqa = null;
   private TaskStorage taskStorage = null;
-  private TaskLockbox taskLockbox = null;
+  private GlobalTaskLockbox taskLockbox = null;
   private TaskQueue taskQueue = null;
   private TaskRunner taskRunner = null;
   private TestIndexerMetadataStorageCoordinator mdc = null;
@@ -297,7 +291,7 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
         @Override
         public CloseableIterator<InputRow> read(InputStats inputStats)
         {
-          return new CloseableIterator<InputRow>()
+          return new CloseableIterator<>()
           {
             @Override
             public void close()
@@ -374,40 +368,10 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
     }
   }
 
-  private static class MockFirehoseFactory implements FirehoseFactory
-  {
-    @Override
-    public Firehose connect(InputRowParser parser, File temporaryDirectory)
-    {
-      final Iterator<InputRow> inputRowIterator = REALTIME_IDX_TASK_INPUT_ROWS.iterator();
-
-      return new Firehose()
-      {
-        @Override
-        public boolean hasMore()
-        {
-          return inputRowIterator.hasNext();
-        }
-
-        @Nullable
-        @Override
-        public InputRow nextRow()
-        {
-          return inputRowIterator.next();
-        }
-
-        @Override
-        public void close()
-        {
-
-        }
-      };
-    }
-  }
-
-  @Before
+  @BeforeEach
   public void setUp() throws Exception
   {
+    derbyConnectorRule.before();
     // mock things
     queryRunnerFactoryConglomerate = EasyMock.createStrictMock(QueryRunnerFactoryConglomerate.class);
     monitorScheduler = EasyMock.createStrictMock(MonitorScheduler.class);
@@ -415,7 +379,7 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
     // initialize variables
     announcedSinks = 0;
     pushedSegments = 0;
-    indexSpec = new IndexSpec();
+    indexSpec = IndexSpec.getDefault();
     emitter = newMockEmitter();
     EmittingLogger.registerEmitter(emitter);
     mapper = TEST_UTILS.getTestObjectMapper();
@@ -426,17 +390,11 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
     // For creating a customized TaskQueue see testRealtimeIndexTaskFailure test
 
     taskStorage = setUpTaskStorage();
-
     handoffNotifierFactory = setUpSegmentHandOffNotifierFactory();
-
     dataSegmentPusher = setUpDataSegmentPusher();
-
     mdc = setUpMetadataStorageCoordinator();
-
     tb = setUpTaskToolboxFactory(dataSegmentPusher, handoffNotifierFactory, mdc);
-
     taskRunner = setUpThreadPoolTaskRunner(tb);
-
     taskQueue = setUpTaskQueue(taskStorage, taskRunner);
   }
 
@@ -451,8 +409,6 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
       case HEAP_TASK_STORAGE: {
         taskStorage = new HeapMemoryTaskStorage(
             new TaskStorageConfig(null)
-            {
-            }
         );
         break;
       }
@@ -460,11 +416,11 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
       case METADATA_TASK_STORAGE: {
         TestDerbyConnector testDerbyConnector = derbyConnectorRule.getConnector();
         mapper.registerSubtypes(
-            new NamedType(MockFirehoseFactory.class, "mockFirehoseFactory"),
             new NamedType(MockInputSource.class, "mockInputSource"),
             new NamedType(NoopInputFormat.class, "noopInputFormat")
         );
         testDerbyConnector.createTaskTables();
+        testDerbyConnector.createSegmentSchemasTable();
         testDerbyConnector.createSegmentTable();
         taskStorage = new MetadataTaskStorage(
             testDerbyConnector,
@@ -478,11 +434,13 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
         break;
       }
 
-      default: {
+      default:
         throw new RE("Unknown task storage type [%s]", taskStorageType);
-      }
     }
-    tsqa = new TaskStorageQueryAdapter(taskStorage, taskLockbox);
+    TaskMaster taskMaster = EasyMock.createMock(TaskMaster.class);
+    EasyMock.expect(taskMaster.getTaskQueue()).andReturn(Optional.absent()).anyTimes();
+    EasyMock.replay(taskMaster);
+    tsqa = new TaskQueryTool(taskStorage, taskLockbox, taskMaster, null);
     return taskStorage;
   }
 
@@ -493,7 +451,7 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
     return new SegmentHandoffNotifierFactory()
     {
       @Override
-      public SegmentHandoffNotifier createSegmentHandoffNotifier(String dataSource)
+      public SegmentHandoffNotifier createSegmentHandoffNotifier(String dataSource, String taskId)
       {
         return new SegmentHandoffNotifier()
         {
@@ -529,18 +487,6 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
   {
     return new DataSegmentPusher()
     {
-      @Override
-      public String getPathForHadoop()
-      {
-        throw new UnsupportedOperationException();
-      }
-
-      @Deprecated
-      @Override
-      public String getPathForHadoop(String dataSource)
-      {
-        return getPathForHadoop();
-      }
 
       @Override
       public DataSegment push(File file, DataSegment segment, boolean useUniquePath)
@@ -562,9 +508,9 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
     return new TestIndexerMetadataStorageCoordinator()
     {
       @Override
-      public Set<DataSegment> announceHistoricalSegments(Set<DataSegment> segments)
+      public Set<DataSegment> commitSegments(Set<DataSegment> segments, final SegmentSchemaMapping segmentSchemaMapping)
       {
-        Set<DataSegment> retVal = super.announceHistoricalSegments(segments);
+        Set<DataSegment> retVal = super.commitSegments(segments, segmentSchemaMapping);
         if (publishCountDown != null) {
           publishCountDown.countDown();
         }
@@ -594,9 +540,8 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
     Preconditions.checkNotNull(taskStorage);
     Preconditions.checkNotNull(emitter);
 
-    taskLockbox = new TaskLockbox(taskStorage, mdc);
+    taskLockbox = new GlobalTaskLockbox(taskStorage, mdc);
     tac = new LocalTaskActionClientFactory(
-        taskStorage,
         new TaskActionToolbox(
             taskLockbox,
             taskStorage,
@@ -604,62 +549,25 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
             emitter,
             EasyMock.createMock(SupervisorManager.class),
             mapper
-        ),
-        new TaskAuditLogConfig(true)
-    );
-    final String taskDirA = temporaryFolder.newFolder().toString();
-    final String taskDirB = temporaryFolder.newFolder().toString();
-    taskConfig = new TaskConfig(
-        null,
-        null,
-        null,
-        50000,
-        null,
-        false,
-        null,
-        null,
-        null,
-        false,
-        false,
-        TaskConfig.BATCH_PROCESSING_MODE_DEFAULT.name(),
-        null,
-        false,
-        ImmutableList.of(
-            taskDirA,
-            taskDirB
         )
     );
+    taskConfig = new TaskConfigBuilder()
+        .setBaseDir(temporaryFolder.newFolder().toString())
+        .setTmpStorageBytesPerTask(-1L)
+        .build();
 
     return new TaskToolboxFactory(
+        null,
         taskConfig,
         new DruidNode("druid/middlemanager", "localhost", false, 8091, null, true, false),
         tac,
         emitter,
+        NoopPolicyEnforcer.instance(),
         dataSegmentPusher,
         new LocalDataSegmentKiller(new LocalDataSegmentPusherConfig()),
-        new DataSegmentMover()
-        {
-          @Override
-          public DataSegment move(DataSegment dataSegment, Map<String, Object> targetLoadSpec)
-          {
-            return dataSegment;
-          }
-        },
-        new DataSegmentArchiver()
-        {
-          @Override
-          public DataSegment archive(DataSegment segment)
-          {
-            return segment;
-          }
-
-          @Override
-          public DataSegment restore(DataSegment segment)
-          {
-            return segment;
-          }
-        },
-        new DataSegmentAnnouncer()
+        (dataSegment, targetLoadSpec) -> dataSegment,
+        new NoopDataSegmentArchiver(),
+        new TestDataSegmentAnnouncer()
         {
           @Override
           public void announceSegment(DataSegment segment)
@@ -667,54 +575,39 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
             announcedSinks++;
           }
 
-          @Override
-          public void unannounceSegment(DataSegment segment)
-          {
-
-          }
-
-          @Override
-          public void announceSegments(Iterable<DataSegment> segments)
-          {
-
-          }
-
-          @Override
-          public void unannounceSegments(Iterable<DataSegment> segments)
-          {
-
-          }
-        }, // segment announcer
-        EasyMock.createNiceMock(DataSegmentServerAnnouncer.class),
+        },
         handoffNotifierFactory,
         () -> queryRunnerFactoryConglomerate, // query runner factory conglomerate corporation unionized collective
+        DruidProcessingConfig::new,
         DirectQueryProcessingPool.INSTANCE, // query executor service
         NoopJoinableFactory.INSTANCE,
         () -> monitorScheduler, // monitor scheduler
-        new SegmentCacheManagerFactory(new DefaultObjectMapper()),
+        SegmentCacheManagerFactory.createWithOwnedPool(TestIndex.INDEX_IO, new DefaultObjectMapper()),
         MAPPER,
         INDEX_IO,
         MapCache.create(0),
-        FireDepartmentTest.NO_CACHE_CONFIG,
+        new CacheConfig(),
         new CachePopulatorStats(),
         INDEX_MERGER_V9_FACTORY,
+        INDEX_MERGER_V10_FACTORY,
         EasyMock.createNiceMock(DruidNodeAnnouncer.class),
         EasyMock.createNiceMock(DruidNode.class),
         new LookupNodeService("tier"),
-        new DataNodeService("tier", 1000, ServerType.INDEXER_EXECUTOR, 0),
+        new DataNodeService("tier", 1000, null, ServerType.INDEXER_EXECUTOR, 0),
         new NoopTestTaskReportFileWriter(),
         null,
         AuthTestUtils.TEST_AUTHORIZER_MAPPER,
-        new NoopChatHandlerProvider(),
+        new ChatHandlerProvider(),
         TEST_UTILS.getRowIngestionMetersFactory(),
         appenderatorsManager,
         new NoopOverlordClient(),
-        null,
+        new NoopCoordinatorClient(),
         null,
         null,
         null,
         "1",
-        new TaskStorageDirTracker(taskConfig)
+        CentralizedDatasourceSchemaConfig.create(),
+        JvmUtils.getRuntimeInfo()
     );
   }
 
@@ -744,157 +637,130 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
         TaskQueueConfig.class
     );
 
-    return new TaskQueue(lockConfig, tqc, new DefaultTaskConfig(), ts, tr, tac, taskLockbox, emitter);
+    return new TaskQueue(
+        lockConfig,
+        tqc,
+        new DefaultTaskConfig(),
+        ts,
+        tr,
+        tac,
+        taskLockbox,
+        emitter,
+        mapper,
+        new NoopTaskContextEnricher()
+    );
   }
 
-  @After
-  public void tearDown()
+  @AfterEach
+  public void tearDown() throws IOException
   {
     if (taskQueue.isActive()) {
       taskQueue.stop();
     }
+    derbyConnectorRule.after();
   }
 
   @Test
-  public void testIndexTask() throws Exception
+  public void testIndexTask()
   {
     final Task indexTask = new IndexTask(
         null,
         null,
         new IndexIngestionSpec(
-            new DataSchema(
-                "foo",
-                new TimestampSpec(null, null, null),
-                DimensionsSpec.EMPTY,
-                new AggregatorFactory[]{new DoubleSumAggregatorFactory("met", "met")},
-                new UniformGranularitySpec(
-                    Granularities.DAY,
-                    null,
-                    ImmutableList.of(Intervals.of("2010-01-01/P2D"))
-                ),
-                null
-            ),
-            new IndexIOConfig(null, new MockInputSource(), new NoopInputFormat(), false, false),
-            new IndexTuningConfig(
-                null,
-                10000,
-                null,
-                10,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                indexSpec,
-                null,
-                3,
-                false,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null
-            )
+            DataSchema.builder()
+                      .withDataSource("foo")
+                      .withTimestamp(TimestampSpec.DEFAULT)
+                      .withDimensions(DimensionsSpec.EMPTY)
+                      .withAggregators(new DoubleSumAggregatorFactory("met", "met"))
+                      .withGranularity(
+                          new UniformGranularitySpec(
+                              Granularities.DAY,
+                              null,
+                              ImmutableList.of(Intervals.of("2010-01-01/P2D"))
+                          )
+                      )
+                      .build(),
+            new IndexIOConfig(new MockInputSource(), new NoopInputFormat(), false, false),
+            TuningConfigBuilder.forIndexTask()
+                               .withMaxRowsPerSegment(10000)
+                               .withMaxRowsInMemory(100)
+                               .withIndexSpec(indexSpec)
+                               .withMaxPendingPersists(3)
+                               .withForceGuaranteedRollup(false)
+                               .build()
         ),
         null
     );
 
-    final Optional<TaskStatus> preRunTaskStatus = tsqa.getStatus(indexTask.getId());
-    Assert.assertTrue("pre run task status not present", !preRunTaskStatus.isPresent());
+    final Optional<TaskStatus> preRunTaskStatus = tsqa.getTaskStatus(indexTask.getId());
+    Assertions.assertTrue(!preRunTaskStatus.isPresent(), "pre run task status not present");
 
     final TaskStatus mergedStatus = runTask(indexTask);
     final TaskStatus status = taskStorage.getStatus(indexTask.getId()).get();
     final List<DataSegment> publishedSegments = BY_INTERVAL_ORDERING.sortedCopy(mdc.getPublished());
-    final List<DataSegment> loggedSegments = BY_INTERVAL_ORDERING.sortedCopy(tsqa.getInsertedSegments(indexTask.getId()));
 
-    Assert.assertEquals("statusCode", TaskState.SUCCESS, status.getStatusCode());
-    Assert.assertEquals(taskLocation, status.getLocation());
-    Assert.assertEquals("merged statusCode", TaskState.SUCCESS, mergedStatus.getStatusCode());
-    Assert.assertEquals("segments logged vs published", loggedSegments, publishedSegments);
-    Assert.assertEquals("num segments published", 2, mdc.getPublished().size());
-    Assert.assertEquals("num segments nuked", 0, mdc.getNuked().size());
+    Assertions.assertEquals(TaskState.SUCCESS, status.getStatusCode(), "statusCode");
+    Assertions.assertEquals(taskLocation, status.getLocation());
+    Assertions.assertEquals(TaskState.SUCCESS, mergedStatus.getStatusCode(), "merged statusCode");
+    Assertions.assertEquals(2, mdc.getPublished().size(), "num segments published");
+    Assertions.assertEquals(0, mdc.getNuked().size(), "num segments nuked");
 
-    Assert.assertEquals("segment1 datasource", "foo", publishedSegments.get(0).getDataSource());
-    Assert.assertEquals("segment1 interval", Intervals.of("2010-01-01/P1D"), publishedSegments.get(0).getInterval());
-    Assert.assertEquals(
-        "segment1 dimensions",
+    Assertions.assertEquals("foo", publishedSegments.get(0).getDataSource(), "segment1 datasource");
+    Assertions.assertEquals(Intervals.of("2010-01-01/P1D"), publishedSegments.get(0).getInterval(), "segment1 interval");
+    Assertions.assertEquals(
         ImmutableList.of("dim1", "dim2"),
-        publishedSegments.get(0).getDimensions()
+        publishedSegments.get(0).getDimensions(),
+        "segment1 dimensions"
     );
-    Assert.assertEquals("segment1 metrics", ImmutableList.of("met"), publishedSegments.get(0).getMetrics());
+    Assertions.assertEquals(ImmutableList.of("met"), publishedSegments.get(0).getMetrics(), "segment1 metrics");
 
-    Assert.assertEquals("segment2 datasource", "foo", publishedSegments.get(1).getDataSource());
-    Assert.assertEquals("segment2 interval", Intervals.of("2010-01-02/P1D"), publishedSegments.get(1).getInterval());
-    Assert.assertEquals(
-        "segment2 dimensions",
+    Assertions.assertEquals("foo", publishedSegments.get(1).getDataSource(), "segment2 datasource");
+    Assertions.assertEquals(Intervals.of("2010-01-02/P1D"), publishedSegments.get(1).getInterval(), "segment2 interval");
+    Assertions.assertEquals(
         ImmutableList.of("dim1", "dim2"),
-        publishedSegments.get(1).getDimensions()
+        publishedSegments.get(1).getDimensions(),
+        "segment2 dimensions"
     );
-    Assert.assertEquals("segment2 metrics", ImmutableList.of("met"), publishedSegments.get(1).getMetrics());
+    Assertions.assertEquals(ImmutableList.of("met"), publishedSegments.get(1).getMetrics(), "segment2 metrics");
   }
 
   @Test
-  public void testIndexTaskFailure() throws Exception
+  public void testIndexTaskFailure()
   {
     final Task indexTask = new IndexTask(
         null,
         null,
         new IndexIngestionSpec(
-            new DataSchema(
-                "foo",
-                null,
-                new AggregatorFactory[]{new DoubleSumAggregatorFactory("met", "met")},
-                new UniformGranularitySpec(
-                    Granularities.DAY,
-                    null,
-                    ImmutableList.of(Intervals.of("2010-01-01/P1D"))
-                ),
-                null,
-                mapper
-            ),
-            new IndexIOConfig(null, new MockExceptionInputSource(), new NoopInputFormat(), false, false),
-            new IndexTuningConfig(
-                null,
-                10000,
-                null,
-                10,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                indexSpec,
-                null,
-                3,
-                false,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null
-            )
+            DataSchema.builder()
+                      .withDataSource("foo")
+                      .withTimestamp(TimestampSpec.DEFAULT)
+                      .withAggregators(new DoubleSumAggregatorFactory("met", "met"))
+                      .withGranularity(
+                          new UniformGranularitySpec(
+                              Granularities.DAY,
+                              null,
+                              ImmutableList.of(Intervals.of("2010-01-01/P1D"))
+                          )
+                      )
+                      .build(),
+            new IndexIOConfig(new MockExceptionInputSource(), new NoopInputFormat(), false, false),
+            TuningConfigBuilder.forIndexTask()
+                               .withMaxRowsPerSegment(10000)
+                               .withMaxRowsInMemory(10)
+                               .withIndexSpec(indexSpec)
+                               .withMaxPendingPersists(3)
+                               .withForceGuaranteedRollup(false)
+                               .build()
         ),
         null
     );
 
     final TaskStatus status = runTask(indexTask);
 
-    Assert.assertEquals("statusCode", TaskState.FAILED, status.getStatusCode());
-    Assert.assertEquals(taskLocation, status.getLocation());
-    Assert.assertEquals("num segments published", 0, mdc.getPublished().size());
-    Assert.assertEquals("num segments nuked", 0, mdc.getNuked().size());
+    Assertions.assertEquals(TaskState.FAILED, status.getStatusCode(), "statusCode");
+    Assertions.assertEquals(taskLocation, status.getLocation());
+    Assertions.assertEquals(0, mdc.getPublished().size(), "num segments published");
+    Assertions.assertEquals(0, mdc.getNuked().size(), "num segments nuked");
   }
 
   @Test
@@ -907,16 +773,14 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
             "2011-04-01/2011-04-02",
             "2011-04-02/2011-04-03",
             "2011-04-04/2011-04-05"
-        ), new Function<String, DataSegment>()
+        ), new Function<>()
         {
           @Override
           public DataSegment apply(String input)
           {
             final Interval interval = Intervals.of(input);
             try {
-              return DataSegment.builder()
-                                .dataSource("test_kill_task")
-                                .interval(interval)
+              return DataSegment.builder(SegmentId.of("test_kill_task", interval, "2011-04-6T16:52:46.119-05:00", 0))
                                 .loadSpec(
                                     ImmutableMap.of(
                                         "type",
@@ -932,7 +796,6 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
                                         + "/0/index.zip"
                                     )
                                 )
-                                .version("2011-04-6T16:52:46.119-05:00")
                                 .dimensions(ImmutableList.of())
                                 .metrics(ImmutableList.of())
                                 .shardSpec(NoneShardSpec.instance())
@@ -947,11 +810,18 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
         }
     );
 
-    mdc.setUnusedSegments(expectedUnusedSegments);
+    mdc.commitSegments(Set.copyOf(expectedUnusedSegments), null);
+    expectedUnusedSegments.forEach(segment -> mdc.markSegmentAsUnused(segment.getId()));
 
     // manually create local segments files
     List<File> segmentFiles = new ArrayList<>();
-    for (DataSegment segment : mdc.retrieveUnusedSegmentsForInterval("test_kill_task", Intervals.of("2011-04-01/P4D"))) {
+    final List<DataSegment> unusedSegments = mdc.retrieveUnusedSegmentsForInterval(
+        "test_kill_task",
+        Intervals.of("2011-04-01/P4D"),
+        null,
+        null
+    );
+    for (DataSegment segment : unusedSegments) {
       File file = new File((String) segment.getLoadSpec().get("path"));
       FileUtils.mkdirp(file.getParentFile());
       Files.write(file.toPath(), ByteArrays.EMPTY_ARRAY);
@@ -964,70 +834,177 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
             "test_kill_task",
             Intervals.of("2011-04-01/P4D"),
             null,
-            false
+            null,
+            null,
+            null,
+            null
         );
 
     final TaskStatus status = runTask(killUnusedSegmentsTask);
-    Assert.assertEquals(taskLocation, status.getLocation());
-    Assert.assertEquals("merged statusCode", TaskState.SUCCESS, status.getStatusCode());
-    Assert.assertEquals("num segments published", 0, mdc.getPublished().size());
-    Assert.assertEquals("num segments nuked", 3, mdc.getNuked().size());
-    Assert.assertTrue(
-        "expected unused segments get killed",
+    Assertions.assertEquals(taskLocation, status.getLocation());
+    Assertions.assertEquals(TaskState.SUCCESS, status.getStatusCode(), "merged statusCode");
+    Assertions.assertEquals(3, mdc.getPublished().size(), "num segments published");
+    Assertions.assertEquals(3, mdc.getNuked().size(), "num segments nuked");
+    Assertions.assertEquals(1, mdc.getDeleteSegmentsCount(), "delete segment batch call count");
+    Assertions.assertTrue(
         expectedUnusedSegments.containsAll(mdc.getNuked()) && mdc.getNuked().containsAll(
             expectedUnusedSegments
-        )
+        ),
+        "expected unused segments get killed"
     );
 
     for (File file : segmentFiles) {
-      Assert.assertFalse("unused segments files get deleted", file.exists());
+      Assertions.assertFalse(file.exists(), "unused segments files get deleted");
     }
   }
 
   @Test
-  public void testRealtimeishTask() throws Exception
+  public void testKillUnusedSegmentsTaskWithMaxSegmentsToKill() throws Exception
+  {
+    final File tmpSegmentDir = temporaryFolder.newFolder();
+
+    List<DataSegment> expectedUnusedSegments = Lists.transform(
+        ImmutableList.of(
+            "2011-04-01/2011-04-02",
+            "2011-04-02/2011-04-03",
+            "2011-04-04/2011-04-05"
+        ), new Function<>()
+        {
+          @Override
+          public DataSegment apply(String input)
+          {
+            final Interval interval = Intervals.of(input);
+            try {
+              return DataSegment.builder(SegmentId.of("test_kill_task", interval, "2011-04-6T16:52:46.119-05:00", 0))
+                  .loadSpec(
+                      ImmutableMap.of(
+                          "type",
+                          "local",
+                          "path",
+                          tmpSegmentDir.getCanonicalPath()
+                          + "/druid/localStorage/wikipedia/"
+                          + interval.getStart()
+                          + "-"
+                          + interval.getEnd()
+                          + "/"
+                          + "2011-04-6T16:52:46.119-05:00"
+                          + "/0/index.zip"
+                      )
+                  )
+                  .dimensions(ImmutableList.of())
+                  .metrics(ImmutableList.of())
+                  .shardSpec(NoneShardSpec.instance())
+                  .binaryVersion(9)
+                  .size(0)
+                  .build();
+            }
+            catch (IOException e) {
+              throw new ISE(e, "Error creating segments");
+            }
+          }
+        }
+    );
+
+    mdc.commitSegments(Set.copyOf(expectedUnusedSegments), null);
+    expectedUnusedSegments.forEach(segment -> mdc.markSegmentAsUnused(segment.getId()));
+
+    // manually create local segments files
+    List<File> segmentFiles = new ArrayList<>();
+    final List<DataSegment> unusedSegments = mdc.retrieveUnusedSegmentsForInterval(
+        "test_kill_task",
+        Intervals.of("2011-04-01/P4D"),
+        null,
+        null
+    );
+    for (DataSegment segment : unusedSegments) {
+      File file = new File((String) segment.getLoadSpec().get("path"));
+      FileUtils.mkdirp(file.getParentFile());
+      Files.write(file.toPath(), ByteArrays.EMPTY_ARRAY);
+      segmentFiles.add(file);
+    }
+
+    final int maxSegmentsToKill = 2;
+    final Task killUnusedSegmentsTask =
+        new KillUnusedSegmentsTask(
+            null,
+            "test_kill_task",
+            Intervals.of("2011-04-01/P4D"),
+            null,
+            null,
+            null,
+            maxSegmentsToKill,
+            null
+        );
+
+    final TaskStatus status = runTask(killUnusedSegmentsTask);
+    Assertions.assertEquals(taskLocation, status.getLocation());
+    Assertions.assertEquals(TaskState.SUCCESS, status.getStatusCode(), "merged statusCode");
+    Assertions.assertEquals(3, mdc.getPublished().size(), "num segments published");
+    Assertions.assertEquals(maxSegmentsToKill, mdc.getNuked().size(), "num segments nuked");
+    Assertions.assertTrue(
+        expectedUnusedSegments.containsAll(mdc.getNuked()),
+        "expected unused segments get killed"
+    );
+
+    int expectedNumOfSegmentsRemaining = segmentFiles.size() - maxSegmentsToKill;
+    int actualNumOfSegmentsRemaining = 0;
+    for (File file : segmentFiles) {
+      if (file.exists()) {
+        actualNumOfSegmentsRemaining++;
+      }
+    }
+
+    Assertions.assertEquals(
+        expectedNumOfSegmentsRemaining,
+        actualNumOfSegmentsRemaining,
+        "Expected of segments deleted did not match expectations"
+    );
+  }
+
+  @Test
+  public void testRealtimeishTask()
   {
     final Task rtishTask = new RealtimeishTask();
     final TaskStatus status = runTask(rtishTask);
 
-    Assert.assertEquals("statusCode", TaskState.SUCCESS, status.getStatusCode());
-    Assert.assertEquals(taskLocation, status.getLocation());
-    Assert.assertEquals("num segments published", 2, mdc.getPublished().size());
-    Assert.assertEquals("num segments nuked", 0, mdc.getNuked().size());
+    Assertions.assertEquals(TaskState.SUCCESS, status.getStatusCode(), "statusCode");
+    Assertions.assertEquals(taskLocation, status.getLocation());
+    Assertions.assertEquals(2, mdc.getPublished().size(), "num segments published");
+    Assertions.assertEquals(0, mdc.getNuked().size(), "num segments nuked");
   }
 
   @Test
-  public void testNoopTask() throws Exception
+  public void testNoopTask()
   {
-    final Task noopTask = new DefaultObjectMapper().readValue(
-        "{\"type\":\"noop\", \"runTime\":\"100\"}\"",
-        Task.class
-    );
-    final TaskStatus status = runTask(noopTask);
+    final TaskStatus status = runTask(NoopTask.create());
 
-    Assert.assertEquals("statusCode", TaskState.SUCCESS, status.getStatusCode());
-    Assert.assertEquals(taskLocation, status.getLocation());
-    Assert.assertEquals("num segments published", 0, mdc.getPublished().size());
-    Assert.assertEquals("num segments nuked", 0, mdc.getNuked().size());
+    Assertions.assertEquals(TaskState.SUCCESS, status.getStatusCode(), "statusCode");
+    Assertions.assertEquals(taskLocation, status.getLocation());
+    Assertions.assertEquals(0, mdc.getPublished().size(), "num segments published");
+    Assertions.assertEquals(0, mdc.getNuked().size(), "num segments nuked");
   }
 
   @Test
-  public void testNeverReadyTask() throws Exception
+  public void testNeverReadyTask()
   {
-    final Task neverReadyTask = new DefaultObjectMapper().readValue(
-        "{\"type\":\"noop\", \"isReadyResult\":\"exception\"}\"",
-        Task.class
-    );
+    final Task neverReadyTask = new NoopTask(null, null, null, 0, 0, null)
+    {
+      @Override
+      public boolean isReady(TaskActionClient taskActionClient)
+      {
+        throw new ISE("Task will never be ready");
+      }
+    };
     final TaskStatus status = runTask(neverReadyTask);
 
-    Assert.assertEquals("statusCode", TaskState.FAILED, status.getStatusCode());
-    Assert.assertEquals(taskLocation, status.getLocation());
-    Assert.assertEquals("num segments published", 0, mdc.getPublished().size());
-    Assert.assertEquals("num segments nuked", 0, mdc.getNuked().size());
+    Assertions.assertEquals(TaskState.FAILED, status.getStatusCode(), "statusCode");
+    Assertions.assertEquals(taskLocation, status.getLocation());
+    Assertions.assertEquals(0, mdc.getPublished().size(), "num segments published");
+    Assertions.assertEquals(0, mdc.getNuked().size(), "num segments nuked");
   }
 
   @Test
-  public void testSimple() throws Exception
+  public void testSimple()
   {
     final Task task = new AbstractFixedIntervalTask(
         "id1",
@@ -1064,27 +1041,26 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
         }
 
         final DataSegment segment = DataSegment
-            .builder()
-            .dataSource("ds")
-            .interval(interval)
-            .version(lock.getVersion())
+            .builder(SegmentId.of("ds", interval, lock.getVersion(), 0))
             .size(0)
             .build();
 
-        toolbox.getTaskActionClient().submit(new SegmentInsertAction(ImmutableSet.of(segment)));
+        toolbox.getTaskActionClient().submit(
+            SegmentTransactionalInsertAction.appendAction(ImmutableSet.of(segment), null, null, null, null, null)
+        );
         return TaskStatus.success(getId());
       }
     };
 
     final TaskStatus status = runTask(task);
-    Assert.assertEquals(taskLocation, status.getLocation());
-    Assert.assertEquals("statusCode", TaskState.SUCCESS, status.getStatusCode());
-    Assert.assertEquals("segments published", 1, mdc.getPublished().size());
-    Assert.assertEquals("segments nuked", 0, mdc.getNuked().size());
+    Assertions.assertEquals(taskLocation, status.getLocation());
+    Assertions.assertEquals(TaskState.SUCCESS, status.getStatusCode(), "statusCode");
+    Assertions.assertEquals(1, mdc.getPublished().size(), "segments published");
+    Assertions.assertEquals(0, mdc.getNuked().size(), "segments nuked");
   }
 
   @Test
-  public void testBadInterval() throws Exception
+  public void testBadInterval()
   {
     final Task task = new AbstractFixedIntervalTask("id1", "id1", "ds", Intervals.of("2012-01-01/P1D"), null)
     {
@@ -1105,28 +1081,27 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
         final TaskLock myLock = Iterables.getOnlyElement(toolbox.getTaskActionClient().submit(new LockListAction()));
 
         final DataSegment segment = DataSegment
-            .builder()
-            .dataSource("ds")
-            .interval(Intervals.of("2012-01-01/P2D"))
-            .version(myLock.getVersion())
+            .builder(SegmentId.of("ds", Intervals.of("2012-01-01/P2D"), myLock.getVersion(), 0))
             .size(0)
             .build();
 
-        toolbox.getTaskActionClient().submit(new SegmentInsertAction(ImmutableSet.of(segment)));
+        toolbox.getTaskActionClient().submit(
+            SegmentTransactionalInsertAction.appendAction(ImmutableSet.of(segment), null, null, null, null, null)
+        );
         return TaskStatus.success(getId());
       }
     };
 
     final TaskStatus status = runTask(task);
 
-    Assert.assertEquals("statusCode", TaskState.FAILED, status.getStatusCode());
-    Assert.assertEquals(taskLocation, status.getLocation());
-    Assert.assertEquals("segments published", 0, mdc.getPublished().size());
-    Assert.assertEquals("segments nuked", 0, mdc.getNuked().size());
+    Assertions.assertEquals(TaskState.FAILED, status.getStatusCode(), "statusCode");
+    Assertions.assertEquals(taskLocation, status.getLocation());
+    Assertions.assertEquals(0, mdc.getPublished().size(), "segments published");
+    Assertions.assertEquals(0, mdc.getNuked().size(), "segments nuked");
   }
 
   @Test
-  public void testBadVersion() throws Exception
+  public void testBadVersion()
   {
     final Task task = new AbstractFixedIntervalTask("id1", "id1", "ds", Intervals.of("2012-01-01/P1D"), null)
     {
@@ -1147,132 +1122,23 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
         final TaskLock myLock = Iterables.getOnlyElement(toolbox.getTaskActionClient().submit(new LockListAction()));
 
         final DataSegment segment = DataSegment
-            .builder()
-            .dataSource("ds")
-            .interval(Intervals.of("2012-01-01/P1D"))
-            .version(myLock.getVersion() + "1!!!1!!")
+            .builder(SegmentId.of("ds", Intervals.of("2012-01-01/P1D"), myLock.getVersion() + "1!!!1!!", 0))
             .size(0)
             .build();
 
-        toolbox.getTaskActionClient().submit(new SegmentInsertAction(ImmutableSet.of(segment)));
+        toolbox.getTaskActionClient().submit(
+            SegmentTransactionalInsertAction.appendAction(ImmutableSet.of(segment), null, null, null, null, null)
+        );
         return TaskStatus.success(getId());
       }
     };
 
     final TaskStatus status = runTask(task);
 
-    Assert.assertEquals("statusCode", TaskState.FAILED, status.getStatusCode());
-    Assert.assertEquals(taskLocation, status.getLocation());
-    Assert.assertEquals("segments published", 0, mdc.getPublished().size());
-    Assert.assertEquals("segments nuked", 0, mdc.getNuked().size());
-  }
-
-  @Test(timeout = 60_000L)
-  public void testRealtimeIndexTask() throws Exception
-  {
-    publishCountDown = new CountDownLatch(1);
-    monitorScheduler.addMonitor(EasyMock.anyObject(Monitor.class));
-    EasyMock.expectLastCall().times(1);
-    monitorScheduler.removeMonitor(EasyMock.anyObject(Monitor.class));
-    EasyMock.expectLastCall().times(1);
-    EasyMock.replay(monitorScheduler, queryRunnerFactoryConglomerate);
-
-    RealtimeIndexTask realtimeIndexTask = newRealtimeIndexTask();
-    final String taskId = realtimeIndexTask.getId();
-
-    taskQueue.start();
-    taskQueue.add(realtimeIndexTask);
-    //wait for task to process events and publish segment
-    publishCountDown.await();
-
-    // Realtime Task has published the segment, simulate loading of segment to a historical node so that task finishes with SUCCESS status
-    Assert.assertEquals(1, handOffCallbacks.size());
-    Pair<Executor, Runnable> executorRunnablePair = Iterables.getOnlyElement(handOffCallbacks.values());
-    executorRunnablePair.lhs.execute(executorRunnablePair.rhs);
-    handOffCallbacks.clear();
-
-    // Wait for realtime index task to handle callback in plumber and succeed
-    while (tsqa.getStatus(taskId).get().isRunnable()) {
-      Thread.sleep(10);
-    }
-
-    TaskStatus status = tsqa.getStatus(taskId).get();
-    Assert.assertTrue("Task should be in Success state", status.isSuccess());
-    Assert.assertEquals(taskLocation, status.getLocation());
-
-    Assert.assertEquals(1, announcedSinks);
-    Assert.assertEquals(1, pushedSegments);
-    Assert.assertEquals(1, mdc.getPublished().size());
-    DataSegment segment = mdc.getPublished().iterator().next();
-    Assert.assertEquals("test_ds", segment.getDataSource());
-    Assert.assertEquals(ImmutableList.of("dim1", "dim2"), segment.getDimensions());
-    Assert.assertEquals(
-        Intervals.of(now.toString("YYYY-MM-dd") + "/" + now.plusDays(1).toString("YYYY-MM-dd")),
-        segment.getInterval()
-    );
-    Assert.assertEquals(ImmutableList.of("count"), segment.getMetrics());
-    EasyMock.verify(monitorScheduler, queryRunnerFactoryConglomerate);
-  }
-
-  @Test(timeout = 60_000L)
-  public void testRealtimeIndexTaskFailure() throws Exception
-  {
-    dataSegmentPusher = new DataSegmentPusher()
-    {
-      @Deprecated
-      @Override
-      public String getPathForHadoop(String s)
-      {
-        return getPathForHadoop();
-      }
-
-      @Override
-      public String getPathForHadoop()
-      {
-        throw new UnsupportedOperationException();
-      }
-
-      @Override
-      public DataSegment push(File file, DataSegment dataSegment, boolean useUniquePath)
-      {
-        throw new RuntimeException("FAILURE");
-      }
-
-      @Override
-      public Map<String, Object> makeLoadSpec(URI uri)
-      {
-        throw new UnsupportedOperationException();
-      }
-    };
-
-    tb = setUpTaskToolboxFactory(dataSegmentPusher, handoffNotifierFactory, mdc);
-
-    taskRunner = setUpThreadPoolTaskRunner(tb);
-
-    taskQueue = setUpTaskQueue(taskStorage, taskRunner);
-
-    monitorScheduler.addMonitor(EasyMock.anyObject(Monitor.class));
-    EasyMock.expectLastCall().times(1);
-    monitorScheduler.removeMonitor(EasyMock.anyObject(Monitor.class));
-    EasyMock.expectLastCall().times(1);
-    EasyMock.replay(monitorScheduler, queryRunnerFactoryConglomerate);
-
-    RealtimeIndexTask realtimeIndexTask = newRealtimeIndexTask();
-    final String taskId = realtimeIndexTask.getId();
-
-    taskQueue.start();
-    taskQueue.add(realtimeIndexTask);
-
-    // Wait for realtime index task to fail
-    while (tsqa.getStatus(taskId).get().isRunnable()) {
-      Thread.sleep(10);
-    }
-
-    TaskStatus status = tsqa.getStatus(taskId).get();
-    Assert.assertTrue("Task should be in Failure state", status.isFailure());
-    Assert.assertEquals(taskLocation, status.getLocation());
-
-    EasyMock.verify(monitorScheduler, queryRunnerFactoryConglomerate);
+    Assertions.assertEquals(TaskState.FAILED, status.getStatusCode(), "statusCode");
+    Assertions.assertEquals(taskLocation, status.getLocation());
+    Assertions.assertEquals(0, mdc.getPublished().size(), "segments published");
+    Assertions.assertEquals(0, mdc.getNuked().size(), "segments nuked");
   }
 
   @Test
@@ -1282,45 +1148,25 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
         null,
         null,
         new IndexIngestionSpec(
-            new DataSchema(
-                "foo",
-                new TimestampSpec(null, null, null),
-                DimensionsSpec.EMPTY,
-                new AggregatorFactory[]{new DoubleSumAggregatorFactory("met", "met")},
-                new UniformGranularitySpec(
-                    Granularities.DAY,
-                    null,
-                    ImmutableList.of(Intervals.of("2010-01-01/P2D"))
-                ),
-                null
-            ),
-            new IndexIOConfig(null, new MockInputSource(), new NoopInputFormat(), false, false),
-            new IndexTuningConfig(
-                null,
-                10000,
-                null,
-                10,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                indexSpec,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null
-            )
+            DataSchema.builder()
+                      .withDataSource("foo")
+                      .withTimestamp(TimestampSpec.DEFAULT)
+                      .withDimensions(DimensionsSpec.EMPTY)
+                      .withAggregators(new DoubleSumAggregatorFactory("met", "met"))
+                      .withGranularity(
+                          new UniformGranularitySpec(
+                              Granularities.DAY,
+                              null,
+                              ImmutableList.of(Intervals.of("2010-01-01/P2D"))
+                          )
+                      )
+                      .build(),
+            new IndexIOConfig(new MockInputSource(), new NoopInputFormat(), false, false),
+            TuningConfigBuilder.forIndexTask()
+                               .withMaxRowsPerSegment(10000)
+                               .withMaxRowsInMemory(10)
+                               .withIndexSpec(indexSpec)
+                               .build()
         ),
         null
     );
@@ -1331,7 +1177,7 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
     taskQueue.start();
     taskStorage.insert(indexTask, TaskStatus.running(indexTask.getId()));
 
-    while (tsqa.getStatus(indexTask.getId()).get().isRunnable()) {
+    while (tsqa.getTaskStatus(indexTask.getId()).get().isRunnable()) {
       if (System.currentTimeMillis() > startTime + 10 * 1000) {
         throw new ISE("Where did the task go?!: %s", indexTask.getId());
       }
@@ -1341,31 +1187,29 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
 
     final TaskStatus status = taskStorage.getStatus(indexTask.getId()).get();
     final List<DataSegment> publishedSegments = BY_INTERVAL_ORDERING.sortedCopy(mdc.getPublished());
-    final List<DataSegment> loggedSegments = BY_INTERVAL_ORDERING.sortedCopy(tsqa.getInsertedSegments(indexTask.getId()));
 
-    Assert.assertEquals("statusCode", TaskState.SUCCESS, status.getStatusCode());
-    Assert.assertEquals(taskLocation, status.getLocation());
-    Assert.assertEquals("segments logged vs published", loggedSegments, publishedSegments);
-    Assert.assertEquals("num segments published", 2, mdc.getPublished().size());
-    Assert.assertEquals("num segments nuked", 0, mdc.getNuked().size());
+    Assertions.assertEquals(TaskState.SUCCESS, status.getStatusCode(), "statusCode");
+    Assertions.assertEquals(taskLocation, status.getLocation());
+    Assertions.assertEquals(2, mdc.getPublished().size(), "num segments published");
+    Assertions.assertEquals(0, mdc.getNuked().size(), "num segments nuked");
 
-    Assert.assertEquals("segment1 datasource", "foo", publishedSegments.get(0).getDataSource());
-    Assert.assertEquals("segment1 interval", Intervals.of("2010-01-01/P1D"), publishedSegments.get(0).getInterval());
-    Assert.assertEquals(
-        "segment1 dimensions",
+    Assertions.assertEquals("foo", publishedSegments.get(0).getDataSource(), "segment1 datasource");
+    Assertions.assertEquals(Intervals.of("2010-01-01/P1D"), publishedSegments.get(0).getInterval(), "segment1 interval");
+    Assertions.assertEquals(
         ImmutableList.of("dim1", "dim2"),
-        publishedSegments.get(0).getDimensions()
+        publishedSegments.get(0).getDimensions(),
+        "segment1 dimensions"
     );
-    Assert.assertEquals("segment1 metrics", ImmutableList.of("met"), publishedSegments.get(0).getMetrics());
+    Assertions.assertEquals(ImmutableList.of("met"), publishedSegments.get(0).getMetrics(), "segment1 metrics");
 
-    Assert.assertEquals("segment2 datasource", "foo", publishedSegments.get(1).getDataSource());
-    Assert.assertEquals("segment2 interval", Intervals.of("2010-01-02/P1D"), publishedSegments.get(1).getInterval());
-    Assert.assertEquals(
-        "segment2 dimensions",
+    Assertions.assertEquals("foo", publishedSegments.get(1).getDataSource(), "segment2 datasource");
+    Assertions.assertEquals(Intervals.of("2010-01-02/P1D"), publishedSegments.get(1).getInterval(), "segment2 interval");
+    Assertions.assertEquals(
         ImmutableList.of("dim1", "dim2"),
-        publishedSegments.get(1).getDimensions()
+        publishedSegments.get(1).getDimensions(),
+        "segment2 dimensions"
     );
-    Assert.assertEquals("segment2 metrics", ImmutableList.of("met"), publishedSegments.get(1).getMetrics());
+    Assertions.assertEquals(ImmutableList.of("met"), publishedSegments.get(1).getMetrics(), "segment2 metrics");
   }
 
   @Test
@@ -1375,11 +1219,11 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
 
     UnifiedIndexerAppenderatorsManager unifiedIndexerAppenderatorsManager = new UnifiedIndexerAppenderatorsManager(
         new ForwardingQueryProcessingPool(exec),
-        JoinableFactoryWrapperTest.NOOP_JOINABLE_FACTORY_WRAPPER,
         new WorkerConfig(),
         MapCache.create(2048),
         new CacheConfig(),
         new CachePopulatorStats(),
+        NoopPolicyEnforcer.instance(),
         MAPPER,
         new NoopServiceEmitter(),
         () -> queryRunnerFactoryConglomerate
@@ -1393,70 +1237,52 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
         null,
         null,
         new IndexIngestionSpec(
-            new DataSchema(
-                "foo",
-                new TimestampSpec(null, null, null),
-                DimensionsSpec.EMPTY,
-                new AggregatorFactory[]{new DoubleSumAggregatorFactory("met", "met")},
-                new UniformGranularitySpec(
-                    Granularities.DAY,
-                    null,
-                    ImmutableList.of(Intervals.of("2010-01-01/P2D"))
-                ),
-                null
-            ),
-            new IndexIOConfig(null, new MockInputSource(), new NoopInputFormat(), false, false),
-            new IndexTuningConfig(
-                null,
-                10000,
-                null,
-                10,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                indexSpec,
-                null,
-                3,
-                false,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null
-            )
+            DataSchema.builder()
+                      .withDataSource("foo")
+                      .withTimestamp(TimestampSpec.DEFAULT)
+                      .withDimensions(DimensionsSpec.EMPTY)
+                      .withAggregators(new DoubleSumAggregatorFactory("met", "met"))
+                      .withGranularity(
+                          new UniformGranularitySpec(
+                              Granularities.DAY,
+                              null,
+                              ImmutableList.of(Intervals.of("2010-01-01/P2D"))
+                          )
+                      )
+                      .build(),
+            new IndexIOConfig(new MockInputSource(), new NoopInputFormat(), false, false),
+            TuningConfigBuilder.forIndexTask()
+                               .withMaxRowsPerSegment(10000)
+                               .withMaxRowsInMemory(10)
+                               .withIndexSpec(indexSpec)
+                               .withMaxPendingPersists(3)
+                               .withForceGuaranteedRollup(false)
+                               .build()
         ),
         null
     );
 
-    final Optional<TaskStatus> preRunTaskStatus = tsqa.getStatus(indexTask.getId());
-    Assert.assertTrue("pre run task status not present", !preRunTaskStatus.isPresent());
+    final Optional<TaskStatus> preRunTaskStatus = tsqa.getTaskStatus(indexTask.getId());
+    Assertions.assertTrue(!preRunTaskStatus.isPresent(), "pre run task status not present");
 
     final TaskStatus mergedStatus = runTask(indexTask);
     final TaskStatus status = taskStorage.getStatus(indexTask.getId()).get();
 
-    Assert.assertEquals("statusCode", TaskState.SUCCESS, status.getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, status.getStatusCode(), "statusCode");
 
     Map<String, UnifiedIndexerAppenderatorsManager.DatasourceBundle> bundleMap =
         unifiedIndexerAppenderatorsManager.getDatasourceBundles();
 
-    Assert.assertEquals(1, bundleMap.size());
+    Assertions.assertEquals(1, bundleMap.size());
 
     unifiedIndexerAppenderatorsManager.removeAppenderatorsForTask(indexTask.getId(), "foo");
 
-    Assert.assertTrue(bundleMap.isEmpty());
+    Assertions.assertTrue(bundleMap.isEmpty());
 
   }
 
   @Test
-  public void testLockRevoked() throws Exception
+  public void testLockRevoked()
   {
     final Task task = new AbstractFixedIntervalTask(
         "id1",
@@ -1493,32 +1319,26 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
         }
 
         final TaskLock lockBeforeRevoke = toolbox.getTaskActionClient().submit(action);
-        Assert.assertFalse(lockBeforeRevoke.isRevoked());
+        Assertions.assertFalse(lockBeforeRevoke.isRevoked());
 
         taskLockbox.revokeLock(getId(), lock);
 
         final TaskLock lockAfterRevoke = toolbox.getTaskActionClient().submit(action);
-        Assert.assertTrue(lockAfterRevoke.isRevoked());
+        Assertions.assertTrue(lockAfterRevoke.isRevoked());
         return TaskStatus.failure(getId(), "lock revoked test");
       }
     };
 
     final TaskStatus status = runTask(task);
-    Assert.assertEquals(taskLocation, status.getLocation());
-    Assert.assertEquals("statusCode", TaskState.FAILED, status.getStatusCode());
-    Assert.assertEquals("segments published", 0, mdc.getPublished().size());
-    Assert.assertEquals("segments nuked", 0, mdc.getNuked().size());
+    Assertions.assertEquals(taskLocation, status.getLocation());
+    Assertions.assertEquals(TaskState.FAILED, status.getStatusCode(), "statusCode");
+    Assertions.assertEquals(0, mdc.getPublished().size(), "segments published");
+    Assertions.assertEquals(0, mdc.getNuked().size(), "segments nuked");
   }
 
-  private TaskStatus runTask(final Task task) throws Exception
+  private TaskStatus runTask(final Task task)
   {
-    final Task dummyTask = new DefaultObjectMapper().readValue(
-        "{\"type\":\"noop\", \"isReadyResult\":\"exception\"}\"",
-        Task.class
-    );
-    final long startTime = System.currentTimeMillis();
-
-    Preconditions.checkArgument(!task.getId().equals(dummyTask.getId()));
+    final Stopwatch taskRunDuration = Stopwatch.createStarted();
 
     // Since multiple tasks can be run in a single unit test using runTask(), hence this check and synchronization
     synchronized (this) {
@@ -1526,85 +1346,27 @@ public class TaskLifecycleTest extends InitializedNullHandlingTest
         taskQueue.start();
       }
     }
-    taskQueue.add(dummyTask);
     taskQueue.add(task);
 
+    final String taskId = task.getId();
     TaskStatus retVal = null;
-
-    for (final String taskId : ImmutableList.of(dummyTask.getId(), task.getId())) {
-      try {
-        TaskStatus status;
-        while ((status = tsqa.getStatus(taskId).get()).isRunnable()) {
-          if (System.currentTimeMillis() > startTime + 10 * 1000) {
-            throw new ISE("Where did the task go?!: %s", task.getId());
-          }
-
-          Thread.sleep(100);
+    try {
+      TaskStatus status;
+      while ((status = tsqa.getTaskStatus(taskId).get()).isRunnable()) {
+        if (taskRunDuration.millisElapsed() > 10_000) {
+          throw new ISE("Where did the task go?!: %s", task.getId());
         }
-        if (taskId.equals(task.getId())) {
-          retVal = status;
-        }
+
+        Thread.sleep(100);
       }
-      catch (Exception e) {
-        throw new RuntimeException(e);
+      if (taskId.equals(task.getId())) {
+        retVal = status;
       }
+    }
+    catch (Exception e) {
+      throw new RuntimeException(e);
     }
 
     return retVal;
-  }
-
-  private RealtimeIndexTask newRealtimeIndexTask()
-  {
-    String taskId = StringUtils.format("rt_task_%s", System.currentTimeMillis());
-    DataSchema dataSchema = new DataSchema(
-        "test_ds",
-        TestHelper.makeJsonMapper().convertValue(
-            new MapInputRowParser(
-                new TimeAndDimsParseSpec(
-                    new TimestampSpec(null, null, null),
-                    DimensionsSpec.EMPTY
-                )
-            ),
-            JacksonUtils.TYPE_REFERENCE_MAP_STRING_OBJECT
-        ),
-        new AggregatorFactory[]{new LongSumAggregatorFactory("count", "rows")},
-        new UniformGranularitySpec(Granularities.DAY, Granularities.NONE, null),
-        null,
-        mapper
-    );
-    RealtimeIOConfig realtimeIOConfig = new RealtimeIOConfig(
-        new MockFirehoseFactory(),
-        null
-        // PlumberSchool - Realtime Index Task always uses RealtimePlumber which is hardcoded in RealtimeIndexTask class
-    );
-    RealtimeTuningConfig realtimeTuningConfig = new RealtimeTuningConfig(
-        null,
-        1000,
-        null,
-        null,
-        new Period("P1Y"),
-        null, //default window period of 10 minutes
-        null, // base persist dir ignored by Realtime Index task
-        null,
-        null,
-        null,
-        null,
-        null,
-        null,
-        0,
-        0,
-        null,
-        null,
-        null,
-        null,
-        null
-    );
-    FireDepartment fireDepartment = new FireDepartment(dataSchema, realtimeIOConfig, realtimeTuningConfig);
-    return new RealtimeIndexTask(
-        taskId,
-        new TaskResource(taskId, 1),
-        fireDepartment,
-        null
-    );
   }
 }

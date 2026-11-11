@@ -16,13 +16,9 @@
  * limitations under the License.
  */
 
-@import '../../variables';
+@use '../../variables' as *;
 
 .show-value-dialog {
-  &.#{$bp-ns}-dialog {
-    padding-bottom: 10px;
-  }
-
   &.normal.#{$bp-ns}-dialog {
     height: 600px;
   }
@@ -32,12 +28,22 @@
     height: 90vh;
   }
 
-  .#{$bp-ns}-input {
-    margin: 10px;
-    flex: 1;
+  .#{$bp-ns}-dialog-body {
+    display: flex;
+    flex-direction: column;
+
+    .code-editor {
+      flex: 1;
+      height: 100%;
+    }
+
+    .#{$bp-ns}-input {
+      flex: 1;
+      resize: none;
+    }
   }
 
-  .#{$bp-ns}-dialog-footer-actions {
-    padding-right: 10px;
+  .#{$bp-ns}-dialog-footer {
+    margin-top: 0;
   }
 }

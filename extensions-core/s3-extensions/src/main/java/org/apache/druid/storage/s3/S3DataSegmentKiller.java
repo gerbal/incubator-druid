@@ -19,9 +19,9 @@
 
 package org.apache.druid.storage.s3;
 
-import com.amazonaws.AmazonServiceException;
 import com.google.common.base.Predicates;
 import com.google.common.base.Supplier;
+import com.google.common.collect.Lists;
 import com.google.inject.Inject;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.MapUtils;
@@ -29,9 +29,18 @@ import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.segment.loading.DataSegmentKiller;
 import org.apache.druid.segment.loading.SegmentLoadingException;
 import org.apache.druid.timeline.DataSegment;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
+import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
+import software.amazon.awssdk.services.s3.model.S3Exception;
+import software.amazon.awssdk.services.s3.model.S3Object;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  *
@@ -40,12 +49,14 @@ public class S3DataSegmentKiller implements DataSegmentKiller
 {
   private static final Logger log = new Logger(S3DataSegmentKiller.class);
 
+  private static final int NUM_RETRIES = 3;
+
   /**
    * Any implementation of DataSegmentKiller is initialized when an ingestion job starts if the extension is loaded,
    * even when the implementation of DataSegmentKiller is not used. As a result, if we have a s3 client instead
    * of a supplier of it, it can cause unnecessary config validation for s3 even when it's not used at all.
    * To perform the config validation only when it is actually used, we use a supplier.
-   *
+   * <p>
    * See OmniDataSegmentKiller for how DataSegmentKillers are initialized.
    */
   private final Supplier<ServerSideEncryptingAmazonS3> s3ClientSupplier;
@@ -65,27 +76,132 @@ public class S3DataSegmentKiller implements DataSegmentKiller
   }
 
   @Override
+  public void kill(List<DataSegment> segments) throws SegmentLoadingException
+  {
+    if (segments.isEmpty()) {
+      return;
+    }
+    if (segments.size() == 1) {
+      kill(segments.get(0));
+      return;
+    }
+
+    final ServerSideEncryptingAmazonS3 s3Client = this.s3ClientSupplier.get();
+
+    // create a map of bucket to keys to delete
+    Map<String, List<ObjectIdentifier>> bucketToKeysToDelete = new HashMap<>();
+    for (DataSegment segment : segments) {
+      String s3Bucket = MapUtils.getString(segment.getLoadSpec(), S3DataSegmentPuller.BUCKET);
+      String path = MapUtils.getString(segment.getLoadSpec(), S3DataSegmentPuller.KEY);
+      List<ObjectIdentifier> keysToDelete = bucketToKeysToDelete.computeIfAbsent(
+          s3Bucket,
+          k -> new ArrayList<>()
+      );
+      if (path.endsWith("/")) {
+        // segment is not compressed, list objects and add them all to delete list
+        ListObjectsV2Request request = ListObjectsV2Request
+            .builder()
+            .bucket(s3Bucket)
+            .prefix(path)
+            .build();
+        final ListObjectsV2Response list = s3Client.listObjectsV2(request);
+        for (S3Object objectSummary : list.contents()) {
+          keysToDelete.add(ObjectIdentifier.builder().key(objectSummary.key()).build());
+        }
+      } else {
+        keysToDelete.add(ObjectIdentifier.builder().key(path).build());
+        keysToDelete.add(ObjectIdentifier.builder().key(DataSegmentKiller.descriptorPath(path)).build());
+      }
+    }
+
+    boolean shouldThrowException = false;
+    for (Map.Entry<String, List<ObjectIdentifier>> bucketToKeys : bucketToKeysToDelete.entrySet()) {
+      String s3Bucket = bucketToKeys.getKey();
+      List<ObjectIdentifier> keysToDelete = bucketToKeys.getValue();
+      boolean hadException = deleteKeysForBucket(s3Client, s3Bucket, keysToDelete);
+      if (hadException) {
+        shouldThrowException = true;
+      }
+    }
+    if (shouldThrowException) {
+      // exception error message gets cutoff without providing any details. look at the logs for more details.
+      // this was a shortcut to handle the many different ways there could potentially be failures and handle them
+      // reasonably
+      throw new SegmentLoadingException(
+          "Couldn't delete segments from S3. See the task logs for more details."
+      );
+    }
+  }
+
+  /**
+   * Delete all keys in a bucket from s3
+   *
+   * @param s3Client     client used to communicate with s3
+   * @param s3Bucket     the bucket where the keys exist
+   * @param keysToDelete the keys to delete
+   * @return a boolean value of true if there was an issue deleting one or many keys, a boolean value of false if
+   * succesful
+   */
+  private boolean deleteKeysForBucket(
+      ServerSideEncryptingAmazonS3 s3Client,
+      String s3Bucket,
+      List<ObjectIdentifier> keysToDelete
+  )
+  {
+    boolean hadException = false;
+    for (List<ObjectIdentifier> chunkOfKeys : Lists.partition(keysToDelete, S3Utils.MAX_MULTI_OBJECT_DELETE_SIZE)) {
+      try {
+        log.info("Deleting %d segment files from S3 bucket[%s]", chunkOfKeys.size(), s3Bucket);
+        S3Utils.deleteBucketKeys(s3Client, s3Bucket, chunkOfKeys, NUM_RETRIES);
+      }
+      catch (Exception e) {
+        hadException = true;
+        log.noStackTrace().warn(e,
+            "Unable to delete from bucket [%s], keys [%s]",
+            s3Bucket,
+            chunkOfKeys.stream().map(ObjectIdentifier::key).collect(Collectors.joining(", "))
+        );
+      }
+    }
+    return hadException;
+  }
+
+  @Override
   public void kill(DataSegment segment) throws SegmentLoadingException
   {
     try {
       Map<String, Object> loadSpec = segment.getLoadSpec();
-      String s3Bucket = MapUtils.getString(loadSpec, "bucket");
-      String s3Path = MapUtils.getString(loadSpec, "key");
-      String s3DescriptorPath = DataSegmentKiller.descriptorPath(s3Path);
-
+      String s3Bucket = MapUtils.getString(loadSpec, S3DataSegmentPuller.BUCKET);
+      String s3Path = MapUtils.getString(loadSpec, S3DataSegmentPuller.KEY);
       final ServerSideEncryptingAmazonS3 s3Client = this.s3ClientSupplier.get();
-      if (s3Client.doesObjectExist(s3Bucket, s3Path)) {
-        log.info("Removing index file[s3://%s/%s] from s3!", s3Bucket, s3Path);
-        s3Client.deleteObject(s3Bucket, s3Path);
-      }
-      // descriptor.json is a file to store segment metadata in deep storage. This file is deprecated and not stored
-      // anymore, but we still delete them if exists.
-      if (s3Client.doesObjectExist(s3Bucket, s3DescriptorPath)) {
-        log.info("Removing descriptor file[s3://%s/%s] from s3!", s3Bucket, s3DescriptorPath);
-        s3Client.deleteObject(s3Bucket, s3DescriptorPath);
+
+      if (s3Path.endsWith("/")) {
+        // segment is not compressed, list objects and delete them all
+        ListObjectsV2Request request = ListObjectsV2Request
+            .builder()
+            .bucket(s3Bucket)
+            .prefix(s3Path)
+            .build();
+        final ListObjectsV2Response list = s3Client.listObjectsV2(request);
+        for (S3Object objectSummary : list.contents()) {
+          log.info("Removing index file[s3://%s/%s] from s3!", s3Bucket, objectSummary.key());
+          s3Client.deleteObject(s3Bucket, objectSummary.key());
+        }
+      } else {
+        String s3DescriptorPath = DataSegmentKiller.descriptorPath(s3Path);
+        if (s3Client.doesObjectExist(s3Bucket, s3Path)) {
+          log.info("Removing index file[s3://%s/%s] from s3!", s3Bucket, s3Path);
+          s3Client.deleteObject(s3Bucket, s3Path);
+        }
+        // descriptor.json is a file to store segment metadata in deep storage. This file is deprecated and not stored
+        // anymore, but we still delete them if exists.
+        if (s3Client.doesObjectExist(s3Bucket, s3DescriptorPath)) {
+          log.info("Removing descriptor file[s3://%s/%s] from s3!", s3Bucket, s3DescriptorPath);
+          s3Client.deleteObject(s3Bucket, s3DescriptorPath);
+        }
       }
     }
-    catch (AmazonServiceException e) {
+    catch (S3Exception e) {
       throw new SegmentLoadingException(e, "Couldn't kill segment[%s]: [%s]", segment.getId(), e);
     }
   }

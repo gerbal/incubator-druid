@@ -21,6 +21,7 @@ package org.apache.druid.storage.azure;
 
 import com.google.common.io.ByteSource;
 import com.google.inject.Inject;
+import org.apache.druid.guice.annotations.Global;
 import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.segment.loading.SegmentLoadingException;
@@ -28,6 +29,8 @@ import org.apache.druid.utils.CompressionUtils;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Paths;
+import java.util.List;
 
 /**
  * Used for Reading segment files stored in Azure based deep storage
@@ -37,12 +40,34 @@ public class AzureDataSegmentPuller
   private static final Logger log = new Logger(AzureDataSegmentPuller.class);
 
   private final AzureByteSourceFactory byteSourceFactory;
+  private final AzureStorage azureStorage;
+
+  private final AzureAccountConfig azureAccountConfig;
 
   @Inject
   public AzureDataSegmentPuller(
-      AzureByteSourceFactory byteSourceFactory)
+      AzureByteSourceFactory byteSourceFactory,
+      @Global AzureStorage azureStorage,
+      AzureAccountConfig azureAccountConfig
+  )
   {
     this.byteSourceFactory = byteSourceFactory;
+    this.azureStorage = azureStorage;
+    this.azureAccountConfig = azureAccountConfig;
+  }
+
+  /**
+   * The storage client this puller reads through, so that {@link AzureLoadSpec} can hand it to an
+   * {@link AzureSegmentRangeReader} rather than having the deep storage client injected into the load spec itself.
+   */
+  AzureStorage getAzureStorage()
+  {
+    return azureStorage;
+  }
+
+  AzureAccountConfig getAccountConfig()
+  {
+    return azureAccountConfig;
   }
 
   FileUtils.FileCopyResult getSegmentFiles(
@@ -59,20 +84,18 @@ public class AzureDataSegmentPuller
           "Loading container: [%s], with blobPath: [%s] and outDir: [%s]", containerName, blobPath, outDir
       );
 
-      final String actualBlobPath = AzureUtils.maybeRemoveAzurePathPrefix(blobPath);
+      final String actualBlobPath = AzureUtils.maybeRemoveAzurePathPrefix(blobPath, azureAccountConfig.getBlobStorageEndpoint());
 
-      final ByteSource byteSource = byteSourceFactory.create(containerName, actualBlobPath);
-      final FileUtils.FileCopyResult result = CompressionUtils.unzip(
-          byteSource,
-          outDir,
-          AzureUtils.AZURE_RETRY,
-          false
-      );
+      // A trailing slash means the segment was pushed unzipped (druid.storage.zip=false), so the path names a
+      // directory of blobs to pull individually rather than a single zip to unpack.
+      final FileUtils.FileCopyResult result = actualBlobPath.endsWith("/")
+                                              ? getSegmentFilesFromDirectory(containerName, actualBlobPath, outDir)
+                                              : unzipSegmentFiles(containerName, actualBlobPath, outDir);
 
       log.info("Loaded %d bytes from [%s] to [%s]", result.size(), actualBlobPath, outDir.getAbsolutePath());
       return result;
     }
-    catch (IOException e) {
+    catch (Exception e) {
       try {
         FileUtils.deleteDirectory(outDir);
       }
@@ -86,5 +109,41 @@ public class AzureDataSegmentPuller
       }
       throw new SegmentLoadingException(e, e.getMessage());
     }
+  }
+
+  private FileUtils.FileCopyResult unzipSegmentFiles(
+      final String containerName,
+      final String blobPath,
+      final File outDir
+  ) throws IOException
+  {
+    final ByteSource byteSource = byteSourceFactory.create(containerName, blobPath, azureStorage);
+    return CompressionUtils.unzip(
+        byteSource,
+        outDir,
+        AzureUtils.AZURE_RETRY,
+        false
+    );
+  }
+
+  private FileUtils.FileCopyResult getSegmentFilesFromDirectory(
+      final String containerName,
+      final String blobPathPrefix,
+      final File outDir
+  )
+  {
+    final int maxTries = azureAccountConfig.getMaxTries();
+    final List<String> blobPaths = azureStorage.listBlobs(containerName, blobPathPrefix, null, maxTries);
+    final FileUtils.FileCopyResult copyResult = new FileUtils.FileCopyResult();
+
+    for (final String blobPath : blobPaths) {
+      final ByteSource byteSource = byteSourceFactory.create(containerName, blobPath, azureStorage);
+      final File outFile = new File(outDir, Paths.get(blobPath).getFileName().toString());
+      copyResult.addFiles(
+          FileUtils.retryCopy(byteSource, outFile, AzureUtils.AZURE_RETRY, maxTries).getFiles()
+      );
+    }
+
+    return copyResult;
   }
 }

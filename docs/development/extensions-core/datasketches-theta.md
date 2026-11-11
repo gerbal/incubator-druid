@@ -23,14 +23,14 @@ title: "DataSketches Theta Sketch module"
   -->
 
 
-This module provides Apache Druid aggregators based on Theta sketch from [Apache DataSketches](https://datasketches.apache.org/) library.
+This module provides Apache&circledR; Druid aggregators based on Theta sketch from [Apache DataSketches](https://datasketches.apache.org/) library.
 Sketch algorithms are approximate. For more information, see [Accuracy](https://datasketches.apache.org/docs/Theta/ThetaAccuracy.html) in the DataSketches documentation.
 
 At ingestion time, the Theta sketch aggregator creates Theta sketch objects which are stored in Druid segments. Logically speaking, a Theta sketch object can be thought of as a Set data structure. At query time, sketches are read and aggregated (set unioned) together. In the end, by default, you receive the estimate of the number of unique entries in the sketch object. You can use post aggregators to do union, intersection or difference on sketch columns in the same row.
 
 Note that you can use `thetaSketch` aggregator on columns which were not ingested using the same. It will return estimated cardinality of the column. It is recommended to use it at ingestion time as well to make querying faster.
 
-To use this aggregator, make sure you [include](../../development/extensions.md#loading-extensions) the extension in your config file:
+To use this aggregator, make sure you [include](../../configuration/extensions.md#loading-extensions) the extension in your config file:
 
 ```
 druid.extensions.loadList=["druid-datasketches"]
@@ -57,7 +57,7 @@ For additional sketch types supported in Druid, see [DataSketches extension](dat
 |`fieldName`|A string for the name of the aggregator used at ingestion time.|yes|
 |`isInputThetaSketch`|Only set this to true at indexing time if your input data contains Theta sketch objects. This applies to cases when you use DataSketches outside of Druid, for example with Pig or Hive, to produce the data to ingest into Druid |no, defaults to false|
 |`size`|Must be a power of 2. Internally, size refers to the maximum number of entries sketch object retains. Higher size means higher accuracy but more space to store sketches. After you index with a particular size, Druid persists the sketch in segments. At query time you must use a size greater or equal to the ingested size. See the [DataSketches site](https://datasketches.apache.org/docs/Theta/ThetaSize) for details. The default is recommended for the majority of use cases.|no, defaults to 16384|
-|`shouldFinalize`|Return the final double type representing the estimate rather than the intermediate sketch type itself. In addition to controlling the finalization of this aggregator, you can control whether all aggregators are finalized with the query context parameters [`finalize`](../../querying/query-context.md) and [`sqlFinalizeOuterSketches`](../../querying/sql-query-context.md).|no, defaults to `true`|
+|`shouldFinalize`|Return the final double type representing the estimate rather than the intermediate sketch type itself. In addition to controlling the finalization of this aggregator, you can control whether all aggregators are finalized with the query context parameters [`finalize`](../../querying/query-context-reference.md) and [`sqlFinalizeOuterSketches`](../../querying/sql-query-context.md).|no, defaults to `true`|
 
 ## Post aggregators
 

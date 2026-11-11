@@ -24,81 +24,91 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Sets;
 import nl.jqno.equalsverifier.EqualsVerifier;
-import org.apache.druid.common.config.NullHandling;
+import org.apache.druid.data.input.ColumnsFilter;
 import org.apache.druid.data.input.InputRow;
+import org.apache.druid.data.input.InputRowSchema;
 import org.apache.druid.data.input.impl.DimensionsSpec;
 import org.apache.druid.data.input.impl.FloatDimensionSchema;
-import org.apache.druid.data.input.impl.InputRowParser;
 import org.apache.druid.data.input.impl.LongDimensionSchema;
-import org.apache.druid.data.input.impl.MapInputRowParser;
 import org.apache.druid.data.input.impl.StringDimensionSchema;
-import org.apache.druid.data.input.impl.TimeAndDimsParseSpec;
 import org.apache.druid.data.input.impl.TimestampSpec;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.Pair;
-import org.apache.druid.math.expr.ExpressionProcessing;
 import org.apache.druid.query.expression.TestExprMacroTable;
 import org.apache.druid.query.filter.ExpressionDimFilter;
 import org.apache.druid.query.filter.Filter;
+import org.apache.druid.query.filter.NotDimFilter;
+import org.apache.druid.segment.CursorFactory;
 import org.apache.druid.segment.IndexBuilder;
-import org.apache.druid.segment.StorageAdapter;
+import org.apache.druid.segment.column.ColumnType;
+import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.segment.incremental.IncrementalIndexSchema;
-import org.junit.After;
-import org.junit.AfterClass;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.Closeable;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
-import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
-@RunWith(Parameterized.class)
+@ParameterizedClass
+@MethodSource("constructors")
 public class ExpressionFilterTest extends BaseFilterTest
 {
   private static final String TIMESTAMP_COLUMN = "timestamp";
-
-  private static final InputRowParser<Map<String, Object>> PARSER = new MapInputRowParser(
-      new TimeAndDimsParseSpec(
-          new TimestampSpec(TIMESTAMP_COLUMN, "iso", DateTimes.of("2000")),
-          new DimensionsSpec(
-              ImmutableList.of(
-                  new StringDimensionSchema("dim0"),
-                  new LongDimensionSchema("dim1"),
-                  new FloatDimensionSchema("dim2"),
-                  new StringDimensionSchema("dim3"),
-                  new StringDimensionSchema("dim4")
-              )
+  private static final InputRowSchema SCHEMA = new InputRowSchema(
+      new TimestampSpec(TIMESTAMP_COLUMN, "iso", DateTimes.of("2000")),
+      new DimensionsSpec(
+          ImmutableList.of(
+              new StringDimensionSchema("dim0"),
+              new LongDimensionSchema("dim1"),
+              new FloatDimensionSchema("dim2"),
+              new StringDimensionSchema("dim3"),
+              new StringDimensionSchema("dim4"),
+              new StringDimensionSchema("dim5")
           )
-      )
+      ),
+      ColumnsFilter.all()
   );
 
-  private static final List<InputRow> ROWS = ImmutableList.<Map<String, Object>>of(
-      ImmutableMap.of("dim0", "0", "dim1", 0L, "dim2", 0.0f, "dim3", "", "dim4", ImmutableList.of("1", "2")),
-      ImmutableMap.of("dim0", "1", "dim1", 1L, "dim2", 1.0f, "dim3", "10", "dim4", ImmutableList.of()),
-      ImmutableMap.of("dim0", "2", "dim1", 2L, "dim2", 2.0f, "dim3", "2", "dim4", ImmutableList.of("")),
-      ImmutableMap.of("dim0", "3", "dim1", 3L, "dim2", 3.0f, "dim3", "1", "dim4", ImmutableList.of("3")),
-      ImmutableMap.of("dim0", "4", "dim1", 4L, "dim2", 4.0f, "dim3", "1", "dim4", ImmutableList.of("4", "5")),
-      ImmutableMap.of("dim0", "5", "dim1", 5L, "dim2", 5.0f, "dim3", "5", "dim4", ImmutableList.of("4", "5")),
-      ImmutableMap.of("dim0", "6", "dim1", 6L, "dim2", 6.0f, "dim3", "1"),
-      ImmutableMap.of("dim0", "7", "dim1", 7L, "dim2", 7.0f, "dim3", "a"),
-      ImmutableMap.of("dim0", "8", "dim1", 8L, "dim2", 8.0f, "dim3", 8L),
+  private static final RowSignature ROW_SIGNATURE = RowSignature.builder()
+                                                                .add("dim0", ColumnType.STRING)
+                                                                .add("dim1", ColumnType.LONG)
+                                                                .add("dim2", ColumnType.FLOAT)
+                                                                .add("dim3", ColumnType.STRING)
+                                                                .add("dim4", ColumnType.STRING)
+                                                                .add("dim5", ColumnType.STRING)
+                                                                .build();
 
+
+  private static final List<InputRow> ROWS = ImmutableList.of(
+      makeSchemaRow(SCHEMA, ROW_SIGNATURE, "0", 0L, 0.0f, "", ImmutableList.of("1", "2"), "a"),
+      makeSchemaRow(SCHEMA, ROW_SIGNATURE, "1", 1L, 1.0f, "10", ImmutableList.of(), "b"),
+      makeSchemaRow(SCHEMA, ROW_SIGNATURE, "2", 2L, 2.0f, "2", ImmutableList.of(""), null),
+      makeSchemaRow(SCHEMA, ROW_SIGNATURE, "3", 3L, 3.0f, "1", ImmutableList.of("3"), "c"),
+      makeSchemaRow(SCHEMA, ROW_SIGNATURE, "4", 4L, 4.0f, "1", ImmutableList.of("4", "5"), ""),
+      makeSchemaRow(SCHEMA, ROW_SIGNATURE, "5", 5L, 5.0f, "5", ImmutableList.of("4", "5"), "d"),
+      makeSchemaRow(SCHEMA, ROW_SIGNATURE, "6", 6L, 6.0f, "1", null, "e"),
+      makeSchemaRow(SCHEMA, ROW_SIGNATURE, "7", 7L, 7.0f, "a", null, "f"),
+      makeSchemaRow(SCHEMA, ROW_SIGNATURE, "8", 8L, 8.0f, 8L, null, "g"),
       // Note: the "dim3 == 1.234" check in "testOneSingleValuedStringColumn" fails if dim3 is 1.234f instead of 1.234d,
       // because the literal 1.234 is interpreted as a double, and 1.234f cast to double is not equivalent to 1.234d.
-      ImmutableMap.of("dim0", "9", "dim1", 9L, "dim2", 9.0f, "dim3", 1.234d, "dim4", 1.234d)
-  ).stream().map(e -> PARSER.parseBatch(e).get(0)).collect(Collectors.toList());
+      makeSchemaRow(SCHEMA, ROW_SIGNATURE, "9", 9L, 9.0f, 1.234d, 1.234d, null)
+  );
+
+  public static Stream<Object[]> constructors()
+  {
+    return BaseFilterTest.makeConstructors().stream();
+  }
+
 
   public ExpressionFilterTest(
       String testName,
       IndexBuilder indexBuilder,
-      Function<IndexBuilder, Pair<StorageAdapter, Closeable>> finisher,
+      Function<IndexBuilder, Pair<CursorFactory, Closeable>> finisher,
       boolean cnf,
       boolean optimize
   )
@@ -108,7 +118,7 @@ public class ExpressionFilterTest extends BaseFilterTest
         ROWS,
         indexBuilder.schema(
             new IncrementalIndexSchema.Builder()
-                .withDimensionsSpec(PARSER.getParseSpec().getDimensionsSpec()).build()
+                .withDimensionsSpec(SCHEMA.getDimensionsSpec()).build()
         ),
         finisher,
         cnf,
@@ -116,30 +126,19 @@ public class ExpressionFilterTest extends BaseFilterTest
     );
   }
 
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
-
-  @Before
-  public void setup()
-  {
-    ExpressionProcessing.initializeForStrictBooleansTests(false);
-  }
-
-  @After
-  public void teardown()
-  {
-    ExpressionProcessing.initializeForTests();
-  }
-
-  @AfterClass
+  @AfterAll
   public static void tearDown() throws Exception
   {
-    BaseFilterTest.tearDown(ColumnComparisonFilterTest.class.getName());
+    BaseFilterTest.tearDown(ExpressionFilterTest.class.getName());
   }
 
   @Test
   public void testOneSingleValuedStringColumn()
   {
+    if (testName.contains("incrementalAutoTypes")) {
+      // dim 3 is mixed type in auto incrementalIndex, so presents as complex<json>
+      return;
+    }
     assertFilterMatches(edf("dim3 == ''"), ImmutableList.of("0"));
     assertFilterMatches(edf("dim3 == '1'"), ImmutableList.of("3", "4", "6"));
     assertFilterMatches(edf("dim3 == 'a'"), ImmutableList.of("7"));
@@ -147,75 +146,109 @@ public class ExpressionFilterTest extends BaseFilterTest
     assertFilterMatches(edf("dim3 == 1.0"), ImmutableList.of("3", "4", "6"));
     assertFilterMatches(edf("dim3 == 1.234"), ImmutableList.of("9"));
     assertFilterMatches(edf("dim3 < '2'"), ImmutableList.of("0", "1", "3", "4", "6", "9"));
-    if (NullHandling.replaceWithDefault()) {
-      assertFilterMatches(edf("dim3 < 2"), ImmutableList.of("0", "3", "4", "6", "7", "9"));
-      assertFilterMatches(edf("dim3 < 2.0"), ImmutableList.of("0", "3", "4", "6", "7", "9"));
-    } else {
-      // Empty String and "a" will not match
-      assertFilterMatches(edf("dim3 < 2"), ImmutableList.of("3", "4", "6", "9"));
-      assertFilterMatches(edf("dim3 < 2.0"), ImmutableList.of("3", "4", "6", "9"));
-    }
-    assertFilterMatchesSkipVectorize(edf("like(dim3, '1%')"), ImmutableList.of("1", "3", "4", "6", "9"));
-    assertFilterMatchesSkipVectorize(edf("array_contains(dim3, '1')"), ImmutableList.of("3", "4", "6"));
+
+    // Empty String and "a" will not match
+    assertFilterMatches(edf("dim3 < 2"), ImmutableList.of("3", "4", "6", "9"));
+    assertFilterMatches(edf("dim3 < 2.0"), ImmutableList.of("3", "4", "6", "9"));
+    assertFilterMatchesSkipVectorizeUnlessFallback(edf("like(dim3, '1%')"), ImmutableList.of("1", "3", "4", "6", "9"));
+    assertFilterMatchesSkipVectorizeUnlessFallback(edf("array_contains(dim3, '1')"), ImmutableList.of("3", "4", "6"));
+  }
+
+  @Test
+  public void testComplement()
+  {
+    assertFilterMatches(edf("dim5 == 'a'"), ImmutableList.of("0"));
+    assertFilterMatches(
+        NotDimFilter.of(edf("dim5 == 'a'")),
+        ImmutableList.of("1", "3", "4", "5", "6", "7", "8")
+    );
+    assertFilterMatches(
+        edf("dim5 == ''"), ImmutableList.of("4")
+    );
+    assertFilterMatches(
+        NotDimFilter.of(edf("dim5 == ''")), ImmutableList.of("0", "1", "3", "5", "6", "7", "8")
+    );
   }
 
   @Test
   public void testOneMultiValuedStringColumn()
   {
-    if (NullHandling.replaceWithDefault()) {
-      assertFilterMatchesSkipVectorize(edf("dim4 == ''"), ImmutableList.of("1", "2", "6", "7", "8"));
-    } else {
-      assertFilterMatchesSkipVectorize(edf("dim4 == ''"), ImmutableList.of("2"));
-      // AS per SQL standard null == null returns false.
-      assertFilterMatchesSkipVectorize(edf("dim4 == null"), ImmutableList.of());
+    // auto type columns ingest arrays instead of mvds, bail out
+    if (isAutoSchema()) {
+      return;
     }
+
+    assertFilterMatchesSkipVectorize(edf("dim4 == ''"), ImmutableList.of("2"));
+    // AS per SQL standard null == null returns false.
+    assertFilterMatchesSkipVectorize(edf("dim4 == null"), ImmutableList.of());
+    if (hasTypeInformation()) {
+      assertFilterMatchesSkipVectorize(edf("isnull(dim4)"), ImmutableList.of("1", "6", "7", "8"));
+      assertFilterMatchesSkipVectorize(
+          NotDimFilter.of(edf("isnull(dim4)")),
+          ImmutableList.of("0", "2", "3", "4", "5", "9")
+      );
+      assertFilterMatchesSkipVectorize(edf("cast(dim4, 'LONG')"), ImmutableList.of("0", "3", "4", "5", "9"));
+      assertFilterMatchesSkipVectorize(NotDimFilter.of(edf("cast(dim4, 'LONG')")), ImmutableList.of());
+      assertFilterMatchesSkipVectorize(edf("cast(dim4, 'STRING')"), ImmutableList.of());
+      assertFilterMatchesSkipVectorize(
+          NotDimFilter.of(edf("cast(dim4, 'STRING')")),
+          ImmutableList.of("0", "2", "3", "4", "5", "9")
+      );
+      assertFilterMatchesSkipVectorize(edf("cast(dim4, 'DOUBLE')"), ImmutableList.of("0", "3", "4", "5", "9"));
+      assertFilterMatchesSkipVectorize(NotDimFilter.of(edf("cast(dim4, 'DOUBLE')")), ImmutableList.of());
+    }
+
     assertFilterMatchesSkipVectorize(edf("dim4 == '1'"), ImmutableList.of("0"));
     assertFilterMatchesSkipVectorize(edf("dim4 == '3'"), ImmutableList.of("3"));
     assertFilterMatchesSkipVectorize(edf("dim4 == '4'"), ImmutableList.of("4", "5"));
     assertFilterMatchesSkipVectorize(edf("concat(dim4, dim4) == '33'"), ImmutableList.of("3"));
     assertFilterMatchesSkipVectorize(edf("like(dim4, '4%')"), ImmutableList.of("4", "5"));
-    assertFilterMatchesSkipVectorize(edf("array_contains(dim4, '5')"), ImmutableList.of("4", "5"));
-    assertFilterMatchesSkipVectorize(edf("array_to_string(dim4, ':') == '4:5'"), ImmutableList.of("4", "5"));
+    // array functions on mvds can vectorize with fallback
+    assertFilterMatchesSkipVectorizeUnlessFallback(edf("array_contains(dim4, '5')"), ImmutableList.of("4", "5"));
+    assertFilterMatchesSkipVectorizeUnlessFallback(edf("array_to_string(dim4, ':') == '4:5'"), ImmutableList.of("4", "5"));
   }
 
   @Test
   public void testSingleAndMultiValuedStringColumn()
   {
-    assertFilterMatchesSkipVectorize(edf("array_contains(dim4, dim3)"), ImmutableList.of("5", "9"));
+    assertFilterMatchesSkipVectorizeUnlessFallback(edf("array_contains(dim4, dim3)"), ImmutableList.of("5", "9"));
+  }
+
+  @Test
+  public void testMvOverlap()
+  {
+    assertFilterMatchesSkipVectorizeUnlessFallback(edf("mv_overlap(dim4, '1')"), List.of("0"));
+    assertFilterMatchesSkipVectorizeUnlessFallback(edf("mv_overlap(dim4, '4')"), List.of("4", "5"));
+    assertFilterMatchesSkipVectorizeUnlessFallback(edf("mv_overlap(dim4, array(1, 2, 3, 4))"), List.of("0", "3", "4", "5"));
+    assertFilterMatchesSkipVectorizeUnlessFallback(edf("mv_overlap(dim4, dim3)"), List.of("5", "9"));
+    assertFilterMatchesSkipVectorizeUnlessFallback(edf("mv_overlap(dim4, null)"), List.of("1", "6", "7", "8"));
+    assertFilterMatchesSkipVectorizeUnlessFallback(edf("mv_overlap(dim4, [])"), List.of());
   }
 
   @Test
   public void testOneLongColumn()
   {
-    if (NullHandling.replaceWithDefault()) {
-      assertFilterMatches(edf("dim1 == ''"), ImmutableList.of("0"));
-    } else {
-      // A long does not match empty string
-      assertFilterMatches(edf("dim1 == ''"), ImmutableList.of());
-    }
+    // A long does not match empty string
+    assertFilterMatches(edf("dim1 == ''"), ImmutableList.of());
     assertFilterMatches(edf("dim1 == '1'"), ImmutableList.of("1"));
     assertFilterMatches(edf("dim1 == 2"), ImmutableList.of("2"));
     assertFilterMatches(edf("dim1 < '2'"), ImmutableList.of("0", "1"));
     assertFilterMatches(edf("dim1 < 2"), ImmutableList.of("0", "1"));
     assertFilterMatches(edf("dim1 < 2.0"), ImmutableList.of("0", "1"));
-    assertFilterMatchesSkipVectorize(edf("like(dim1, '1%')"), ImmutableList.of("1"));
+    assertFilterMatchesSkipVectorizeUnlessFallback(edf("like(dim1, '1%')"), ImmutableList.of("1"));
   }
 
   @Test
   public void testOneFloatColumn()
   {
-    if (NullHandling.replaceWithDefault()) {
-      assertFilterMatches(edf("dim2 == ''"), ImmutableList.of("0"));
-    } else {
-      // A float does not match empty string
-      assertFilterMatches(edf("dim2 == ''"), ImmutableList.of());
-    }
+    // A float does not match empty string
+    assertFilterMatches(edf("dim2 == ''"), ImmutableList.of());
     assertFilterMatches(edf("dim2 == '1'"), ImmutableList.of("1"));
     assertFilterMatches(edf("dim2 == 2"), ImmutableList.of("2"));
     assertFilterMatches(edf("dim2 < '2'"), ImmutableList.of("0", "1"));
     assertFilterMatches(edf("dim2 < 2"), ImmutableList.of("0", "1"));
     assertFilterMatches(edf("dim2 < 2.0"), ImmutableList.of("0", "1"));
-    assertFilterMatchesSkipVectorize(edf("like(dim2, '1%')"), ImmutableList.of("1"));
+    assertFilterMatchesSkipVectorizeUnlessFallback(edf("like(dim2, '1%')"), ImmutableList.of("1"));
   }
 
   @Test
@@ -234,83 +267,87 @@ public class ExpressionFilterTest extends BaseFilterTest
     // String vs string
     assertFilterMatches(edf("dim0 == dim3"), ImmutableList.of("2", "5", "8"));
 
-    if (NullHandling.replaceWithDefault()) {
-      // String vs long
-      assertFilterMatches(edf("dim1 == dim3"), ImmutableList.of("0", "2", "5", "8"));
+    // String vs long
+    assertFilterMatches(edf("dim1 == dim3"), ImmutableList.of("2", "5", "8"));
 
-      // String vs float
-      assertFilterMatches(edf("dim2 == dim3"), ImmutableList.of("0", "2", "5", "8"));
-    } else {
-      // String vs long
-      assertFilterMatches(edf("dim1 == dim3"), ImmutableList.of("2", "5", "8"));
+    // String vs float
+    assertFilterMatches(edf("dim2 == dim3"), ImmutableList.of("2", "5", "8"));
 
-      // String vs float
-      assertFilterMatches(edf("dim2 == dim3"), ImmutableList.of("2", "5", "8"));
+    // auto type columns ingest arrays instead of mvds
+    if (isAutoSchema()) {
+      return;
     }
-
     // String vs. multi-value string
     assertFilterMatchesSkipVectorize(edf("dim0 == dim4"), ImmutableList.of("3", "4", "5"));
   }
 
   @Test
+  public void testNullNotUnknown()
+  {
+    assertFilterMatchesSkipVectorizeUnlessFallback(
+        edf("isfalse(dim5)"),
+        ImmutableList.of("0", "1", "3", "4", "5", "6", "7", "8")
+    );
+    assertFilterMatchesSkipVectorizeUnlessFallback(
+        edf("!isfalse(dim5)"),
+        ImmutableList.of("2", "9")
+    );
+    assertFilterMatchesSkipVectorizeUnlessFallback(
+        NotDimFilter.of(edf("isfalse(dim5)")),
+        ImmutableList.of("2", "9")
+    );
+
+    assertFilterMatchesSkipVectorizeUnlessFallback(
+        edf("isfalse(notexist)"),
+        ImmutableList.of()
+    );
+    assertFilterMatchesSkipVectorizeUnlessFallback(
+        edf("!isfalse(notexist)"), ImmutableList.of("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
+    );
+    assertFilterMatchesSkipVectorizeUnlessFallback(
+        NotDimFilter.of(edf("isfalse(notexist)")), ImmutableList.of("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
+    );
+  }
+
+  @Test
   public void testMissingColumn()
   {
-    if (NullHandling.replaceWithDefault()) {
-      assertFilterMatches(
-          edf("missing == ''"),
-          ImmutableList.of("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
-      );
-      assertFilterMatches(
-          edf("missing == otherMissing"),
-          ImmutableList.of("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
-      );
-    } else {
-      // AS per SQL standard null == null returns false.
-      assertFilterMatches(edf("missing == null"), ImmutableList.of());
-      // also this madness doesn't do madness
-      assertFilterMatches(
-          edf("missing == otherMissing"),
-          ImmutableList.of()
-      );
-    }
+    // AS per SQL standard null == null returns false.
+    assertFilterMatches(edf("missing == null"), ImmutableList.of());
+    // and inverted too
+    assertFilterMatches(NotDimFilter.of(edf("missing == null")), ImmutableList.of());
+    // also this madness doesn't do madness
+    assertFilterMatches(
+        edf("missing == otherMissing"),
+        ImmutableList.of()
+    );
+    assertFilterMatches(
+        NotDimFilter.of(edf("missing == otherMissing")),
+        ImmutableList.of()
+    );
     assertFilterMatches(edf("missing == '1'"), ImmutableList.of());
     assertFilterMatches(edf("missing == 2"), ImmutableList.of());
-    if (NullHandling.replaceWithDefault()) {
-      // missing equivaluent to 0
-      assertFilterMatches(
-          edf("missing < '2'"),
-          ImmutableList.of("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
-      );
-      assertFilterMatches(
-          edf("missing < 2"),
-          ImmutableList.of("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
-      );
-      assertFilterMatches(
-          edf("missing < 2.0"),
-          ImmutableList.of("0", "1", "2", "3", "4", "5", "6", "7", "8", "9")
-      );
-    } else {
-      // missing equivalent to null
-      assertFilterMatches(edf("missing < '2'"), ImmutableList.of());
-      assertFilterMatches(edf("missing < 2"), ImmutableList.of());
-      assertFilterMatches(edf("missing < 2.0"), ImmutableList.of());
-    }
+
+    // missing equivalent to null
+    assertFilterMatches(edf("missing < '2'"), ImmutableList.of());
+    assertFilterMatches(edf("missing < 2"), ImmutableList.of());
+    assertFilterMatches(edf("missing < 2.0"), ImmutableList.of());
     assertFilterMatches(edf("missing > '2'"), ImmutableList.of());
     assertFilterMatches(edf("missing > 2"), ImmutableList.of());
     assertFilterMatches(edf("missing > 2.0"), ImmutableList.of());
-    assertFilterMatchesSkipVectorize(edf("like(missing, '1%')"), ImmutableList.of());
+    assertFilterMatchesSkipVectorizeUnlessFallback(edf("like(missing, '1%')"), ImmutableList.of());
   }
 
   @Test
   public void testGetRequiredColumn()
   {
-    Assert.assertEquals(edf("like(dim1, '1%')").getRequiredColumns(), Sets.newHashSet("dim1"));
-    Assert.assertEquals(edf("dim2 == '1'").getRequiredColumns(), Sets.newHashSet("dim2"));
-    Assert.assertEquals(edf("dim3 < '2'").getRequiredColumns(), Sets.newHashSet("dim3"));
-    Assert.assertEquals(edf("dim4 == ''").getRequiredColumns(), Sets.newHashSet("dim4"));
-    Assert.assertEquals(edf("1 + 1").getRequiredColumns(), new HashSet<>());
-    Assert.assertEquals(edf("dim0 == dim3").getRequiredColumns(), Sets.newHashSet("dim0", "dim3"));
-    Assert.assertEquals(edf("missing == ''").getRequiredColumns(), Sets.newHashSet("missing"));
+    Assertions.assertEquals(edf("like(dim1, '1%')").getRequiredColumns(), Sets.newHashSet("dim1"));
+    Assertions.assertEquals(edf("dim2 == '1'").getRequiredColumns(), Sets.newHashSet("dim2"));
+    Assertions.assertEquals(edf("dim3 < '2'").getRequiredColumns(), Sets.newHashSet("dim3"));
+    Assertions.assertEquals(edf("dim4 == ''").getRequiredColumns(), Sets.newHashSet("dim4"));
+    Assertions.assertEquals(edf("1 + 1").getRequiredColumns(), new HashSet<>());
+    Assertions.assertEquals(edf("dim0 == dim3").getRequiredColumns(), Sets.newHashSet("dim0", "dim3"));
+    Assertions.assertEquals(edf("missing == ''").getRequiredColumns(), Sets.newHashSet("missing"));
   }
 
   @Test
@@ -326,14 +363,47 @@ public class ExpressionFilterTest extends BaseFilterTest
   public void testRequiredColumnRewrite()
   {
     Filter filter = edf("dim1 == '1'").toFilter();
-    Assert.assertFalse(filter.supportsRequiredColumnRewrite());
+    Assertions.assertFalse(filter.supportsRequiredColumnRewrite());
 
-    expectedException.expect(UnsupportedOperationException.class);
-    expectedException.expectMessage("Required column rewrite is not supported by this filter.");
-    filter.rewriteRequiredColumns(ImmutableMap.of("invalidName", "dim1"));
+    Throwable t = Assertions.assertThrows(
+        UnsupportedOperationException.class,
+        () -> filter.rewriteRequiredColumns(ImmutableMap.of("invalidName", "dim1"))
+    );
+    Assertions.assertEquals("Required column rewrite is not supported by this filter.", t.getMessage());
   }
 
-  private static ExpressionDimFilter edf(final String expression)
+  /**
+   * now() has no required column bindings, so without the non-determinism check Expr.asBitmapColumnIndex would fall
+   * into the "constant expression" branch and evaluate it once to produce an AllTrue/AllFalse bitmap index. The
+   * correct behavior is to return null, which forces per-row evaluation.
+   */
+  @Test
+  public void testNowFilterDoesNotProduceConstantBitmapIndex()
+  {
+    // "now() > 0" has no required bindings — would otherwise trigger constant folding in asBitmapColumnIndex.
+    Filter filter = edf("now() > 0").toFilter();
+    Assertions.assertNull(
+        filter.getBitmapColumnIndex(null),
+        "ExpressionFilter.getBitmapColumnIndex should return null for non-deterministic now()"
+    );
+  }
+
+  /**
+   * Two ExpressionDimFilters built at different times that both wrap now() would otherwise produce identical cache
+   * keys (now() stringifies the same way every time), allowing stale cached results to be reused.
+   * NowExpression mixes nanoTime into the cache key via decorateCacheKeyBuilder so two distinct filter instances
+   * over the same expression produce different bytes.
+   */
+  @Test
+  public void testNowDimFilterCacheKeyIsNotStableAcrossInstances()
+  {
+    Assertions.assertFalse(
+        java.util.Arrays.equals(edf("now()").getCacheKey(), edf("now()").getCacheKey()),
+        "ExpressionDimFilter cache keys for now() must differ across instances to defeat result caching"
+    );
+  }
+
+  protected static ExpressionDimFilter edf(final String expression)
   {
     return new ExpressionDimFilter(expression, null, TestExprMacroTable.INSTANCE);
   }

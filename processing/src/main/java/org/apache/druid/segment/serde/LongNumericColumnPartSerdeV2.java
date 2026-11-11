@@ -22,16 +22,17 @@ package org.apache.druid.segment.serde;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import org.apache.druid.collections.bitmap.ImmutableBitmap;
-import org.apache.druid.java.util.common.io.smoosh.FileSmoosher;
 import org.apache.druid.segment.column.ValueType;
 import org.apache.druid.segment.data.BitmapSerde;
 import org.apache.druid.segment.data.BitmapSerdeFactory;
 import org.apache.druid.segment.data.CompressedColumnarLongsSupplier;
+import org.apache.druid.segment.file.SegmentFileBuilder;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
 import java.nio.ByteOrder;
 import java.nio.channels.WritableByteChannel;
+import java.util.Objects;
 
 /**
  */
@@ -123,9 +124,9 @@ public class LongNumericColumnPartSerdeV2 implements ColumnPartSerde
         }
 
         @Override
-        public void writeTo(WritableByteChannel channel, FileSmoosher smoosher) throws IOException
+        public void writeTo(WritableByteChannel channel, SegmentFileBuilder fileBuilder) throws IOException
         {
-          delegate.writeTo(channel, smoosher);
+          delegate.writeTo(channel, fileBuilder);
         }
       };
       return new LongNumericColumnPartSerdeV2(byteOrder, bitmapSerdeFactory, serializer);
@@ -142,12 +143,13 @@ public class LongNumericColumnPartSerdeV2 implements ColumnPartSerde
   @Override
   public Deserializer getDeserializer()
   {
-    return (buffer, builder, columnConfig) -> {
+    return (buffer, builder, columnConfig, parent) -> {
       int offset = buffer.getInt();
       int initialPos = buffer.position();
       final CompressedColumnarLongsSupplier column = CompressedColumnarLongsSupplier.fromByteBuffer(
           buffer,
-          byteOrder
+          byteOrder,
+          builder.getFileMapper()
       );
       buffer.position(initialPos + offset);
       final ImmutableBitmap bitmap;
@@ -165,5 +167,25 @@ public class LongNumericColumnPartSerdeV2 implements ColumnPartSerde
              .setNumericColumnSupplier(new LongNumericColumnSupplier(column, bitmap))
              .setNullValueIndexSupplier(bitmap);
     };
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    final LongNumericColumnPartSerdeV2 that = (LongNumericColumnPartSerdeV2) o;
+    return Objects.equals(byteOrder, that.byteOrder)
+           && Objects.equals(bitmapSerdeFactory, that.bitmapSerdeFactory);
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return Objects.hash(byteOrder, bitmapSerdeFactory);
   }
 }

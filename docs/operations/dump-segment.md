@@ -23,7 +23,7 @@ title: "dump-segment tool"
   -->
 
 
-The DumpSegment tool can be used to dump the metadata or contents of an Apache Druid segment for debugging purposes. Note that the
+The DumpSegment tool can be used to dump the metadata or contents of an Apache&circledR; Druid segment for debugging purposes. Note that the
 dump is not necessarily a full-fidelity translation of the segment. In particular, not all metadata is included, and
 complex metric values may not be complete.
 
@@ -31,6 +31,22 @@ To run the tool, point it at a segment directory and provide a file for writing 
 
 ```
 java -classpath "/my/druid/lib/*" -Ddruid.extensions.loadList="[]" org.apache.druid.cli.Main \
+  tools dump-segment \
+  --directory /home/druid/path/to/segment/ \
+  --out /home/druid/output.txt
+```
+
+If you use JDK 17 and above, you need to add the following additional parameters
+```
+--add-opens java.base/java.lang=ALL-UNNAMED
+--add-opens java.base/sun.nio.ch=ALL-UNNAMED
+```
+The following is an example
+
+```
+java --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED \
+  -classpath "/my/druid/lib/*" \
+  -Ddruid.extensions.loadList="[]" org.apache.druid.cli.Main \
   tools dump-segment \
   --directory /home/druid/path/to/segment/ \
   --out /home/druid/output.txt

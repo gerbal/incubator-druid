@@ -19,6 +19,7 @@
 
 package org.apache.druid.segment;
 
+import com.fasterxml.jackson.annotation.JacksonInject;
 import com.fasterxml.jackson.databind.AnnotationIntrospector;
 import com.fasterxml.jackson.databind.InjectableValues;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -40,12 +41,10 @@ import org.apache.druid.query.groupby.ResultRow;
 import org.apache.druid.query.timeseries.TimeseriesResultValue;
 import org.apache.druid.query.topn.TopNResultValue;
 import org.apache.druid.segment.column.ColumnConfig;
-import org.apache.druid.segment.data.ComparableList;
-import org.apache.druid.segment.data.ComparableStringArray;
 import org.apache.druid.segment.join.JoinableFactoryWrapper;
 import org.apache.druid.segment.writeout.SegmentWriteOutMediumFactory;
 import org.apache.druid.timeline.DataSegment.PruneSpecsHolder;
-import org.junit.Assert;
+import org.junit.jupiter.api.Assertions;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -62,21 +61,40 @@ import java.util.stream.IntStream;
 public class TestHelper
 {
   public static final ObjectMapper JSON_MAPPER = makeJsonMapper();
-  public static final ColumnConfig NO_CACHE_COLUMN_CONFIG = () -> 0;
 
   public static IndexMergerV9 getTestIndexMergerV9(SegmentWriteOutMediumFactory segmentWriteOutMediumFactory)
   {
     return new IndexMergerV9(JSON_MAPPER, getTestIndexIO(), segmentWriteOutMediumFactory, true);
   }
 
+  public static IndexMergerV9 getTestIndexMergerV9(ObjectMapper jsonMapper, SegmentWriteOutMediumFactory segmentWriteOutMediumFactory)
+  {
+    return new IndexMergerV9(jsonMapper, getTestIndexIO(jsonMapper), segmentWriteOutMediumFactory, true);
+  }
+
+  public static IndexMergerV9 getTestIndexMergerV9(SegmentWriteOutMediumFactory segmentWriteOutMediumFactory, ColumnConfig columnConfig)
+  {
+    return new IndexMergerV9(JSON_MAPPER, getTestIndexIO(columnConfig), segmentWriteOutMediumFactory, true);
+  }
+
   public static IndexIO getTestIndexIO()
   {
-    return getTestIndexIO(NO_CACHE_COLUMN_CONFIG);
+    return getTestIndexIO(ColumnConfig.SELECTION_SIZE);
   }
 
   public static IndexIO getTestIndexIO(ColumnConfig columnConfig)
   {
     return new IndexIO(JSON_MAPPER, columnConfig);
+  }
+
+  public static IndexIO getTestIndexIO(ObjectMapper jsonMapper, ColumnConfig columnConfig)
+  {
+    return new IndexIO(jsonMapper, columnConfig);
+  }
+
+  public static IndexIO getTestIndexIO(ObjectMapper jsonMapper)
+  {
+    return new IndexIO(jsonMapper, ColumnConfig.SELECTION_SIZE);
   }
 
   public static AnnotationIntrospector makeAnnotationIntrospector()
@@ -86,7 +104,7 @@ public class TestHelper
     return new GuiceAnnotationIntrospector()
     {
       @Override
-      public Object findInjectableValueId(AnnotatedMember m)
+      public JacksonInject.Value findInjectableValue(AnnotatedMember m)
       {
         return null;
       }
@@ -220,7 +238,7 @@ public class TestHelper
     }
 
     if (resultsIter.hasNext()) {
-      Assert.fail(
+      Assertions.fail(
           StringUtils.format(
               "%s: Expected resultsIter to be exhausted, next element was %s",
               failMsg,
@@ -230,7 +248,7 @@ public class TestHelper
     }
 
     if (resultsIter2.hasNext()) {
-      Assert.fail(
+      Assertions.fail(
           StringUtils.format(
               "%s: Expected resultsIter2 to be exhausted, next element was %s",
               failMsg,
@@ -240,7 +258,7 @@ public class TestHelper
     }
 
     if (expectedResultsIter.hasNext()) {
-      Assert.fail(
+      Assertions.fail(
           StringUtils.format(
               "%s: Expected expectedResultsIter to be exhausted, next element was %s",
               failMsg,
@@ -262,7 +280,7 @@ public class TestHelper
       final Object next = resultsIter.next();
       final Object next2 = resultsIter2.next();
 
-      String failMsg = msg + "-" + index++;
+      String failMsg = msg + "[" + index++ + "]";
       String failMsg2 = StringUtils.format(
           "%s: Second iterator bad, multiple calls to iterator() should be safe",
           failMsg
@@ -273,25 +291,25 @@ public class TestHelper
         assertRow(failMsg, (ResultRow) expectedNext, (ResultRow) next);
         assertRow(failMsg2, (ResultRow) expectedNext, (ResultRow) next2);
       } else {
-        Assert.assertEquals(failMsg, expectedNext, next);
-        Assert.assertEquals(failMsg2, expectedNext, next2);
+        Assertions.assertEquals(expectedNext, next, failMsg);
+        Assertions.assertEquals(expectedNext, next2, failMsg2);
       }
     }
 
     if (resultsIter.hasNext()) {
-      Assert.fail(
+      Assertions.fail(
           StringUtils.format("%s: Expected resultsIter to be exhausted, next element was %s", msg, resultsIter.next())
       );
     }
 
     if (resultsIter2.hasNext()) {
-      Assert.fail(
+      Assertions.fail(
           StringUtils.format("%s: Expected resultsIter2 to be exhausted, next element was %s", msg, resultsIter.next())
       );
     }
 
     if (expectedResultsIter.hasNext()) {
-      Assert.fail(
+      Assertions.fail(
           StringUtils.format(
               "%s: Expected expectedResultsIter to be exhausted, next element was %s",
               msg,
@@ -303,14 +321,18 @@ public class TestHelper
 
   private static void assertResult(String msg, Result<?> expected, Result actual)
   {
-    Assert.assertEquals(msg, expected, actual);
+    Assertions.assertEquals(expected, actual, msg);
   }
 
   private static void assertTimeseriesResultValue(String msg, Result expected, Result actual)
   {
     // Custom equals check to get fuzzy comparison of numerics, useful because different groupBy strategies don't
     // always generate exactly the same results (different merge ordering / float vs double)
-    Assert.assertEquals(StringUtils.format("%s: timestamp", msg), expected.getTimestamp(), actual.getTimestamp());
+    Assertions.assertEquals(
+        expected.getTimestamp(),
+        actual.getTimestamp(),
+        StringUtils.format("%s: timestamp", msg)
+    );
 
     TimeseriesResultValue expectedVal = (TimeseriesResultValue) expected.getValue();
     TimeseriesResultValue actualVal = (TimeseriesResultValue) actual.getValue();
@@ -345,7 +367,7 @@ public class TestHelper
                                             dimensionAndMetricValueExtractor.getBaseObject()
                                         ))
                                         .collect(Collectors.toList());
-    Assert.assertEquals("Size of list must match", listExpectedRows.size(), listActualRows.size());
+    Assertions.assertEquals(listExpectedRows.size(), listActualRows.size(), "Size of list must match");
 
     IntStream.range(0, listExpectedRows.size()).forEach(value -> assertRow(
         StringUtils.format("%s, on value number [%s]", msg, value),
@@ -358,45 +380,55 @@ public class TestHelper
   {
     // Custom equals check to get fuzzy comparison of numerics, useful because different groupBy strategies don't
     // always generate exactly the same results (different merge ordering / float vs double)
-    Assert.assertEquals(
-        StringUtils.format("%s: timestamp", msg),
+    Assertions.assertEquals(
         expected.getTimestamp(),
-        actual.getTimestamp()
+        actual.getTimestamp(),
+        StringUtils.format("%s: timestamp", msg)
     );
 
     final Map<String, Object> expectedMap = ((MapBasedRow) expected).getEvent();
     final Map<String, Object> actualMap = ((MapBasedRow) actual).getEvent();
 
-    Assert.assertEquals(StringUtils.format("%s: map keys", msg), expectedMap.keySet(), actualMap.keySet());
     for (final String key : expectedMap.keySet()) {
       final Object expectedValue = expectedMap.get(key);
+      if (!actualMap.containsKey(key)) {
+        Assertions.fail(
+            StringUtils.format("%s: Expected key [%s] to exist, but it did not [%s]", msg, key, actualMap.keySet())
+        );
+      }
+
       final Object actualValue = actualMap.get(key);
 
-      if (expectedValue != null && expectedValue.getClass().isArray()) {
-        Assert.assertArrayEquals((Object[]) expectedValue, (Object[]) actualValue);
+      if ((expectedValue != null && actualValue == null) || (expectedValue == null && actualValue != null)) {
+        Assertions.assertEquals(expectedValue, actualValue, StringUtils.format("%s: key[%s]", msg, key));
+      } else if (expectedValue != null && expectedValue.getClass().isArray()) {
+        Assertions.assertArrayEquals((Object[]) expectedValue, (Object[]) actualValue);
       } else if (expectedValue instanceof Float || expectedValue instanceof Double) {
-        Assert.assertEquals(
-            StringUtils.format("%s: key[%s]", msg, key),
+        Assertions.assertEquals(
             ((Number) expectedValue).doubleValue(),
             ((Number) actualValue).doubleValue(),
-            Math.abs(((Number) expectedValue).doubleValue() * 1e-6)
+            Math.abs(((Number) expectedValue).doubleValue() * 1e-6),
+            StringUtils.format("%s: key[%s]", msg, key)
         );
       } else {
-        Assert.assertEquals(
-            StringUtils.format("%s: key[%s]", msg, key),
+        Assertions.assertEquals(
             expectedValue,
-            actualValue
+            actualValue,
+            StringUtils.format("%s: key[%s]", msg, key)
         );
       }
     }
+    // Given that we iterated through all of the keys in one, checking that the key exists in the other, then if they
+    // have the same size, they must have the same keyset.
+    Assertions.assertEquals(expectedMap.size(), actualMap.size());
   }
 
   public static void assertRow(String msg, ResultRow expected, ResultRow actual)
   {
-    Assert.assertEquals(
-        StringUtils.format("%s: row length", msg),
+    Assertions.assertEquals(
         expected.length(),
-        actual.length()
+        actual.length(),
+        StringUtils.format("%s: row length", msg)
     );
 
     for (int i = 0; i < expected.length(); i++) {
@@ -408,40 +440,33 @@ public class TestHelper
       if (expectedValue != null && expectedValue.getClass().isArray()) {
         // spilled results will materialize into lists, coerce them back to arrays if we expected arrays
         if (actualValue instanceof List) {
-          Assert.assertEquals(
-              message,
+          Assertions.assertArrayEquals(
               (Object[]) expectedValue,
-              (Object[]) ExprEval.coerceListToArray((List) actualValue, true).rhs
+              (Object[]) ExprEval.coerceListToArray((List) actualValue, true).rhs,
+              message
           );
         } else {
-          Assert.assertArrayEquals(
-              message,
+          Assertions.assertArrayEquals(
               (Object[]) expectedValue,
-              (Object[]) actualValue
+              (Object[]) actualValue,
+              message
           );
         }
       } else if (expectedValue instanceof Float || expectedValue instanceof Double) {
-        Assert.assertEquals(
-            message,
+        if (actualValue == null) {
+          Assertions.fail(message + ": failed because expected numeric value is actually null");
+        }
+        Assertions.assertEquals(
             ((Number) expectedValue).doubleValue(),
             ((Number) actualValue).doubleValue(),
-            Math.abs(((Number) expectedValue).doubleValue() * 1e-6)
-        );
-      } else if (expectedValue instanceof ComparableStringArray && actualValue instanceof List) {
-        Assert.assertArrayEquals(
-            ((ComparableStringArray) expectedValue).getDelegate(),
-            ExprEval.coerceListToArray((List) actualValue, true).rhs
-        );
-      } else if (expectedValue instanceof ComparableList && actualValue instanceof List) {
-        Assert.assertArrayEquals(
-            ((ComparableList) expectedValue).getDelegate().toArray(new Object[0]),
-            ExprEval.coerceListToArray((List) actualValue, true).rhs
+            Math.abs(((Number) expectedValue).doubleValue() * 1e-6),
+            message
         );
       } else {
-        Assert.assertEquals(
-            message,
+        Assertions.assertEquals(
             expectedValue,
-            actualValue
+            actualValue,
+            message
         );
       }
     }
@@ -465,6 +490,17 @@ public class TestHelper
     return theVals;
   }
 
+  public static Map<String, Object> makeMapWithExplicitNull(Object... vals)
+  {
+    Preconditions.checkArgument(vals.length % 2 == 0);
+
+    Map<String, Object> theVals = new HashMap<>();
+    for (int i = 0; i < vals.length; i += 2) {
+      theVals.put(vals[i].toString(), vals[i + 1]);
+    }
+    return theVals;
+  }
+
   public static void testSerializesDeserializes(Object object)
   {
     testSerializesDeserializes(JSON_MAPPER, object);
@@ -475,7 +511,7 @@ public class TestHelper
     try {
       String serialized = objectMapper.writeValueAsString(object);
       Object deserialized = objectMapper.readValue(serialized, object.getClass());
-      Assert.assertEquals(serialized, objectMapper.writeValueAsString(deserialized));
+      Assertions.assertEquals(serialized, objectMapper.writeValueAsString(deserialized));
     }
     catch (IOException e) {
       throw new UncheckedIOException(e);

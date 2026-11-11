@@ -43,7 +43,7 @@ import java.util.Properties;
  * add a binding to Cat.class. If the value is "dog", it will add a binding to Dog.class.
  *
  * At injection time, you will get the items that satisfy their corresponding predicates by calling
- * injector.getInstance(Key.get(new TypeLiteral<Set<Animal>>(){}))
+ * {@code injector.getInstance(Key.get(new TypeLiteral<Set<Animal>>(){}))}
  */
 @PublicApi
 public class ConditionalMultibind<T>
@@ -61,7 +61,7 @@ public class ConditionalMultibind<T>
    */
   public static <T> ConditionalMultibind<T> create(Properties properties, Binder binder, Class<T> type)
   {
-    return new ConditionalMultibind<T>(properties, Multibinder.newSetBinder(binder, type));
+    return new ConditionalMultibind<>(properties, Multibinder.newSetBinder(binder, type));
   }
 
   /**
@@ -82,7 +82,7 @@ public class ConditionalMultibind<T>
       Class<? extends Annotation> annotationType
   )
   {
-    return new ConditionalMultibind<T>(properties, Multibinder.newSetBinder(binder, type, annotationType));
+    return new ConditionalMultibind<>(properties, Multibinder.newSetBinder(binder, type, annotationType));
   }
 
   /**
@@ -97,7 +97,7 @@ public class ConditionalMultibind<T>
    */
   public static <T> ConditionalMultibind<T> create(Properties properties, Binder binder, TypeLiteral<T> type)
   {
-    return new ConditionalMultibind<T>(properties, Multibinder.newSetBinder(binder, type));
+    return new ConditionalMultibind<>(properties, Multibinder.newSetBinder(binder, type));
   }
 
   /**
@@ -118,7 +118,7 @@ public class ConditionalMultibind<T>
       Class<? extends Annotation> annotationType
   )
   {
-    return new ConditionalMultibind<T>(properties, Multibinder.newSetBinder(binder, type, annotationType));
+    return new ConditionalMultibind<>(properties, Multibinder.newSetBinder(binder, type, annotationType));
   }
 
 

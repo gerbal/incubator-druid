@@ -22,15 +22,16 @@ package org.apache.druid.common.gcp;
 import com.google.api.client.googleapis.testing.auth.oauth2.MockGoogleCredential;
 import com.google.api.client.http.HttpRequestInitializer;
 import com.google.api.client.http.HttpTransport;
+import com.google.api.client.json.JsonFactory;
 import com.google.api.client.testing.http.MockHttpTransport;
 import com.google.inject.Binder;
 import com.google.inject.Guice;
 import com.google.inject.Injector;
-import com.google.inject.Scopes;
 import com.google.inject.util.Modules;
+import org.apache.druid.guice.DruidScopes;
 import org.apache.druid.guice.LazySingleton;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 public class GcpModuleTest
 {
@@ -42,10 +43,19 @@ public class GcpModuleTest
       @Override
       public void configure(Binder binder)
       {
-        binder.bindScope(LazySingleton.class, Scopes.SINGLETON);
+        binder.bindScope(LazySingleton.class, DruidScopes.SINGLETON);
+      }
+
+      @Override
+      public HttpRequestInitializer mockRequestInitializer(
+          HttpTransport transport,
+          JsonFactory factory
+      )
+      {
+        return new MockGoogleCredential.Builder().setTransport(transport).setJsonFactory(factory).build();
       }
     }));
-    Assert.assertTrue(injector.getInstance(HttpRequestInitializer.class) instanceof MockGoogleCredential);
-    Assert.assertTrue(injector.getInstance(HttpTransport.class) instanceof MockHttpTransport);
+    Assertions.assertTrue(injector.getInstance(HttpRequestInitializer.class) instanceof MockGoogleCredential);
+    Assertions.assertTrue(injector.getInstance(HttpTransport.class) instanceof MockHttpTransport);
   }
 }

@@ -21,14 +21,14 @@ package org.apache.druid.segment.data;
 
 import org.apache.druid.java.util.common.io.smoosh.FileSmoosher;
 import org.apache.druid.java.util.common.io.smoosh.SmooshedFileMapper;
-import org.apache.druid.java.util.common.io.smoosh.SmooshedWriter;
 import org.apache.druid.segment.CompressedPools;
+import org.apache.druid.segment.file.SegmentFileChannel;
 import org.apache.druid.segment.writeout.SegmentWriteOutMedium;
 import org.apache.druid.segment.writeout.TmpFileSegmentWriteOutMediumFactory;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
+import org.apache.druid.testing.TemporaryFolderExtension;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.File;
 import java.io.IOException;
@@ -41,17 +41,17 @@ import java.util.concurrent.ThreadLocalRandom;
 
 public class CompressedVariableSizeBlobColumnTest
 {
-  @Rule
-  public final TemporaryFolder tempFolder = new TemporaryFolder();
+  @RegisterExtension
+  public final TemporaryFolderExtension temporaryFolder = TemporaryFolderExtension.testCaseScoped();
 
   @Test
   public void testSomeValues() throws IOException
   {
     // value sizes increase until they span at least 3 pages of compressed buffers
-    final File tmpFile = tempFolder.newFolder();
+    final File tmpFile = temporaryFolder.newFolder("dir1");
     final FileSmoosher smoosher = new FileSmoosher(tmpFile);
 
-    final File tmpFile2 = tempFolder.newFolder();
+    final File tmpFile2 = temporaryFolder.newFolder("dir2");
     final SegmentWriteOutMedium writeOutMedium =
         TmpFileSegmentWriteOutMediumFactory.instance().makeSegmentWriteOutMedium(tmpFile2);
 
@@ -76,7 +76,7 @@ public class CompressedVariableSizeBlobColumnTest
       numWritten++;
     }
 
-    SmooshedWriter writer = smoosher.addWithSmooshedWriter(fileNameBase, serializer.getSerializedSize());
+    SegmentFileChannel writer = smoosher.addWithChannel(fileNameBase, serializer.getSerializedSize());
     serializer.writeTo(writer, smoosher);
     writer.close();
     smoosher.close();
@@ -88,20 +88,21 @@ public class CompressedVariableSizeBlobColumnTest
         fileNameBase,
         base,
         ByteOrder.nativeOrder(),
+        ByteOrder.nativeOrder(),
         fileMapper
     ).get();
     for (int row = 0; row < numWritten; row++) {
       ByteBuffer value = column.get(row);
-      byte[] bytes = new byte[value.limit()];
+      byte[] bytes = new byte[value.remaining()];
       value.get(bytes);
-      Assert.assertArrayEquals("Row " + row, values.get(row), bytes);
+      Assertions.assertArrayEquals(values.get(row), bytes, "Row " + row);
     }
     for (int rando = 0; rando < numWritten; rando++) {
       int row = ThreadLocalRandom.current().nextInt(0, numWritten - 1);
       ByteBuffer value = column.get(row);
       byte[] bytes = new byte[value.remaining()];
       value.get(bytes);
-      Assert.assertArrayEquals("Row " + row, values.get(row), bytes);
+      Assertions.assertArrayEquals(values.get(row), bytes, "Row " + row);
     }
     column.close();
     fileMapper.close();
@@ -111,10 +112,10 @@ public class CompressedVariableSizeBlobColumnTest
   public void testSomeValuesByteBuffers() throws IOException
   {
     // value sizes increase until they span at least 3 pages of compressed buffers
-    final File tmpFile = tempFolder.newFolder();
+    final File tmpFile = temporaryFolder.newFolder("dir1");
     final FileSmoosher smoosher = new FileSmoosher(tmpFile);
 
-    final File tmpFile2 = tempFolder.newFolder();
+    final File tmpFile2 = temporaryFolder.newFolder("dir2");
     final SegmentWriteOutMedium writeOutMedium =
         TmpFileSegmentWriteOutMediumFactory.instance().makeSegmentWriteOutMedium(tmpFile2);
 
@@ -139,7 +140,7 @@ public class CompressedVariableSizeBlobColumnTest
       numWritten++;
     }
 
-    SmooshedWriter writer = smoosher.addWithSmooshedWriter(fileNameBase, serializer.getSerializedSize());
+    SegmentFileChannel writer = smoosher.addWithChannel(fileNameBase, serializer.getSerializedSize());
     serializer.writeTo(writer, smoosher);
     writer.close();
     smoosher.close();
@@ -151,20 +152,83 @@ public class CompressedVariableSizeBlobColumnTest
         fileNameBase,
         base,
         ByteOrder.nativeOrder(),
+        ByteOrder.nativeOrder(),
         fileMapper
     ).get();
     for (int row = 0; row < numWritten; row++) {
       ByteBuffer value = column.get(row);
       byte[] bytes = new byte[value.remaining()];
       value.get(bytes);
-      Assert.assertArrayEquals("Row " + row, values.get(row), bytes);
+      Assertions.assertArrayEquals(values.get(row), bytes, "Row " + row);
     }
     for (int rando = 0; rando < numWritten; rando++) {
       int row = ThreadLocalRandom.current().nextInt(0, numWritten - 1);
       ByteBuffer value = column.get(row);
       byte[] bytes = new byte[value.remaining()];
       value.get(bytes);
-      Assert.assertArrayEquals("Row " + row, values.get(row), bytes);
+      Assertions.assertArrayEquals(values.get(row), bytes, "Row " + row);
+    }
+    column.close();
+    fileMapper.close();
+  }
+
+  @Test
+  public void testSomeValuesByteBuffersBigEndian() throws IOException
+  {
+    final File tmpFile = temporaryFolder.newFolder("dir1");
+    final FileSmoosher smoosher = new FileSmoosher(tmpFile);
+
+    final File tmpFile2 = temporaryFolder.newFolder("dir2");
+    final SegmentWriteOutMedium writeOutMedium =
+        TmpFileSegmentWriteOutMediumFactory.instance().makeSegmentWriteOutMedium(tmpFile2);
+
+    final String fileNameBase = "test";
+
+    final CompressionStrategy compressionStrategy = CompressionStrategy.LZ4;
+    CompressedVariableSizedBlobColumnSerializer serializer = new CompressedVariableSizedBlobColumnSerializer(
+        fileNameBase,
+        writeOutMedium,
+        compressionStrategy
+    );
+    serializer.open();
+
+    int numWritten = 0;
+    final Random r = ThreadLocalRandom.current();
+    final List<Long> values = new ArrayList<>();
+    final ByteBuffer longValueConverter = ByteBuffer.allocate(Long.BYTES).order(ByteOrder.BIG_ENDIAN);
+    for (int i = 0, offset = 0; offset < CompressedPools.BUFFER_SIZE * 4; i++, offset = 1 << i) {
+      final long l = r.nextLong();
+      values.add(l);
+      longValueConverter.clear();
+      longValueConverter.putLong(l);
+      longValueConverter.rewind();
+      serializer.addValue(longValueConverter.array());
+      numWritten++;
+    }
+
+    SegmentFileChannel writer = smoosher.addWithChannel(fileNameBase, serializer.getSerializedSize());
+    serializer.writeTo(writer, smoosher);
+    writer.close();
+    smoosher.close();
+    SmooshedFileMapper fileMapper = SmooshedFileMapper.load(tmpFile);
+
+    ByteBuffer base = fileMapper.mapFile(fileNameBase);
+
+    CompressedVariableSizedBlobColumn column = CompressedVariableSizedBlobColumnSupplier.fromByteBuffer(
+        fileNameBase,
+        base,
+        ByteOrder.nativeOrder(),
+        ByteOrder.BIG_ENDIAN,
+        fileMapper
+    ).get();
+    for (int row = 0; row < numWritten; row++) {
+      ByteBuffer value = column.get(row);
+      Assertions.assertEquals(values.get(row).longValue(), value.getLong(), "Row " + row);
+    }
+    for (int rando = 0; rando < numWritten; rando++) {
+      int row = ThreadLocalRandom.current().nextInt(0, numWritten - 1);
+      ByteBuffer value = column.get(row);
+      Assertions.assertEquals(values.get(row).longValue(), value.getLong(), "Row " + row);
     }
     column.close();
     fileMapper.close();
@@ -174,10 +238,10 @@ public class CompressedVariableSizeBlobColumnTest
   public void testLongs() throws IOException
   {
     // value sizes increase until they span at least 3 pages of compressed buffers
-    final File tmpFile = tempFolder.newFolder();
+    final File tmpFile = temporaryFolder.newFolder("dir1");
     final FileSmoosher smoosher = new FileSmoosher(tmpFile);
 
-    final File tmpFile2 = tempFolder.newFolder();
+    final File tmpFile2 = temporaryFolder.newFolder("dir2");
     final SegmentWriteOutMedium writeOutMedium =
         TmpFileSegmentWriteOutMediumFactory.instance().makeSegmentWriteOutMedium(tmpFile2);
 
@@ -186,7 +250,8 @@ public class CompressedVariableSizeBlobColumnTest
     final CompressionStrategy compressionStrategy = CompressionStrategy.LZ4;
     CompressedLongsSerializer serializer = new CompressedLongsSerializer(
         writeOutMedium,
-        compressionStrategy
+        compressionStrategy,
+        writeOutMedium.getCloser()
     );
     serializer.open();
 
@@ -200,10 +265,11 @@ public class CompressedVariableSizeBlobColumnTest
       numWritten++;
     }
 
-    SmooshedWriter writer = smoosher.addWithSmooshedWriter(fileNameBase, serializer.getSerializedSize());
+    SegmentFileChannel writer = smoosher.addWithChannel(fileNameBase, serializer.getSerializedSize());
     serializer.writeTo(writer, smoosher);
     writer.close();
     smoosher.close();
+    writeOutMedium.close();
     SmooshedFileMapper fileMapper = SmooshedFileMapper.load(tmpFile);
 
     ByteBuffer base = fileMapper.mapFile(fileNameBase);
@@ -211,22 +277,22 @@ public class CompressedVariableSizeBlobColumnTest
     CompressedLongsReader reader = CompressedLongsReader.fromByteBuffer(base, ByteOrder.nativeOrder()).get();
     for (int row = 0; row < numWritten; row++) {
       long l = reader.get(row);
-      Assert.assertEquals("Row " + row, values.get(row).longValue(), l);
+      Assertions.assertEquals(values.get(row).longValue(), l, "Row " + row);
     }
 
     // test random access pt 1
     int random = 0;
-    Assert.assertEquals("Row " + random, values.get(random).longValue(), reader.get(random));
+    Assertions.assertEquals(values.get(random).longValue(), reader.get(random), "Row " + random);
     random = 2_000_000;
-    Assert.assertEquals("Row " + random, values.get(random).longValue(), reader.get(random));
+    Assertions.assertEquals(values.get(random).longValue(), reader.get(random), "Row " + random);
     random = 1_000_000;
-    Assert.assertEquals("Row " + random, values.get(random).longValue(), reader.get(random));
+    Assertions.assertEquals(values.get(random).longValue(), reader.get(random), "Row " + random);
 
     // test random access pt 2
     for (int rando = 0; rando < numWritten; rando++) {
       int row = ThreadLocalRandom.current().nextInt(0, numWritten - 1);
       long l = reader.get(row);
-      Assert.assertEquals("Row " + row, values.get(row).longValue(), l);
+      Assertions.assertEquals(values.get(row).longValue(), l, "Row " + row);
     }
 
     reader.close();

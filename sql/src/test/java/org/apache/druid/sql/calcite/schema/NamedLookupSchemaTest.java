@@ -20,14 +20,14 @@
 package org.apache.druid.sql.calcite.schema;
 
 import org.apache.druid.sql.calcite.util.CalciteTestBase;
-import org.easymock.EasyMockRunner;
+import org.easymock.EasyMockExtension;
 import org.easymock.Mock;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
-@RunWith(EasyMockRunner.class)
+@ExtendWith(EasyMockExtension.class)
 public class NamedLookupSchemaTest extends CalciteTestBase
 {
   private static final String SCHEMA_NAME = "lookup";
@@ -37,7 +37,7 @@ public class NamedLookupSchemaTest extends CalciteTestBase
 
   private NamedLookupSchema target;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
     target = new NamedLookupSchema(lookupSchema);
@@ -46,12 +46,12 @@ public class NamedLookupSchemaTest extends CalciteTestBase
   @Test
   public void testGetSchemaNameShouldReturnName()
   {
-    Assert.assertEquals(SCHEMA_NAME, target.getSchemaName());
+    Assertions.assertEquals(SCHEMA_NAME, target.getSchemaName());
   }
 
   @Test
   public void testGetSchemaShouldReturnSchema()
   {
-    Assert.assertEquals(lookupSchema, target.getSchema());
+    Assertions.assertEquals(lookupSchema, target.getSchema());
   }
 }

@@ -23,14 +23,16 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import org.apache.druid.indexing.common.task.NoopTask;
 import org.apache.druid.indexing.overlord.ImmutableWorkerInfo;
-import org.apache.druid.indexing.overlord.config.RemoteTaskRunnerConfig;
+import org.apache.druid.indexing.overlord.config.HttpRemoteTaskRunnerConfig;
 import org.apache.druid.indexing.worker.Worker;
 import org.apache.druid.indexing.worker.config.WorkerConfig;
 import org.apache.druid.java.util.common.DateTimes;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
 
 public class FillCapacityWithAffinityWorkerSelectStrategyTest
 {
@@ -38,11 +40,12 @@ public class FillCapacityWithAffinityWorkerSelectStrategyTest
   public void testFindWorkerForTask()
   {
     FillCapacityWorkerSelectStrategy strategy = new FillCapacityWithAffinityWorkerSelectStrategy(
-        new AffinityConfig(ImmutableMap.of("foo", ImmutableSet.of("localhost")), false)
+        new AffinityConfig(ImmutableMap.of("foo", ImmutableSet.of("localhost")), false),
+        null
     );
 
     ImmutableWorkerInfo worker = strategy.findWorkerForTask(
-        new RemoteTaskRunnerConfig(),
+        new HttpRemoteTaskRunnerConfig(),
         ImmutableMap.of(
             "lhost",
             new ImmutableWorkerInfo(
@@ -59,27 +62,21 @@ public class FillCapacityWithAffinityWorkerSelectStrategyTest
                 DateTimes.nowUtc()
             )
         ),
-        new NoopTask(null, null, null, 1, 0, null, null, null)
-        {
-          @Override
-          public String getDataSource()
-          {
-            return "foo";
-          }
-        }
+        NoopTask.forDatasource("foo")
     );
-    Assert.assertEquals("localhost", worker.getWorker().getHost());
+    Assertions.assertEquals("localhost", worker.getWorker().getHost());
   }
 
   @Test
   public void testFindWorkerForTaskWithNulls()
   {
     FillCapacityWorkerSelectStrategy strategy = new FillCapacityWithAffinityWorkerSelectStrategy(
-        new AffinityConfig(ImmutableMap.of("foo", ImmutableSet.of("localhost")), false)
+        new AffinityConfig(ImmutableMap.of("foo", ImmutableSet.of("localhost")), false),
+        null
     );
 
     ImmutableWorkerInfo worker = strategy.findWorkerForTask(
-        new RemoteTaskRunnerConfig(),
+        new HttpRemoteTaskRunnerConfig(),
         ImmutableMap.of(
             "lhost",
             new ImmutableWorkerInfo(
@@ -96,20 +93,21 @@ public class FillCapacityWithAffinityWorkerSelectStrategyTest
                 DateTimes.nowUtc()
             )
         ),
-        new NoopTask(null, null, null, 1, 0, null, null, null)
+        NoopTask.create()
     );
-    Assert.assertEquals("lhost", worker.getWorker().getHost());
+    Assertions.assertEquals("lhost", worker.getWorker().getHost());
   }
 
   @Test
   public void testIsolation()
   {
     FillCapacityWorkerSelectStrategy strategy = new FillCapacityWithAffinityWorkerSelectStrategy(
-        new AffinityConfig(ImmutableMap.of("foo", ImmutableSet.of("localhost")), false)
+        new AffinityConfig(ImmutableMap.of("foo", ImmutableSet.of("localhost")), false),
+        null
     );
 
     ImmutableWorkerInfo worker = strategy.findWorkerForTask(
-        new RemoteTaskRunnerConfig(),
+        new HttpRemoteTaskRunnerConfig(),
         ImmutableMap.of(
             "localhost",
             new ImmutableWorkerInfo(
@@ -119,8 +117,142 @@ public class FillCapacityWithAffinityWorkerSelectStrategyTest
                 DateTimes.nowUtc()
             )
         ),
-        new NoopTask(null, null, null, 1, 0, null, null, null)
+        NoopTask.create()
     );
-    Assert.assertNull(worker);
+    Assertions.assertNull(worker);
+  }
+
+  @Test
+  public void testFindWorkerForTaskWithGlobalLimits()
+  {
+    Map<String, Integer> taskLimits = new HashMap<>();
+    taskLimits.put("noop", 2);
+
+    Map<String, Integer> capacityUsed = new HashMap<>();
+    capacityUsed.put("noop", 1);
+    FillCapacityWorkerSelectStrategy strategy = new FillCapacityWorkerSelectStrategy(
+        null,
+        new TaskLimits(taskLimits, null)
+    );
+
+    NoopTask noopTask = NoopTask.forDatasource("foo");
+    ImmutableWorkerInfo worker = strategy.findWorkerForTask(
+        new HttpRemoteTaskRunnerConfig(),
+        ImmutableMap.of(
+            "localhost0",
+            new ImmutableWorkerInfo(
+                new Worker("http", "localhost0", "localhost0", 2, "v1", WorkerConfig.DEFAULT_CATEGORY), 0,
+                new HashSet<>(),
+                new HashSet<>(),
+                DateTimes.nowUtc()
+            ),
+            "localhost1",
+            new ImmutableWorkerInfo(
+                new Worker("http", "localhost1", "localhost1", 2, "v1", WorkerConfig.DEFAULT_CATEGORY), 0,
+                0,
+                capacityUsed,
+                new HashSet<>(),
+                new HashSet<>(),
+                DateTimes.nowUtc()
+            )
+        ),
+        noopTask
+    );
+    Assertions.assertNotNull(worker);
+
+    ImmutableWorkerInfo worker1 = strategy.findWorkerForTask(
+        new HttpRemoteTaskRunnerConfig(),
+        ImmutableMap.of(
+            "localhost0",
+            new ImmutableWorkerInfo(
+                new Worker("http", "localhost0", "localhost0", 2, "v1", WorkerConfig.DEFAULT_CATEGORY), 0,
+                0,
+                capacityUsed,
+                new HashSet<>(),
+                new HashSet<>(),
+                DateTimes.nowUtc()
+            ),
+            "localhost1",
+            new ImmutableWorkerInfo(
+                new Worker("http", "localhost1", "localhost1", 2, "v1", WorkerConfig.DEFAULT_CATEGORY), 0,
+                0,
+                capacityUsed,
+                new HashSet<>(),
+                new HashSet<>(),
+                DateTimes.nowUtc()
+            )
+        ),
+        noopTask
+    );
+
+    Assertions.assertNull(worker1);
+
+  }
+
+  @Test
+  public void testFindWorkerForTaskWithGlobalRatios()
+  {
+    Map<String, Double> taskRatios = new HashMap<>();
+    taskRatios.put("noop", 0.5);
+
+    Map<String, Integer> capacityUsed = new HashMap<>();
+    capacityUsed.put("noop", 1);
+    FillCapacityWorkerSelectStrategy strategy = new FillCapacityWorkerSelectStrategy(
+        null,
+        new TaskLimits(null, taskRatios)
+    );
+
+    NoopTask noopTask = NoopTask.forDatasource("foo");
+    ImmutableWorkerInfo worker = strategy.findWorkerForTask(
+        new HttpRemoteTaskRunnerConfig(),
+        ImmutableMap.of(
+            "localhost0",
+            new ImmutableWorkerInfo(
+                new Worker("http", "localhost0", "localhost0", 2, "v1", WorkerConfig.DEFAULT_CATEGORY), 0,
+                new HashSet<>(),
+                new HashSet<>(),
+                DateTimes.nowUtc()
+            ),
+            "localhost1",
+            new ImmutableWorkerInfo(
+                new Worker("http", "localhost1", "localhost1", 2, "v1", WorkerConfig.DEFAULT_CATEGORY), 0,
+                0,
+                capacityUsed,
+                new HashSet<>(),
+                new HashSet<>(),
+                DateTimes.nowUtc()
+            )
+        ),
+        noopTask
+    );
+    Assertions.assertNotNull(worker);
+
+    ImmutableWorkerInfo worker1 = strategy.findWorkerForTask(
+        new HttpRemoteTaskRunnerConfig(),
+        ImmutableMap.of(
+            "localhost0",
+            new ImmutableWorkerInfo(
+                new Worker("http", "localhost0", "localhost0", 2, "v1", WorkerConfig.DEFAULT_CATEGORY), 0,
+                0,
+                capacityUsed,
+                new HashSet<>(),
+                new HashSet<>(),
+                DateTimes.nowUtc()
+            ),
+            "localhost1",
+            new ImmutableWorkerInfo(
+                new Worker("http", "localhost1", "localhost1", 2, "v1", WorkerConfig.DEFAULT_CATEGORY), 0,
+                0,
+                capacityUsed,
+                new HashSet<>(),
+                new HashSet<>(),
+                DateTimes.nowUtc()
+            )
+        ),
+        noopTask
+    );
+
+    Assertions.assertNull(worker1);
+
   }
 }

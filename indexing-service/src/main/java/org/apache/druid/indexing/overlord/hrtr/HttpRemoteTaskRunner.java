@@ -22,7 +22,7 @@ package org.apache.druid.indexing.overlord.hrtr;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Joiner;
+import com.google.common.base.Objects;
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
@@ -40,7 +40,7 @@ import com.google.common.util.concurrent.ListenableScheduledFuture;
 import com.google.common.util.concurrent.ListeningScheduledExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
-import org.apache.curator.framework.CuratorFramework;
+import io.netty.handler.codec.http.HttpMethod;
 import org.apache.druid.concurrent.LifecycleLock;
 import org.apache.druid.discovery.DiscoveryDruidNode;
 import org.apache.druid.discovery.DruidNodeDiscovery;
@@ -64,10 +64,12 @@ import org.apache.druid.indexing.overlord.autoscaling.ProvisioningStrategy;
 import org.apache.druid.indexing.overlord.autoscaling.ScalingStats;
 import org.apache.druid.indexing.overlord.config.HttpRemoteTaskRunnerConfig;
 import org.apache.druid.indexing.overlord.config.WorkerTaskRunnerConfig;
+import org.apache.druid.indexing.overlord.setup.DefaultWorkerBehaviorConfig;
 import org.apache.druid.indexing.overlord.setup.WorkerBehaviorConfig;
 import org.apache.druid.indexing.overlord.setup.WorkerSelectStrategy;
 import org.apache.druid.indexing.worker.TaskAnnouncement;
 import org.apache.druid.indexing.worker.Worker;
+import org.apache.druid.indexing.worker.config.WorkerConfig;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.Pair;
@@ -82,10 +84,8 @@ import org.apache.druid.java.util.emitter.service.ServiceMetricEvent;
 import org.apache.druid.java.util.http.client.HttpClient;
 import org.apache.druid.java.util.http.client.Request;
 import org.apache.druid.java.util.http.client.response.InputStreamResponseHandler;
-import org.apache.druid.server.initialization.IndexerZkConfig;
+import org.apache.druid.query.DruidMetrics;
 import org.apache.druid.tasklogs.TaskLogStreamer;
-import org.apache.zookeeper.KeeperException;
-import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.joda.time.Duration;
 import org.joda.time.Period;
 
@@ -122,13 +122,11 @@ import java.util.stream.Collectors;
  * 3. GET request for getting list of assigned, running, completed tasks on Middle Manager and its enable/disable status.
  * This endpoint is implemented to support long poll and holds the request till there is a change. This class
  * sends the next request immediately as the previous finishes to keep the state up-to-date.
- * <p>
- * ZK_CLEANUP_TODO : As of 0.11.1, it is required to cleanup task status paths from ZK which are created by the
- * workers to support deprecated RemoteTaskRunner. So a method "scheduleCompletedTaskStatusCleanupFromZk()" is added'
- * which should be removed in the release that removes RemoteTaskRunner legacy ZK updation WorkerTaskMonitor class.
  */
-public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
+public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer, WorkerHolder.Listener
 {
+  public static final String TASK_DISCOVERED_COUNT = "task/discovered/count";
+
   private static final EmittingLogger log = new EmittingLogger(HttpRemoteTaskRunner.class);
 
   private final LifecycleLock lifecycleLock = new LifecycleLock();
@@ -188,15 +186,6 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
   private final TaskStorage taskStorage;
   private final ServiceEmitter emitter;
 
-  // ZK_CLEANUP_TODO : Remove these when RemoteTaskRunner and WorkerTaskMonitor are removed.
-  private static final Joiner JOINER = Joiner.on("/");
-
-  @Nullable // Null, if zk is disabled
-  private final CuratorFramework cf;
-
-  @Nullable // Null, if zk is disabled
-  private final ScheduledExecutorService zkCleanupExec;
-  private final IndexerZkConfig indexerZkConfig;
   private volatile DruidNodeDiscovery.Listener nodeDiscoveryListener;
 
   public HttpRemoteTaskRunner(
@@ -207,8 +196,6 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
       ProvisioningStrategy<WorkerTaskRunner> provisioningStrategy,
       DruidNodeDiscoveryProvider druidNodeDiscoveryProvider,
       TaskStorage taskStorage,
-      @Nullable CuratorFramework cf,
-      IndexerZkConfig indexerZkConfig,
       ServiceEmitter emitter
   )
   {
@@ -234,19 +221,6 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
         ScheduledExecutors.fixed(1, "HttpRemoteTaskRunner-Worker-Cleanup-%d")
     );
 
-    if (cf != null) {
-      this.cf = cf;
-      this.zkCleanupExec = ScheduledExecutors.fixed(
-          1,
-          "HttpRemoteTaskRunner-zk-cleanup-%d"
-      );
-    } else {
-      this.cf = null;
-      this.zkCleanupExec = null;
-    }
-
-    this.indexerZkConfig = indexerZkConfig;
-
     this.provisioningStrategy = provisioningStrategy;
   }
 
@@ -260,8 +234,6 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
 
     try {
       log.info("Starting...");
-
-      scheduleCompletedTaskStatusCleanupFromZk();
 
       startWorkersHandling();
 
@@ -288,68 +260,6 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
     finally {
       lifecycleLock.exitStart();
     }
-  }
-
-  private void scheduleCompletedTaskStatusCleanupFromZk()
-  {
-    if (cf == null) {
-      return;
-    }
-
-    zkCleanupExec.scheduleAtFixedRate(
-        () -> {
-          try {
-            List<String> workers;
-            try {
-              workers = cf.getChildren().forPath(indexerZkConfig.getStatusPath());
-            }
-            catch (KeeperException.NoNodeException e) {
-              // statusPath doesn't exist yet; can occur if no middleManagers have started.
-              workers = ImmutableList.of();
-            }
-
-            Set<String> knownActiveTaskIds = new HashSet<>();
-            if (!workers.isEmpty()) {
-              for (Task task : taskStorage.getActiveTasks()) {
-                knownActiveTaskIds.add(task.getId());
-              }
-            }
-
-            for (String workerId : workers) {
-              String workerStatusPath = JOINER.join(indexerZkConfig.getStatusPath(), workerId);
-
-              List<String> taskIds;
-              try {
-                taskIds = cf.getChildren().forPath(workerStatusPath);
-              }
-              catch (KeeperException.NoNodeException e) {
-                taskIds = ImmutableList.of();
-              }
-
-              for (String taskId : taskIds) {
-                if (!knownActiveTaskIds.contains(taskId)) {
-                  String taskStatusPath = JOINER.join(workerStatusPath, taskId);
-                  try {
-                    cf.delete().guaranteed().forPath(taskStatusPath);
-                  }
-                  catch (KeeperException.NoNodeException e) {
-                    log.info("Failed to delete taskStatusPath[%s].", taskStatusPath);
-                  }
-                }
-              }
-            }
-          }
-          catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-          }
-          catch (Exception ex) {
-            log.error(ex, "Unknown error while doing task status cleanup in ZK.");
-          }
-        },
-        1,
-        5,
-        TimeUnit.MINUTES
-    );
   }
 
   /**
@@ -503,7 +413,7 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
     } else {
       // Notify interested parties
       taskRunnerWorkItem.setResult(taskStatus);
-      TaskRunnerUtils.notifyStatusChanged(listeners, taskStatus.getId(), taskStatus);
+      TaskRunnerUtils.notifyStatusChanged(listeners, taskRunnerWorkItem.task, taskStatus);
 
       // Update success/failure counters, Blacklist node if there are too many failures.
       if (workerHolder != null) {
@@ -541,6 +451,12 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
         //CountDownLatch.countDown() does nothing when count has already reached 0.
         workerViewInitialized.countDown();
       }
+
+      @Override
+      public void nodeViewInitializedTimedOut()
+      {
+        nodeViewInitialized();
+      }
     };
     druidNodeDiscovery.registerListener(nodeDiscoveryListener);
 
@@ -565,13 +481,26 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
 
   private Worker toWorker(DiscoveryDruidNode node)
   {
+    final WorkerNodeService workerNodeService = node.getService(WorkerNodeService.DISCOVERY_SERVICE_KEY, WorkerNodeService.class);
+    if (workerNodeService == null) {
+      // this shouldn't typically happen, but just in case it does, make a dummy worker to allow the callbacks to
+      // continue since addWorker/removeWorker only need worker.getHost()
+      return new Worker(
+          node.getDruidNode().getServiceScheme(),
+          node.getDruidNode().getHostAndPortToUse(),
+          null,
+          0,
+          "",
+          WorkerConfig.DEFAULT_CATEGORY
+      );
+    }
     return new Worker(
         node.getDruidNode().getServiceScheme(),
         node.getDruidNode().getHostAndPortToUse(),
-        ((WorkerNodeService) node.getServices().get(WorkerNodeService.DISCOVERY_SERVICE_KEY)).getIp(),
-        ((WorkerNodeService) node.getServices().get(WorkerNodeService.DISCOVERY_SERVICE_KEY)).getCapacity(),
-        ((WorkerNodeService) node.getServices().get(WorkerNodeService.DISCOVERY_SERVICE_KEY)).getVersion(),
-        ((WorkerNodeService) node.getServices().get(WorkerNodeService.DISCOVERY_SERVICE_KEY)).getCategory()
+        workerNodeService.getIp(),
+        workerNodeService.getCapacity(),
+        workerNodeService.getVersion(),
+        workerNodeService.getCategory()
     );
   }
 
@@ -590,17 +519,20 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
           // tasks that we think are running on this worker. Provide that information to WorkerHolder that
           // manages the task syncing with that worker.
           for (Map.Entry<String, HttpRemoteTaskRunnerWorkItem> e : tasks.entrySet()) {
-            if (e.getValue().getState() == HttpRemoteTaskRunnerWorkItem.State.RUNNING) {
-              Worker w = e.getValue().getWorker();
-              if (w != null && w.getHost().equals(worker.getHost()) && e.getValue().getTask() != null) {
-                expectedAnnouncements.add(
-                    TaskAnnouncement.create(
-                        e.getValue().getTask(),
-                        TaskStatus.running(e.getKey()),
-                        e.getValue().getLocation()
-                    )
-                );
-              }
+            HttpRemoteTaskRunnerWorkItem workItem = e.getValue();
+            if (workItem.isRunningOnWorker(worker)) {
+              // This announcement is only used to notify when a task has disappeared on the worker
+              // So it is okay to set the dataSource and taskResource to null as they will not be used
+              expectedAnnouncements.add(
+                  TaskAnnouncement.create(
+                      workItem.getTaskId(),
+                      workItem.getTaskType(),
+                      null,
+                      TaskStatus.running(workItem.getTaskId()),
+                      workItem.getLocation(),
+                      null
+                  )
+              );
             }
           }
         }
@@ -609,7 +541,7 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
             httpClient,
             config,
             workersSyncExec,
-            this::taskAddedOrUpdated,
+            this,
             worker,
             expectedAnnouncements
         );
@@ -695,8 +627,8 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
               if (!taskItem.getResult().isDone()) {
                 log.warn(
                     "Failing task[%s] because worker[%s] disappeared and did not report within cleanup timeout[%s].",
-                    workerHostAndPort,
                     taskItem.getTaskId(),
+                    workerHostAndPort,
                     config.getTaskCleanupTimeout()
                 );
                 // taskComplete(..) must be called outside of statusLock, see comments on method.
@@ -743,7 +675,8 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
           {
             removedWorkerCleanups.remove(workerHostAndPort, cleanupTask);
           }
-        }
+        },
+        MoreExecutors.directExecutor()
     );
   }
 
@@ -777,7 +710,7 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
     final Set<Map.Entry<String, WorkerHolder>> workerEntrySet = ImmutableSet.copyOf(workers.entrySet());
     for (Map.Entry<String, WorkerHolder> e : workerEntrySet) {
       WorkerHolder workerHolder = e.getValue();
-      if (!workerHolder.getUnderlyingSyncer().isOK()) {
+      if (workerHolder.getUnderlyingSyncer().needsReset()) {
         synchronized (workers) {
           // check again that server is still there and only then reset.
           if (workers.containsKey(e.getKey())) {
@@ -908,27 +841,35 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
   }
 
   @Override
-  public Collection<Worker> markWorkersLazy(Predicate<ImmutableWorkerInfo> isLazyWorker, int maxWorkers)
+  public Collection<Worker> markWorkersLazy(Predicate<ImmutableWorkerInfo> isLazyWorker, int maxLazyWorkers)
   {
+    // skip the lock and bail early if we should not mark any workers lazy (e.g. number
+    // of current workers is at or below the minNumWorkers of autoscaler config)
+    if (lazyWorkers.size() >= maxLazyWorkers) {
+      return getLazyWorkers();
+    }
+
+    // Search for new workers to mark lazy.
+    // Status lock is used to prevent any tasks being assigned to workers while we mark them lazy
     synchronized (statusLock) {
       for (Map.Entry<String, WorkerHolder> worker : workers.entrySet()) {
+        if (lazyWorkers.size() >= maxLazyWorkers) {
+          break;
+        }
         final WorkerHolder workerHolder = worker.getValue();
         try {
           if (isWorkerOkForMarkingLazy(workerHolder.getWorker()) && isLazyWorker.apply(workerHolder.toImmutable())) {
             log.info("Adding Worker[%s] to lazySet!", workerHolder.getWorker().getHost());
             lazyWorkers.put(worker.getKey(), workerHolder);
-            if (lazyWorkers.size() == maxWorkers) {
-              // only mark excess workers as lazy and allow their cleanup
-              break;
-            }
           }
         }
         catch (Exception e) {
           throw new RuntimeException(e);
         }
       }
-      return getLazyWorkers();
     }
+
+    return getLazyWorkers();
   }
 
   private boolean isWorkerOkForMarkingLazy(Worker worker)
@@ -1037,20 +978,7 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
           taskId
       );
 
-      try {
-        return Optional.of(httpClient.go(
-            new Request(HttpMethod.GET, url),
-            new InputStreamResponseHandler()
-        ).get());
-      }
-      catch (InterruptedException e) {
-        throw new RuntimeException(e);
-      }
-      catch (ExecutionException e) {
-        // Unwrap if possible
-        Throwables.propagateIfPossible(e.getCause(), IOException.class);
-        throw new RuntimeException(e);
-      }
+      return TaskRunnerUtils.streamTaskReportsFromTaskLocation(httpClient, url);
     }
   }
 
@@ -1076,7 +1004,7 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
         if (entry.getValue().getState() == HttpRemoteTaskRunnerWorkItem.State.RUNNING) {
           TaskRunnerUtils.notifyLocationChanged(
               ImmutableList.of(listenerPair),
-              entry.getKey(),
+              entry.getValue().getTask(),
               entry.getValue().getLocation()
           );
         }
@@ -1260,8 +1188,18 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
         try {
           // this will send HTTP request to worker for assigning task
           if (!runTaskOnWorker(taskItem, immutableWorker.getWorker().getHost())) {
-            if (taskItem.getState() == HttpRemoteTaskRunnerWorkItem.State.PENDING_WORKER_ASSIGN) {
-              taskItem.revertStateFromPendingWorkerAssignToPending();
+            TaskStatus shutdownStatus = null;
+            synchronized (statusLock) {
+              if (taskItem.getState() == HttpRemoteTaskRunnerWorkItem.State.PENDING_WORKER_ASSIGN) {
+                shutdownStatus = taskItem.shutdownStatus;
+                if (shutdownStatus == null) {
+                  taskItem.revertStateFromPendingWorkerAssignToPending();
+                }
+              }
+            }
+            if (shutdownStatus != null) {
+              // taskComplete(..) must be called outside of statusLock, see comments on method.
+              taskComplete(taskItem, null, shutdownStatus);
             }
           }
         }
@@ -1318,21 +1256,37 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
     }
 
     WorkerHolder workerHolderRunningTask = null;
+    HttpRemoteTaskRunnerWorkItem pendingWorkItem = null;
     synchronized (statusLock) {
       log.info("Shutdown [%s] because: [%s]", taskId, reason);
       HttpRemoteTaskRunnerWorkItem taskRunnerWorkItem = tasks.get(taskId);
       if (taskRunnerWorkItem != null) {
         if (taskRunnerWorkItem.getState() == HttpRemoteTaskRunnerWorkItem.State.RUNNING) {
+          taskRunnerWorkItem.shutdownStatus = TaskStatus.failure(taskId, reason);
           workerHolderRunningTask = workers.get(taskRunnerWorkItem.getWorker().getHost());
           if (workerHolderRunningTask == null) {
             log.info("Can't shutdown! No worker running task[%s]", taskId);
           }
+        } else if (taskRunnerWorkItem.getState() == HttpRemoteTaskRunnerWorkItem.State.PENDING) {
+          // Removing it here stops the pending task executor from picking it up before it is completed below.
+          pendingTaskIds.remove(taskId);
+          pendingWorkItem = taskRunnerWorkItem;
+        } else if (taskRunnerWorkItem.getState() == HttpRemoteTaskRunnerWorkItem.State.PENDING_WORKER_ASSIGN) {
+          // The assigning thread completes the task if assignment fails, and taskAddedOrUpdated
+          // asks the worker to shut it down if the worker runs it.
+          taskRunnerWorkItem.shutdownStatus = TaskStatus.failure(taskId, reason);
+          pendingTaskIds.remove(taskId);
         } else if (taskRunnerWorkItem.getState() == HttpRemoteTaskRunnerWorkItem.State.COMPLETE) {
           tasks.remove(taskId);
         }
       } else {
         log.info("Received shutdown task[%s], but can't find it. Ignored.", taskId);
       }
+    }
+
+    if (pendingWorkItem != null) {
+      // taskComplete(..) must be called outside of statusLock, see comments on method.
+      taskComplete(pendingWorkItem, null, TaskStatus.failure(taskId, reason));
     }
 
     //shutdown is called outside of lock as we don't want to hold the lock while sending http request
@@ -1410,11 +1364,10 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
   }
 
   @Override
+  @SuppressWarnings("GuardedBy") // Read on tasks is safe
   public Collection<? extends TaskRunnerWorkItem> getKnownTasks()
   {
-    synchronized (statusLock) {
-      return ImmutableList.copyOf(tasks.values());
-    }
+    return ImmutableList.copyOf(tasks.values());
   }
 
   @SuppressWarnings("GuardedBy") // Read on tasks is safe
@@ -1458,7 +1411,17 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
     ).collect(Collectors.toList());
   }
 
+  /**
+   * @deprecated Use {@link #getBlacklistedWorkerInfos()} instead.
+   */
+  @Deprecated
+  @SuppressWarnings("PMD.ConfusingMethodName")
   public Collection<ImmutableWorkerInfo> getBlackListedWorkers()
+  {
+    return getBlacklistedWorkerInfos();
+  }
+
+  public Collection<ImmutableWorkerInfo> getBlacklistedWorkerInfos()
   {
     return ImmutableList.copyOf(Collections2.transform(blackListedWorkers.values(), WorkerHolder::toImmutable));
   }
@@ -1478,7 +1441,7 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
     return Optional.fromNullable(provisioningService.getStats());
   }
 
-  @VisibleForTesting
+  @Override
   public void taskAddedOrUpdated(final TaskAnnouncement announcement, final WorkerHolder workerHolder)
   {
     final String taskId = announcement.getTaskId();
@@ -1505,15 +1468,28 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
         if (knownStatusInStorage.isPresent()) {
           switch (knownStatusInStorage.get().getStatusCode()) {
             case RUNNING:
+              final Optional<Task> task = taskStorage.getTask(taskId);
+              if (!task.isPresent()) {
+                log.makeAlert(
+                    "Could not fetch payload of task[%s] with status[%s]."
+                    + " Ignoring notification[%s] from worker[%s].",
+                    taskId, knownStatusInStorage.get(), announcement, worker.getHost()
+                ).emit();
+                break;
+              }
+
               taskItem = new HttpRemoteTaskRunnerWorkItem(
                   taskId,
                   worker,
                   TaskLocation.unknown(),
-                  null,
+                  task.get(),
                   announcement.getTaskType(),
                   HttpRemoteTaskRunnerWorkItem.State.RUNNING
               );
               tasks.put(taskId, taskItem);
+              final ServiceMetricEvent.Builder metricBuilder = new ServiceMetricEvent.Builder();
+              metricBuilder.setDimension(DruidMetrics.TASK_ID, taskId);
+              emitter.emit(metricBuilder.setMetric(TASK_DISCOVERED_COUNT, 1L));
               break;
             case SUCCESS:
             case FAILED:
@@ -1560,13 +1536,15 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
 
                 final ServiceMetricEvent.Builder metricBuilder = new ServiceMetricEvent.Builder();
                 IndexTaskUtils.setTaskDimensions(metricBuilder, taskItem.getTask());
-                emitter.emit(metricBuilder.build(
+                emitter.emit(metricBuilder.setMetric(
                     "task/pending/time",
                     new Duration(taskItem.getCreatedTime(), DateTimes.nowUtc()).getMillis())
                 );
 
                 // fall through
               case RUNNING:
+                // A worker can report a task RUNNING before its task runner has it and ignore a shutdown request
+                shouldShutdownTask = taskItem.shutdownStatus != null;
                 if (worker.getHost().equals(taskItem.getWorker().getHost())) {
                   if (!announcement.getTaskLocation().equals(taskItem.getLocation())) {
                     log.info(
@@ -1576,7 +1554,7 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
                         announcement.getTaskLocation()
                     );
                     taskItem.setLocation(announcement.getTaskLocation());
-                    TaskRunnerUtils.notifyLocationChanged(listeners, taskId, announcement.getTaskLocation());
+                    TaskRunnerUtils.notifyLocationChanged(listeners, taskItem.getTask(), announcement.getTaskLocation());
                   }
                 } else {
                   log.warn(
@@ -1625,7 +1603,7 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
                         announcement.getTaskLocation()
                     );
                     taskItem.setLocation(announcement.getTaskLocation());
-                    TaskRunnerUtils.notifyLocationChanged(listeners, taskId, announcement.getTaskLocation());
+                    TaskRunnerUtils.notifyLocationChanged(listeners, taskItem.getTask(), announcement.getTaskLocation());
                   }
 
                   isTaskCompleted = true;
@@ -1672,6 +1650,14 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
       workerHolder.shutdownTask(taskId);
     }
 
+    synchronized (statusLock) {
+      statusLock.notifyAll();
+    }
+  }
+
+  @Override
+  public void stateChanged(boolean enabled, WorkerHolder workerHolder)
+  {
     synchronized (statusLock) {
       statusLock.notifyAll();
     }
@@ -1745,7 +1731,7 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
   public Map<String, Long> getBlacklistedTaskSlotCount()
   {
     Map<String, Long> totalBlacklistedPeons = new HashMap<>();
-    for (ImmutableWorkerInfo worker : getBlackListedWorkers()) {
+    for (ImmutableWorkerInfo worker : getBlacklistedWorkerInfos()) {
       String workerCategory = worker.getWorker().getCategory();
       int workerBlacklistedPeons = worker.getWorker().getCapacity();
       totalBlacklistedPeons.compute(
@@ -1755,6 +1741,48 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
     }
 
     return totalBlacklistedPeons;
+  }
+
+  @Override
+  public int getTotalCapacity()
+  {
+    return getWorkers().stream().mapToInt(workerInfo -> workerInfo.getWorker().getCapacity()).sum();
+  }
+
+
+  /**
+   * Retrieves the maximum capacity of the task runner when autoscaling is enabled.*
+   * @return The maximum capacity as an integer value. Returns -1 if the maximum
+   *         capacity cannot be determined or if autoscaling is not enabled.
+   */
+  @Override
+  public int getMaximumCapacityWithAutoscale()
+  {
+    int maximumCapacity = -1;
+    WorkerBehaviorConfig workerBehaviorConfig = workerConfigRef.get();
+    if (workerBehaviorConfig == null) {
+      // Auto scale not setup
+      log.debug("Cannot calculate maximum worker capacity as worker behavior config is not configured");
+      maximumCapacity = -1;
+    } else if (workerBehaviorConfig instanceof DefaultWorkerBehaviorConfig) {
+      DefaultWorkerBehaviorConfig defaultWorkerBehaviorConfig = (DefaultWorkerBehaviorConfig) workerBehaviorConfig;
+      if (defaultWorkerBehaviorConfig.getAutoScaler() == null) {
+        // Auto scale not setup
+        log.debug("Cannot calculate maximum worker capacity as auto scaler not configured");
+        maximumCapacity = -1;
+      } else {
+        int maxWorker = defaultWorkerBehaviorConfig.getAutoScaler().getMaxNumWorkers();
+        int expectedWorkerCapacity = provisioningStrategy.getExpectedWorkerCapacity(getWorkers());
+        maximumCapacity = expectedWorkerCapacity == -1 ? -1 : maxWorker * expectedWorkerCapacity;
+      }
+    }
+    return maximumCapacity;
+  }
+
+  @Override
+  public int getUsedCapacity()
+  {
+    return getWorkers().stream().mapToInt(ImmutableWorkerInfo::getCurrCapacityUsed).sum();
   }
 
   private static class HttpRemoteTaskRunnerWorkItem extends RemoteTaskRunnerWorkItem
@@ -1796,24 +1824,33 @@ public class HttpRemoteTaskRunner implements WorkerTaskRunner, TaskLogStreamer
     private Task task;
     private State state;
 
+    // Guarded by the enclosing runner's statusLock.
+    @Nullable
+    private TaskStatus shutdownStatus;
+
     HttpRemoteTaskRunnerWorkItem(
         String taskId,
         Worker worker,
         TaskLocation location,
-        @Nullable Task task,
+        Task task,
         String taskType,
         State state
     )
     {
-      super(taskId, task == null ? null : task.getType(), worker, location, task == null ? null : task.getDataSource());
+      super(taskId, task.getType(), worker, location, task.getDataSource());
       this.state = Preconditions.checkNotNull(state);
-      Preconditions.checkArgument(task == null || taskType == null || taskType.equals(task.getType()));
-
-      // It is possible to have it null when the TaskRunner is just started and discovered this taskId from a worker,
-      // notifications don't contain whole Task instance but just metadata about the task.
+      Preconditions.checkArgument(taskType == null || taskType.equals(task.getType()));
       this.task = task;
     }
 
+    public boolean isRunningOnWorker(Worker candidateWorker)
+    {
+      return getState() == HttpRemoteTaskRunnerWorkItem.State.RUNNING &&
+          getWorker() != null &&
+          Objects.equal(getWorker().getHost(), candidateWorker.getHost());
+    }
+
+    @Override
     public Task getTask()
     {
       return task;

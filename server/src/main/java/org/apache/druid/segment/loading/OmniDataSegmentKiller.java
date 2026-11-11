@@ -28,8 +28,10 @@ import org.apache.druid.java.util.common.MapUtils;
 import org.apache.druid.timeline.DataSegment;
 
 import javax.annotation.Nullable;
-
+import java.io.IOException;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -48,6 +50,22 @@ public class OmniDataSegmentKiller implements DataSegmentKiller
       String type = entry.getKey();
       Provider<DataSegmentKiller> provider = entry.getValue();
       this.killers.put(type, Suppliers.memoize(provider::get));
+    }
+  }
+
+  @Override
+  public void kill(List<DataSegment> segments) throws SegmentLoadingException
+  {
+    Map<DataSegmentKiller, List<DataSegment>> killersToSegments = new HashMap<>();
+    for (DataSegment segment : segments) {
+      DataSegmentKiller dataSegmentKiller = getKiller(segment);
+      if (dataSegmentKiller != null) {
+        List<DataSegment> segmentsList = killersToSegments.computeIfAbsent(dataSegmentKiller, x -> new ArrayList<>());
+        segmentsList.add(segment);
+      }
+    }
+    for (Map.Entry<DataSegmentKiller, List<DataSegment>> killerAndSegments : killersToSegments.entrySet()) {
+      killerAndSegments.getKey().kill(killerAndSegments.getValue());
     }
   }
 
@@ -80,6 +98,27 @@ public class OmniDataSegmentKiller implements DataSegmentKiller
   public void killAll()
   {
     throw new UnsupportedOperationException("not implemented");
+  }
+
+  @Override
+  public void killRecursively(String relativePath) throws IOException
+  {
+    IOException firstFailure = null;
+    for (Supplier<DataSegmentKiller> supplier : killers.values()) {
+      try {
+        supplier.get().killRecursively(relativePath);
+      }
+      catch (IOException e) {
+        if (firstFailure == null) {
+          firstFailure = e;
+        } else {
+          firstFailure.addSuppressed(e);
+        }
+      }
+    }
+    if (firstFailure != null) {
+      throw firstFailure;
+    }
   }
 
   @VisibleForTesting

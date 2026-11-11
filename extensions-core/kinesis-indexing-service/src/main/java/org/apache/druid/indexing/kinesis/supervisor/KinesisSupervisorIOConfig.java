@@ -26,13 +26,17 @@ import com.google.common.base.Preconditions;
 import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.indexing.kinesis.KinesisIndexTaskIOConfig;
 import org.apache.druid.indexing.kinesis.KinesisRegion;
+import org.apache.druid.indexing.seekablestream.supervisor.BoundedStreamConfig;
 import org.apache.druid.indexing.seekablestream.supervisor.IdleConfig;
+import org.apache.druid.indexing.seekablestream.supervisor.LagAggregator;
 import org.apache.druid.indexing.seekablestream.supervisor.SeekableStreamSupervisorIOConfig;
 import org.apache.druid.indexing.seekablestream.supervisor.autoscaler.AutoScalerConfig;
 import org.joda.time.DateTime;
 import org.joda.time.Period;
 
 import javax.annotation.Nullable;
+import java.util.Map;
+import java.util.Objects;
 
 public class KinesisSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
 {
@@ -71,12 +75,14 @@ public class KinesisSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
       @JsonProperty("lateMessageRejectionPeriod") Period lateMessageRejectionPeriod,
       @JsonProperty("earlyMessageRejectionPeriod") Period earlyMessageRejectionPeriod,
       @JsonProperty("lateMessageRejectionStartDateTime") DateTime lateMessageRejectionStartDateTime,
-      @JsonProperty("recordsPerFetch") Integer recordsPerFetch,
+      @JsonProperty("recordsPerFetch") @Deprecated Integer recordsPerFetch,
       @JsonProperty("fetchDelayMillis") Integer fetchDelayMillis,
       @JsonProperty("awsAssumedRoleArn") String awsAssumedRoleArn,
       @JsonProperty("awsExternalId") String awsExternalId,
       @Nullable @JsonProperty("autoScalerConfig") AutoScalerConfig autoScalerConfig,
-      @JsonProperty("deaggregate") boolean deaggregate
+      @JsonProperty("deaggregate") @Deprecated boolean deaggregate,
+      @Nullable @JsonProperty("serverPriorityToReplicas") Map<Integer, Integer> serverPriorityToReplicas,
+      @Nullable @JsonProperty("boundedStreamConfig") BoundedStreamConfig boundedStreamConfig
   )
   {
     super(
@@ -92,8 +98,12 @@ public class KinesisSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
         lateMessageRejectionPeriod,
         earlyMessageRejectionPeriod,
         autoScalerConfig,
+        LagAggregator.DEFAULT,
         lateMessageRejectionStartDateTime,
-        new IdleConfig(null, null)
+        new IdleConfig(null, null),
+        null,
+        serverPriorityToReplicas,
+        boundedStreamConfig
     );
 
     this.endpoint = endpoint != null
@@ -173,5 +183,43 @@ public class KinesisSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
            ", awsExternalId='" + awsExternalId + '\'' +
            ", deaggregate=" + deaggregate +
            '}';
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (!super.equals(o)) {
+      return false;
+    }
+    KinesisSupervisorIOConfig that = (KinesisSupervisorIOConfig) o;
+    return fetchDelayMillis == that.fetchDelayMillis
+           && deaggregate == that.deaggregate
+           && Objects.equals(endpoint, that.endpoint)
+           && Objects.equals(recordsPerFetch, that.recordsPerFetch)
+           && Objects.equals(awsAssumedRoleArn, that.awsAssumedRoleArn)
+           && Objects.equals(awsExternalId, that.awsExternalId);
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return Objects.hash(
+        super.hashCode(),
+        endpoint,
+        recordsPerFetch,
+        fetchDelayMillis,
+        awsAssumedRoleArn,
+        awsExternalId,
+        deaggregate
+    );
+  }
+
+  @Override
+  public KinesisIOConfigBuilder toBuilder()
+  {
+    return new KinesisIOConfigBuilder().copyFrom(this);
   }
 }

@@ -29,7 +29,7 @@ import java.util.Map;
  * This class provides the semantic view of the table specification,
  * without the operational aspects such as version, name, etc.
  *
- * @see {@link TableMetadata} for the operational representation
+ * @see TableMetadata for the operational representation
  */
 public class ResolvedTable extends ObjectFacade
 {
@@ -82,6 +82,15 @@ public class ResolvedTable extends ObjectFacade
   public Map<String, Object> properties()
   {
     return spec.properties();
+  }
+
+  public <T> T decodeProperty(String key)
+  {
+    final Object value = spec.properties().get(key);
+    if (value == null) {
+      return null;
+    }
+    return (T) defn.property(key).decode(value, jsonMapper);
   }
 
   public ObjectMapper jsonMapper()

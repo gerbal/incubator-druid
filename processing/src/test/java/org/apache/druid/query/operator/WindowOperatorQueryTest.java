@@ -19,17 +19,24 @@
 
 package org.apache.druid.query.operator;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import org.apache.druid.java.util.common.IAE;
+import nl.jqno.equalsverifier.EqualsVerifier;
+import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.query.InlineDataSource;
 import org.apache.druid.query.QueryContext;
 import org.apache.druid.query.TableDataSource;
+import org.apache.druid.query.spec.LegacySegmentSpec;
+import org.apache.druid.query.spec.MultipleIntervalSegmentSpec;
+import org.apache.druid.query.spec.QuerySegmentSpec;
 import org.apache.druid.segment.column.RowSignature;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -45,77 +52,91 @@ public class WindowOperatorQueryTest
 {
   WindowOperatorQuery query;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
     query = new WindowOperatorQuery(
         InlineDataSource.fromIterable(new ArrayList<>(), RowSignature.empty()),
+        new LegacySegmentSpec(Intervals.ETERNITY),
         ImmutableMap.of("sally", "sue"),
         RowSignature.empty(),
-        new ArrayList<>()
+        new ArrayList<>(),
+        null
     );
   }
 
   @Test
   public void getOperators()
   {
-    Assert.assertTrue(query.getOperators().isEmpty());
+    Assertions.assertTrue(query.getOperators().isEmpty());
   }
 
   @Test
   public void getRowSignature()
   {
-    Assert.assertEquals(0, query.getRowSignature().size());
+    Assertions.assertEquals(0, query.getRowSignature().size());
   }
 
   @Test
   public void hasFilters()
   {
-    Assert.assertFalse(query.hasFilters());
+    Assertions.assertFalse(query.hasFilters());
   }
 
   @Test
   public void getFilter()
   {
-    Assert.assertNull(query.getFilter());
+    Assertions.assertNull(query.getFilter());
   }
 
   @Test
   public void getType()
   {
-    Assert.assertEquals("windowOperator", query.getType());
+    Assertions.assertEquals("windowOperator", query.getType());
   }
 
   @Test
   public void withOverriddenContext()
   {
-    Assert.assertEquals("sue", query.context().get("sally"));
+    Assertions.assertEquals("sue", query.context().get("sally"));
     final QueryContext context = query.withOverriddenContext(ImmutableMap.of("sally", "soo")).context();
-    Assert.assertEquals("soo", context.get("sally"));
+    Assertions.assertEquals("soo", context.get("sally"));
   }
 
   @Test
   public void withDataSource()
   {
     final Set<String> tableNames = query.getDataSource().getTableNames();
-    Assert.assertEquals(0, tableNames.size());
+    Assertions.assertEquals(0, tableNames.size());
 
-    boolean exceptionThrown = false;
-    try {
-      query.withDataSource(new TableDataSource("bob"));
-    }
-    catch (IAE e) {
-      // should fail trying to set a TableDataSource as TableDataSource is not currently allowed.
-      exceptionThrown = true;
-    }
-    Assert.assertTrue(exceptionThrown);
+    final TableDataSource newDs = new TableDataSource("bob");
+    Assertions.assertSame(newDs, query.withDataSource(newDs).getDataSource());
+  }
+
+  @Test
+  public void withQuerySpec()
+  {
+    QuerySegmentSpec spec = new MultipleIntervalSegmentSpec(Collections.emptyList());
+    Assertions.assertSame(spec, ((WindowOperatorQuery) query.withQuerySegmentSpec(spec)).getQuerySegmentSpec());
+  }
+
+  @Test
+  public void withOperators()
+  {
+    List<OperatorFactory> operators = ImmutableList.<OperatorFactory>builder()
+        .add(new NaivePartitioningOperatorFactory(Collections.singletonList("some")))
+        .build();
+    Assertions.assertSame(operators, ((WindowOperatorQuery) query.withOperators(operators)).getOperators());
   }
 
   @Test
   public void testEquals()
   {
-    Assert.assertEquals(query, query);
-    Assert.assertEquals(query, query.withDataSource(query.getDataSource()));
-    Assert.assertNotEquals(query, query.toString());
+    EqualsVerifier.simple().forClass(WindowOperatorQuery.class)
+        .withNonnullFields("duration", "querySegmentSpec")
+        .usingGetClass()
+        .verify();
+
+    Assertions.assertNotEquals(query, query.toString());
   }
 }

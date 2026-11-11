@@ -1,0 +1,1068 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.druid.k8s.overlord;
+
+import com.google.common.base.Optional;
+import com.google.common.base.Supplier;
+import com.google.common.collect.ImmutableList;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.SettableFuture;
+import io.fabric8.kubernetes.api.model.batch.v1.Job;
+import io.fabric8.kubernetes.api.model.batch.v1.JobBuilder;
+import io.fabric8.kubernetes.client.dsl.LogWatch;
+import io.netty.handler.codec.http.DefaultHttpResponse;
+import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.handler.codec.http.HttpVersion;
+import org.apache.commons.io.IOUtils;
+import org.apache.druid.common.config.ConfigManager;
+import org.apache.druid.indexer.RunnerTaskState;
+import org.apache.druid.indexer.TaskLocation;
+import org.apache.druid.indexer.TaskStatus;
+import org.apache.druid.indexing.common.task.Task;
+import org.apache.druid.indexing.overlord.TaskRunnerWorkItem;
+import org.apache.druid.java.util.emitter.service.ServiceEmitter;
+import org.apache.druid.java.util.emitter.service.ServiceEventBuilder;
+import org.apache.druid.java.util.http.client.HttpClient;
+import org.apache.druid.java.util.http.client.Request;
+import org.apache.druid.java.util.http.client.response.InputStreamFullResponseHandler;
+import org.apache.druid.java.util.http.client.response.InputStreamFullResponseHolder;
+import org.apache.druid.k8s.overlord.common.K8sTaskId;
+import org.apache.druid.k8s.overlord.common.K8sTestUtils;
+import org.apache.druid.k8s.overlord.common.KubernetesPeonClient;
+import org.apache.druid.k8s.overlord.execution.DefaultKubernetesTaskRunnerDynamicConfig;
+import org.apache.druid.k8s.overlord.execution.KubernetesTaskRunnerDynamicConfig;
+import org.apache.druid.k8s.overlord.taskadapter.TaskAdapter;
+import org.apache.druid.tasklogs.TaskLogs;
+import org.easymock.EasyMock;
+import org.easymock.EasyMockExtension;
+import org.easymock.EasyMockSupport;
+import org.easymock.Mock;
+import org.hamcrest.MatcherAssert;
+import org.hamcrest.Matchers;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+
+import javax.annotation.Nullable;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+
+@ExtendWith(EasyMockExtension.class)
+@SuppressWarnings("DoNotMock")
+public class KubernetesTaskRunnerTest extends EasyMockSupport
+{
+  private static final String ID = "id";
+
+  @Mock private HttpClient httpClient;
+  @Mock private TaskAdapter taskAdapter;
+  @Mock private KubernetesPeonClient peonClient;
+  @Mock private KubernetesPeonLifecycle kubernetesPeonLifecycle;
+  @Mock private ServiceEmitter emitter;
+  @Mock private ListenableFuture<TaskStatus> statusFuture;
+  @Mock private ConfigManager configManager;
+
+  private KubernetesTaskRunnerStaticConfig staticConfig;
+  private KubernetesTaskRunnerEffectiveConfig config;
+  private KubernetesTaskRunner runner;
+  private Task task;
+
+  @BeforeEach
+  public void setup()
+  {
+    staticConfig = KubernetesTaskRunnerConfig.builder()
+        .withCapacity(1)
+        .build();
+
+    Supplier<KubernetesTaskRunnerDynamicConfig> dynamicConfigRef = () -> new DefaultKubernetesTaskRunnerDynamicConfig(null, 1);
+
+    config = new KubernetesTaskRunnerEffectiveConfig(staticConfig, dynamicConfigRef);
+
+    task = K8sTestUtils.createTask(ID, 0);
+
+    configManager = EasyMock.createNiceMock(ConfigManager.class);
+    EasyMock.replay(configManager);
+
+    runner = new KubernetesTaskRunner(
+        taskAdapter,
+        config,
+        peonClient,
+        httpClient,
+        new TestPeonLifecycleFactory(kubernetesPeonLifecycle),
+        emitter,
+        configManager
+    );
+  }
+
+  @Test
+  public void test_start_withExistingJobs() throws IOException
+  {
+    SettableFuture<Boolean> settableFuture = SettableFuture.create();
+    settableFuture.set(true);
+    KubernetesTaskRunner runner = new KubernetesTaskRunner(
+        taskAdapter,
+        config,
+        peonClient,
+        httpClient,
+        new TestPeonLifecycleFactory(kubernetesPeonLifecycle),
+        emitter,
+        configManager
+    )
+    {
+      @Override
+      protected KubernetesWorkItem joinAsync(Task task)
+      {
+        return tasks.computeIfAbsent(
+            task.getId(),
+            k -> new KubernetesWorkItem(
+                task,
+                Futures.immediateFuture(TaskStatus.success(task.getId())),
+                kubernetesPeonLifecycle
+            )
+        );
+      }
+    };
+
+    Job job = new JobBuilder()
+        .withNewMetadata()
+        .withName(ID)
+        .endMetadata()
+        .build();
+
+    EasyMock.expect(peonClient.getPeonJobs()).andReturn(ImmutableList.of(job));
+    EasyMock.expect(taskAdapter.toTask(job)).andReturn(task);
+    EasyMock.expect(kubernetesPeonLifecycle.getTaskStartedSuccessfullyFuture()).andReturn(
+        settableFuture
+    );
+
+    expectCleanupOfCompletedJobs();
+    replayAll();
+
+    try {
+      runner.start();
+
+      verifyAll();
+
+      Assertions.assertNotNull(runner.tasks);
+      Assertions.assertEquals(1, runner.tasks.size());
+    }
+    finally {
+      runner.stop();
+    }
+  }
+
+  @Test
+  public void test_stop_doesNotShutDownSharedExecutor()
+  {
+    final ThreadPoolExecutor sharedExecutor = new ThreadPoolExecutor(
+        1,
+        1,
+        0L,
+        TimeUnit.MILLISECONDS,
+        new LinkedBlockingQueue<>()
+    );
+    final KubernetesTaskRunner sharedExecutorRunner = new KubernetesTaskRunner(
+        taskAdapter,
+        config,
+        peonClient,
+        httpClient,
+        new TestPeonLifecycleFactory(kubernetesPeonLifecycle),
+        emitter,
+        sharedExecutor,
+        configManager
+    );
+
+    sharedExecutorRunner.stop();
+
+    Assertions.assertFalse(sharedExecutor.isShutdown());
+    sharedExecutor.shutdownNow();
+  }
+
+  @Test
+  public void test_start_withExistingJobs_oneJobFails() throws IOException
+  {
+    SettableFuture<Boolean> settableFuture = SettableFuture.create();
+    settableFuture.set(true);
+    KubernetesTaskRunner runner = new KubernetesTaskRunner(
+        taskAdapter,
+        config,
+        peonClient,
+        httpClient,
+        new TestPeonLifecycleFactory(kubernetesPeonLifecycle),
+        emitter,
+        configManager
+    )
+    {
+      @Override
+      protected KubernetesWorkItem joinAsync(Task task)
+      {
+        return tasks.computeIfAbsent(
+            task.getId(),
+            k -> new KubernetesWorkItem(
+                task,
+                Futures.immediateFuture(TaskStatus.success(task.getId())),
+                kubernetesPeonLifecycle
+            )
+        );
+      }
+    };
+
+    Job job = new JobBuilder()
+        .withNewMetadata()
+        .withName(ID)
+        .endMetadata()
+        .build();
+
+    Job job2 = new JobBuilder()
+        .withNewMetadata()
+        .withName("id2")
+        .endMetadata()
+        .build();
+
+    EasyMock.expect(peonClient.getPeonJobs()).andReturn(ImmutableList.of(job, job2));
+    EasyMock.expect(taskAdapter.toTask(job)).andReturn(task);
+    EasyMock.expect(taskAdapter.toTask(job2)).andThrow(new IOException("deserialization exception"));
+
+    EasyMock.expect(kubernetesPeonLifecycle.getTaskStartedSuccessfullyFuture()).andReturn(
+        settableFuture
+    );
+
+    expectCleanupOfCompletedJobs();
+    replayAll();
+
+    try {
+      runner.start();
+
+      verifyAll();
+
+      Assertions.assertNotNull(runner.tasks);
+      Assertions.assertEquals(1, runner.tasks.size());
+    }
+    finally {
+      runner.stop();
+    }
+  }
+
+  @Test
+  public void test_start_whenDeserializationExceptionThrown_isIgnored() throws IOException
+  {
+    KubernetesTaskRunner runner = new KubernetesTaskRunner(
+        taskAdapter,
+        config,
+        peonClient,
+        httpClient,
+        new TestPeonLifecycleFactory(kubernetesPeonLifecycle),
+        emitter,
+        configManager
+    )
+    {
+      @Override
+      protected KubernetesWorkItem joinAsync(Task task)
+      {
+        return tasks.computeIfAbsent(task.getId(), k -> new KubernetesWorkItem(task, null, kubernetesPeonLifecycle));
+      }
+    };
+
+    Job job = new JobBuilder()
+        .withNewMetadata()
+        .withName(ID)
+        .endMetadata()
+        .build();
+
+    EasyMock.expect(peonClient.getPeonJobs()).andReturn(ImmutableList.of(job));
+    EasyMock.expect(taskAdapter.toTask(job)).andThrow(new IOException());
+
+    expectCleanupOfCompletedJobs();
+    replayAll();
+
+    try {
+      runner.start();
+
+      verifyAll();
+
+      Assertions.assertNotNull(runner.tasks);
+      Assertions.assertEquals(0, runner.tasks.size());
+    }
+    finally {
+      runner.stop();
+    }
+  }
+
+  /**
+   * {@link KubernetesTaskRunner#start()} schedules the cleanup of completed peon jobs on a background executor with
+   * an initial delay of 1 ms. Whether the first cleanup runs before {@link #verifyAll()} depends on thread scheduling,
+   * so the call must be allowed any number of times to keep the tests deterministic.
+   */
+  private void expectCleanupOfCompletedJobs()
+  {
+    EasyMock.expect(peonClient.deleteCompletedPeonJobsOlderThan(EasyMock.anyLong(), EasyMock.eq(TimeUnit.MILLISECONDS)))
+            .andReturn(0)
+            .anyTimes();
+  }
+
+  @Test
+  public void test_streamTaskLog_withoutExistingTask_returnsEmptyOptional()
+  {
+    Optional<InputStream> maybeInputStream = runner.streamTaskLog(task.getId(), 0L);
+    Assertions.assertFalse(maybeInputStream.isPresent());
+  }
+
+  @Test
+  public void test_streamTaskLog_withExistingTask() throws IOException
+  {
+    KubernetesWorkItem workItem = new KubernetesWorkItem(task, null, kubernetesPeonLifecycle)
+    {
+      @Override
+      protected Optional<InputStream> streamTaskLogs()
+      {
+        return Optional.of(IOUtils.toInputStream("", StandardCharsets.UTF_8));
+      }
+    };
+
+    runner.tasks.put(task.getId(), workItem);
+
+    Optional<InputStream> maybeInputStream = runner.streamTaskLog(task.getId(), 0L);
+
+    Assertions.assertTrue(maybeInputStream.isPresent());
+    Assertions.assertEquals("", IOUtils.toString(maybeInputStream.get(), StandardCharsets.UTF_8));
+  }
+
+  @Test
+  public void test_run_withoutExistingTask() throws IOException, ExecutionException, InterruptedException
+  {
+    Job job = new JobBuilder()
+        .withNewMetadata()
+        .withName(ID)
+        .endMetadata()
+        .build();
+
+    TaskStatus taskStatus = TaskStatus.success(task.getId());
+
+    EasyMock.expect(taskAdapter.fromTask(task)).andReturn(job);
+    EasyMock.expect(taskAdapter.shouldUseDeepStorageForTaskPayload(task)).andReturn(false);
+    EasyMock.expect(kubernetesPeonLifecycle.run(
+        EasyMock.eq(job),
+        EasyMock.anyLong(),
+        EasyMock.anyLong(),
+        EasyMock.anyBoolean()
+    )).andReturn(taskStatus);
+
+    replayAll();
+
+    ListenableFuture<TaskStatus> future = runner.run(task);
+    Assertions.assertEquals(taskStatus, future.get());
+
+    verifyAll();
+  }
+
+  @Test
+  public void test_run_withExistingTask_returnsExistingWorkItem()
+  {
+    KubernetesWorkItem workItem = new KubernetesWorkItem(task, null, kubernetesPeonLifecycle);
+    runner.tasks.put(task.getId(), workItem);
+
+    ListenableFuture<TaskStatus> future = runner.run(task);
+
+    Assertions.assertEquals(workItem.getResult(), future);
+  }
+
+  @Test
+  public void test_run_whenExceptionThrown_throwsRuntimeException() throws IOException
+  {
+    Job job = new JobBuilder()
+        .withNewMetadata()
+        .withName(ID)
+        .endMetadata()
+        .build();
+
+    EasyMock.expect(taskAdapter.fromTask(task)).andReturn(job);
+    EasyMock.expect(taskAdapter.shouldUseDeepStorageForTaskPayload(task)).andReturn(false);
+    EasyMock.expect(kubernetesPeonLifecycle.run(
+        EasyMock.eq(job),
+        EasyMock.anyLong(),
+        EasyMock.anyLong(),
+        EasyMock.anyBoolean()
+    )).andThrow(new IllegalStateException());
+
+    replayAll();
+
+    ListenableFuture<TaskStatus> future = runner.run(task);
+
+    Exception e = Assertions.assertThrows(ExecutionException.class, future::get);
+    Assertions.assertTrue(e.getCause() instanceof RuntimeException);
+
+    verifyAll();
+  }
+
+  @Test
+  public void test_join_withoutExistingTask() throws ExecutionException, InterruptedException
+  {
+    TaskStatus taskStatus = TaskStatus.success(task.getId());
+
+    EasyMock.expect(kubernetesPeonLifecycle.join(EasyMock.anyLong())).andReturn(taskStatus);
+
+    replayAll();
+
+    KubernetesWorkItem workItem = runner.joinAsync(task);
+    Assertions.assertEquals(taskStatus, workItem.getResult().get());
+
+    verifyAll();
+  }
+
+  @Test
+  public void test_join_withExistingTask_returnsExistingWorkItem()
+  {
+    KubernetesWorkItem workItem = new KubernetesWorkItem(task, null, kubernetesPeonLifecycle);
+    runner.tasks.put(task.getId(), workItem);
+
+    ListenableFuture<TaskStatus> future = runner.run(task);
+
+    Assertions.assertEquals(workItem.getResult(), future);
+  }
+
+  @Test
+  public void test_join_whenExceptionThrown_throwsRuntimeException()
+  {
+    EasyMock.expect(kubernetesPeonLifecycle.join(EasyMock.anyLong())).andThrow(new IllegalStateException());
+
+    replayAll();
+
+    KubernetesWorkItem workItem = runner.joinAsync(task);
+
+    Exception e = Assertions.assertThrows(ExecutionException.class, () -> workItem.getResult().get());
+    Assertions.assertTrue(e.getCause() instanceof RuntimeException);
+
+    verifyAll();
+  }
+
+  @Test
+  public void test_doTask_whenShutdownRequested_throwsRuntimeException()
+  {
+    Assertions.assertThrows(
+        RuntimeException.class,
+        () -> runner.doTask(task, true),
+        "Task [id] has been shut down"
+    );
+  }
+
+  @Test
+  public void test_shutdown_withExistingTask_removesTaskFromMap()
+  {
+    KubernetesWorkItem workItem = new KubernetesWorkItem(task, statusFuture, kubernetesPeonLifecycle) {
+      @Override
+      protected synchronized void shutdown()
+      {
+      }
+    };
+    EasyMock.expect(statusFuture.isDone()).andReturn(true).anyTimes();
+    replayAll();
+    runner.tasks.put(task.getId(), workItem);
+    runner.shutdown(task.getId(), "");
+    Assertions.assertTrue(runner.tasks.isEmpty());
+    verifyAll();
+  }
+
+  @Test
+  public void test_shutdown_withExistingTask_futureIncomplete_removesTaskFromMap()
+  {
+    KubernetesWorkItem workItem = new KubernetesWorkItem(task, statusFuture, kubernetesPeonLifecycle) {
+      @Override
+      protected synchronized void shutdown()
+      {
+      }
+    };
+    EasyMock.expect(statusFuture.isDone()).andReturn(false).anyTimes();
+    replayAll();
+    runner.tasks.put(task.getId(), workItem);
+    runner.shutdown(task.getId(), "");
+    Assertions.assertEquals(1, runner.tasks.size());
+    verifyAll();
+  }
+
+  @Test
+  public void test_shutdown_whileWaitingForCapacity_doesNotLaunchJob() throws Exception
+  {
+    final CountDownLatch capacityFreed = new CountDownLatch(1);
+    final ThreadPoolExecutor sharedExecutor = newExecutorAtCapacity(capacityFreed);
+    final KubernetesTaskRunner runner = newRunnerWithRealPeonLifecycles(sharedExecutor, null);
+
+    final K8sTaskId k8sTaskId = new K8sTaskId(config.getK8sTaskPodNamePrefix(), task);
+    EasyMock.expect(peonClient.getPeonLogWatcher(k8sTaskId)).andReturn(Optional.absent());
+    EasyMock.expect(peonClient.deletePeonJob(k8sTaskId)).andReturn(false);
+    replayAll();
+
+    try {
+      final ListenableFuture<TaskStatus> future = runner.run(task);
+      Assertions.assertEquals(RunnerTaskState.PENDING, runner.getRunnerTaskState(task.getId()));
+
+      runner.shutdown(task.getId(), "killed");
+      capacityFreed.countDown();
+
+      Assertions.assertTrue(future.get(10, TimeUnit.SECONDS).isFailure());
+      verifyAll();
+
+      runner.shutdown(task.getId(), "killed");
+      Assertions.assertTrue(runner.tasks.isEmpty());
+    }
+    finally {
+      runner.stop();
+      sharedExecutor.shutdownNow();
+    }
+  }
+
+  @Test
+  public void test_shutdown_whileWaitingForCapacity_deletesRestoredJobAndSavesLogs() throws Exception
+  {
+    final TaskLogs taskLogs = createMock(TaskLogs.class);
+    final LogWatch logWatch = createMock(LogWatch.class);
+    final CountDownLatch capacityFreed = new CountDownLatch(1);
+    final ThreadPoolExecutor sharedExecutor = newExecutorAtCapacity(capacityFreed);
+    final KubernetesTaskRunner runner = newRunnerWithRealPeonLifecycles(sharedExecutor, taskLogs);
+
+    final K8sTaskId k8sTaskId = new K8sTaskId(config.getK8sTaskPodNamePrefix(), task);
+    EasyMock.expect(peonClient.getPeonLogWatcher(k8sTaskId)).andReturn(Optional.of(logWatch));
+    EasyMock.expect(peonClient.deletePeonJob(k8sTaskId)).andReturn(true);
+    EasyMock.expect(logWatch.getOutput()).andReturn(IOUtils.toInputStream("", StandardCharsets.UTF_8));
+    taskLogs.pushTaskLog(EasyMock.eq(task.getId()), EasyMock.anyObject(File.class));
+    logWatch.close();
+    replayAll();
+
+    try {
+      final KubernetesWorkItem workItem = runner.joinAsync(task);
+
+      runner.shutdown(task.getId(), "killed");
+      capacityFreed.countDown();
+
+      Assertions.assertTrue(workItem.getResult().get(10, TimeUnit.SECONDS).isFailure());
+      verifyAll();
+    }
+    finally {
+      runner.stop();
+      sharedExecutor.shutdownNow();
+    }
+  }
+
+  /**
+   * Returns a single-thread executor whose only thread stays busy until {@code capacityFreed} counts down.
+   */
+  private static ThreadPoolExecutor newExecutorAtCapacity(CountDownLatch capacityFreed)
+  {
+    final ThreadPoolExecutor executor = new ThreadPoolExecutor(
+        1,
+        1,
+        0L,
+        TimeUnit.MILLISECONDS,
+        new LinkedBlockingQueue<>()
+    );
+    executor.submit(() -> {
+      capacityFreed.await();
+      return null;
+    });
+    return executor;
+  }
+
+  private KubernetesTaskRunner newRunnerWithRealPeonLifecycles(
+      ThreadPoolExecutor sharedExecutor,
+      @Nullable TaskLogs taskLogs
+  )
+  {
+    return new KubernetesTaskRunner(
+        taskAdapter,
+        config,
+        peonClient,
+        httpClient,
+        new KubernetesPeonLifecycleFactory(peonClient, taskLogs, null, 1000L, null),
+        emitter,
+        sharedExecutor,
+        configManager
+    );
+  }
+
+  @Test
+  public void test_shutdown_withoutExistingTask()
+  {
+    runner.shutdown(task.getId(), "");
+  }
+
+  @Test
+  public void test_getTotalTaskSlotCount()
+  {
+    Map<String, Long> slotCount = runner.getTotalTaskSlotCount();
+
+    MatcherAssert.assertThat(slotCount, Matchers.allOf(
+        Matchers.aMapWithSize(1),
+        Matchers.hasEntry(
+            Matchers.equalTo(KubernetesTaskRunner.WORKER_CATEGORY),
+            Matchers.equalTo(1L)
+        )
+    ));
+  }
+
+  @Test
+  public void test_getKnownTasks()
+  {
+    KubernetesWorkItem workItem = new KubernetesWorkItem(task, null, kubernetesPeonLifecycle);
+
+    runner.tasks.put(task.getId(), workItem);
+
+    Collection<? extends TaskRunnerWorkItem> tasks = runner.getKnownTasks();
+
+    Assertions.assertEquals(1, tasks.size());
+    Assertions.assertEquals(Collections.singletonList(workItem), runner.getKnownTasks());
+  }
+
+  @Test
+  public void test_getRunningTasks()
+  {
+    Task pendingTask = K8sTestUtils.createTask("pending-id", 0);
+    KubernetesWorkItem pendingWorkItem = new KubernetesWorkItem(pendingTask, null, kubernetesPeonLifecycle) {
+      @Override
+      protected RunnerTaskState getRunnerTaskState()
+      {
+        return RunnerTaskState.PENDING;
+      }
+    };
+    runner.tasks.put(pendingTask.getId(), pendingWorkItem);
+
+    Task runningTask = K8sTestUtils.createTask("running-id", 0);
+    KubernetesWorkItem runningWorkItem = new KubernetesWorkItem(runningTask, null, kubernetesPeonLifecycle) {
+      @Override
+      protected RunnerTaskState getRunnerTaskState()
+      {
+        return RunnerTaskState.RUNNING;
+      }
+    };
+    runner.tasks.put(runningTask.getId(), runningWorkItem);
+
+    Collection<? extends TaskRunnerWorkItem> tasks = runner.getRunningTasks();
+
+    Assertions.assertEquals(1, tasks.size());
+    Assertions.assertEquals(Collections.singletonList(runningWorkItem), tasks);
+  }
+
+  @Test
+  public void test_getPendingTasks()
+  {
+    Task pendingTask = K8sTestUtils.createTask("pending-id", 0);
+    KubernetesWorkItem pendingWorkItem = new KubernetesWorkItem(pendingTask, null, kubernetesPeonLifecycle) {
+      @Override
+      protected RunnerTaskState getRunnerTaskState()
+      {
+        return RunnerTaskState.PENDING;
+      }
+    };
+    runner.tasks.put(pendingTask.getId(), pendingWorkItem);
+
+    Task runningTask = K8sTestUtils.createTask("running-id", 0);
+    KubernetesWorkItem runningWorkItem = new KubernetesWorkItem(runningTask, null, kubernetesPeonLifecycle) {
+      @Override
+      protected RunnerTaskState getRunnerTaskState()
+      {
+        return RunnerTaskState.RUNNING;
+      }
+    };
+    runner.tasks.put(runningTask.getId(), runningWorkItem);
+
+    Collection<? extends TaskRunnerWorkItem> tasks = runner.getPendingTasks();
+
+    Assertions.assertEquals(1, tasks.size());
+    Assertions.assertEquals(Collections.singletonList(pendingWorkItem), tasks);
+  }
+
+  @Test
+  public void test_getRunnerTaskState_withoutExistingTask_returnsNull()
+  {
+    Assertions.assertNull(runner.getRunnerTaskState(task.getId()));
+  }
+
+  @Test
+  public void test_getRunnerTaskState_withExistingTask()
+  {
+    KubernetesWorkItem workItem = new KubernetesWorkItem(task, null, kubernetesPeonLifecycle) {
+      @Override
+      protected RunnerTaskState getRunnerTaskState()
+      {
+        return RunnerTaskState.NONE;
+      }
+    };
+    runner.tasks.put(task.getId(), workItem);
+
+    Assertions.assertEquals(RunnerTaskState.NONE, runner.getRunnerTaskState(task.getId()));
+  }
+
+  @Test
+  public void test_streamTaskReports_withExistingTask() throws Exception
+  {
+    final KubernetesWorkItem workItem = new KubernetesWorkItem(task, null, kubernetesPeonLifecycle) {
+      @Override
+      public TaskLocation getLocation()
+      {
+        return TaskLocation.create("host", 0, 1, false);
+      }
+    };
+
+    runner.tasks.put(task.getId(), workItem);
+
+    EasyMock.expect(httpClient.go(
+        EasyMock.anyObject(Request.class),
+        EasyMock.anyObject(InputStreamFullResponseHandler.class))
+    ).andReturn(Futures.immediateFuture(taskReportResponse(HttpResponseStatus.OK, "{}")));
+
+    replayAll();
+
+    final Optional<InputStream> maybeInputStream = runner.streamTaskReports(task.getId());
+
+    verifyAll();
+
+    Assertions.assertTrue(maybeInputStream.isPresent());
+    Assertions.assertEquals("{}", IOUtils.toString(maybeInputStream.get(), StandardCharsets.UTF_8));
+  }
+
+  @Test
+  public void test_streamTaskReports_whenTaskReportsUnavailable_returnsEmptyOptional() throws Exception
+  {
+    final KubernetesWorkItem workItem = new KubernetesWorkItem(task, null, kubernetesPeonLifecycle) {
+      @Override
+      public TaskLocation getLocation()
+      {
+        return TaskLocation.create("host", 0, 1, false);
+      }
+    };
+
+    runner.tasks.put(task.getId(), workItem);
+
+    EasyMock.expect(httpClient.go(
+        EasyMock.anyObject(Request.class),
+        EasyMock.anyObject(InputStreamFullResponseHandler.class))
+    ).andReturn(Futures.immediateFuture(taskReportResponse(HttpResponseStatus.SERVICE_UNAVAILABLE, "error")));
+
+    replayAll();
+
+    final Optional<InputStream> maybeInputStream = runner.streamTaskReports(task.getId());
+
+    verifyAll();
+
+    Assertions.assertFalse(maybeInputStream.isPresent());
+  }
+
+  @Test
+  public void test_streamTaskReports_withoutExistingTask_returnsEmptyOptional() throws Exception
+  {
+    final Optional<InputStream> maybeInputStream = runner.streamTaskReports(task.getId());
+    Assertions.assertFalse(maybeInputStream.isPresent());
+  }
+
+  @Test
+  public void test_streamTaskReports_withUnknownTaskLocation_returnsEmptyOptional() throws Exception
+  {
+    final KubernetesWorkItem workItem = new KubernetesWorkItem(task, null, kubernetesPeonLifecycle) {
+      @Override
+      public TaskLocation getLocation()
+      {
+        return TaskLocation.unknown();
+      }
+    };
+
+    runner.tasks.put(task.getId(), workItem);
+
+    final Optional<InputStream> maybeInputStream = runner.streamTaskReports(task.getId());
+    Assertions.assertFalse(maybeInputStream.isPresent());
+  }
+
+  @Test
+  public void test_streamTaskReports_whenInterruptedExceptionThrown_throwsRuntimeException()
+  {
+    final KubernetesWorkItem workItem = new KubernetesWorkItem(task, null, kubernetesPeonLifecycle) {
+      @Override
+      public TaskLocation getLocation()
+      {
+        return TaskLocation.create("host", 0, 1, false);
+      }
+    };
+
+    runner.tasks.put(task.getId(), workItem);
+
+    final ListenableFuture<InputStreamFullResponseHolder> future = new ListenableFuture<>()
+    {
+      @Override
+      public void addListener(Runnable runnable, Executor executor)
+      {
+      }
+
+      @Override
+      public boolean cancel(boolean mayInterruptIfRunning)
+      {
+        return false;
+      }
+
+      @Override
+      public boolean isCancelled()
+      {
+        return false;
+      }
+
+      @Override
+      public boolean isDone()
+      {
+        return false;
+      }
+
+      @Override
+      public InputStreamFullResponseHolder get() throws InterruptedException
+      {
+        throw new InterruptedException();
+      }
+
+      @Override
+      public InputStreamFullResponseHolder get(long timeout, TimeUnit unit) throws InterruptedException
+      {
+        throw new InterruptedException();
+      }
+    };
+
+    EasyMock.expect(httpClient.go(
+        EasyMock.anyObject(Request.class),
+        EasyMock.anyObject(InputStreamFullResponseHandler.class))
+    ).andReturn(future);
+
+    replayAll();
+
+    final Exception e = Assertions.assertThrows(RuntimeException.class, () -> runner.streamTaskReports(task.getId()));
+    Assertions.assertTrue(e.getCause() instanceof InterruptedException);
+
+    verifyAll();
+  }
+
+  @Test
+  public void test_streamTaskReports_whenExecutionExceptionThrown_throwsRuntimeException()
+  {
+    final KubernetesWorkItem workItem = new KubernetesWorkItem(task, null, kubernetesPeonLifecycle) {
+      @Override
+      public TaskLocation getLocation()
+      {
+        return TaskLocation.create("host", 0, 1, false);
+      }
+    };
+
+    runner.tasks.put(task.getId(), workItem);
+
+    EasyMock.expect(httpClient.go(
+        EasyMock.anyObject(Request.class),
+        EasyMock.anyObject(InputStreamFullResponseHandler.class))
+    ).andReturn(Futures.immediateFailedFuture(new Exception()));
+
+    replayAll();
+
+    Assertions.assertThrows(RuntimeException.class, () -> runner.streamTaskReports(task.getId()));
+
+    verifyAll();
+  }
+
+  @Test
+  public void test_metricsReported_whenTaskStateChange()
+  {
+    KubernetesWorkItem workItem = new KubernetesWorkItem(task, null, kubernetesPeonLifecycle) {
+      @Override
+      public TaskLocation getLocation()
+      {
+        return TaskLocation.unknown();
+      }
+    };
+
+    runner.tasks.put(task.getId(), workItem);
+
+    emitter.emit(EasyMock.anyObject(ServiceEventBuilder.class));
+
+    replayAll();
+
+    runner.emitTaskStateMetrics(KubernetesPeonLifecycle.State.RUNNING, task.getId());
+
+    verifyAll();
+  }
+
+  @Test
+  public void test_getTaskLocation_withExistingTask()
+  {
+    KubernetesWorkItem workItem = new KubernetesWorkItem(task, null, kubernetesPeonLifecycle) {
+      @Override
+      public TaskLocation getLocation()
+      {
+        return TaskLocation.create("host", 0, 1, false);
+      }
+    };
+
+    runner.tasks.put(task.getId(), workItem);
+
+    TaskLocation taskLocation = runner.getTaskLocation(task.getId());
+    Assertions.assertEquals(TaskLocation.create("host", 0, 1, false), taskLocation);
+  }
+
+  @Test
+  public void test_getTaskLocation_throws()
+  {
+    KubernetesWorkItem workItem = new KubernetesWorkItem(task, null, kubernetesPeonLifecycle)
+    {
+      @Override
+      public TaskLocation getLocation()
+      {
+        throw new RuntimeException();
+      }
+    };
+
+    runner.tasks.put(task.getId(), workItem);
+
+    TaskLocation taskLocation = runner.getTaskLocation(task.getId());
+    Assertions.assertEquals(TaskLocation.unknown(), taskLocation);
+  }
+
+  @Test
+  public void test_getTaskLocation_noTaskFound()
+  {
+    TaskLocation taskLocation = runner.getTaskLocation(task.getId());
+    Assertions.assertEquals(TaskLocation.unknown(), taskLocation);
+  }
+
+  @Test
+  public void test_getTotalCapacity()
+  {
+    Assertions.assertEquals(1, runner.getTotalCapacity());
+  }
+
+  @Test
+  public void test_getUsedCapacity()
+  {
+    Assertions.assertEquals(0, runner.getUsedCapacity());
+    KubernetesWorkItem workItem = new KubernetesWorkItem(task, null, kubernetesPeonLifecycle);
+    runner.tasks.put(task.getId(), workItem);
+    Assertions.assertEquals(1, runner.getUsedCapacity());
+    runner.tasks.remove(task.getId());
+    Assertions.assertEquals(0, runner.getUsedCapacity());
+  }
+
+  @Test
+  public void test_stop()
+  {
+
+    KubernetesTaskRunner kubernetesTaskRunner = new KubernetesTaskRunner(
+        taskAdapter,
+        config,
+        peonClient,
+        httpClient,
+        new TestPeonLifecycleFactory(kubernetesPeonLifecycle),
+        emitter,
+        configManager
+    );
+    kubernetesTaskRunner.stop();
+    Assertions.assertThrows(RejectedExecutionException.class, () -> kubernetesTaskRunner.run(task));
+  }
+
+  @Test
+  public void test_syncCapacityWithDynamicConfig_increase_updatesExecutorAndCapacity() throws Exception
+  {
+    Method method = KubernetesTaskRunner.class.getDeclaredMethod(
+        "syncCapacityWithDynamicConfig",
+        KubernetesTaskRunnerDynamicConfig.class
+    );
+    method.setAccessible(true);
+
+    // increase from 1 -> 3
+    method.invoke(runner, new DefaultKubernetesTaskRunnerDynamicConfig(null, 3));
+
+    Field tpeField = KubernetesTaskRunner.class.getDeclaredField("tpe");
+    tpeField.setAccessible(true);
+    ThreadPoolExecutor executor = (ThreadPoolExecutor) tpeField.get(runner);
+
+    Assertions.assertEquals(3, executor.getCorePoolSize());
+    Assertions.assertEquals(3, executor.getMaximumPoolSize());
+    Assertions.assertEquals(3, runner.getTotalCapacity());
+  }
+
+  @Test
+  public void test_syncCapacityWithDynamicConfig_decrease_updatesExecutorAndCapacity() throws Exception
+  {
+    Method method = KubernetesTaskRunner.class.getDeclaredMethod(
+        "syncCapacityWithDynamicConfig",
+        KubernetesTaskRunnerDynamicConfig.class
+    );
+    method.setAccessible(true);
+
+    // first increase to 4 to ensure we can decrease after
+    method.invoke(runner, new DefaultKubernetesTaskRunnerDynamicConfig(null, 4));
+    // then decrease 4 -> 2
+    method.invoke(runner, new DefaultKubernetesTaskRunnerDynamicConfig(null, 2));
+
+    Field tpeField = KubernetesTaskRunner.class.getDeclaredField("tpe");
+    tpeField.setAccessible(true);
+    ThreadPoolExecutor executor = (ThreadPoolExecutor) tpeField.get(runner);
+
+    Assertions.assertEquals(2, executor.getCorePoolSize());
+    Assertions.assertEquals(2, executor.getMaximumPoolSize());
+    Assertions.assertEquals(2, runner.getTotalCapacity());
+  }
+
+  @Test
+  public void test_syncCapacityWithDynamicConfig_sameCapacity_noChangeAndNoError() throws Exception
+  {
+    Method method = KubernetesTaskRunner.class.getDeclaredMethod(
+        "syncCapacityWithDynamicConfig",
+        KubernetesTaskRunnerDynamicConfig.class
+    );
+    method.setAccessible(true);
+
+    // initial capacity is 1 in setup; calling with 1 should be a no-op
+    method.invoke(runner, new DefaultKubernetesTaskRunnerDynamicConfig(null, 1));
+
+    Field tpeField = KubernetesTaskRunner.class.getDeclaredField("tpe");
+    tpeField.setAccessible(true);
+    ThreadPoolExecutor executor = (ThreadPoolExecutor) tpeField.get(runner);
+
+    Assertions.assertEquals(1, executor.getCorePoolSize());
+    Assertions.assertEquals(1, executor.getMaximumPoolSize());
+    Assertions.assertEquals(1, runner.getTotalCapacity());
+  }
+
+  private static InputStreamFullResponseHolder taskReportResponse(
+      final HttpResponseStatus status,
+      final String content
+  )
+  {
+    final InputStreamFullResponseHolder response = new InputStreamFullResponseHolder(
+        new DefaultHttpResponse(HttpVersion.HTTP_1_1, status)
+    );
+    response.addChunk(content.getBytes(StandardCharsets.UTF_8));
+    response.done();
+    return response;
+  }
+}

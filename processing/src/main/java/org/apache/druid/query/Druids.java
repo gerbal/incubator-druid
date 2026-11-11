@@ -22,7 +22,6 @@ package org.apache.druid.query;
 import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
 import org.apache.druid.java.util.common.Intervals;
@@ -30,12 +29,14 @@ import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.granularity.Granularity;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.PostAggregator;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.datasourcemetadata.DataSourceMetadataQuery;
 import org.apache.druid.query.dimension.DefaultDimensionSpec;
 import org.apache.druid.query.dimension.DimensionSpec;
 import org.apache.druid.query.filter.DimFilter;
 import org.apache.druid.query.filter.InDimFilter;
 import org.apache.druid.query.filter.SelectorDimFilter;
+import org.apache.druid.query.metadata.metadata.AggregatorMergeStrategy;
 import org.apache.druid.query.metadata.metadata.ColumnIncluderator;
 import org.apache.druid.query.metadata.metadata.SegmentMetadataQuery;
 import org.apache.druid.query.scan.ScanQuery;
@@ -52,6 +53,8 @@ import org.apache.druid.query.timeboundary.TimeBoundaryQuery;
 import org.apache.druid.query.timeseries.TimeseriesQuery;
 import org.apache.druid.segment.VirtualColumn;
 import org.apache.druid.segment.VirtualColumns;
+import org.apache.druid.segment.column.ColumnType;
+import org.apache.druid.segment.column.RowSignature;
 import org.joda.time.Interval;
 
 import javax.annotation.Nullable;
@@ -69,7 +72,7 @@ import java.util.UUID;
  */
 public class Druids
 {
-  public static final Function<String, DimensionSpec> DIMENSION_IDENTITY = new Function<String, DimensionSpec>()
+  public static final Function<String, DimensionSpec> DIMENSION_IDENTITY = new Function<>()
   {
     @Nullable
     @Override
@@ -197,7 +200,7 @@ public class Druids
 
     public TimeseriesQueryBuilder virtualColumns(VirtualColumn... virtualColumns)
     {
-      return virtualColumns(VirtualColumns.create(Arrays.asList(virtualColumns)));
+      return virtualColumns(VirtualColumns.create(virtualColumns));
     }
 
     public TimeseriesQueryBuilder filters(String dimensionName, String value)
@@ -275,7 +278,7 @@ public class Druids
 
     public TimeseriesQueryBuilder queryId(String queryId)
     {
-      context = BaseQuery.computeOverriddenContext(context, ImmutableMap.of(BaseQuery.QUERY_ID, queryId));
+      context = QueryContexts.override(context, QueryContextParameters.QUERY_ID, queryId);
       return this;
     }
 
@@ -442,7 +445,7 @@ public class Druids
 
     public SearchQueryBuilder virtualColumns(VirtualColumn... vc)
     {
-      virtualColumns = VirtualColumns.create(Arrays.asList(vc));
+      virtualColumns = VirtualColumns.create(vc);
       return this;
     }
 
@@ -509,7 +512,7 @@ public class Druids
 
     public SearchQueryBuilder queryId(String queryId)
     {
-      context = BaseQuery.computeOverriddenContext(context, ImmutableMap.of(BaseQuery.QUERY_ID, queryId));
+      context = QueryContexts.override(context, QueryContextParameters.QUERY_ID, queryId);
       return this;
     }
   }
@@ -626,7 +629,7 @@ public class Druids
 
     public TimeBoundaryQueryBuilder queryId(String queryId)
     {
-      context = BaseQuery.computeOverriddenContext(context, ImmutableMap.of(BaseQuery.QUERY_ID, queryId));
+      context = QueryContexts.override(context, QueryContextParameters.QUERY_ID, queryId);
       return this;
     }
   }
@@ -659,6 +662,7 @@ public class Druids
     private EnumSet<SegmentMetadataQuery.AnalysisType> analysisTypes;
     private Boolean merge;
     private Boolean lenientAggregatorMerge;
+    private AggregatorMergeStrategy aggregatorMergeStrategy;
     private Boolean usingDefaultInterval;
     private Map<String, Object> context;
 
@@ -670,6 +674,7 @@ public class Druids
       analysisTypes = null;
       merge = null;
       lenientAggregatorMerge = null;
+      aggregatorMergeStrategy = null;
       usingDefaultInterval = null;
       context = null;
     }
@@ -684,7 +689,8 @@ public class Druids
           context,
           analysisTypes,
           usingDefaultInterval,
-          lenientAggregatorMerge
+          lenientAggregatorMerge,
+          aggregatorMergeStrategy
       );
     }
 
@@ -696,7 +702,7 @@ public class Druids
           .toInclude(query.getToInclude())
           .analysisTypes(query.getAnalysisTypes())
           .merge(query.isMerge())
-          .lenientAggregatorMerge(query.isLenientAggregatorMerge())
+          .aggregatorMergeStrategy(query.getAggregatorMergeStrategy())
           .usingDefaultInterval(query.isUsingDefaultInterval())
           .context(query.getContext());
     }
@@ -761,9 +767,16 @@ public class Druids
       return this;
     }
 
+    @Deprecated
     public SegmentMetadataQueryBuilder lenientAggregatorMerge(boolean lenientAggregatorMerge)
     {
       this.lenientAggregatorMerge = lenientAggregatorMerge;
+      return this;
+    }
+
+    public SegmentMetadataQueryBuilder aggregatorMergeStrategy(AggregatorMergeStrategy aggregatorMergeStrategy)
+    {
+      this.aggregatorMergeStrategy = aggregatorMergeStrategy;
       return this;
     }
 
@@ -812,9 +825,9 @@ public class Druids
     private long limit;
     private DimFilter dimFilter;
     private List<String> columns = new ArrayList<>();
-    private Boolean legacy;
-    private ScanQuery.Order order;
-    private List<ScanQuery.OrderBy> orderBy;
+    private Order order;
+    private List<OrderBy> orderBy;
+    private List<ColumnType> columnTypes = null;
 
     public ScanQuery build()
     {
@@ -830,8 +843,8 @@ public class Druids
           orderBy,
           dimFilter,
           columns,
-          legacy,
-          context
+          context,
+          columnTypes
       );
     }
 
@@ -847,14 +860,19 @@ public class Druids
           .limit(query.getScanRowsLimit())
           .filters(query.getFilter())
           .columns(query.getColumns())
-          .legacy(query.isLegacy())
           .context(query.getContext())
-          .orderBy(query.getOrderBys());
+          .orderBy(query.getOrderBys())
+          .columnTypes(query.getColumnTypes());
     }
 
     public ScanQueryBuilder dataSource(String ds)
     {
       dataSource = new TableDataSource(ds);
+      return this;
+    }
+    public ScanQueryBuilder dataSource(Query<?> q)
+    {
+      dataSource = new QueryDataSource(q);
       return this;
     }
 
@@ -888,7 +906,7 @@ public class Druids
 
     public ScanQueryBuilder virtualColumns(VirtualColumn... virtualColumns)
     {
-      return virtualColumns(VirtualColumns.create(Arrays.asList(virtualColumns)));
+      return virtualColumns(VirtualColumns.create(virtualColumns));
     }
 
     public ScanQueryBuilder context(Map<String, Object> c)
@@ -939,22 +957,34 @@ public class Druids
       return this;
     }
 
-    public ScanQueryBuilder legacy(Boolean legacy)
-    {
-      this.legacy = legacy;
-      return this;
-    }
-
-    public ScanQueryBuilder order(ScanQuery.Order order)
+    public ScanQueryBuilder order(Order order)
     {
       this.order = order;
       return this;
     }
 
-    public ScanQueryBuilder orderBy(List<ScanQuery.OrderBy> orderBys)
+    public ScanQueryBuilder orderBy(List<OrderBy> orderBys)
     {
       this.orderBy = orderBys;
       return this;
+    }
+
+    public ScanQueryBuilder columnTypes(List<ColumnType> columnTypes)
+    {
+      this.columnTypes = columnTypes;
+      return this;
+    }
+
+    public ScanQueryBuilder columnTypes(ColumnType... columnType)
+    {
+      this.columnTypes = Arrays.asList(columnType);
+      return this;
+    }
+
+    public ScanQueryBuilder columns(RowSignature sig)
+    {
+      return columnTypes(sig.getColumnTypes())
+          .columns(sig.getColumnNames());
     }
   }
 

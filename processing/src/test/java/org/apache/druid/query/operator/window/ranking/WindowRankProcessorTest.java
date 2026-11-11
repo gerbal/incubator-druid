@@ -19,6 +19,7 @@
 
 package org.apache.druid.query.operator.window.ranking;
 
+import com.google.common.collect.ImmutableList;
 import org.apache.druid.query.operator.window.ComposingProcessor;
 import org.apache.druid.query.operator.window.Processor;
 import org.apache.druid.query.operator.window.RowsAndColumnsHelper;
@@ -26,7 +27,8 @@ import org.apache.druid.query.rowsandcols.MapOfColumnsRowsAndColumns;
 import org.apache.druid.query.rowsandcols.RowsAndColumns;
 import org.apache.druid.query.rowsandcols.column.Column;
 import org.apache.druid.query.rowsandcols.column.IntArrayColumn;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -48,6 +50,8 @@ public class WindowRankProcessorTest
         new WindowRankProcessor(orderingCols, "rank", false),
         new WindowRankProcessor(orderingCols, "rankAsPercent", true)
     );
+
+    Assertions.assertEquals(ImmutableList.of("rank", "rankAsPercent"), processor.getOutputColumnNames());
 
     final RowsAndColumnsHelper expectations = new RowsAndColumnsHelper()
         .expectColumn("vals", new int[]{7, 18, 18, 30, 120, 121, 122, 122, 8290, 8290})

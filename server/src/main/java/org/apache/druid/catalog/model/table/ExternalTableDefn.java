@@ -21,7 +21,6 @@ package org.apache.druid.catalog.model.table;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.google.common.annotations.VisibleForTesting;
-import org.apache.druid.catalog.model.ColumnSpec;
 import org.apache.druid.catalog.model.ModelProperties.ObjectPropertyDefn;
 import org.apache.druid.catalog.model.ModelProperties.PropertyDefn;
 import org.apache.druid.catalog.model.ResolvedTable;
@@ -206,6 +205,11 @@ public class ExternalTableDefn extends TableDefn
   public static final String TABLE_TYPE = "extern";
 
   /**
+   * Column type for external tables.
+   */
+  public static final String EXTERNAL_COLUMN_TYPE = "extern";
+
+  /**
    * Property which holds the input source specification as serialized as JSON.
    */
   public static final String SOURCE_PROPERTY = "source";
@@ -219,19 +223,19 @@ public class ExternalTableDefn extends TableDefn
    * Definition of the input source property.
    */
   private static final PropertyDefn<InputSource> SOURCE_PROPERTY_DEFN =
-      new ObjectPropertyDefn<InputSource>(SOURCE_PROPERTY, InputSource.class);
+      new ObjectPropertyDefn<>(SOURCE_PROPERTY, InputSource.class);
 
   /**
    * Definition of the input format property.
    */
   private static final PropertyDefn<InputFormat> FORMAT_PROPERTY_DEFN =
-      new ObjectPropertyDefn<InputFormat>(FORMAT_PROPERTY, InputFormat.class);
+      new ObjectPropertyDefn<>(FORMAT_PROPERTY, InputFormat.class);
 
   /**
    * Type reference used to deserialize JSON to a generic map.
    */
   @VisibleForTesting
-  public static final TypeReference<Map<String, Object>> MAP_TYPE_REF = new TypeReference<Map<String, Object>>() { };
+  public static final TypeReference<Map<String, Object>> MAP_TYPE_REF = new TypeReference<>() {};
 
   private TableDefnRegistry registry;
 
@@ -277,12 +281,6 @@ public class ExternalTableDefn extends TableDefn
   public TableFunction tableFn(ResolvedTable table)
   {
     return new ResolvedExternalTable(table).resolve(registry).tableFn();
-  }
-
-  @Override
-  protected void validateColumn(ColumnSpec colSpec)
-  {
-    // Validate type in next PR
   }
 
   /**

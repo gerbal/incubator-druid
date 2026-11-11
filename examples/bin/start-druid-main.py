@@ -75,7 +75,7 @@ SERVICE_MEMORY_RATIO = {
 }
 
 MINIMUM_MEMORY_MB = {
-    MIDDLE_MANAGER: 64,
+    MIDDLE_MANAGER: 256,
     ROUTER: 256,
     TASKS: 1024,
     BROKER: 900,
@@ -154,7 +154,7 @@ sample usage:
                              '\'common.jvm.config\' & \'common.runtime.properties\' files. \n'
                              'If this argument is not given, config from \n'
                              'conf/druid/auto directory is used.\n'
-                             'Note. zookeeper config cannot be overriden.\n')
+                             'Note. zookeeper config cannot be overridden.\n')
     parser.add_argument('--compute', action='store_true',
                         help='Does not start Druid, only displays the memory allocated \n'
                              'to each service if started with the given total memory.\n')
@@ -362,7 +362,7 @@ def get_physical_memory_linux():
 
 def get_physical_memory_osx():
     p1 = subprocess.Popen(['sysctl', '-a'], stdout=subprocess.PIPE)
-    p2 = subprocess.check_output(['grep', 'hw.memsize'], stdin=p1.stdout)
+    p2 = subprocess.check_output(['grep', 'hw.memsize:'], stdin=p1.stdout)
     p2 = p2.decode('utf-8')
     fields = p2.split(':')
 
@@ -394,7 +394,7 @@ def convert_total_memory_string(memory):
             physical_memory = get_physical_memory()
 
             if physical_memory is None:
-                raise ValueError('Please specify memory argument')
+                raise ValueError('Could not automatically determine memory size. Please explicitly specify the memory argument as --memory=<integer_value><m/g>')
 
             return physical_memory
         elif memory.endswith(MEM_MB_SUFFIX):
@@ -529,7 +529,7 @@ def distribute_memory(services, total_memory):
         if service in MINIMUM_MEMORY_MB and allocated_memory < MINIMUM_MEMORY_MB.get(service):
             allocated_memory = MINIMUM_MEMORY_MB.get(service)
 
-        service_memory_config[service], allocated_memory = build_memory_config(service, allocated_memory)
+        service_memory_config[service] = build_memory_config(service, allocated_memory)[0]
 
     print_if_verbose('\nMemory distribution for services:')
     for key, value in service_memory_config.items():

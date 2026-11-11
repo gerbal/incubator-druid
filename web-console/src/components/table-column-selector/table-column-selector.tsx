@@ -16,18 +16,23 @@
  * limitations under the License.
  */
 
-import { Button, Menu, Position } from '@blueprintjs/core';
+import { Button, Menu, PopoverNext } from '@blueprintjs/core';
 import { IconNames } from '@blueprintjs/icons';
-import { Popover2 } from '@blueprintjs/popover2';
 import React, { useState } from 'react';
 
 import { MenuCheckbox } from '../menu-checkbox/menu-checkbox';
 
 import './table-column-selector.scss';
 
+export type TableColumnSelectorColumn = string | { text: string; label: string };
+
+function getColumnName(c: TableColumnSelectorColumn) {
+  return typeof c === 'string' ? c : c.text;
+}
+
 interface TableColumnSelectorProps {
-  columns: string[];
-  onChange: (column: string) => void;
+  columns: TableColumnSelectorColumn[];
+  onChange: (columnName: string) => void;
   onClose?: (added: number) => void;
   tableColumnsHidden: string[];
 }
@@ -38,42 +43,49 @@ export const TableColumnSelector = React.memo(function TableColumnSelector(
   const { columns, onChange, onClose, tableColumnsHidden } = props;
   const [added, setAdded] = useState(0);
 
-  const isColumnShown = (column: string) => !tableColumnsHidden.includes(column);
+  const isColumnShown = (column: TableColumnSelectorColumn) =>
+    !tableColumnsHidden.includes(getColumnName(column));
 
   const checkboxes = (
     <Menu className="table-column-selector-menu">
-      {columns.map(column => (
-        <MenuCheckbox
-          text={column}
-          key={column}
-          checked={isColumnShown(column)}
-          onChange={() => {
-            if (!isColumnShown(column)) {
-              setAdded(added + 1);
-            }
-            onChange(column);
-          }}
-        />
-      ))}
+      {columns.map(column => {
+        const columnName = getColumnName(column);
+        return (
+          <MenuCheckbox
+            text={columnName}
+            label={typeof column === 'string' ? undefined : column.label}
+            key={columnName}
+            checked={isColumnShown(column)}
+            onChange={() => {
+              if (!isColumnShown(column)) {
+                setAdded(added + 1);
+              }
+              onChange(columnName);
+            }}
+          />
+        );
+      })}
     </Menu>
   );
 
   const counterText = `(${columns.filter(isColumnShown).length}/${columns.length})`;
 
   return (
-    <Popover2
+    <PopoverNext
       className="table-column-selector"
       content={checkboxes}
-      position={Position.BOTTOM_RIGHT}
+      placement="bottom-end"
       onOpened={() => setAdded(0)}
       onClose={() => {
         if (!onClose) return;
         onClose(added);
       }}
+      lazy
+      shouldReturnFocusOnClose={false}
     >
-      <Button rightIcon={IconNames.CARET_DOWN}>
+      <Button endIcon={IconNames.CARET_DOWN}>
         Columns <span className="counter">{counterText}</span>
       </Button>
-    </Popover2>
+    </PopoverNext>
   );
 });

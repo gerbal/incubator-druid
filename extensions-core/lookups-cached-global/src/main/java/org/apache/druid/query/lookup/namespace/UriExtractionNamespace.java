@@ -32,6 +32,8 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 import org.apache.druid.guice.annotations.Json;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.StringUtils;
@@ -48,8 +50,6 @@ import org.apache.druid.java.util.common.parsers.Parser;
 import org.joda.time.Period;
 
 import javax.annotation.Nullable;
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotNull;
 import java.io.IOException;
 import java.net.URI;
 import java.util.Arrays;
@@ -327,7 +327,7 @@ public class UriExtractionNamespace implements ExtractionNamespace
           this.valueColumn,
           Arrays.toString(columns.toArray())
       );
-      CSVParser csvParser = new CSVParser(null, columns, hasHeaderRow, skipHeaderRows);
+      CSVParser csvParser = new CSVParser(null, columns, hasHeaderRow, skipHeaderRows, false);
       csvParser.startFileFromBeginning();
       this.parser = new DelegateParser(
           csvParser,
@@ -355,13 +355,13 @@ public class UriExtractionNamespace implements ExtractionNamespace
     @JsonProperty
     public String getKeyColumn()
     {
-      return this.keyColumn;
+      return keyColumn;
     }
 
     @JsonProperty
     public String getValueColumn()
     {
-      return this.valueColumn;
+      return valueColumn;
     }
 
     @Override
@@ -431,7 +431,8 @@ public class UriExtractionNamespace implements ExtractionNamespace
           StringUtils.emptyToNullNonDruidDataString(delimiter),
           StringUtils.emptyToNullNonDruidDataString(listDelimiter),
           hasHeaderRow,
-          skipHeaderRows
+          skipHeaderRows,
+          false
       );
       delegate.startFileFromBeginning();
       Preconditions.checkArgument(
@@ -643,7 +644,7 @@ public class UriExtractionNamespace implements ExtractionNamespace
       final JsonFactory jsonFactory = jsonMapper.getFactory().copy();
       jsonFactory.configure(JsonFactory.Feature.CANONICALIZE_FIELD_NAMES, false);
 
-      parser = new Parser<String, String>()
+      parser = new Parser<>()
       {
         @Override
         public Map<String, String> parseToMap(String input)

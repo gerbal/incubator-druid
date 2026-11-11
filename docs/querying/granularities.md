@@ -23,12 +23,15 @@ sidebar_label: "Granularities"
   ~ under the License.
   -->
 
-> Apache Druid supports two query languages: [Druid SQL](sql.md) and [native queries](querying.md).
-> This document describes the native
-> language. For information about time functions available in SQL, refer to the
-> [SQL documentation](sql-scalar.md#date-and-time-functions).
+:::info
+ Apache&circledR; Druid supports two query languages: [Druid SQL](sql.md) and [native queries](querying.md).
+ This document describes the native
+ language. For information about time functions available in SQL, refer to the
+ [SQL documentation](sql-scalar.md#date-and-time-functions).
+:::
 
-Granularity determines how to bucket data across the time dimension, or how to aggregate data by hour, day, minute, etc.
+Granularity determines how to bucket data across the time dimension, or how to aggregate data by hour, day, minute, etc and defines how it is stored.
+The granularity formats here apply also to `segmentGranularity` and `queryGranularity` in the `granularitySpec` section of the [ingestion spec](../ingestion/ingestion-spec.md#granularityspec).
 
 For example, use time granularities in [native queries](querying.md) to bucket results by time, and in the `dataSchema` \\ [`granularitySpec`](../ingestion/ingestion-spec.md#granularityspec) section of ingestion specifications to segment incoming data.
 
@@ -51,7 +54,7 @@ Druid supports the following granularity strings:
   - `six_hour`
   - `eight_hour`
   - `day`
-  - `week`
+  - `week`*
   - `month`
   - `quarter` 
   - `year`
@@ -59,11 +62,15 @@ Druid supports the following granularity strings:
 The minimum and maximum granularities are `none` and `all`, described as follows:
 * `all` buckets everything into a single bucket.
 * `none` does not mean zero bucketing. It buckets data to millisecond granularity—the granularity of the internal index. You can think of `none` as equivalent to `millisecond`.
-  > Do not use `none` in a [timeseries query](../querying/timeseriesquery.md); Druid fills empty interior time buckets with zeroes, meaning the output will contain results for every single millisecond in the requested interval.
+:::info
+ Do not use `none` in a [timeseries query](../querying/timeseriesquery.md); Druid fills empty interior time buckets with zeroes, meaning the output will contain results for every single millisecond in the requested interval.
+:::
+
+*Avoid using the `week` granularity for partitioning at ingestion time, because weeks don't align neatly with months and years, making it difficult to partition by coarser granularities later.
 
 #### Example:
 
-Suppose you have data below stored in Apache Druid with millisecond ingestion granularity,
+Suppose you have data below stored in Apache&circledR; Druid with millisecond ingestion granularity,
 
 ``` json
 {"timestamp": "2013-08-31T01:02:33Z", "page": "AAA", "language" : "en"}

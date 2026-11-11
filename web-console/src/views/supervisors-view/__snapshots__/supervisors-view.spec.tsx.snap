@@ -1,0 +1,232 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`SupervisorsView matches snapshot 1`] = `
+<div
+  class="supervisors-view app-view"
+>
+  <div
+    class="view-control-bar"
+  >
+    <div
+      class="control-label"
+    >
+      Supervisors
+    </div>
+    <div
+      class="bp6-button-group timed-button refresh-button"
+    >
+      <button
+        class="bp6-button"
+        type="button"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-refresh"
+        >
+          <svg
+            data-icon="refresh"
+          />
+        </span>
+        <span
+          class="bp6-button-text"
+        >
+          Refresh
+        </span>
+      </button>
+      <span
+        class="bp6-popover-target"
+      >
+        <button
+          aria-expanded="false"
+          aria-haspopup="menu"
+          class="bp6-button"
+          type="button"
+        >
+          <span
+            aria-hidden="true"
+            class="bp6-icon bp6-icon-caret-down"
+          >
+            <svg
+              data-icon="caret-down"
+            />
+          </span>
+        </button>
+      </span>
+    </div>
+    <span
+      class="bp6-popover-target"
+    >
+      <button
+        aria-expanded="false"
+        aria-haspopup="menu"
+        class="bp6-button"
+        type="button"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-plus"
+        >
+          <svg
+            data-icon="plus"
+          />
+        </span>
+        <span
+          class="bp6-button-text"
+        >
+          Create
+        </span>
+      </button>
+    </span>
+    <span
+      class="more-button bp6-popover-target"
+    >
+      <button
+        aria-expanded="false"
+        aria-haspopup="menu"
+        class="bp6-button"
+        title="More actions"
+        type="button"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-more"
+        >
+          <svg
+            data-icon="more"
+          />
+        </span>
+      </button>
+    </span>
+    <span
+      class="table-column-selector bp6-popover-target"
+    >
+      <button
+        aria-expanded="false"
+        aria-haspopup="menu"
+        class="bp6-button"
+        type="button"
+      >
+        <span
+          class="bp6-button-text"
+        >
+          Columns 
+          <span
+            class="counter"
+          >
+            (10/10)
+          </span>
+        </span>
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-caret-down"
+        >
+          <svg
+            data-icon="caret-down"
+          />
+        </span>
+      </button>
+    </span>
+  </div>
+  <stub-console-table
+    filterable="true"
+    loading="true"
+    manual="true"
+    no-data-text=""
+    of-text=""
+    page="0"
+    page-size="25"
+    pages="10000000"
+    rows="0"
+    show-page-jump="false"
+    show-pagination="true"
+  >
+    <stub-column
+      id="supervisor_id"
+      width="280"
+    >
+      Supervisor ID
+    </stub-column>
+    <stub-column
+      id="datasource"
+      width="280"
+    >
+      Datasource
+    </stub-column>
+    <stub-column
+      id="type"
+      width="120"
+    >
+      Type
+    </stub-column>
+    <stub-column
+      id="source"
+      width="200"
+    >
+      Topic/Stream
+    </stub-column>
+    <stub-column
+      id="detailed_state"
+      width="170"
+    >
+      Status
+    </stub-column>
+    <stub-column
+      id="configured_tasks"
+      width="130"
+    >
+      Configured tasks
+    </stub-column>
+    <stub-column
+      id="running_tasks"
+      width="150"
+    >
+      Running tasks
+    </stub-column>
+    <stub-column
+      id="details"
+      width="250"
+    >
+      Details
+    </stub-column>
+    <stub-column
+      id="stats"
+      width="300"
+    >
+      Stats
+      <br />
+      <span
+        class="bp6-popover-target"
+      >
+        <i
+          aria-expanded="false"
+          aria-haspopup="menu"
+          class="title-button"
+        >
+          Rate over past 5 minutes
+           
+          <span
+            aria-hidden="true"
+            class="bp6-icon bp6-icon-caret-down"
+          >
+            <svg
+              data-icon="caret-down"
+            />
+          </span>
+        </i>
+      </span>
+    </stub-column>
+    <stub-column
+      id="recent_errors"
+      width="150"
+    >
+      Recent errors
+    </stub-column>
+    <stub-column
+      id="actions"
+      width="70"
+    >
+      Actions
+    </stub-column>
+  </stub-console-table>
+</div>
+`;

@@ -1,6 +1,7 @@
 ---
 id: docker
-title: "Tutorial: Run with Docker"
+title:  Run with Docker
+sidebar_label: Run with Docker
 ---
 
 <!--
@@ -22,7 +23,7 @@ title: "Tutorial: Run with Docker"
   ~ under the License.
   -->
 
-This quickstart guides you through the steps to download the Apache Druid image from [Docker Hub](https://hub.docker.com/r/apache/druid) and deploy it on a single machine using [Docker](https://www.docker.com/get-started) and [Docker Compose](https://docs.docker.com/compose/).
+This quickstart guides you through the steps to download the Apache&circledR; Druid image from [Docker Hub](https://hub.docker.com/r/apache/druid) and deploy it on a single machine using [Docker](https://www.docker.com/get-started) and [Docker Compose](https://docs.docker.com/compose/).
 After you finish the initial setup, the cluster will be ready to load data.
 
 Before beginning the quickstart, it is helpful to read the [general Druid overview](../design/index.md) and the [ingestion overview](../ingestion/index.md), because the tutorials refer to concepts discussed on those pages. It also helps to be familiar with [Docker](https://www.docker.com/get-started).
@@ -35,7 +36,7 @@ This tutorial assumes you will download the required files from GitHub. The file
 
 ### Docker memory requirements
 
-The default `docker-compose.yml` launches eight containers: Zookeeper, PostgreSQL, and six Druid containers based upon the [micro quickstart configuration](../operations/single-server.html#single-server-reference-configurations-deprecated).
+The default `docker-compose.yml` launches eight containers: Zookeeper, PostgreSQL, and six Druid containers based upon the [micro quickstart configuration](../operations/single-server.md#single-server-reference-configurations-deprecated).
 Each Druid service is configured to use up to 7 GiB of memory (6 GiB direct memory and 1 GiB heap). However, the quickstart will not use all the available memory.
 
 For this setup, Docker needs at least 6 GiB of memory available for the Druid cluster. For Docker Desktop on Mac OS, adjust the memory settings in the [Docker Desktop preferences](https://docs.docker.com/desktop/mac/). If you experience a crash with a 137 error code you likely don't have enough memory allocated to Docker.
@@ -80,7 +81,7 @@ Production configuration:
 
 Logging configuration:
 
-* `DRUID_LOG4J` -- set the entire [`log4j.xml` configuration file](https://logging.apache.org/log4j/2.x/manual/configuration.html#XML)  verbatim. ([Example](https://github.com/apache/druid/blob/{{DRUIDVERSION}}/distribution/docker/environment#L52))
+* `DRUID_LOG4J` -- set the entire [`log4j.xml` configuration file](https://logging.apache.org/log4j/2.x/manual/configuration.html#XML)  verbatim. ([Example](https://github.com/apache/druid/blob/{{DRUIDVERSION}}/distribution/docker/environment#L51))
 * `DRUID_LOG_LEVEL` -- override the default [Log4j log level](https://en.wikipedia.org/wiki/Log4j#Log4j_log_levels)
 * `DRUID_SERVICE_LOG4J` -- set the entire [`log4j.xml` configuration file](https://logging.apache.org/log4j/2.x/manual/configuration.html#XML)  verbatim specific to a service.
 * `DRUID_SERVICE_LOG_LEVEL` -- override the default [Log4j log level](https://en.wikipedia.org/wiki/Log4j#Log4j_log_levels) in the service specific log4j.
@@ -99,7 +100,7 @@ is translated into the following option in the Java launch command for the Druid
 
 `-Ddruid.metadata.storage.type=postgresql`
 
-Note that Druid uses port 8888 for the console. This port is also used by Jupyter and other tools. To avoid conflicts, you can change the port in the [`ports`](https://github.com/apache/druid/blob/0.21.1/distribution/docker/docker-compose.yml#L125) section of the `docker-compose.yml` file. For example, to expose the console on port 9999 of the host:
+Note that Druid uses port 8888 for the console. This port is also used by Jupyter and other tools. To avoid conflicts, you can change the port in the [`ports`](https://github.com/apache/druid/blob/{{DRUIDVERSION}}/distribution/docker/docker-compose.yml#L129) section of the `docker-compose.yml` file. For example, to expose the console on port 9999 of the host:
 
 ```yaml
     container_name: router
@@ -112,7 +113,7 @@ Note that Druid uses port 8888 for the console. This port is also used by Jupyte
 
 `cd` into the directory that contains the configuration files. This is the directory you created above, or the `distribution/docker/` in your Druid installation directory if you installed Druid locally.
 
-Run `docker-compose up` to launch the cluster with a shell attached, or `docker-compose up -d` to run the cluster in the background.
+Run `docker compose up` to launch the cluster with a shell attached, or `docker compose up -d` to run the cluster in the background.
 
 Once the cluster has started, you can navigate to the [web console](../operations/web-console.md) at [http://localhost:8888](http://localhost:8888). The [Druid router process](../design/router.md) serves the UI.
 
@@ -132,5 +133,5 @@ docker exec -ti <id> sh
 
 Where `<id>` is the container id found with `docker ps`. Druid is installed in `/opt/druid`. The [script](https://github.com/apache/druid/blob/{{DRUIDVERSION}}/distribution/docker/druid.sh) which consumes the environment variables mentioned above, and which launches Druid, is located at `/druid.sh`.
 
-Run `docker-compose down` to shut down the cluster. Your data is persisted as a set of [Docker volumes](https://docs.docker.com/storage/volumes/) and will be available when you restart your Druid cluster.
+Run `docker compose down` to shut down the cluster. Your data is persisted as a set of [Docker volumes](https://docs.docker.com/storage/volumes/) and will be available when you restart your Druid cluster.
 

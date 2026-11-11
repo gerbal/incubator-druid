@@ -19,8 +19,12 @@
 
 package org.apache.druid.collections.spatial.search;
 
-import org.junit.Assert;
-import org.junit.Test;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import org.apache.druid.collections.spatial.RTreeUtils;
+import org.apache.druid.collections.spatial.SpatialUtils;
+import org.apache.druid.jackson.DefaultObjectMapper;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 
@@ -31,21 +35,89 @@ public class RadiusBoundTest
   {
     final float[] coords0 = new float[]{1.0F, 2.0F};
     final float[] coords1 = new float[]{1.1F, 2.1F};
-    Assert.assertArrayEquals(
+    Assertions.assertArrayEquals(
         new RadiusBound(coords0, 3.0F, 10).getCacheKey(),
         new RadiusBound(coords0, 3.0F, 10).getCacheKey()
     );
-    Assert.assertFalse(Arrays.equals(
+    Assertions.assertFalse(Arrays.equals(
         new RadiusBound(coords0, 3.0F, 10).getCacheKey(),
         new RadiusBound(coords1, 3.0F, 10).getCacheKey()
     ));
-    Assert.assertFalse(Arrays.equals(
+    Assertions.assertFalse(Arrays.equals(
         new RadiusBound(coords0, 3.0F, 10).getCacheKey(),
         new RadiusBound(coords0, 3.1F, 10).getCacheKey()
     ));
-    Assert.assertFalse(Arrays.equals(
+    Assertions.assertFalse(Arrays.equals(
         new RadiusBound(coords0, 3.0F, 10).getCacheKey(),
         new RadiusBound(coords0, 3.0F, 9).getCacheKey()
     ));
+  }
+
+  @Test
+  public void testContains()
+  {
+    float circleCenterLat = 12.3456789f;
+    float circleCenterLon = 45.6789012f;
+    float circleRadius = 500.0f; // Radius in meters
+    int numberOfPoints = 1000;
+
+    float[] center = new float[]{circleCenterLat, circleCenterLon};
+    Bound bound = new RadiusBound(center, circleRadius, 100, RadiusBound.RadiusUnit.meters);
+
+    float[][] geoInsidePoints = SpatialUtils.generateGeoCoordinatesAroundCircle(
+        circleCenterLat,
+        circleCenterLon,
+        circleRadius,
+        numberOfPoints,
+        true
+    );
+
+    for (float[] geoPoint : geoInsidePoints) {
+      double distance = RTreeUtils.calculateHaversineDistance(geoPoint[0], geoPoint[1], center[0], center[1]);
+      Assertions.assertTrue(distance < circleRadius);
+      Assertions.assertTrue(bound.contains(geoPoint));
+      float[] floatPoint = new float[]{
+          Float.parseFloat(String.valueOf(geoPoint[0])),
+          Float.parseFloat(String.valueOf(geoPoint[1]))
+      };
+      Assertions.assertTrue(bound.contains(floatPoint));
+    }
+
+    float[][] geoOutsidePoints = SpatialUtils.generateGeoCoordinatesAroundCircle(
+        circleCenterLat,
+        circleCenterLon,
+        circleRadius,
+        numberOfPoints,
+        false
+    );
+
+    for (float[] geoPoint : geoOutsidePoints) {
+      double haversineDistance = RTreeUtils.calculateHaversineDistance(geoPoint[0], geoPoint[1], center[0], center[1]);
+      Assertions.assertTrue(haversineDistance > circleRadius); // asserts that point is outside
+      Assertions.assertFalse(bound.contains(geoPoint));
+      float[] floatPoint = new float[]{
+          Float.parseFloat(String.valueOf(geoPoint[0])),
+          Float.parseFloat(String.valueOf(geoPoint[1]))
+      };
+      Assertions.assertFalse(bound.contains(floatPoint));
+    }
+  }
+
+  @Test
+  public void deSerTest() throws JsonProcessingException
+  {
+    float circleCenterLat = 12.3456789f;
+    float circleCenterLon = 45.6789012f;
+    float circleRadius = 500.0f; // Radius in meters
+
+    float[] center = new float[]{circleCenterLat, circleCenterLon};
+    Bound bound = new RadiusBound(center, circleRadius, 100);
+    DefaultObjectMapper objectMapper = DefaultObjectMapper.INSTANCE;
+    Bound val = objectMapper.readValue(objectMapper.writeValueAsString(bound), Bound.class);
+    Assertions.assertEquals(bound, val);
+
+    Bound bound1 = new RadiusBound(center, circleRadius, 100, RadiusBound.RadiusUnit.meters);
+    Bound val1 = objectMapper.readValue(objectMapper.writeValueAsString(bound1), Bound.class);
+    Assertions.assertEquals(bound1, val1);
   }
 }

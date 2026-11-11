@@ -38,14 +38,16 @@ import org.apache.druid.server.security.AuthenticationResult;
 import javax.annotation.Nullable;
 import javax.naming.AuthenticationException;
 import javax.naming.Context;
+import javax.naming.Name;
 import javax.naming.NamingEnumeration;
 import javax.naming.NamingException;
+import javax.naming.directory.BasicAttribute;
+import javax.naming.directory.BasicAttributes;
 import javax.naming.directory.DirContext;
 import javax.naming.directory.InitialDirContext;
 import javax.naming.directory.SearchControls;
 import javax.naming.directory.SearchResult;
 import javax.naming.ldap.LdapName;
-
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -59,6 +61,7 @@ public class LDAPCredentialsValidator implements CredentialsValidator
   private static final ReentrantLock LOCK = new ReentrantLock();
 
   private final LruBlockCache cache;
+  private final PasswordHashGenerator hashGenerator = new PasswordHashGenerator();
 
   private final BasicAuthLDAPConfig ldapConfig;
   // Custom overrides that can be passed via tests
@@ -76,7 +79,9 @@ public class LDAPCredentialsValidator implements CredentialsValidator
       @JsonProperty("credentialIterations") Integer credentialIterations,
       @JsonProperty("credentialVerifyDuration") Integer credentialVerifyDuration,
       @JsonProperty("credentialMaxDuration") Integer credentialMaxDuration,
-      @JsonProperty("credentialCacheSize") Integer credentialCacheSize
+      @JsonProperty("credentialCacheSize") Integer credentialCacheSize,
+      @JsonProperty("groupBaseDn") String groupBaseDn,
+      @JsonProperty("groupSearch") String groupSearch
   )
   {
     this.ldapConfig = new BasicAuthLDAPConfig(
@@ -89,7 +94,9 @@ public class LDAPCredentialsValidator implements CredentialsValidator
         credentialIterations == null ? BasicAuthUtils.DEFAULT_KEY_ITERATIONS : credentialIterations,
         credentialVerifyDuration == null ? BasicAuthUtils.DEFAULT_CREDENTIAL_VERIFY_DURATION_SECONDS : credentialVerifyDuration,
         credentialMaxDuration == null ? BasicAuthUtils.DEFAULT_CREDENTIAL_MAX_DURATION_SECONDS : credentialMaxDuration,
-        credentialCacheSize == null ? BasicAuthUtils.DEFAULT_CREDENTIAL_CACHE_SIZE : credentialCacheSize
+        credentialCacheSize == null ? BasicAuthUtils.DEFAULT_CREDENTIAL_CACHE_SIZE : credentialCacheSize,
+        groupBaseDn,
+        groupSearch
     );
 
     this.cache = new LruBlockCache(
@@ -152,14 +159,16 @@ public class LDAPCredentialsValidator implements CredentialsValidator
       char[] password
   )
   {
-    SearchResult userResult;
-    LdapName userDn;
-    Map<String, Object> contextMap = new HashMap<>();
+    if (username.isEmpty() || password.length == 0) {
+      return null;
+    }
+    final SearchResult userResult;
+    final LdapName userDn;
+    final Map<String, Object> contextMap = new HashMap<>();
+    final LdapUserPrincipal principal = this.cache.getOrExpire(username);
 
-    LdapUserPrincipal principal = this.cache.getOrExpire(username);
-    if (principal != null && principal.hasSameCredentials(password)) {
+    if (principal != null && principal.hasSameCredentials(password, hashGenerator)) {
       contextMap.put(BasicAuthUtils.SEARCH_RESULT_CONTEXT_KEY, principal.getSearchResult());
-      return new AuthenticationResult(username, authorizerName, authenticatorName, contextMap);
     } else {
       ClassLoader currentClassLoader = Thread.currentThread().getContextClassLoader();
       try {
@@ -197,8 +206,12 @@ public class LDAPCredentialsValidator implements CredentialsValidator
         throw new BasicSecurityAuthenticationException(Access.DEFAULT_ERROR_MESSAGE);
       }
 
+      if (this.ldapConfig.isGroupSearchConfigured() && !hasMemberOfAttribute(userResult)) {
+        enrichWithGroupSearch(userResult);
+      }
+
       byte[] salt = BasicAuthUtils.generateSalt();
-      byte[] hash = BasicAuthUtils.hashPassword(password, salt, this.ldapConfig.getCredentialIterations());
+      byte[] hash = hashGenerator.getOrComputePasswordHash(password, salt, this.ldapConfig.getCredentialIterations());
       LdapUserPrincipal newPrincipal = new LdapUserPrincipal(
           username,
           new BasicAuthenticatorCredentials(salt, hash, this.ldapConfig.getCredentialIterations()),
@@ -207,10 +220,21 @@ public class LDAPCredentialsValidator implements CredentialsValidator
 
       this.cache.put(username, newPrincipal);
       contextMap.put(BasicAuthUtils.SEARCH_RESULT_CONTEXT_KEY, userResult);
-      return new AuthenticationResult(username, authorizerName, authenticatorName, contextMap);
     }
+    return new AuthenticationResult(username, authorizerName, authenticatorName, contextMap);
   }
 
+  /**
+   * Retrieves an LDAP user object by using {@link javax.naming.ldap.LdapContext#search(Name, String, SearchControls)}.
+   *
+   * Regarding the "BanJNDI" suppression: Errorprone flags all usage of APIs that may do JNDI lookups because of the
+   * potential for RCE. The risk is that an attacker with ability to set user-level properties on the LDAP server could
+   * cause us to read a serialized Java object (a well-known security risk). We mitigate the risk by avoiding the
+   * "lookup" API, and using the "search" API *without* setting the returningObjFlag.
+   *
+   * See https://errorprone.info/bugpattern/BanJNDI for more details.
+   */
+  @SuppressWarnings("BanJNDI")
   @Nullable
   SearchResult getLdapUserObject(BasicAuthLDAPConfig ldapConfig, DirContext context, String username)
   {
@@ -223,19 +247,87 @@ public class LDAPCredentialsValidator implements CredentialsValidator
           ldapConfig.getBaseDn(),
           StringUtils.format(ldapConfig.getUserSearch(), encodedUsername),
           sc);
+      final SearchResult userResult;
       try {
         if (!results.hasMore()) {
           return null;
         }
-        return results.next();
+        userResult = results.next();
       }
       finally {
         results.close();
       }
+      return userResult;
     }
     catch (NamingException e) {
       LOG.debug(e, "Unable to find user '%s'", username);
       return null;
+    }
+  }
+
+  private static boolean hasMemberOfAttribute(SearchResult userResult)
+  {
+    return userResult.getAttributes() != null
+        && userResult.getAttributes().get("memberOf") != null;
+  }
+
+  @SuppressWarnings("BanJNDI")
+  private void enrichWithGroupSearch(SearchResult userResult)
+  {
+    final ClassLoader currentClassLoader = Thread.currentThread().getContextClassLoader();
+    InitialDirContext dirContext = null;
+    try {
+      Thread.currentThread().setContextClassLoader(this.getClass().getClassLoader());
+      dirContext = new InitialDirContext(bindProperties(this.ldapConfig));
+
+      final String userDn = userResult.getNameInNamespace();
+      final SearchControls sc = new SearchControls();
+      sc.setSearchScope(SearchControls.SUBTREE_SCOPE);
+      sc.setReturningAttributes(new String[]{"1.1"});
+
+      final String filter = StringUtils.format(this.ldapConfig.getGroupSearch(), encodeForLDAP(userDn, true));
+      final NamingEnumeration<SearchResult> groupResults = dirContext.search(
+          this.ldapConfig.getGroupBaseDn(),
+          filter,
+          sc
+      );
+
+      final BasicAttribute memberOfAttr = new BasicAttribute("memberOf");
+      try {
+        while (groupResults.hasMore()) {
+          memberOfAttr.add(groupResults.next().getNameInNamespace());
+        }
+      }
+      finally {
+        groupResults.close();
+      }
+
+      if (memberOfAttr.size() > 0) {
+        if (userResult.getAttributes() == null) {
+          userResult.setAttributes(new BasicAttributes(true));
+        }
+        userResult.getAttributes().put(memberOfAttr);
+        LOG.debug(
+            "Populated memberOf for user '%s' with %d groups from reverse group search",
+            userDn,
+            memberOfAttr.size()
+        );
+      }
+    }
+    catch (NamingException e) {
+      LOG.error(e, "Exception during reverse group lookup, proceeding without group memberships");
+    }
+    finally {
+      try {
+        if (dirContext != null) {
+          dirContext.close();
+        }
+      }
+      catch (Exception ignored) {
+        LOG.warn("Exception closing LDAP context");
+        // ignored
+      }
+      Thread.currentThread().setContextClassLoader(currentClassLoader);
     }
   }
 

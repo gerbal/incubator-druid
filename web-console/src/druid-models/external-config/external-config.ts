@@ -22,14 +22,17 @@ import {
   F,
   filterMap,
   L,
+  SqlColumnDeclaration,
   SqlExpression,
   SqlFunction,
   SqlLiteral,
   SqlStar,
+  SqlType,
 } from 'druid-query-toolkit';
 import * as JSONBig from 'json-bigint-native';
 
 import { nonEmptyArray } from '../../utils';
+import type { ArrayIngestMode } from '../array-ingest-mode/array-ingest-mode';
 import type { InputFormat } from '../input-format/input-format';
 import type { InputSource } from '../input-source/input-source';
 
@@ -46,12 +49,7 @@ function joinLinesMax(lines: string[], max: number) {
 export interface ExternalConfig {
   inputSource: InputSource;
   inputFormat: InputFormat;
-  signature: SignatureColumn[];
-}
-
-export interface SignatureColumn {
-  name: string;
-  type: string;
+  signature: readonly SqlColumnDeclaration[];
 }
 
 export function summarizeInputSource(inputSource: InputSource, multiline: boolean): string {
@@ -78,7 +76,7 @@ export function summarizeInputSource(inputSource: InputSource, multiline: boolea
 
     case 's3':
     case 'google':
-    case 'azure': {
+    case 'azureStorage': {
       const possibleLines = inputSource.uris || inputSource.prefixes;
       if (nonEmptyArray(possibleLines)) {
         let lines: string[] = possibleLines;
@@ -123,22 +121,25 @@ export function externalConfigToTableExpression(config: ExternalConfig): SqlExpr
   return SqlExpression.parse(`TABLE(
   EXTERN(
     ${L(JSONBig.stringify(config.inputSource))},
-    ${L(JSONBig.stringify(config.inputFormat))},
-    ${L(JSONBig.stringify(config.signature))}
+    ${L(JSONBig.stringify(config.inputFormat))}
   )
-)`);
+) EXTEND (${config.signature.join(', ')})`);
 }
 
 export function externalConfigToInitDimensions(
   config: ExternalConfig,
-  isArrays: boolean[],
   timeExpression: SqlExpression | undefined,
+  arrayIngestMode: ArrayIngestMode,
 ): SqlExpression[] {
-  return (timeExpression ? [timeExpression.as('__time')] : [])
+  return (timeExpression ? [timeExpression.setAlias('__time')] : [])
     .concat(
-      filterMap(config.signature, ({ name }, i) => {
-        if (timeExpression && timeExpression.containsColumnName(name)) return;
-        return C(name).applyIf(isArrays[i], ex => F('MV_TO_ARRAY', ex).as(name) as any);
+      filterMap(config.signature, columnDeclaration => {
+        const columnName = columnDeclaration.getColumnName();
+        if (timeExpression && timeExpression.containsColumnName(columnName)) return;
+        return C(columnName).applyIf(
+          arrayIngestMode === 'mvd' && columnDeclaration.columnType.isArray(),
+          ex => F('ARRAY_TO_MV', ex).as(columnName),
+        );
       }),
     )
     .slice(0, MULTI_STAGE_QUERY_MAX_COLUMNS);
@@ -150,12 +151,12 @@ export function fitExternalConfigPattern(query: SqlQuery): ExternalConfig {
   }
 
   const tableFn = query.fromClause?.expressions?.first();
-  if (!(tableFn instanceof SqlFunction) || tableFn.functionName !== 'TABLE') {
+  if (!(tableFn instanceof SqlFunction) || tableFn.getEffectiveFunctionName() !== 'TABLE') {
     throw new Error(`External FROM must be a TABLE function`);
   }
 
   const externFn = tableFn.getArg(0);
-  if (!(externFn instanceof SqlFunction) || externFn.functionName !== 'EXTERN') {
+  if (!(externFn instanceof SqlFunction) || externFn.getEffectiveFunctionName() !== 'EXTERN') {
     throw new Error(`Within the TABLE function there must be an extern function`);
   }
 
@@ -175,12 +176,19 @@ export function fitExternalConfigPattern(query: SqlQuery): ExternalConfig {
     throw new Error(`The second argument to the extern function must be a string embedding JSON`);
   }
 
-  let signature: any;
-  try {
-    const arg2 = externFn.getArg(2);
-    signature = JSONBig.parse(arg2 instanceof SqlLiteral ? String(arg2.value) : '#');
-  } catch {
-    throw new Error(`The third argument to the extern function must be a string embedding JSON`);
+  let signature: readonly SqlColumnDeclaration[];
+  const columnDeclarations = tableFn.getColumnDeclarations();
+  if (columnDeclarations) {
+    signature = columnDeclarations;
+  } else {
+    try {
+      const arg2 = externFn.getArg(2);
+      signature = JSONBig.parse(arg2 instanceof SqlLiteral ? String(arg2.value) : '#').map(
+        (c: any) => SqlColumnDeclaration.create(c.name, SqlType.fromNativeType(c.type)),
+      );
+    } catch {
+      throw new Error(`The third argument to the extern function must be a string embedding JSON`);
+    }
   }
 
   return {

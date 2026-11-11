@@ -26,12 +26,13 @@ import com.google.common.base.Preconditions;
 import com.google.common.base.Suppliers;
 import org.apache.druid.data.input.Row;
 import org.apache.druid.data.input.Rows;
+import org.apache.druid.error.InvalidInput;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.math.expr.Expr;
 import org.apache.druid.math.expr.ExprMacroTable;
 import org.apache.druid.math.expr.InputBindings;
 import org.apache.druid.math.expr.Parser;
-import org.apache.druid.segment.virtual.ExpressionSelectors;
+import org.apache.druid.segment.column.ColumnHolder;
 
 import java.util.List;
 import java.util.Objects;
@@ -58,6 +59,15 @@ public class ExpressionTransform implements Transform
     this.parsedExpression = Suppliers.memoize(
         () -> Parser.parse(expression, Preconditions.checkNotNull(this.macroTable, "macroTable"))
     )::get;
+
+    if (ColumnHolder.TIME_COLUMN_NAME.equals(name) && parsedExpression.get().analyzeInputs().isNonDeterministic()) {
+      throw InvalidInput.exception(
+          "Cannot use non-deterministic expression[%s] to set column name[%s]."
+          + " Non-deterministic expressions such as now() are not supported as __time transforms.",
+          expression,
+          ColumnHolder.TIME_COLUMN_NAME
+      );
+    }
   }
 
   @JsonProperty
@@ -100,7 +110,7 @@ public class ExpressionTransform implements Transform
     public Object eval(final Row row)
     {
       try {
-        return expr.eval(InputBindings.forRow(row)).valueOrDefault();
+        return expr.eval(InputBindings.forRow(row)).value();
       }
       catch (Throwable t) {
         throw new ISE(t, "Could not transform value for %s reason: %s", name, t.getMessage());
@@ -111,9 +121,7 @@ public class ExpressionTransform implements Transform
     public List<String> evalDimension(Row row)
     {
       try {
-        return Rows.objectToStrings(
-            ExpressionSelectors.coerceEvalToObjectOrList(expr.eval(InputBindings.forRow(row)))
-        );
+        return Rows.objectToStrings(expr.eval(InputBindings.forRow(row)).value());
       }
       catch (Throwable t) {
         throw new ISE(t, "Could not transform dimension value for %s reason: %s", name, t.getMessage());

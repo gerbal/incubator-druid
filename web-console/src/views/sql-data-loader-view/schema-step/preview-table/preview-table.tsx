@@ -16,21 +16,25 @@
  * limitations under the License.
  */
 
-import { Icon } from '@blueprintjs/core';
+import { Icon, PopoverNext } from '@blueprintjs/core';
 import { IconNames } from '@blueprintjs/icons';
-import { Popover2 } from '@blueprintjs/popover2';
 import classNames from 'classnames';
-import type { Column, QueryResult, SqlQuery } from 'druid-query-toolkit';
-import { SqlAlias, SqlStar } from 'druid-query-toolkit';
+import type { Column, QueryResult, SqlExpression, SqlQueryBase } from 'druid-query-toolkit';
+import { SqlAlias, SqlFunction, SqlStar } from 'druid-query-toolkit';
 import React, { useState } from 'react';
-import type { RowRenderProps } from 'react-table';
-import ReactTable from 'react-table';
 
-import { BracedText, Deferred, TableCell } from '../../../../components';
+import type { ConsoleTableCellInfo } from '../../../../components';
+import { BracedText, ConsoleTable, Deferred, TableCell } from '../../../../components';
 import { CellFilterMenu } from '../../../../components/cell-filter-menu/cell-filter-menu';
 import { ShowValueDialog } from '../../../../dialogs/show-value-dialog/show-value-dialog';
 import type { QueryAction } from '../../../../utils';
-import { columnToIcon, columnToWidth, filterMap, getNumericColumnBraces } from '../../../../utils';
+import {
+  columnToIcon,
+  columnToSummary,
+  columnToWidth,
+  filterMap,
+  getNumericColumnBraces,
+} from '../../../../utils';
 
 import './preview-table.scss';
 
@@ -38,7 +42,13 @@ function isDate(v: any): v is Date {
   return Boolean(v && typeof v.toISOString === 'function');
 }
 
-function getExpressionIfAlias(query: SqlQuery, selectIndex: number): string {
+function isWrappedInArrayToMv(ex: SqlExpression | undefined) {
+  if (!ex) return false;
+  ex = ex.getUnderlyingExpression();
+  return ex instanceof SqlFunction && ex.getEffectiveFunctionName() === 'ARRAY_TO_MV';
+}
+
+function formatFormulaAtIndex(query: SqlQueryBase, selectIndex: number): string {
   const ex = query.getSelectExpressionForIndex(selectIndex);
 
   if (query.isRealOutputColumnAtSelectIndex(selectIndex)) {
@@ -66,7 +76,7 @@ export const PreviewTable = React.memo(function PreviewTable(props: PreviewTable
   const { queryResult, onQueryAction, columnFilter, selectedColumnIndex, onEditColumn } = props;
   const [showValue, setShowValue] = useState<string>();
 
-  const parsedQuery: SqlQuery = queryResult.sqlQuery!;
+  const parsedQuery = queryResult.sqlQuery;
   if (!parsedQuery) return null;
 
   function hasFilterOnHeader(header: string, headerIndex: number): boolean {
@@ -91,10 +101,10 @@ export const PreviewTable = React.memo(function PreviewTable(props: PreviewTable
     );
   }
 
-  const numericColumnBraces = getNumericColumnBraces(queryResult);
+  const numericColumnBraces = getNumericColumnBraces(queryResult, undefined, undefined);
   return (
     <div className="preview-table">
-      <ReactTable
+      <ConsoleTable
         className="-striped -highlight"
         data={queryResult.rows as any[][]}
         noDataText={queryResult.rows.length ? '' : 'Preview returned no data'}
@@ -117,21 +127,24 @@ export const PreviewTable = React.memo(function PreviewTable(props: PreviewTable
                 column.isTimeColumn() ? 'timestamp' : 'dimension',
                 `column${i}`,
                 column.sqlType?.toLowerCase(),
-                { selected },
+                {
+                  selected,
+                  'multi-value': isWrappedInArrayToMv(parsedQuery.getSelectExpressionForIndex(i)),
+                },
               );
 
           return {
             Header() {
               return (
                 <div className="header-wrapper" onClick={() => onEditColumn(i)}>
-                  <div className="output-name">
+                  <div className="output-name" data-tooltip={columnToSummary(column)}>
                     {icon && <Icon className="type-icon" icon={icon} size={12} />}
                     {h}
                     {hasFilterOnHeader(h, i) && (
                       <Icon className="filter-icon" icon={IconNames.FILTER} size={14} />
                     )}
                   </div>
-                  <div className="formula">{getExpressionIfAlias(parsedQuery, i)}</div>
+                  <div className="formula">{formatFormulaAtIndex(parsedQuery, i)}</div>
                 </div>
               );
             },
@@ -139,11 +152,15 @@ export const PreviewTable = React.memo(function PreviewTable(props: PreviewTable
             className: columnClassName,
             width: columnToWidth(column),
             accessor: String(i),
-            Cell(row: RowRenderProps) {
+            Cell(row: ConsoleTableCellInfo<any>) {
               const value = row.value;
               return (
                 <div>
-                  <Popover2 content={<Deferred content={() => getCellMenu(column, i, value)} />}>
+                  <PopoverNext
+                    content={<Deferred content={() => getCellMenu(column, i, value)} />}
+                    lazy
+                    shouldReturnFocusOnClose={false}
+                  >
                     {numericColumnBraces[i] ? (
                       <BracedText
                         className="table-padding"
@@ -154,7 +171,7 @@ export const PreviewTable = React.memo(function PreviewTable(props: PreviewTable
                     ) : (
                       <TableCell value={value} unlimited />
                     )}
-                  </Popover2>
+                  </PopoverNext>
                 </div>
               );
             },

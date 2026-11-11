@@ -27,6 +27,7 @@ import org.apache.druid.segment.data.CompressedColumnarLongsSupplier;
 
 import javax.annotation.Nullable;
 import java.nio.ByteOrder;
+import java.util.Objects;
 
 /**
  */
@@ -96,10 +97,11 @@ public class LongNumericColumnPartSerde implements ColumnPartSerde
   @Override
   public Deserializer getDeserializer()
   {
-    return (buffer, builder, columnConfig) -> {
+    return (buffer, builder, columnConfig, parent) -> {
       final CompressedColumnarLongsSupplier column = CompressedColumnarLongsSupplier.fromByteBuffer(
           buffer,
-          byteOrder
+          byteOrder,
+          builder.getFileMapper()
       );
       LongNumericColumnSupplier columnSupplier = new LongNumericColumnSupplier(
           column,
@@ -109,5 +111,24 @@ public class LongNumericColumnPartSerde implements ColumnPartSerde
              .setHasMultipleValues(false)
              .setNumericColumnSupplier(columnSupplier);
     };
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    final LongNumericColumnPartSerde that = (LongNumericColumnPartSerde) o;
+    return Objects.equals(byteOrder, that.byteOrder);
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return Objects.hashCode(byteOrder);
   }
 }

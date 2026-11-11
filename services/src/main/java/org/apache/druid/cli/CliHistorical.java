@@ -24,12 +24,10 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.inject.Binder;
-import com.google.inject.Inject;
 import com.google.inject.Key;
 import com.google.inject.Module;
 import com.google.inject.name.Names;
 import org.apache.druid.client.cache.CacheConfig;
-import org.apache.druid.curator.ZkEnablementConfig;
 import org.apache.druid.discovery.NodeRole;
 import org.apache.druid.guice.CacheModule;
 import org.apache.druid.guice.DruidProcessingModule;
@@ -39,24 +37,30 @@ import org.apache.druid.guice.JoinableFactoryModule;
 import org.apache.druid.guice.JsonConfigProvider;
 import org.apache.druid.guice.LazySingleton;
 import org.apache.druid.guice.LifecycleModule;
-import org.apache.druid.guice.ManageLifecycle;
 import org.apache.druid.guice.QueryRunnerFactoryModule;
 import org.apache.druid.guice.QueryableModule;
+import org.apache.druid.guice.SegmentWranglerModule;
 import org.apache.druid.guice.ServerTypeConfig;
 import org.apache.druid.java.util.common.logger.Logger;
+import org.apache.druid.msq.dart.guice.DartWorkerMemoryManagementModule;
+import org.apache.druid.msq.dart.guice.DartWorkerModule;
+import org.apache.druid.msq.guice.MSQDurableStorageModule;
+import org.apache.druid.msq.guice.MSQExternalDataSourceModule;
+import org.apache.druid.msq.guice.MSQIndexingModule;
 import org.apache.druid.query.QuerySegmentWalker;
 import org.apache.druid.query.lookup.LookupModule;
 import org.apache.druid.server.QueryResource;
 import org.apache.druid.server.ResponseContextConfig;
 import org.apache.druid.server.SegmentManager;
-import org.apache.druid.server.coordination.ServerManager;
+import org.apache.druid.server.ServerManager;
+import org.apache.druid.server.coordination.SegmentCacheBootstrapper;
 import org.apache.druid.server.coordination.ServerType;
-import org.apache.druid.server.coordination.ZkCoordinator;
 import org.apache.druid.server.http.HistoricalResource;
 import org.apache.druid.server.http.SegmentListerResource;
 import org.apache.druid.server.http.SelfDiscoveryResource;
 import org.apache.druid.server.initialization.jetty.JettyServerInitializer;
 import org.apache.druid.server.metrics.QueryCountStatsProvider;
+import org.apache.druid.storage.local.LocalTmpStorageConfig;
 import org.apache.druid.timeline.PruneLastCompactionState;
 import org.eclipse.jetty.server.Server;
 
@@ -72,17 +76,9 @@ public class CliHistorical extends ServerRunnable
 {
   private static final Logger log = new Logger(CliHistorical.class);
 
-  private boolean isZkEnabled = true;
-
   public CliHistorical()
   {
     super(log);
-  }
-
-  @Inject
-  public void configure(Properties properties)
-  {
-    isZkEnabled = ZkEnablementConfig.isEnabled(properties);
   }
 
   @Override
@@ -98,6 +94,7 @@ public class CliHistorical extends ServerRunnable
         new DruidProcessingModule(),
         new QueryableModule(),
         new QueryRunnerFactoryModule(),
+        new SegmentWranglerModule(),
         new JoinableFactoryModule(),
         new HistoricalServiceModule(),
         binder -> {
@@ -107,11 +104,9 @@ public class CliHistorical extends ServerRunnable
           binder.bindConstant().annotatedWith(PruneLastCompactionState.class).to(true);
           binder.bind(ResponseContextConfig.class).toInstance(ResponseContextConfig.newConfig(true));
 
-          // register Server before binding ZkCoordinator to ensure HTTP endpoints are available immediately
           LifecycleModule.register(binder, Server.class);
           binder.bind(ServerManager.class).in(LazySingleton.class);
           binder.bind(SegmentManager.class).in(LazySingleton.class);
-          binder.bind(ZkCoordinator.class).in(ManageLifecycle.class);
           bindQuerySegmentWalker(binder);
 
           binder.bind(ServerTypeConfig.class).toInstance(new ServerTypeConfig(ServerType.HISTORICAL));
@@ -122,9 +117,7 @@ public class CliHistorical extends ServerRunnable
           Jerseys.addResource(binder, HistoricalResource.class);
           LifecycleModule.register(binder, QueryResource.class);
 
-          if (isZkEnabled) {
-            LifecycleModule.register(binder, ZkCoordinator.class);
-          }
+          LifecycleModule.register(binder, SegmentCacheBootstrapper.class);
 
           JsonConfigProvider.bind(binder, "druid.historical.cache", CacheConfig.class);
           binder.install(new CacheModule());
@@ -136,13 +129,22 @@ public class CliHistorical extends ServerRunnable
 
           Jerseys.addResource(binder, SelfDiscoveryResource.class);
           LifecycleModule.registerKey(binder, Key.get(SelfDiscoveryResource.class));
+
+          binder.bind(LocalTmpStorageConfig.class)
+                .toProvider(new LocalTmpStorageConfig.DefaultLocalTmpStorageConfigProvider("historical"))
+                .in(LazySingleton.class);
         },
-        new LookupModule()
+        new LookupModule(),
+        new MSQIndexingModule(),
+        new MSQDurableStorageModule(),
+        new MSQExternalDataSourceModule(),
+        new DartWorkerModule(),
+        new DartWorkerMemoryManagementModule()
     );
   }
 
   /**
-   * This method is visible for testing query retry on missing segments. See {@link CliHistoricalForQueryErrorTest}.
+   * This method is visible for testing query retry on missing segments.
    */
   @VisibleForTesting
   public void bindQuerySegmentWalker(Binder binder)

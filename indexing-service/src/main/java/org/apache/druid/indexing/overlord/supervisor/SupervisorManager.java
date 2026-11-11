@@ -19,29 +19,62 @@
 
 package org.apache.druid.indexing.overlord.supervisor;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.google.inject.Inject;
+import org.apache.druid.common.config.Configs;
+import org.apache.druid.common.guava.FutureUtils;
+import org.apache.druid.common.utils.IdUtils;
+import org.apache.druid.error.DruidException;
+import org.apache.druid.error.InternalServerError;
+import org.apache.druid.error.InvalidInput;
+import org.apache.druid.error.NotFound;
+import org.apache.druid.guice.annotations.Json;
+import org.apache.druid.indexing.common.actions.TaskLocks;
+import org.apache.druid.indexing.common.task.Tasks;
 import org.apache.druid.indexing.overlord.DataSourceMetadata;
 import org.apache.druid.indexing.overlord.supervisor.autoscaler.SupervisorTaskAutoScaler;
+import org.apache.druid.indexing.seekablestream.SeekableStreamDataSourceMetadata;
+import org.apache.druid.indexing.seekablestream.supervisor.BoundedStreamConfig;
+import org.apache.druid.indexing.seekablestream.supervisor.SeekableStreamSupervisor;
+import org.apache.druid.indexing.seekablestream.supervisor.SeekableStreamSupervisorSpec;
+import org.apache.druid.indexing.seekablestream.supervisor.autoscaler.CostBasedAutoScaler;
+import org.apache.druid.indexing.seekablestream.supervisor.autoscaler.CostBasedAutoScalerConfig;
+import org.apache.druid.indexing.seekablestream.supervisor.autoscaler.CostMetrics;
+import org.apache.druid.java.util.common.IAE;
+import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.Pair;
 import org.apache.druid.java.util.common.lifecycle.LifecycleStart;
 import org.apache.druid.java.util.common.lifecycle.LifecycleStop;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.metadata.MetadataSupervisorManager;
+import org.apache.druid.metadata.PendingSegmentRecord;
+import org.apache.druid.query.DefaultQueryMetrics;
 import org.apache.druid.segment.incremental.ParseExceptionReport;
+import org.apache.druid.server.metrics.SupervisorStatsProvider;
 
 import javax.annotation.Nullable;
-
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Future;
 
 /**
  * Manages the creation and lifetime of {@link Supervisor}.
  */
-public class SupervisorManager
+public class SupervisorManager implements SupervisorStatsProvider
 {
   private static final EmittingLogger log = new EmittingLogger(SupervisorManager.class);
 
@@ -52,10 +85,12 @@ public class SupervisorManager
   private final Object lock = new Object();
 
   private volatile boolean started = false;
+  private final ObjectMapper jsonMapper;
 
   @Inject
-  public SupervisorManager(MetadataSupervisorManager metadataSupervisorManager)
+  public SupervisorManager(@Json ObjectMapper jsonMapper, MetadataSupervisorManager metadataSupervisorManager)
   {
+    this.jsonMapper = jsonMapper;
     this.metadataSupervisorManager = metadataSupervisorManager;
   }
 
@@ -67,6 +102,61 @@ public class SupervisorManager
   public Set<String> getSupervisorIds()
   {
     return supervisors.keySet();
+  }
+
+  @Override
+  public Collection<SupervisorStatsProvider.SupervisorStats> getSupervisorStats()
+  {
+    List<SupervisorStatsProvider.SupervisorStats> stats = new ArrayList<>();
+    for (Map.Entry<String, Pair<Supervisor, SupervisorSpec>> entry : supervisors.entrySet()) {
+
+      final Pair<Supervisor, SupervisorSpec> pair = entry.getValue();
+      if (pair == null || pair.lhs == null) {
+        continue;
+      }
+      final Supervisor supervisor = pair.lhs;
+      final SupervisorSpec supervisorSpec = pair.rhs;
+      final SupervisorStateManager.State state = supervisor.getState();
+
+      stats.add(new SupervisorStatsProvider.SupervisorStats(
+          supervisorSpec.getId(),
+          supervisorSpec.getType(),
+          state == null ? "UNKNOWN" : state.getBasicState().toString(),
+          DefaultQueryMetrics.getTableNamesAsString(new HashSet<>(supervisorSpec.getDataSources())),
+          supervisorSpec.getSource() == null ? "" : supervisorSpec.getSource(),
+          state == null ? "UNKNOWN" : state.toString()
+      ));
+    }
+    return stats;
+  }
+
+  /**
+   * Finds the list of active streaming supervisors ingest into the given datasource
+   * using an APPEND lock.
+   *
+   * @param datasource Datasource to find active supervisor id with append lock for.
+   * @return List of active appending supervisor IDs, if any.
+   */
+  public List<String> getActiveSupervisorIdsForDatasourceWithAppendLock(String datasource)
+  {
+    final List<String> matchingSupervisorIds = new ArrayList<>();
+    for (Map.Entry<String, Pair<Supervisor, SupervisorSpec>> entry : supervisors.entrySet()) {
+      final String supervisorId = entry.getKey();
+      final Supervisor supervisor = entry.getValue().lhs;
+      final SupervisorSpec supervisorSpec = entry.getValue().rhs;
+
+      boolean hasAppendLock = supervisorSpec instanceof SeekableStreamSupervisorSpec
+                              && specHasConcurrentLocks((SeekableStreamSupervisorSpec) supervisorSpec);
+
+      if (supervisor instanceof SeekableStreamSupervisor
+          && !supervisorSpec.isSuspended()
+          && supervisorSpec.getDataSources().contains(datasource)
+          && (hasAppendLock)) {
+        matchingSupervisorIds.add(supervisorId);
+      }
+    }
+
+    return matchingSupervisorIds;
   }
 
   public Optional<SupervisorSpec> getSupervisorSpec(String id)
@@ -81,7 +171,27 @@ public class SupervisorManager
     return supervisor == null ? Optional.absent() : Optional.fromNullable(supervisor.lhs.getState());
   }
 
-  public boolean createOrUpdateAndStartSupervisor(SupervisorSpec spec)
+  public boolean handoffTaskGroupsEarly(String id, List<Integer> taskGroupIds)
+  {
+    Pair<Supervisor, SupervisorSpec> supervisor = supervisors.get(id);
+    if (supervisor == null || supervisor.lhs == null) {
+      return false;
+    }
+    final StreamSupervisor streamSupervisor = requireStreamSupervisor(id, "handoff");
+    streamSupervisor.handoffTaskGroupsEarly(taskGroupIds);
+    return true;
+  }
+
+  /**
+   * Applies {@code spec} under a single lock. With {@code skipRestartIfUnmodified=true}, an unchanged spec
+   * is a no-op; a changed spec is persisted without restart when {@link SupervisorSpec#getActionOnUpdateTo}
+   * returns {@link SupervisorSpecUpdateAction#NONE}. With {@code skipRestartIfUnmodified=false}, the supervisor
+   * is always recreated and its tasks always terminated.
+   */
+  public SupervisorSpecUpdateResult createOrUpdateAndStartSupervisor(
+      final SupervisorSpec spec,
+      final boolean skipRestartIfUnmodified
+  )
   {
     Preconditions.checkState(started, "SupervisorManager not started");
     Preconditions.checkNotNull(spec, "spec");
@@ -90,8 +200,82 @@ public class SupervisorManager
 
     synchronized (lock) {
       Preconditions.checkState(started, "SupervisorManager not started");
-      possiblyStopAndRemoveSupervisorInternal(spec.getId(), false);
-      return createAndStartSupervisorInternal(spec, true);
+
+      if (!skipRestartIfUnmodified) {
+        // Always stop/recreate and terminate tasks, persisting whenever the spec actually changed
+        final boolean specChanged = isSpecChangedAndValidated(spec);
+        final SupervisorSpec existingSpec = possiblyStopAndRemoveSupervisorInternal(spec.getId(), false, true);
+        spec.merge(existingSpec);
+        createAndStartSupervisorInternal(spec, specChanged);
+        return SupervisorSpecUpdateResult.of(specChanged, SupervisorSpecUpdateAction.RESTART_SUPERVISOR_AND_TASKS);
+      }
+
+      final Pair<Supervisor, SupervisorSpec> current = supervisors.get(spec.getId());
+      final boolean isNew = current == null || current.rhs == null;
+
+      if (isNew) {
+        // merge() self-initializes taskCount from taskCountStart for a new autoscaling supervisor (no existing spec).
+        spec.merge(null);
+        createAndStartSupervisorInternal(spec, true);
+        return SupervisorSpecUpdateResult.of(true, SupervisorSpecUpdateAction.RESTART_SUPERVISOR_AND_TASKS);
+      }
+
+      final SupervisorSpec currentSpec = current.rhs;
+      if (!areSpecBytesChanged(spec, currentSpec)) {
+        return SupervisorSpecUpdateResult.of(false, SupervisorSpecUpdateAction.NONE);
+      }
+
+      // merge() may carry forward omitted fields (e.g. taskCount); compare the effective spec.
+      spec.merge(currentSpec);
+      if (!areSpecBytesChanged(spec, currentSpec)) {
+        return SupervisorSpecUpdateResult.of(false, SupervisorSpecUpdateAction.NONE);
+      }
+
+      // The effective (merged) spec is what will be persisted, so validate that transition exactly once.
+      currentSpec.validateSpecUpdateTo(spec);
+
+      SupervisorSpecUpdateAction action = currentSpec.getActionOnUpdateTo(spec);
+      if (action == SupervisorSpecUpdateAction.NONE) {
+        metadataSupervisorManager.insert(spec.getId(), spec);
+        supervisors.put(spec.getId(), Pair.of(current.lhs, spec));
+        return SupervisorSpecUpdateResult.of(true, SupervisorSpecUpdateAction.NONE);
+      }
+
+      // Restart path: stop+recreate, persisting the changed spec.
+      boolean shouldTaskBeTerminated = action == SupervisorSpecUpdateAction.RESTART_SUPERVISOR_AND_TASKS;
+      possiblyStopAndRemoveSupervisorInternal(spec.getId(), false, shouldTaskBeTerminated);
+      createAndStartSupervisorInternal(spec, true);
+      return SupervisorSpecUpdateResult.of(true, action);
+    }
+  }
+
+  /** Byte-level diff against the running spec; validates allowed updates when bytes differ. */
+  private boolean isSpecChangedAndValidated(SupervisorSpec spec)
+  {
+    final Pair<Supervisor, SupervisorSpec> current = supervisors.get(spec.getId());
+    final SupervisorSpec currentSpec = current == null ? null : current.rhs;
+    if (currentSpec == null) {
+      return true;
+    } else if (!areSpecBytesChanged(spec, currentSpec)) {
+      return false;
+    } else {
+      currentSpec.validateSpecUpdateTo(spec);
+      return true;
+    }
+  }
+
+  /** Byte-level diff of {@code proposedSpec} against {@code currentSpec}. Does not validate the transition. */
+  private boolean areSpecBytesChanged(SupervisorSpec proposedSpec, SupervisorSpec currentSpec)
+  {
+    try {
+      return !Arrays.equals(
+          jsonMapper.writeValueAsBytes(proposedSpec),
+          jsonMapper.writeValueAsBytes(currentSpec)
+      );
+    }
+    catch (JsonProcessingException ex) {
+      log.warn(ex, "Failed to write spec as bytes for spec_id[%s]", proposedSpec.getId());
+      return true;
     }
   }
 
@@ -102,7 +286,7 @@ public class SupervisorManager
 
     synchronized (lock) {
       Preconditions.checkState(started, "SupervisorManager not started");
-      return possiblyStopAndRemoveSupervisorInternal(id, true);
+      return possiblyStopAndRemoveSupervisorInternal(id, true, true) != null;
     }
   }
 
@@ -132,7 +316,7 @@ public class SupervisorManager
             createAndStartSupervisorInternal(spec, false);
           }
           catch (Exception ex) {
-            log.error(ex, "Failed to start supervisor: [%s]", spec.getId());
+            log.error(ex, "Failed to start supervisor: id [%s]", spec.getId());
           }
         }
       }
@@ -145,11 +329,12 @@ public class SupervisorManager
   public void stop()
   {
     Preconditions.checkState(started, "SupervisorManager not started");
-
+    List<ListenableFuture<Void>> stopFutures = new ArrayList<>();
     synchronized (lock) {
+      log.info("Stopping [%d] supervisors", supervisors.keySet().size());
       for (String id : supervisors.keySet()) {
         try {
-          supervisors.get(id).lhs.stop(false);
+          stopFutures.add(supervisors.get(id).lhs.stopAsync());
           SupervisorTaskAutoScaler autoscaler = autoscalers.get(id);
           if (autoscaler != null) {
             autoscaler.stop();
@@ -159,6 +344,18 @@ public class SupervisorManager
           log.warn(e, "Caught exception while stopping supervisor [%s]", id);
         }
       }
+      log.info("Waiting for [%d] supervisors to shutdown", stopFutures.size());
+      try {
+        FutureUtils.coalesce(stopFutures).get();
+      }
+      catch (Exception e) {
+        log.warn(
+            e,
+            "Stopped [%d] out of [%d] supervisors. Remaining supervisors will be killed.",
+            stopFutures.stream().filter(Future::isDone).count(),
+            stopFutures.size()
+        );
+      }
       supervisors.clear();
       autoscalers.clear();
       started = false;
@@ -167,9 +364,10 @@ public class SupervisorManager
     log.info("SupervisorManager stopped.");
   }
 
-  public List<VersionedSupervisorSpec> getSupervisorHistoryForId(String id)
+  public List<VersionedSupervisorSpec> getSupervisorHistoryForId(String id, @Nullable Integer limit)
+      throws IllegalArgumentException
   {
-    return metadataSupervisorManager.getAllForId(id);
+    return metadataSupervisorManager.getAllForId(id, limit);
   }
 
   public Map<String, List<VersionedSupervisorSpec>> getSupervisorHistory()
@@ -201,7 +399,7 @@ public class SupervisorManager
     return supervisor == null ? Optional.absent() : Optional.fromNullable(supervisor.lhs.isHealthy());
   }
 
-  public boolean resetSupervisor(String id, @Nullable DataSourceMetadata dataSourceMetadata)
+  public boolean resetSupervisor(String id, @Nullable DataSourceMetadata resetDataSourceMetadata)
   {
     Preconditions.checkState(started, "SupervisorManager not started");
     Preconditions.checkNotNull(id, "id");
@@ -212,12 +410,124 @@ public class SupervisorManager
       return false;
     }
 
-    supervisor.lhs.reset(dataSourceMetadata);
+    final StreamSupervisor streamSupervisor = requireStreamSupervisor(id, "reset");
+    if (resetDataSourceMetadata == null) {
+      streamSupervisor.reset(null);
+    } else {
+      streamSupervisor.resetOffsets(resetDataSourceMetadata);
+    }
     SupervisorTaskAutoScaler autoscaler = autoscalers.get(id);
     if (autoscaler != null) {
       autoscaler.reset();
     }
     return true;
+  }
+
+  /**
+   * Resets a supervisor to the latest stream offsets and starts a bounded backfill supervisor to
+   * process the skipped range from the previously checkpointed offsets up to the latest offsets.
+   *
+   * @param id               supervisor ID
+   * @param backfillTaskCount number of tasks for the backfill supervisor, or null to inherit from the source spec
+   * @return map with {@code "id"} (the original supervisor ID) and {@code "backfillSupervisorId"}
+   * @throws IllegalArgumentException if the supervisor is not a {@link SeekableStreamSupervisor},
+   *                                  if {@code useEarliestSequenceNumber} is true,
+   *                                  if {@code useConcurrentLocks} is not set to true in the supervisor context,
+   *                                  or if the supervisor is not in a RUNNING state
+   * @throws IllegalStateException    if the latest or checkpointed offsets cannot be retrieved,
+   *                                  or if the backfill spec cannot be serialized
+   */
+  public Map<String, Object> resetToLatestAndBackfill(String id, @Nullable Integer backfillTaskCount)
+  {
+    Preconditions.checkState(started, "SupervisorManager not started");
+    Preconditions.checkNotNull(id, "id");
+
+    Pair<SeekableStreamSupervisor, SeekableStreamSupervisorSpec> supervisor = getSupervisorOfType(
+        id,
+        SeekableStreamSupervisor.class,
+        SeekableStreamSupervisorSpec.class,
+        "resetToLatestAndBackfill"
+    );
+
+    SeekableStreamSupervisor streamSupervisor = supervisor.lhs;
+    SeekableStreamSupervisorSpec streamSpec = supervisor.rhs;
+
+    validateResetAndBackfill(id, streamSupervisor, streamSpec);
+
+    log.info("Capturing latest offsets from stream for supervisor[%s]", id);
+    streamSupervisor.updatePartitionLagFromStream();
+    Map<?, ?> endOffsets = streamSupervisor.getLatestSequencesFromStream();
+
+    log.info("Capturing checkpointed offsets for supervisor[%s]", id);
+    Map<?, ?> startOffsets = streamSupervisor.getOffsetsFromMetadataStorage();
+
+    if (endOffsets == null || endOffsets.isEmpty()) {
+      throw new ISE("Skipping reset: Failed to get latest offsets from stream for supervisor[%s]", id);
+    }
+    if (startOffsets == null || startOffsets.isEmpty()) {
+      throw new ISE("Skipping reset: Failed to get checkpointed offsets for supervisor[%s]", id);
+    }
+
+    String backfillSupervisorId = IdUtils.getRandomIdWithPrefix(id + "_backfill");
+
+    try {
+      Map<String, Object> normalizedStartOffsets = jsonMapper.readValue(jsonMapper.writeValueAsString(startOffsets), Map.class);
+      Map<String, Object> normalizedEndOffsets = jsonMapper.readValue(jsonMapper.writeValueAsString(endOffsets), Map.class);
+      BoundedStreamConfig boundedStreamConfig = new BoundedStreamConfig(normalizedStartOffsets, normalizedEndOffsets);
+      SupervisorSpec backfillSpec = streamSpec.createBackfillSpec(backfillSupervisorId, boundedStreamConfig, backfillTaskCount);
+      createOrUpdateAndStartSupervisor(backfillSpec, false);
+    }
+    catch (JsonProcessingException e) {
+      throw new ISE(e, "Failed to serialize offsets for backfill supervisor[%s]", backfillSupervisorId);
+    }
+
+    log.info(
+        "Started backfill supervisor[%s] for supervisor[%s] with startOffsets[%s] and endOffsets[%s]",
+        backfillSupervisorId,
+        id,
+        startOffsets,
+        endOffsets
+    );
+
+    log.info("Resetting supervisor[%s] metadata to latest offsets", id);
+    DataSourceMetadata resetMetadata = streamSupervisor.createDataSourceMetaDataForReset(
+        streamSupervisor.getIoConfig().getStream(),
+        endOffsets
+    );
+
+    streamSupervisor.resetOffsets(resetMetadata);
+
+    // Reset autoscaler if present
+    SupervisorTaskAutoScaler autoscaler = autoscalers.get(id);
+    if (autoscaler != null) {
+      autoscaler.reset();
+    }
+
+    return ImmutableMap.of(
+        "id", id,
+        "backfillSupervisorId", backfillSupervisorId
+    );
+  }
+
+  private void validateResetAndBackfill(
+      String id,
+      SeekableStreamSupervisor streamSupervisor,
+      SeekableStreamSupervisorSpec streamSpec
+  )
+  {
+    if (streamSupervisor.getIoConfig().isUseEarliestSequenceNumber()) {
+      throw new IAE("Reset with skipped offsets is not supported when useEarliestOffset is true.");
+    }
+
+    if (!specHasConcurrentLocks(streamSpec)) {
+      throw new IAE(
+          "Backfill tasks require 'useConcurrentLocks' to be set to true in the supervisor context to allow concurrent writes with the main supervisor tasks"
+      );
+    }
+
+    if (streamSupervisor.getState() != SupervisorStateManager.BasicState.RUNNING) {
+      throw new IAE("Supervisor[%s] must be in a RUNNING state to perform a reset and backfill", id);
+    }
   }
 
   public boolean checkPointDataSourceMetadata(
@@ -234,7 +544,8 @@ public class SupervisorManager
 
       Preconditions.checkNotNull(supervisor, "supervisor could not be found");
 
-      supervisor.lhs.checkpoint(taskGroupId, previousDataSourceMetadata);
+      final StreamSupervisor streamSupervisor = requireStreamSupervisor(supervisorId, "checkPoint");
+      streamSupervisor.checkpoint(taskGroupId, previousDataSourceMetadata);
       return true;
     }
     catch (Exception e) {
@@ -243,6 +554,176 @@ public class SupervisorManager
     return false;
   }
 
+  /**
+   * Registers a new version of the given pending segment on a supervisor. This
+   * allows the supervisor to include the pending segment in queries fired against
+   * that segment version.
+   *
+   * @return the number of tasks notified if the segment was registered on a seekable stream supervisor, or
+   * {@link OptionalInt#empty()} if no such supervisor was found or the registration failed
+   */
+  public OptionalInt registerUpgradedPendingSegmentOnSupervisor(
+      String supervisorId,
+      PendingSegmentRecord upgradedPendingSegment
+  )
+  {
+    try {
+      Preconditions.checkNotNull(supervisorId, "supervisorId cannot be null");
+      Preconditions.checkNotNull(upgradedPendingSegment, "upgraded pending segment cannot be null");
+      Preconditions.checkNotNull(upgradedPendingSegment.getTaskAllocatorId(), "taskAllocatorId cannot be null");
+      Preconditions.checkNotNull(
+          upgradedPendingSegment.getUpgradedFromSegmentId(),
+          "upgradedFromSegmentId cannot be null"
+      );
+
+      Pair<Supervisor, SupervisorSpec> supervisor = supervisors.get(supervisorId);
+      Preconditions.checkNotNull(supervisor, "supervisor could not be found");
+      if (!(supervisor.lhs instanceof SeekableStreamSupervisor)) {
+        return OptionalInt.empty();
+      }
+
+      SeekableStreamSupervisor<?, ?, ?> seekableStreamSupervisor = (SeekableStreamSupervisor<?, ?, ?>) supervisor.lhs;
+      return OptionalInt.of(seekableStreamSupervisor.registerNewVersionOfPendingSegment(upgradedPendingSegment));
+    }
+    catch (Exception e) {
+      log.error(
+          e,
+          "Failed to upgrade pending segment[%s] to new pending segment[%s] on Supervisor[%s].",
+          upgradedPendingSegment.getUpgradedFromSegmentId(),
+          upgradedPendingSegment.getId().getVersion(),
+          supervisorId
+      );
+    }
+    return OptionalInt.empty();
+  }
+
+  /**
+   * Checks if the given {@code supervisorId} represents a {@link SeekableStreamSupervisor}
+   * and if the {@code taskId} is ready to publish its segments.
+   *
+   * @return A future that completes successfully with true when the given
+   * {@code taskId} can proceed with publishing its segments.
+   */
+  public ListenableFuture<Boolean> isTaskReadyToPublishSegments(
+      String supervisorId,
+      String taskId,
+      DataSourceMetadata startMetadata
+  )
+  {
+    InvalidInput.conditionalException(supervisorId != null, "'supervisorId' cannot be null");
+    Pair<Supervisor, SupervisorSpec> supervisor = supervisors.get(supervisorId);
+    if (supervisor == null || supervisor.rhs == null) {
+      throw NotFound.exception("Could not find supervisor[%s]", supervisorId);
+    }
+    if (!(supervisor.lhs instanceof SeekableStreamSupervisor<?, ?, ?>)) {
+      return Futures.immediateFuture(true);
+    }
+
+    if (!(startMetadata instanceof SeekableStreamDataSourceMetadata<?, ?>)) {
+      throw InvalidInput.exception(
+          "Start metadata[%s] of type[%s] is not valid streaming metadata",
+          startMetadata, startMetadata == null ? null : startMetadata.getClass()
+      );
+    }
+
+    return ((SeekableStreamSupervisor<?, ?, ?>) supervisor.lhs)
+        .isTaskReadyToPublishSegments(taskId, startMetadata);
+  }
+
+  /**
+   * Simulates the effects of the {@code costBased} auto-scaler by computing the
+   * optimal task count under various values of aggregate lag.
+   *
+   * @return Map containing a single entry with key {@code "data"} and value as
+   * the simulation rows.
+   */
+  public Map<String, Object> simulateAutoscaling(
+      String supervisorId,
+      CostBasedAutoScalerConfig config,
+      int maxProcessingRatePerTask,
+      @Nullable Integer requestedTaskCount
+  )
+  {
+    if (!config.getEnableTaskAutoScaler()) {
+      throw InvalidInput.exception("Cannot simulate autoscaling since 'enableTaskAutoScaler' is false");
+    }
+
+    // Validate that this is a SeekableStreamSupervisor
+    final Pair<SeekableStreamSupervisor, SeekableStreamSupervisorSpec> supervisorPair =
+        getSupervisorOfType(
+            supervisorId,
+            SeekableStreamSupervisor.class,
+            SeekableStreamSupervisorSpec.class,
+            "simulateAutoscaling"
+        );
+
+    // Validate the inputs
+    final long criticalLag = Configs.valueOrDefault(config.getCriticalLagThreshold(), 1_000_000);
+    InvalidInput.conditionalException(
+        criticalLag >= 1000,
+        "Value of critical lag[%d] must be 1000 or more",
+        criticalLag
+    );
+    InvalidInput.conditionalException(
+        maxProcessingRatePerTask >= 100,
+        "Value of maxProcessingRatePerTask[%d] must be 100 events per second or more",
+        maxProcessingRatePerTask
+    );
+    InvalidInput.conditionalException(
+        requestedTaskCount == null
+        || (requestedTaskCount >= config.getTaskCountMin() && requestedTaskCount <= config.getTaskCountMax()),
+        "Value of currentTaskCount[%d] must be within taskCountMin[%d] and taskCountMax[%d]",
+        requestedTaskCount, config.getTaskCountMin(), config.getTaskCountMax()
+    );
+
+    // Simulate from the supervisor's live task count unless the caller pins one.
+    final SeekableStreamSupervisorSpec supervisorSpec = Objects.requireNonNull(supervisorPair.rhs);
+    final int currentTaskCount = supervisorSpec.getIoConfig().getTaskCount();
+    final int simulationTaskCount = Math.max(
+        config.getTaskCountMin(),
+        Math.min(
+            Configs.valueOrDefault(requestedTaskCount, currentTaskCount),
+            config.getTaskCountMax()
+        )
+    );
+
+    // Use the partition count and task duration from the supervisor spec
+    final int partitionCount = Objects.requireNonNull(supervisorPair.lhs).getKnownPartitionCount();
+    if (partitionCount <= 0) {
+      throw InternalServerError.exception(
+          "Cannot simulate autoscaling since partition count for supervisor[%s] is unknown."
+          + " Retry once the supervisor has discovered the current partition count from stream.",
+          supervisorId
+      );
+    }
+    final long taskDurationSeconds = supervisorSpec.getIoConfig().getTaskDuration().getStandardSeconds();
+
+    // Assume that the tasks are fully used since there is some lag
+    final double idleRatio = config.getOptimalTaskIdleRatio();
+
+    // Invoke the cost function for lag in the range [0, 2 * criticalLagThreshold)
+    final Object[] rows = new Object[200];
+    final long lagStepSize = criticalLag / 100;
+    final CostBasedAutoScaler autoscaleSimulator = CostBasedAutoScaler.createSimulator(config, supervisorId);
+    for (int i = 0; i < 200; ++i) {
+      final double observedAggregateLag = (double) lagStepSize * i;
+      final CostMetrics costMetrics = new CostMetrics(
+          observedAggregateLag / partitionCount,
+          observedAggregateLag,
+          simulationTaskCount,
+          partitionCount,
+          idleRatio,
+          taskDurationSeconds,
+          maxProcessingRatePerTask,
+          maxProcessingRatePerTask * 1.0
+      );
+      final int optimalTaskCount = autoscaleSimulator.computeOptimalTaskCountInternal(costMetrics, true);
+      rows[i] = Map.of("lag", observedAggregateLag, "taskCount", optimalTaskCount);
+    }
+
+    // Collect the results and return
+    return Map.of("data", rows);
+  }
 
   /**
    * Stops a supervisor with a given id and then removes it from the list.
@@ -250,13 +731,18 @@ public class SupervisorManager
    * Caller should have acquired [lock] before invoking this method to avoid contention with other threads that may be
    * starting, stopping, suspending and resuming supervisors.
    *
-   * @return true if a supervisor was stopped, false if there was no supervisor with this id
+   * @return reference to existing supervisor, if exists and was stopped, null if there was no supervisor with this id
    */
-  private boolean possiblyStopAndRemoveSupervisorInternal(String id, boolean writeTombstone)
+  @Nullable
+  private SupervisorSpec possiblyStopAndRemoveSupervisorInternal(
+      String id,
+      boolean writeTombstone,
+      boolean terminateTasks
+  )
   {
     Pair<Supervisor, SupervisorSpec> pair = supervisors.get(id);
-    if (pair == null) {
-      return false;
+    if (pair == null || pair.rhs == null || pair.lhs == null) {
+      return null;
     }
 
     if (writeTombstone) {
@@ -265,16 +751,16 @@ public class SupervisorManager
           new NoopSupervisorSpec(null, pair.rhs.getDataSources())
       ); // where NoopSupervisorSpec is a tombstone
     }
-    pair.lhs.stop(true);
+    pair.lhs.stop(terminateTasks);
     supervisors.remove(id);
 
-    SupervisorTaskAutoScaler autoscler = autoscalers.get(id);
-    if (autoscler != null) {
-      autoscler.stop();
+    SupervisorTaskAutoScaler autoscaler = autoscalers.get(id);
+    if (autoscaler != null) {
+      autoscaler.stop();
       autoscalers.remove(id);
     }
 
-    return true;
+    return pair.rhs;
   }
 
   /**
@@ -294,7 +780,7 @@ public class SupervisorManager
     }
 
     SupervisorSpec nextState = suspend ? pair.rhs.createSuspendedSpec() : pair.rhs.createRunningSpec();
-    possiblyStopAndRemoveSupervisorInternal(nextState.getId(), false);
+    possiblyStopAndRemoveSupervisorInternal(nextState.getId(), false, true);
     return createAndStartSupervisorInternal(nextState, true);
   }
 
@@ -313,31 +799,89 @@ public class SupervisorManager
       return false;
     }
 
-    if (persistSpec) {
-      metadataSupervisorManager.insert(id, spec);
-    }
-
     Supervisor supervisor;
     SupervisorTaskAutoScaler autoscaler;
     try {
       supervisor = spec.createSupervisor();
-      autoscaler = spec.createAutoscaler(supervisor);
+      autoscaler = supervisor.createAutoscaler(spec);
 
       supervisor.start();
       if (autoscaler != null) {
         autoscaler.start();
-        autoscalers.put(id, autoscaler);
       }
     }
     catch (Exception e) {
-      // Supervisor creation or start failed write tombstone only when trying to start a new supervisor
-      if (persistSpec) {
-        metadataSupervisorManager.insert(id, new NoopSupervisorSpec(null, spec.getDataSources()));
-      }
+      log.error("Failed to create and start supervisor: [%s]", spec.getId());
       throw new RuntimeException(e);
     }
 
+    if (persistSpec) {
+      metadataSupervisorManager.insert(id, spec);
+    }
+
     supervisors.put(id, Pair.of(supervisor, spec));
+    if (autoscaler != null) {
+      autoscalers.put(id, autoscaler);
+    }
+
     return true;
+  }
+
+  private StreamSupervisor requireStreamSupervisor(final String supervisorId, final String operation)
+  {
+    return getSupervisorOfType(supervisorId, StreamSupervisor.class, SupervisorSpec.class, operation).lhs;
+  }
+
+  /**
+   * Finds the non-null supervisor for the given ID only and its corresponding
+   * spec only if they are of the specified type.
+   *
+   * @throws DruidException if the supervisor does not exist or is not of the
+   * specified type.
+   */
+  @SuppressWarnings("unchecked")
+  public <S extends Supervisor, T extends SupervisorSpec> Pair<S, T> getSupervisorOfType(
+      String supervisorId,
+      Class<S> supervisorType,
+      Class<T> supervisorSpecType,
+      String operation
+  )
+  {
+    final Pair<Supervisor, SupervisorSpec> supervisor = supervisors.get(supervisorId);
+    if (supervisor == null) {
+      throw NotFound.exception("Supervisor[%s] does not exist", supervisorId);
+    } else if (supervisorType.isInstance(supervisor.lhs) && supervisorSpecType.isInstance(supervisor.rhs)) {
+      return (Pair<S, T>) supervisor;
+    } else {
+      throw DruidException.forPersona(DruidException.Persona.USER)
+                          .ofCategory(DruidException.Category.UNSUPPORTED)
+                          .build(
+                              "Operation[%s] is not supported by supervisor[%s] of type[%s].",
+                              operation,
+                              supervisorId,
+                              supervisor.rhs.getType()
+                          );
+    }
+  }
+
+  @Nullable
+  private SupervisorSpec getSpec(String id)
+  {
+    synchronized (lock) {
+      Pair<Supervisor, SupervisorSpec> supervisor = supervisors.get(id);
+      return supervisor == null ? null : supervisor.rhs;
+    }
+  }
+
+  /**
+   * Returns true if the spec's context enables concurrent (append) locks, accepting both
+   * {@code useConcurrentLocks: true} (or any truthy string) and {@code taskLockType: APPEND}.
+   */
+  private static boolean specHasConcurrentLocks(SeekableStreamSupervisorSpec spec)
+  {
+    return TaskLocks.shouldUseConcurrentLocksForAppend(
+        spec.getContext(),
+        Tasks.DEFAULT_USE_CONCURRENT_LOCKS
+    );
   }
 }

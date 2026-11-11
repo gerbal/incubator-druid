@@ -1,0 +1,1408 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.druid.server.compaction;
+
+import com.fasterxml.jackson.databind.InjectableValues;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableList;
+import org.apache.druid.catalog.MapMetadataCatalog;
+import org.apache.druid.catalog.model.ClusteredValueGroupsBaseTableMetadata;
+import org.apache.druid.catalog.model.ColumnSpec;
+import org.apache.druid.catalog.model.RollupTableBaseTableMetadata;
+import org.apache.druid.catalog.model.TableBaseTableMetadata;
+import org.apache.druid.catalog.model.TableId;
+import org.apache.druid.catalog.model.table.TableBuilder;
+import org.apache.druid.client.indexing.ClientCompactionTaskQueryTuningConfig;
+import org.apache.druid.data.input.impl.AggregateProjectionSpec;
+import org.apache.druid.data.input.impl.ClusteredValueGroupsBaseTableProjectionSpec;
+import org.apache.druid.data.input.impl.DimensionsSpec;
+import org.apache.druid.data.input.impl.LongDimensionSchema;
+import org.apache.druid.data.input.impl.RollupTableProjectionSpec;
+import org.apache.druid.data.input.impl.StringDimensionSchema;
+import org.apache.druid.indexer.granularity.GranularitySpec;
+import org.apache.druid.indexer.granularity.SegmentGranularitySpec;
+import org.apache.druid.indexer.granularity.UniformGranularitySpec;
+import org.apache.druid.indexer.partitions.DimensionRangePartitionsSpec;
+import org.apache.druid.indexer.partitions.DynamicPartitionsSpec;
+import org.apache.druid.indexer.partitions.HashedPartitionsSpec;
+import org.apache.druid.indexer.partitions.PartitionsSpec;
+import org.apache.druid.jackson.DefaultObjectMapper;
+import org.apache.druid.java.util.common.DateTimes;
+import org.apache.druid.java.util.common.Intervals;
+import org.apache.druid.java.util.common.granularity.Granularities;
+import org.apache.druid.java.util.common.granularity.Granularity;
+import org.apache.druid.math.expr.ExprMacroTable;
+import org.apache.druid.query.aggregation.AggregatorFactory;
+import org.apache.druid.query.aggregation.CountAggregatorFactory;
+import org.apache.druid.query.aggregation.LongSumAggregatorFactory;
+import org.apache.druid.query.expression.TestExprMacroTable;
+import org.apache.druid.query.filter.SelectorDimFilter;
+import org.apache.druid.segment.AutoTypeColumnSchema;
+import org.apache.druid.segment.IndexSpec;
+import org.apache.druid.segment.TestDataSource;
+import org.apache.druid.segment.VirtualColumns;
+import org.apache.druid.segment.column.ColumnHolder;
+import org.apache.druid.segment.column.ColumnType;
+import org.apache.druid.segment.data.CompressionStrategy;
+import org.apache.druid.segment.metadata.DefaultIndexingStateFingerprintMapper;
+import org.apache.druid.segment.metadata.HeapMemoryIndexingStateStorage;
+import org.apache.druid.segment.metadata.IndexingStateCache;
+import org.apache.druid.segment.metadata.IndexingStateFingerprintMapper;
+import org.apache.druid.segment.nested.NestedCommonFormatColumnFormatSpec;
+import org.apache.druid.segment.transform.CompactionTransformSpec;
+import org.apache.druid.segment.virtual.ExpressionVirtualColumn;
+import org.apache.druid.server.coordinator.CatalogDataSourceCompactionConfig;
+import org.apache.druid.server.coordinator.DataSourceCompactionConfig;
+import org.apache.druid.server.coordinator.InlineSchemaDataSourceCompactionConfig;
+import org.apache.druid.server.coordinator.UserCompactionTaskDimensionsConfig;
+import org.apache.druid.server.coordinator.UserCompactionTaskGranularityConfig;
+import org.apache.druid.server.coordinator.UserCompactionTaskQueryTuningConfig;
+import org.apache.druid.timeline.CompactionState;
+import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.Collections;
+import java.util.List;
+
+public class CompactionStatusTest
+{
+  private static final DataSegment WIKI_SEGMENT
+      = DataSegment.builder(SegmentId.of(TestDataSource.WIKI, Intervals.of("2013-01-01/PT1H"), "v1", 0))
+                   .size(100_000_000L)
+                   .build();
+  private static final DataSegment WIKI_SEGMENT_2
+      = DataSegment.builder(SegmentId.of(TestDataSource.WIKI, Intervals.of("2013-01-01/PT1H"), "v1", 1))
+                   .size(100_000_000L)
+                   .build();
+
+  private static final String SEALED_WIKI = TestDataSource.WIKI + "_sealed";
+  private static final String HOURLY_WIKI = TestDataSource.WIKI + "_hourly";
+  private static final String UNSEALED_WIKI = TestDataSource.WIKI + "_unsealed";
+  private static final String UNSEALED_PLAIN_WIKI = TestDataSource.WIKI + "_unsealed_plain";
+  private static final String UNSEALED_ROLLUP_WIKI = TestDataSource.WIKI + "_unsealed_rollup";
+  private static final MapMetadataCatalog CATALOG = new MapMetadataCatalog(catalogMapper());
+
+  /**
+   * Aggregators in a rollup table's layout deserialize through the catalog's mapper, and their creators take an
+   * injected {@link ExprMacroTable}.
+   */
+  private static ObjectMapper catalogMapper()
+  {
+    final ObjectMapper mapper = new DefaultObjectMapper();
+    mapper.setInjectableValues(
+        new InjectableValues.Std()
+            .addValue(ExprMacroTable.class, TestExprMacroTable.INSTANCE)
+            .addValue(ExprMacroTable.class.getName(), TestExprMacroTable.INSTANCE)
+            .addValue(ObjectMapper.class.getName(), mapper)
+    );
+    return mapper;
+  }
+
+  static {
+    // Same clustered layout under both names; the only difference is whether the table declares itself sealed.
+    final List<ColumnSpec> columns = ImmutableList.of(
+        new ColumnSpec("tenant", ColumnType.STRING.asTypeString(), null),
+        new ColumnSpec("region", ColumnType.STRING.asTypeString(), null),
+        new ColumnSpec(ColumnHolder.TIME_COLUMN_NAME, ColumnType.LONG.asTypeString(), null)
+    );
+    CATALOG.addSpec(
+        TableId.datasource(SEALED_WIKI),
+        TableBuilder.datasource(SEALED_WIKI, "PT1H")
+                    .columns(columns)
+                    .baseTable(new ClusteredValueGroupsBaseTableMetadata(ImmutableList.of("tenant"), null, null))
+                    .sealed(true)
+                    .buildSpec()
+    );
+    // Same layout again, with a query granularity, which a base table carries as a virtual column that floors __time.
+    CATALOG.addSpec(
+        TableId.datasource(HOURLY_WIKI),
+        TableBuilder.datasource(HOURLY_WIKI, "PT1H")
+                    .columns(columns)
+                    .baseTable(
+                        new ClusteredValueGroupsBaseTableMetadata(
+                            ImmutableList.of("tenant"),
+                            VirtualColumns.create(
+                                Granularities.toVirtualColumn(
+                                    Granularities.HOUR,
+                                    Granularities.GRANULARITY_VIRTUAL_COLUMN_NAME
+                                )
+                            ),
+                            null
+                        )
+                    )
+                    .sealed(true)
+                    .buildSpec()
+    );
+    CATALOG.addSpec(
+        TableId.datasource(UNSEALED_ROLLUP_WIKI),
+        TableBuilder.datasource(UNSEALED_ROLLUP_WIKI, "PT1H")
+                    // A rollup table declares its metric columns too, after the grouping columns, with the type the
+                    // aggregator produces.
+                    .columns(
+                        ImmutableList.<ColumnSpec>builder()
+                            .addAll(columns)
+                            .add(new ColumnSpec("cnt", ColumnType.LONG.asTypeString(), null))
+                            .build()
+                    )
+                    .baseTable(
+                        new RollupTableBaseTableMetadata(
+                            null,
+                            new AggregatorFactory[]{new LongSumAggregatorFactory("cnt", "cnt")},
+                            null
+                        )
+                    )
+                    .buildSpec()
+    );
+    CATALOG.addSpec(
+        TableId.datasource(UNSEALED_PLAIN_WIKI),
+        TableBuilder.datasource(UNSEALED_PLAIN_WIKI, "PT1H")
+                    .columns(columns)
+                    .baseTable(new TableBaseTableMetadata(null, null))
+                    .buildSpec()
+    );
+    CATALOG.addSpec(
+        TableId.datasource(UNSEALED_WIKI),
+        TableBuilder.datasource(UNSEALED_WIKI, "PT1H")
+                    .columns(columns)
+                    .baseTable(new ClusteredValueGroupsBaseTableMetadata(ImmutableList.of("tenant"), null, null))
+                    .buildSpec()
+    );
+  }
+
+  private HeapMemoryIndexingStateStorage indexingStateStorage;
+  private IndexingStateCache indexingStateCache;
+  private IndexingStateFingerprintMapper fingerprintMapper;
+
+  @BeforeEach
+  public void setUp()
+  {
+    indexingStateStorage = new HeapMemoryIndexingStateStorage();
+    indexingStateCache = new IndexingStateCache();
+    fingerprintMapper = new DefaultIndexingStateFingerprintMapper(
+        indexingStateCache,
+        new DefaultObjectMapper()
+    );
+  }
+
+  /**
+   * Helper to sync the cache with states stored in the manager (for tests that persist states).
+   */
+  private void syncCacheFromManager()
+  {
+    indexingStateCache.resetIndexingStatesForPublishedSegments(indexingStateStorage.getAllStoredStates());
+  }
+
+  @Test
+  public void testFindPartitionsSpecWhenGivenIsNull()
+  {
+    final ClientCompactionTaskQueryTuningConfig tuningConfig
+        = ClientCompactionTaskQueryTuningConfig.from(null);
+    Assertions.assertNull(
+        CompactionStatus.findPartitionsSpecFromConfig(tuningConfig)
+    );
+  }
+
+  @Test
+  public void testFindPartitionsSpecWhenGivenIsDynamicWithNullMaxTotalRows()
+  {
+    final PartitionsSpec partitionsSpec = new DynamicPartitionsSpec(null, null);
+    final ClientCompactionTaskQueryTuningConfig tuningConfig
+        = ClientCompactionTaskQueryTuningConfig.from(createCompactionConfig(partitionsSpec));
+    Assertions.assertEquals(
+        new DynamicPartitionsSpec(null, Long.MAX_VALUE),
+        CompactionStatus.findPartitionsSpecFromConfig(tuningConfig)
+    );
+  }
+
+  @Test
+  public void testFindPartitionsSpecWhenGivenIsDynamicWithMaxTotalRows()
+  {
+    final PartitionsSpec partitionsSpec = new DynamicPartitionsSpec(null, 1000L);
+    final ClientCompactionTaskQueryTuningConfig tuningConfig
+        = ClientCompactionTaskQueryTuningConfig.from(createCompactionConfig(partitionsSpec));
+    Assertions.assertEquals(
+        partitionsSpec,
+        CompactionStatus.findPartitionsSpecFromConfig(tuningConfig)
+    );
+  }
+
+  @Test
+  public void testFindPartitionsSpecWhenGivenIsDynamicWithMaxRowsPerSegment()
+  {
+    final PartitionsSpec partitionsSpec = new DynamicPartitionsSpec(100, 1000L);
+    final ClientCompactionTaskQueryTuningConfig tuningConfig
+        = ClientCompactionTaskQueryTuningConfig.from(createCompactionConfig(partitionsSpec));
+    Assertions.assertEquals(
+        partitionsSpec,
+        CompactionStatus.findPartitionsSpecFromConfig(tuningConfig)
+    );
+  }
+
+  @Test
+  public void testFindPartitionsSpecFromConfigWithDeprecatedMaxRowsPerSegmentAndMaxTotalRowsReturnGivenValues()
+  {
+    final DataSourceCompactionConfig config =
+        InlineSchemaDataSourceCompactionConfig.builder()
+                                              .forDataSource("datasource")
+                                              .withMaxRowsPerSegment(100)
+                                              .withTuningConfig(
+                                                  new UserCompactionTaskQueryTuningConfig(
+                                                      null,
+                                                      null,
+                                                      null,
+                                                      1000L,
+                                                      null,
+                                                      null,
+                                                      null,
+                                                      null,
+                                                      null,
+                                                      null,
+                                                      null,
+                                                      null,
+                                                      null,
+                                                      null,
+                                                      null,
+                                                      null,
+                                                      null,
+                                                      null,
+                                                      null
+                                                  )
+                                              )
+                                              .build();
+    Assertions.assertEquals(
+        new DynamicPartitionsSpec(100, 1000L),
+        CompactionStatus.findPartitionsSpecFromConfig(
+            ClientCompactionTaskQueryTuningConfig.from(config)
+        )
+    );
+  }
+
+  @Test
+  public void testFindPartitionsSpecWhenGivenIsHashed()
+  {
+    final PartitionsSpec partitionsSpec =
+        new HashedPartitionsSpec(null, 100, Collections.singletonList("dim"));
+    final ClientCompactionTaskQueryTuningConfig tuningConfig
+        = ClientCompactionTaskQueryTuningConfig.from(createCompactionConfig(partitionsSpec));
+    Assertions.assertEquals(
+        partitionsSpec,
+        CompactionStatus.findPartitionsSpecFromConfig(tuningConfig)
+    );
+  }
+
+  @Test
+  public void testFindPartitionsSpecWhenGivenIsRangeWithMaxRows()
+  {
+    final PartitionsSpec partitionsSpec =
+        new DimensionRangePartitionsSpec(null, 10000, Collections.singletonList("dim"), false);
+    final ClientCompactionTaskQueryTuningConfig tuningConfig
+        = ClientCompactionTaskQueryTuningConfig.from(createCompactionConfig(partitionsSpec));
+    Assertions.assertEquals(
+        partitionsSpec,
+        CompactionStatus.findPartitionsSpecFromConfig(tuningConfig)
+    );
+  }
+
+  @Test
+  public void testFindPartitionsSpecWhenGivenIsRangeWithTargetRows()
+  {
+    final PartitionsSpec partitionsSpec =
+        new DimensionRangePartitionsSpec(10000, null, Collections.singletonList("dim"), false);
+    final ClientCompactionTaskQueryTuningConfig tuningConfig
+        = ClientCompactionTaskQueryTuningConfig.from(createCompactionConfig(partitionsSpec));
+    Assertions.assertEquals(
+        new DimensionRangePartitionsSpec(null, 15000, Collections.singletonList("dim"), false),
+        CompactionStatus.findPartitionsSpecFromConfig(tuningConfig)
+    );
+  }
+
+  @Test
+  public void testStatusWhenLastCompactionStateIsNull()
+  {
+    verifyCompactionStatusIsPendingBecause(
+        null,
+        InlineSchemaDataSourceCompactionConfig.builder().forDataSource(TestDataSource.WIKI).build(),
+        "not compacted yet"
+    );
+  }
+
+  @Test
+  public void testStatusWhenLastCompactionStateIsEmpty()
+  {
+    final PartitionsSpec requiredPartitionsSpec = new DynamicPartitionsSpec(5_000_000, null);
+    verifyCompactionStatusIsPendingBecause(
+        CompactionState.builder().build(),
+        InlineSchemaDataSourceCompactionConfig
+            .builder()
+            .withTuningConfig(createTuningConfig(requiredPartitionsSpec, null))
+            .forDataSource(TestDataSource.WIKI)
+            .build(),
+        "'partitionsSpec' mismatch: required['dynamic' with 5,000,000 rows], current[null]"
+    );
+  }
+
+  @Test
+  public void testStatusOnPartitionsSpecMismatch()
+  {
+    final PartitionsSpec requiredPartitionsSpec = new DynamicPartitionsSpec(5_000_000, null);
+    final PartitionsSpec currentPartitionsSpec = new DynamicPartitionsSpec(100, null);
+
+    final CompactionState lastCompactionState
+        = CompactionState.builder().partitionsSpec(currentPartitionsSpec).build();
+    final DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .withTuningConfig(createTuningConfig(requiredPartitionsSpec, null))
+        .forDataSource(TestDataSource.WIKI)
+        .build();
+
+    verifyCompactionStatusIsPendingBecause(
+        lastCompactionState,
+        compactionConfig,
+        "'partitionsSpec' mismatch: required['dynamic' with 5,000,000 rows],"
+        + " current['dynamic' with 100 rows]"
+    );
+  }
+
+  @Test
+  public void testStatusOnIndexSpecMismatch()
+  {
+    final IndexSpec currentIndexSpec
+        = IndexSpec.builder().withDimensionCompression(CompressionStrategy.ZSTD).build();
+
+    final PartitionsSpec currentPartitionsSpec = new DynamicPartitionsSpec(100, null);
+    final CompactionState lastCompactionState = CompactionState.builder()
+                                                               .partitionsSpec(currentPartitionsSpec)
+                                                               .indexSpec(currentIndexSpec)
+                                                               .build();
+    final DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withTuningConfig(createTuningConfig(currentPartitionsSpec, null))
+        .build();
+
+    verifyCompactionStatusIsPendingBecause(
+        lastCompactionState,
+        compactionConfig,
+        "'indexSpec' mismatch: "
+        + "required[IndexSpec{bitmapSerdeFactory=RoaringBitmapSerdeFactory{},"
+        + " metadataCompression=zstd,"
+        + " dimensionCompression=lz4, stringDictionaryEncoding=Utf8{},"
+        + " metricCompression=lz4, longEncoding=longs, complexMetricCompression=null,"
+        + " autoColumnFormatSpec=null, stringColumnFormatSpec=null, jsonCompression=null, segmentLoader=null}], "
+        + "current[IndexSpec{bitmapSerdeFactory=RoaringBitmapSerdeFactory{},"
+        + " metadataCompression=zstd,"
+        + " dimensionCompression=zstd, stringDictionaryEncoding=Utf8{},"
+        + " metricCompression=lz4, longEncoding=longs, complexMetricCompression=null,"
+        + " autoColumnFormatSpec=null, stringColumnFormatSpec=null, jsonCompression=null, segmentLoader=null}]"
+    );
+  }
+
+  @Test
+  public void testStatusOnSegmentGranularityMismatch()
+  {
+    final GranularitySpec currentGranularitySpec
+        = new UniformGranularitySpec(Granularities.HOUR, null, null);
+
+    final PartitionsSpec currentPartitionsSpec = new DynamicPartitionsSpec(100, null);
+    final IndexSpec currentIndexSpec
+        = IndexSpec.builder().withDimensionCompression(CompressionStrategy.ZSTD).build();
+    final CompactionState lastCompactionState = CompactionState.builder()
+                                                               .partitionsSpec(currentPartitionsSpec)
+                                                               .indexSpec(currentIndexSpec)
+                                                               .granularitySpec(currentGranularitySpec)
+                                                               .build();
+    final DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withTuningConfig(createTuningConfig(currentPartitionsSpec, currentIndexSpec))
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.DAY, null, null))
+        .build();
+
+    verifyCompactionStatusIsPendingBecause(
+        lastCompactionState,
+        compactionConfig,
+        "'segmentGranularity' mismatch: required[DAY], current[HOUR]"
+    );
+  }
+
+  @Test
+  public void testStatusWhenLastCompactionStateSameAsRequired()
+  {
+    final GranularitySpec currentGranularitySpec
+        = new UniformGranularitySpec(Granularities.HOUR, null, null);
+    final PartitionsSpec currentPartitionsSpec = new DynamicPartitionsSpec(100, null);
+    final IndexSpec currentIndexSpec
+        = IndexSpec.builder().withDimensionCompression(CompressionStrategy.ZSTD).build();
+    final CompactionState lastCompactionState = CompactionState.builder()
+                                                               .partitionsSpec(currentPartitionsSpec)
+                                                               .indexSpec(currentIndexSpec)
+                                                               .granularitySpec(currentGranularitySpec)
+                                                               .build();
+    final DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withTuningConfig(createTuningConfig(currentPartitionsSpec, currentIndexSpec))
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.HOUR, null, null))
+        .build();
+
+    final DataSegment segment = DataSegment.builder(WIKI_SEGMENT).lastCompactionState(lastCompactionState).build();
+    final CompactionStatus status = CompactionStatus.compute(
+        List.of(segment),
+        compactionConfig,
+        fingerprintMapper
+    );
+    Assertions.assertTrue(status.isComplete());
+  }
+
+  @Test
+  public void testStatusWhenProjectionsMatch()
+  {
+    final GranularitySpec currentGranularitySpec
+        = new UniformGranularitySpec(Granularities.HOUR, null, null);
+    final PartitionsSpec currentPartitionsSpec = new DynamicPartitionsSpec(100, null);
+    final IndexSpec currentIndexSpec
+        = IndexSpec.builder().withDimensionCompression(CompressionStrategy.ZSTD).build();
+    final AggregateProjectionSpec projection1 =
+        AggregateProjectionSpec.builder("foo")
+                               .virtualColumns(
+                                   Granularities.toVirtualColumn(
+                                       Granularities.HOUR,
+                                       Granularities.GRANULARITY_VIRTUAL_COLUMN_NAME
+                                   )
+                               )
+                               .groupingColumns(
+                                   new LongDimensionSchema(Granularities.GRANULARITY_VIRTUAL_COLUMN_NAME),
+                                   new StringDimensionSchema("a")
+                               )
+                               .aggregators(
+                                   new LongSumAggregatorFactory("sum_long", "long")
+                               )
+                               .build();
+    final CompactionState lastCompactionState = CompactionState.builder()
+                                                               .partitionsSpec(currentPartitionsSpec)
+                                                               .indexSpec(currentIndexSpec)
+                                                               .granularitySpec(currentGranularitySpec)
+                                                               .projections(List.of(projection1))
+                                                               .build();
+    final DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withTuningConfig(createTuningConfig(currentPartitionsSpec, currentIndexSpec))
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.HOUR, null, null))
+        .withProjections(List.of(projection1))
+        .build();
+
+    final DataSegment segment = DataSegment.builder(WIKI_SEGMENT).lastCompactionState(lastCompactionState).build();
+    final CompactionStatus status = CompactionStatus.compute(
+        List.of(segment),
+        compactionConfig,
+        fingerprintMapper
+    );
+    Assertions.assertTrue(status.isComplete());
+  }
+
+  @Test
+  public void testStatusWhenBaseTableMatchesWithQueryGranularity()
+  {
+    // The published segment records the EFFECTIVE baseTable (query-granularity virtual column baked in by
+    // CompactionTask.createDataSchema), while the config carries the query granularity via its granularitySpec plus a
+    // raw baseTable spec. The status check must apply the same withQueryGranularity before comparing, otherwise this
+    // would be perpetually "pending" (re-compacting every cycle).
+    final PartitionsSpec currentPartitionsSpec = new DynamicPartitionsSpec(100, null);
+    final IndexSpec currentIndexSpec
+        = IndexSpec.builder().withDimensionCompression(CompressionStrategy.ZSTD).build();
+    final ClusteredValueGroupsBaseTableProjectionSpec baseTable =
+        ClusteredValueGroupsBaseTableProjectionSpec.builder()
+                                                   .columns(new StringDimensionSchema("tenant"), new LongDimensionSchema("__time"))
+                                                   .clusteringColumns("tenant")
+                                                   .build();
+    // The published segment records baseTable mode: segment granularity in a SegmentGranularitySpec (null
+    // GranularitySpec) and query granularity in the effective baseTable's virtual column.
+    final CompactionState lastCompactionState = CompactionState.builder()
+        .partitionsSpec(currentPartitionsSpec)
+        .indexSpec(currentIndexSpec)
+        .segmentGranularitySpec(new SegmentGranularitySpec(Granularities.HOUR, null))
+        .baseTable(baseTable.withQueryGranularity(Granularities.HOUR))
+        .build();
+    final DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withTuningConfig(createTuningConfig(currentPartitionsSpec, currentIndexSpec))
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.HOUR, Granularities.HOUR, null))
+        .withBaseTable(baseTable)
+        .build();
+
+    final DataSegment segment = DataSegment.builder(WIKI_SEGMENT).lastCompactionState(lastCompactionState).build();
+    final CompactionStatus status = CompactionStatus.compute(
+        List.of(segment),
+        compactionConfig,
+        fingerprintMapper
+    );
+    Assertions.assertTrue(status.isComplete());
+  }
+
+  @Test
+  public void testStatusWhenBaseTableHasUndeclaredColumnsAndCatalogTableIsNotSealed()
+  {
+    // A non-sealed table accepts columns it does not declare, so compaction appends what it finds in the segments and
+    // records a baseTable that is a superset of the declared one. Comparing that strictly would leave the datasource
+    // permanently "pending" and recompact it on every coordinator run.
+    final DataSourceCompactionConfig unsealed = catalogCompactionConfig(UNSEALED_WIKI);
+    final DataSegment segment = DataSegment
+        .builder(WIKI_SEGMENT)
+        .lastCompactionState(stateWithUndeclaredColumn(unsealed))
+        .build();
+
+    Assertions.assertTrue(
+        CompactionStatus.compute(List.of(segment), unsealed, fingerprintMapper).isComplete()
+    );
+  }
+
+  @Test
+  public void testStatusWhenPlainBaseTableHasUndeclaredColumnsAndCatalogTableIsNotSealed()
+  {
+    // Same contract as the clustered case, for a plain 'table' layout: a non-sealed table appends what it finds in
+    // the segments, so the recorded spec is a superset of the declared one and must still read as compacted.
+    final DataSourceCompactionConfig unsealed = catalogCompactionConfig(UNSEALED_PLAIN_WIKI);
+    final DataSegment segment = DataSegment
+        .builder(WIKI_SEGMENT)
+        .lastCompactionState(stateWithUndeclaredColumn(unsealed))
+        .build();
+
+    Assertions.assertTrue(
+        CompactionStatus.compute(List.of(segment), unsealed, fingerprintMapper).isComplete()
+    );
+  }
+
+  @Test
+  public void testStatusWhenRollupBaseTableHasUndeclaredMetricsAndCatalogTableIsNotSealed()
+  {
+    // Unsealed rollup compaction absorbs metrics the catalog does not declare, so the recorded spec carries an extra
+    // aggregator. If that were compared strictly the interval would read as pending on every evaluation and the same
+    // compaction would be scheduled again forever.
+    final DataSourceCompactionConfig unsealed = catalogCompactionConfig(UNSEALED_ROLLUP_WIKI);
+    final CompactionState declared = unsealed.toCompactionState();
+    final DataSegment segment = DataSegment
+        .builder(WIKI_SEGMENT)
+        .lastCompactionState(
+            CompactionState.builder()
+                           .partitionsSpec(declared.getPartitionsSpec())
+                           .indexSpec(declared.getIndexSpec())
+                           .segmentGranularitySpec(declared.getSegmentGranularitySpec())
+                           .baseTable(
+                               ((RollupTableProjectionSpec) declared.getBaseTable()).withAdditionalMetrics(
+                                   new AggregatorFactory[]{new LongSumAggregatorFactory("extra", "extra")}
+                               )
+                           )
+                           .build()
+        )
+        .build();
+
+    Assertions.assertTrue(
+        CompactionStatus.compute(List.of(segment), unsealed, fingerprintMapper).isComplete()
+    );
+  }
+
+  @Test
+  public void testStatusWhenRollupBaseTableHasUndeclaredColumnsAndCatalogTableIsNotSealed()
+  {
+    // Same contract again for a 'rollupTable' layout: appended grouping columns must still read as compacted, and the
+    // declared aggregators are unchanged by the append.
+    final DataSourceCompactionConfig unsealed = catalogCompactionConfig(UNSEALED_ROLLUP_WIKI);
+    final DataSegment segment = DataSegment
+        .builder(WIKI_SEGMENT)
+        .lastCompactionState(stateWithUndeclaredColumn(unsealed))
+        .build();
+
+    Assertions.assertTrue(
+        CompactionStatus.compute(List.of(segment), unsealed, fingerprintMapper).isComplete()
+    );
+  }
+
+  @Test
+  public void testStatusWhenBaseTableHasUndeclaredColumnsAndCatalogTableIsSealed()
+  {
+    // A sealed table declares everything, so a segment carrying a column the spec does not have is a real difference
+    // and must be recompacted away.
+    final DataSourceCompactionConfig sealed = catalogCompactionConfig(SEALED_WIKI);
+    final DataSegment segment = DataSegment
+        .builder(WIKI_SEGMENT)
+        .lastCompactionState(stateWithUndeclaredColumn(sealed))
+        .build();
+
+    final CompactionStatus status = CompactionStatus.compute(List.of(segment), sealed, fingerprintMapper);
+    Assertions.assertFalse(status.isComplete());
+    Assertions.assertTrue(status.getReason().contains("baseTable"));
+  }
+
+  @Test
+  public void testStatusWhenSegmentHasUndeclaredProjectionsAndCatalogTableIsSealed()
+  {
+    // A sealed table that declares no projections is declaring that it has none, so a segment that still carries one
+    // must be recompacted to drop it. The compaction task already does the dropping; without a mismatch here it would
+    // never be scheduled to.
+    final DataSourceCompactionConfig sealed = catalogCompactionConfig(SEALED_WIKI);
+    final DataSegment segment = DataSegment
+        .builder(WIKI_SEGMENT)
+        .lastCompactionState(stateWithProjection(sealed))
+        .build();
+
+    final CompactionStatus status = CompactionStatus.compute(List.of(segment), sealed, fingerprintMapper);
+    Assertions.assertFalse(status.isComplete());
+    Assertions.assertTrue(status.getReason().contains("projections"));
+  }
+
+  @Test
+  public void testStatusWhenSegmentHasUndeclaredProjectionsAndCatalogTableIsNotSealed()
+  {
+    // An unsealed table says nothing about projections it does not declare, so the segment's are left alone.
+    final DataSourceCompactionConfig unsealed = catalogCompactionConfig(UNSEALED_WIKI);
+    final DataSegment segment = DataSegment
+        .builder(WIKI_SEGMENT)
+        .lastCompactionState(stateWithProjection(unsealed))
+        .build();
+
+    Assertions.assertTrue(
+        CompactionStatus.compute(List.of(segment), unsealed, fingerprintMapper).isComplete()
+    );
+  }
+
+  @Test
+  public void testStatusWhenSegmentHasNoProjectionsAndCatalogTableIsSealed()
+  {
+    // The flip side of the check above: a sealed table's empty declaration matches the empty list a compaction of it
+    // records, so a datasource that has no projections is not recompacted over and over.
+    final DataSourceCompactionConfig sealed = catalogCompactionConfig(SEALED_WIKI);
+    final DataSegment segment = DataSegment
+        .builder(WIKI_SEGMENT)
+        .lastCompactionState(sealed.toCompactionState())
+        .build();
+
+    Assertions.assertTrue(
+        CompactionStatus.compute(List.of(segment), sealed, fingerprintMapper).isComplete()
+    );
+  }
+
+  @Test
+  public void testStatusWhenCatalogBaseTableQueryGranularityChanges()
+  {
+    // A base table carries its query granularity as a virtual column, and the base table comparison deliberately
+    // strips that carrier because query granularity has a check of its own. That check compares what the config
+    // reports, so the catalog config has to report the layout's granularity or changing it goes unnoticed.
+    final DataSourceCompactionConfig hourly = catalogCompactionConfig(HOURLY_WIKI);
+    final CompactionState declared = hourly.toCompactionState();
+    final ClusteredValueGroupsBaseTableProjectionSpec daily =
+        ClusteredValueGroupsBaseTableProjectionSpec.builder()
+                                                   .virtualColumns(
+                                                       VirtualColumns.create(
+                                                           Granularities.toVirtualColumn(
+                                                               Granularities.DAY,
+                                                               Granularities.GRANULARITY_VIRTUAL_COLUMN_NAME
+                                                           )
+                                                       )
+                                                   )
+                                                   .columns(
+                                                       new StringDimensionSchema("tenant"),
+                                                       new StringDimensionSchema("region"),
+                                                       new LongDimensionSchema("__time")
+                                                   )
+                                                   .clusteringColumns("tenant")
+                                                   .build();
+    final DataSegment segment = DataSegment
+        .builder(WIKI_SEGMENT)
+        .lastCompactionState(
+            CompactionState.builder()
+                           .partitionsSpec(declared.getPartitionsSpec())
+                           .indexSpec(declared.getIndexSpec())
+                           .segmentGranularitySpec(declared.getSegmentGranularitySpec())
+                           .projections(declared.getProjections())
+                           .baseTable(daily)
+                           .build()
+        )
+        .build();
+
+    final CompactionStatus status = CompactionStatus.compute(List.of(segment), hourly, fingerprintMapper);
+    Assertions.assertFalse(status.isComplete());
+    Assertions.assertTrue(status.getReason().contains("queryGranularity"));
+  }
+
+  @Test
+  public void testStatusWhenCatalogBaseTableQueryGranularityMatches()
+  {
+    // The flip side: the declared granularity must compare equal to the one a compaction of it records, or every
+    // segment of a table with a query granularity would look permanently out of date.
+    final DataSourceCompactionConfig hourly = catalogCompactionConfig(HOURLY_WIKI);
+    final DataSegment segment = DataSegment
+        .builder(WIKI_SEGMENT)
+        .lastCompactionState(hourly.toCompactionState())
+        .build();
+
+    Assertions.assertTrue(
+        CompactionStatus.compute(List.of(segment), hourly, fingerprintMapper).isComplete()
+    );
+  }
+
+  @Test
+  public void testStatusWhenBaseTableDeclaredColumnChangesAndCatalogTableIsNotSealed()
+  {
+    // The relaxation only forgives columns appended after the declared ones; a change to the declaration itself is
+    // still a change, whether or not the table is sealed.
+    final DataSourceCompactionConfig unsealed = catalogCompactionConfig(UNSEALED_WIKI);
+    final CompactionState declared = unsealed.toCompactionState();
+    final ClusteredValueGroupsBaseTableProjectionSpec reclustered =
+        ClusteredValueGroupsBaseTableProjectionSpec.builder()
+                                                   .columns(
+                                                       new StringDimensionSchema("tenant"),
+                                                       new StringDimensionSchema("region"),
+                                                       new LongDimensionSchema("__time")
+                                                   )
+                                                   .clusteringColumns("tenant", "region")
+                                                   .build();
+    final DataSegment segment = DataSegment
+        .builder(WIKI_SEGMENT)
+        .lastCompactionState(
+            CompactionState.builder()
+                           .partitionsSpec(declared.getPartitionsSpec())
+                           .indexSpec(declared.getIndexSpec())
+                           .segmentGranularitySpec(declared.getSegmentGranularitySpec())
+                           .baseTable(reclustered)
+                           .build()
+        )
+        .build();
+
+    final CompactionStatus status = CompactionStatus.compute(List.of(segment), unsealed, fingerprintMapper);
+    Assertions.assertFalse(status.isComplete());
+    Assertions.assertTrue(status.getReason().contains("baseTable"));
+  }
+
+  /**
+   * The state a compaction of {@code config} would record if the segments carried an extra column the catalog does not
+   * declare: everything the config asks for, plus the discovered column appended to the base table.
+   */
+  private static CompactionState stateWithUndeclaredColumn(DataSourceCompactionConfig config)
+  {
+    final CompactionState declared = config.toCompactionState();
+    return CompactionState.builder()
+                          .partitionsSpec(declared.getPartitionsSpec())
+                          .indexSpec(declared.getIndexSpec())
+                          .segmentGranularitySpec(declared.getSegmentGranularitySpec())
+                          .projections(declared.getProjections())
+                          .baseTable(
+                              declared.getBaseTable()
+                                      .withAdditionalColumns(List.of(new StringDimensionSchema("city")))
+                          )
+                          .build();
+  }
+
+  /**
+   * The state a compaction of {@code config} would record if the segments carried a projection the catalog does not
+   * declare: everything the config asks for, with the discovered projection in place of the declared list.
+   */
+  private static CompactionState stateWithProjection(DataSourceCompactionConfig config)
+  {
+    final CompactionState declared = config.toCompactionState();
+    return CompactionState.builder()
+                          .partitionsSpec(declared.getPartitionsSpec())
+                          .indexSpec(declared.getIndexSpec())
+                          .segmentGranularitySpec(declared.getSegmentGranularitySpec())
+                          .baseTable(declared.getBaseTable())
+                          .projections(
+                              List.of(
+                                  AggregateProjectionSpec.builder("by_tenant")
+                                                         .groupingColumns(new StringDimensionSchema("tenant"))
+                                                         .aggregators(new CountAggregatorFactory("count"))
+                                                         .build()
+                              )
+                          )
+                          .build();
+  }
+
+  private static CatalogDataSourceCompactionConfig catalogCompactionConfig(String dataSource)
+  {
+    return new CatalogDataSourceCompactionConfig(
+        dataSource,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        CATALOG
+    );
+  }
+
+  @Test
+  public void testStatusWhenProjectionsMismatch()
+  {
+    final GranularitySpec currentGranularitySpec
+        = new UniformGranularitySpec(Granularities.HOUR, null, null);
+    final PartitionsSpec currentPartitionsSpec = new DynamicPartitionsSpec(100, null);
+    final IndexSpec currentIndexSpec
+        = IndexSpec.builder().withDimensionCompression(CompressionStrategy.ZSTD).build();
+    final AggregateProjectionSpec projection1 =
+        AggregateProjectionSpec.builder("1")
+                               .virtualColumns(
+                                   Granularities.toVirtualColumn(
+                                       Granularities.HOUR,
+                                       Granularities.GRANULARITY_VIRTUAL_COLUMN_NAME
+                                   )
+                               )
+                               .groupingColumns(
+                                   new LongDimensionSchema(Granularities.GRANULARITY_VIRTUAL_COLUMN_NAME),
+                                   new StringDimensionSchema("a")
+                               )
+                               .aggregators(
+                                   new LongSumAggregatorFactory("sum_long", "long")
+                               )
+                               .build();
+    final AggregateProjectionSpec projection2 =
+        AggregateProjectionSpec.builder("2")
+                               .aggregators(new LongSumAggregatorFactory("sum_long", "long"))
+                               .build();
+
+    final CompactionState lastCompactionState = CompactionState.builder()
+                                                               .partitionsSpec(currentPartitionsSpec)
+                                                               .indexSpec(currentIndexSpec)
+                                                               .granularitySpec(currentGranularitySpec)
+                                                               .projections(List.of(projection1))
+                                                               .build();
+    final DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withTuningConfig(createTuningConfig(currentPartitionsSpec, currentIndexSpec))
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.HOUR, null, null))
+        .withProjections(List.of(projection1, projection2))
+        .build();
+
+    final DataSegment segment = DataSegment.builder(WIKI_SEGMENT).lastCompactionState(lastCompactionState).build();
+    final CompactionStatus status = CompactionStatus.compute(
+        List.of(segment),
+        compactionConfig,
+        fingerprintMapper
+    );
+    Assertions.assertFalse(status.isComplete());
+  }
+
+  @Test
+  public void testStatusWhenTransformSpecVirtualColumnsMatch()
+  {
+    ExpressionVirtualColumn vc = new ExpressionVirtualColumn(
+        "extractedField", "concat(metadata, '_category')", ColumnType.STRING, ExprMacroTable.nil()
+    );
+    CompactionTransformSpec transformSpec = new CompactionTransformSpec(
+        new SelectorDimFilter("extractedField", "foo", null),
+        VirtualColumns.create(vc)
+    );
+    CompactionState lastCompactionState = CompactionState.builder()
+                                                         .transformSpec(transformSpec)
+                                                         .indexSpec(IndexSpec.getDefault())
+                                                         .build();
+    DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withTransformSpec(transformSpec)
+        .build();
+
+    DataSegment segment = DataSegment.builder(WIKI_SEGMENT).lastCompactionState(lastCompactionState).build();
+    CompactionStatus status = CompactionStatus.compute(
+        List.of(segment), compactionConfig, fingerprintMapper
+    );
+    Assertions.assertTrue(status.isComplete());
+  }
+
+  @Test
+  public void testStatusWhenTransformSpecVirtualColumnsMismatch()
+  {
+    SelectorDimFilter filter = new SelectorDimFilter("extractedField", "foo", null);
+    ExpressionVirtualColumn oldVc = new ExpressionVirtualColumn(
+        "extractedField", "concat(metadata, '_old')", ColumnType.STRING, ExprMacroTable.nil()
+    );
+    ExpressionVirtualColumn newVc = new ExpressionVirtualColumn(
+        "extractedField", "concat(metadata, '_new')", ColumnType.STRING, ExprMacroTable.nil()
+    );
+
+    CompactionState lastCompactionState = CompactionState.builder()
+                                                         .transformSpec(
+                                                             new CompactionTransformSpec(
+                                                                 filter,
+                                                                 VirtualColumns.create(oldVc)
+                                                             )
+                                                         )
+                                                         .indexSpec(IndexSpec.getDefault())
+                                                         .build();
+    DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withTransformSpec(new CompactionTransformSpec(filter, VirtualColumns.create(newVc)))
+        .build();
+
+    DataSegment segment = DataSegment.builder(WIKI_SEGMENT).lastCompactionState(lastCompactionState).build();
+    CompactionStatus status = CompactionStatus.compute(
+        List.of(segment), compactionConfig, fingerprintMapper
+    );
+    Assertions.assertFalse(status.isComplete());
+    Assertions.assertTrue(status.getReason().startsWith("'transformSpec' mismatch"));
+  }
+
+  @Test
+  public void test_evaluate_needsCompactionWhenMismatchedFingerprintStateHasDifferentVirtualColumns()
+  {
+    SelectorDimFilter filter = new SelectorDimFilter("extractedField", "foo", null);
+    ExpressionVirtualColumn vc = new ExpressionVirtualColumn(
+        "extractedField", "concat(metadata, '_category')", ColumnType.STRING, ExprMacroTable.nil()
+    );
+
+    DataSourceCompactionConfig oldConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withTransformSpec(new CompactionTransformSpec(filter, null))
+        .build();
+    CompactionState oldState = oldConfig.toCompactionState();
+    String oldFingerprint = fingerprintMapper.generateFingerprint(TestDataSource.WIKI, oldState);
+
+    DataSourceCompactionConfig newConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withTransformSpec(new CompactionTransformSpec(filter, VirtualColumns.create(vc)))
+        .build();
+
+    indexingStateStorage.upsertIndexingState(TestDataSource.WIKI, oldFingerprint, oldState, DateTimes.nowUtc());
+    syncCacheFromManager();
+
+    List<DataSegment> segments = List.of(
+        DataSegment.builder(WIKI_SEGMENT).indexingStateFingerprint(oldFingerprint).build()
+    );
+    CompactionStatus status = CompactionStatus.compute(segments, newConfig, fingerprintMapper);
+    Assertions.assertFalse(status.isComplete());
+    Assertions.assertTrue(status.getReason().startsWith("'transformSpec' mismatch"));
+  }
+
+  @Test
+  public void testStatusWhenAutoSchemaMatch()
+  {
+    final GranularitySpec currentGranularitySpec
+        = new UniformGranularitySpec(Granularities.HOUR, null, null);
+    final PartitionsSpec currentPartitionsSpec = new DynamicPartitionsSpec(100, null);
+
+    final IndexSpec indexSpec = IndexSpec.getDefault().getEffectiveSpec();
+    final CompactionState lastCompactionState =
+        CompactionState.builder()
+                       .partitionsSpec(currentPartitionsSpec)
+                       .dimensionsSpec(
+                           DimensionsSpec.builder()
+                                         .setDimensions(
+                                             List.of(
+                                                 AutoTypeColumnSchema.of("x").getEffectiveSchema(indexSpec),
+                                                 AutoTypeColumnSchema.of("y").getEffectiveSchema(indexSpec)
+                                             )
+                                         )
+                                         .build()
+                       )
+                       .indexSpec(indexSpec)
+                       .granularitySpec(currentGranularitySpec)
+                       .projections(Collections.emptyList())
+                       .build();
+    final DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withDimensionsSpec(
+            new UserCompactionTaskDimensionsConfig(
+                List.of(
+                    new AutoTypeColumnSchema(
+                        "x",
+                        null,
+                        NestedCommonFormatColumnFormatSpec.builder()
+                                                          .setDoubleColumnCompression(CompressionStrategy.LZ4)
+                                                          .build()
+                    ),
+                    AutoTypeColumnSchema.of("y")
+                )
+            )
+        )
+        .withTuningConfig(createTuningConfig(currentPartitionsSpec, IndexSpec.getDefault()))
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.HOUR, null, null))
+        .withProjections(Collections.emptyList())
+        .build();
+
+    final DataSegment segment = DataSegment.builder(WIKI_SEGMENT).lastCompactionState(lastCompactionState).build();
+    final CompactionStatus status = CompactionStatus.compute(
+        List.of(segment),
+        compactionConfig,
+        fingerprintMapper
+    );
+    Assertions.assertTrue(status.isComplete());
+  }
+
+  @Test
+  public void testStatusWhenAutoSchemaMismatch()
+  {
+    final GranularitySpec currentGranularitySpec
+        = new UniformGranularitySpec(Granularities.HOUR, null, null);
+    final PartitionsSpec currentPartitionsSpec = new DynamicPartitionsSpec(100, null);
+
+    final IndexSpec indexSpec = IndexSpec.getDefault();
+    final CompactionState lastCompactionState =
+        CompactionState.builder()
+                       .partitionsSpec(currentPartitionsSpec)
+                       .dimensionsSpec(DimensionsSpec.builder()
+                                                     .setDimensions(
+                                                         List.of(
+                                                             AutoTypeColumnSchema.of("x").getEffectiveSchema(indexSpec),
+                                                             AutoTypeColumnSchema.of("y").getEffectiveSchema(indexSpec)
+                                                         )
+                                                     )
+                                                     .build()
+                       )
+                       .indexSpec(IndexSpec.getDefault())
+                       .granularitySpec(currentGranularitySpec)
+                       .projections(Collections.emptyList())
+                       .build();
+    final DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withDimensionsSpec(
+            new UserCompactionTaskDimensionsConfig(
+                List.of(
+                    new AutoTypeColumnSchema(
+                        "x",
+                        null,
+                        NestedCommonFormatColumnFormatSpec.builder()
+                                                          .setDoubleColumnCompression(CompressionStrategy.ZSTD)
+                                                          .build()
+                    ),
+                    AutoTypeColumnSchema.of("y")
+                )
+            )
+        )
+        .withTuningConfig(createTuningConfig(currentPartitionsSpec, IndexSpec.getDefault()))
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.HOUR, null, null))
+        .withProjections(Collections.emptyList())
+        .build();
+
+    final DataSegment segment = DataSegment.builder(WIKI_SEGMENT).lastCompactionState(lastCompactionState).build();
+    final CompactionStatus status = CompactionStatus.compute(
+        List.of(segment),
+        compactionConfig,
+        fingerprintMapper
+    );
+    Assertions.assertFalse(status.isComplete());
+  }
+
+  @Test
+  public void test_evaluate_needsCompactionWhenAllSegmentsHaveUnexpectedIndexingStateFingerprint()
+  {
+    List<DataSegment> segments = List.of(
+        DataSegment.builder(WIKI_SEGMENT).indexingStateFingerprint("wrongFingerprint").build(),
+        DataSegment.builder(WIKI_SEGMENT_2).indexingStateFingerprint("wrongFingerprint").build()
+    );
+
+    final DataSourceCompactionConfig oldCompactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.HOUR, null, null))
+        .build();
+    CompactionState wrongState = oldCompactionConfig.toCompactionState();
+
+    final DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.DAY, null, null))
+        .build();
+
+    indexingStateStorage.upsertIndexingState(TestDataSource.WIKI, "wrongFingerprint", wrongState, DateTimes.nowUtc());
+    syncCacheFromManager();
+
+    verifyEvaluationNeedsCompactionBecauseWithCustomSegments(
+        segments,
+        compactionConfig,
+        "'segmentGranularity' mismatch: required[DAY], current[HOUR]"
+    );
+  }
+
+  @Test
+  public void test_evaluate_needsCompactionWhenSomeSegmentsHaveUnexpectedIndexingStateFingerprint()
+  {
+    final DataSourceCompactionConfig oldCompactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.HOUR, null, null))
+        .build();
+    CompactionState wrongState = oldCompactionConfig.toCompactionState();
+
+    final DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.DAY, null, null))
+        .build();
+
+    CompactionState expectedState = compactionConfig.toCompactionState();
+
+    String expectedFingerprint = fingerprintMapper.generateFingerprint(TestDataSource.WIKI, expectedState);
+
+    List<DataSegment> segments = List.of(
+        DataSegment.builder(WIKI_SEGMENT).indexingStateFingerprint(expectedFingerprint).build(),
+        DataSegment.builder(WIKI_SEGMENT_2).indexingStateFingerprint("wrongFingerprint").build()
+    );
+
+    indexingStateStorage.upsertIndexingState(TestDataSource.WIKI, expectedFingerprint, expectedState, DateTimes.nowUtc());
+    indexingStateStorage.upsertIndexingState(TestDataSource.WIKI, "wrongFingerprint", wrongState, DateTimes.nowUtc());
+    syncCacheFromManager();
+
+    verifyEvaluationNeedsCompactionBecauseWithCustomSegments(
+        segments,
+        compactionConfig,
+        "'segmentGranularity' mismatch: required[DAY], current[HOUR]"
+    );
+  }
+
+  @Test
+  public void test_evaluate_noCompacationIfUnexpectedFingerprintHasExpectedIndexingState()
+  {
+    List<DataSegment> segments = List.of(
+        DataSegment.builder(WIKI_SEGMENT).indexingStateFingerprint("wrongFingerprint").build()
+    );
+    final DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.HOUR, null, null))
+        .build();
+
+    CompactionState expectedState = compactionConfig.toCompactionState();
+    indexingStateStorage.upsertIndexingState(TestDataSource.WIKI, "wrongFingerprint", expectedState, DateTimes.nowUtc());
+    syncCacheFromManager();
+
+    final CompactionStatus status = CompactionStatus.compute(
+        segments,
+        compactionConfig,
+        fingerprintMapper
+    );
+    Assertions.assertTrue(status.isComplete());
+  }
+
+  @Test
+  public void test_evaluate_needsCompactionWhenUnexpectedFingerprintAndNoFingerprintInMetadataStore()
+  {
+    List<DataSegment> segments = List.of(
+        DataSegment.builder(WIKI_SEGMENT).indexingStateFingerprint("wrongFingerprint").build()
+    );
+    final DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.DAY, null, null))
+        .build();
+
+    verifyEvaluationNeedsCompactionBecauseWithCustomSegments(
+        segments,
+        compactionConfig,
+        "One or more fingerprinted segments do not have a cached indexing state"
+    );
+  }
+
+  @Test
+  public void test_evaluate_noCompactionWhenAllSegmentsHaveExpectedIndexingStateFingerprint()
+  {
+    final DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.DAY, null, null))
+        .build();
+
+    CompactionState expectedState = compactionConfig.toCompactionState();
+
+    String expectedFingerprint = fingerprintMapper.generateFingerprint(TestDataSource.WIKI, expectedState);
+
+    List<DataSegment> segments = List.of(
+        DataSegment.builder(WIKI_SEGMENT).indexingStateFingerprint(expectedFingerprint).build(),
+        DataSegment.builder(WIKI_SEGMENT_2).indexingStateFingerprint(expectedFingerprint).build()
+    );
+
+    final CompactionStatus status = CompactionStatus.compute(
+        segments,
+        compactionConfig,
+        fingerprintMapper
+    );
+    Assertions.assertTrue(status.isComplete());
+  }
+
+  @Test
+  public void test_evaluate_needsCompactionWhenNonFingerprintedSegmentsFailChecksOnLastCompactionState()
+  {
+    final DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.DAY, null, null))
+        .build();
+
+    CompactionState expectedState = compactionConfig.toCompactionState();
+    String expectedFingerprint = fingerprintMapper.generateFingerprint(TestDataSource.WIKI, expectedState);
+
+    indexingStateStorage.upsertIndexingState(TestDataSource.WIKI, expectedFingerprint, expectedState, DateTimes.nowUtc());
+    syncCacheFromManager();
+
+    List<DataSegment> segments = List.of(
+        DataSegment.builder(WIKI_SEGMENT).indexingStateFingerprint(expectedFingerprint).build(),
+        DataSegment.builder(WIKI_SEGMENT_2).indexingStateFingerprint(null).lastCompactionState(createCompactionStateWithGranularity(Granularities.HOUR)).build()
+    );
+
+
+    verifyEvaluationNeedsCompactionBecauseWithCustomSegments(
+        segments,
+        compactionConfig,
+        "'segmentGranularity' mismatch: required[DAY], current[HOUR]"
+    );
+  }
+
+  @Test
+  public void test_evaluate_noCompactionWhenNonFingerprintedSegmentsPassChecksOnLastCompactionState()
+  {
+    final DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.DAY, null, null))
+        .build();
+
+    CompactionState expectedState = compactionConfig.toCompactionState();
+
+    String expectedFingerprint = fingerprintMapper.generateFingerprint(TestDataSource.WIKI, expectedState);
+
+    List<DataSegment> segments = List.of(
+        DataSegment.builder(WIKI_SEGMENT).indexingStateFingerprint(expectedFingerprint).build(),
+        DataSegment.builder(WIKI_SEGMENT_2).indexingStateFingerprint(null).lastCompactionState(createCompactionStateWithGranularity(Granularities.DAY)).build()
+    );
+
+    final CompactionStatus status = CompactionStatus.compute(
+        segments,
+        compactionConfig,
+        fingerprintMapper
+    );
+    Assertions.assertTrue(status.isComplete());
+  }
+
+  // ============================
+  // SKIPPED status tests
+  // ============================
+
+  @Test
+  public void test_evaluate_isSkippedWhenInputBytesExceedLimit()
+  {
+    // Two segments with 100MB each = 200MB total
+    // inputSegmentSizeBytes is 150MB, so should be skipped
+    final DataSourceCompactionConfig compactionConfig = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource(TestDataSource.WIKI)
+        .withInputSegmentSizeBytes(150_000_000L)
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.DAY, null, null))
+        .build();
+
+    final CompactionState lastCompactionState = createCompactionStateWithGranularity(Granularities.HOUR);
+    List<DataSegment> segments = List.of(
+        DataSegment.builder(WIKI_SEGMENT).lastCompactionState(lastCompactionState).build(),
+        DataSegment.builder(WIKI_SEGMENT_2).lastCompactionState(lastCompactionState).build()
+    );
+
+    final CompactionStatus status = CompactionStatus.compute(
+        segments,
+        compactionConfig,
+        fingerprintMapper
+    );
+
+    Assertions.assertFalse(status.isComplete());
+    Assertions.assertTrue(status.isSkipped());
+    Assertions.assertTrue(status.getReason().contains("'inputSegmentSize' exceeded"));
+    Assertions.assertTrue(status.getReason().contains("200000000"));
+    Assertions.assertTrue(status.getReason().contains("150000000"));
+  }
+
+  /**
+   * Verify that the evaluation indicates compaction is needed for the expected reason.
+   * Allows customization of the segments in the compaction candidate.
+   */
+  private void verifyEvaluationNeedsCompactionBecauseWithCustomSegments(
+      List<DataSegment> segments,
+      DataSourceCompactionConfig compactionConfig,
+      String expectedReason
+  )
+  {
+    final CompactionStatus status = CompactionStatus.compute(
+        segments,
+        compactionConfig,
+        fingerprintMapper
+    );
+
+    Assertions.assertFalse(status.isComplete());
+    Assertions.assertEquals(expectedReason, status.getReason());
+  }
+
+  private void verifyCompactionStatusIsPendingBecause(
+      CompactionState lastCompactionState,
+      DataSourceCompactionConfig compactionConfig,
+      String expectedReason
+  )
+  {
+    final DataSegment segment
+        = DataSegment.builder(WIKI_SEGMENT)
+                     .lastCompactionState(lastCompactionState)
+                     .build();
+    final CompactionStatus status = CompactionStatus.compute(
+        List.of(segment),
+        compactionConfig,
+        fingerprintMapper
+    );
+
+    Assertions.assertFalse(status.isComplete());
+    Assertions.assertEquals(expectedReason, status.getReason());
+  }
+
+  private static DataSourceCompactionConfig createCompactionConfig(
+      PartitionsSpec partitionsSpec
+  )
+  {
+    return InlineSchemaDataSourceCompactionConfig.builder()
+                                                 .forDataSource(TestDataSource.WIKI)
+                                                 .withTuningConfig(createTuningConfig(partitionsSpec, null))
+                                                 .build();
+  }
+
+  private static UserCompactionTaskQueryTuningConfig createTuningConfig(
+      PartitionsSpec partitionsSpec,
+      IndexSpec indexSpec
+  )
+  {
+    return new UserCompactionTaskQueryTuningConfig(
+        null,
+        null, null, null, null, partitionsSpec, indexSpec, null, null,
+        null, null, null, null, null, null, null, null, null, null
+    );
+  }
+
+  /**
+   * Simple helper to create a CompactionState with only segmentGranularity set
+   */
+  private static CompactionState createCompactionStateWithGranularity(Granularity segmentGranularity)
+  {
+    return CompactionState.builder()
+                          .indexSpec(IndexSpec.getDefault())
+                          .granularitySpec(new UniformGranularitySpec(segmentGranularity, null, null, null))
+                          .build();
+  }
+}

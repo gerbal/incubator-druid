@@ -25,10 +25,10 @@ import io.timeandspace.cronscheduler.CronScheduler;
 import io.timeandspace.cronscheduler.CronTask;
 import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mock;
 import org.mockito.Mockito;
@@ -60,14 +60,14 @@ public class ClockDriftSafeMonitorSchedulerTest
   private CronScheduler cronScheduler;
   private AutoCloseable mocks;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
     cronTaskRunner = Execs.singleThreaded("monitor-scheduler-test");
     mocks = MockitoAnnotations.openMocks(this);
   }
 
-  @After
+  @AfterEach
   public void tearDown() throws Exception
   {
     cronTaskRunner.shutdownNow();
@@ -93,7 +93,7 @@ public class ClockDriftSafeMonitorSchedulerTest
     ExecutorService executor = Mockito.mock(ExecutorService.class);
 
     final MonitorScheduler scheduler = new ClockDriftSafeMonitorScheduler(
-        Mockito.mock(MonitorSchedulerConfig.class),
+        Mockito.mock(DruidMonitorSchedulerConfig.class),
         Mockito.mock(ServiceEmitter.class),
         ImmutableList.of(monitor1, monitor2),
         CronScheduler.newBuilder(Duration.ofSeconds(1L)).setThreadName("monitor-scheduler-test").build(),
@@ -102,12 +102,12 @@ public class ClockDriftSafeMonitorSchedulerTest
 
     final Optional<Monitor1> maybeFound1 = scheduler.findMonitor(Monitor1.class);
     final Optional<Monitor2> maybeFound2 = scheduler.findMonitor(Monitor2.class);
-    Assert.assertTrue(maybeFound1.isPresent());
-    Assert.assertTrue(maybeFound2.isPresent());
-    Assert.assertSame(monitor1, maybeFound1.get());
-    Assert.assertSame(monitor2, maybeFound2.get());
+    Assertions.assertTrue(maybeFound1.isPresent());
+    Assertions.assertTrue(maybeFound2.isPresent());
+    Assertions.assertSame(monitor1, maybeFound1.get());
+    Assertions.assertSame(monitor2, maybeFound2.get());
 
-    Assert.assertFalse(scheduler.findMonitor(Monitor3.class).isPresent());
+    Assertions.assertFalse(scheduler.findMonitor(Monitor3.class).isPresent());
   }
   
   @Test
@@ -153,8 +153,8 @@ public class ClockDriftSafeMonitorSchedulerTest
 
     Monitor monitor = Mockito.mock(Monitor.class);
 
-    MonitorSchedulerConfig config = Mockito.mock(MonitorSchedulerConfig.class);
-    Mockito.when(config.getEmitterPeriod()).thenReturn(new org.joda.time.Duration(1000L));
+    DruidMonitorSchedulerConfig config = Mockito.mock(DruidMonitorSchedulerConfig.class);
+    Mockito.when(config.getEmissionDuration()).thenReturn(new org.joda.time.Duration(1000L));
 
     final MonitorScheduler scheduler = new ClockDriftSafeMonitorScheduler(
         config,
@@ -217,8 +217,8 @@ public class ClockDriftSafeMonitorSchedulerTest
 
     Monitor monitor = Mockito.mock(Monitor.class);
 
-    MonitorSchedulerConfig config = Mockito.mock(MonitorSchedulerConfig.class);
-    Mockito.when(config.getEmitterPeriod()).thenReturn(new org.joda.time.Duration(1000L));
+    DruidMonitorSchedulerConfig config = Mockito.mock(DruidMonitorSchedulerConfig.class);
+    Mockito.when(config.getEmissionDuration()).thenReturn(new org.joda.time.Duration(1000L));
 
     final MonitorScheduler scheduler = new ClockDriftSafeMonitorScheduler(
         config,
@@ -248,8 +248,8 @@ public class ClockDriftSafeMonitorSchedulerTest
     Mockito.when(monitor.monitor(ArgumentMatchers.any(ServiceEmitter.class)))
            .thenThrow(new RuntimeException("Test throwing exception while monitoring"));
 
-    MonitorSchedulerConfig config = Mockito.mock(MonitorSchedulerConfig.class);
-    Mockito.when(config.getEmitterPeriod()).thenReturn(new org.joda.time.Duration(1000L));
+    DruidMonitorSchedulerConfig config = Mockito.mock(DruidMonitorSchedulerConfig.class);
+    Mockito.when(config.getEmissionDuration()).thenReturn(new org.joda.time.Duration(1000L));
 
     CountDownLatch latch = new CountDownLatch(1);
     AtomicBoolean monitorResultHolder = new AtomicBoolean(false);
@@ -301,7 +301,7 @@ public class ClockDriftSafeMonitorSchedulerTest
         ArgumentMatchers.any(), ArgumentMatchers.any(CronTask.class));
     Mockito.verify(executor, Mockito.times(1)).submit(ArgumentMatchers.any(Callable.class));
     Mockito.verify(monitor, Mockito.times(1)).monitor(ArgumentMatchers.any());
-    Assert.assertTrue(monitorResultHolder.get());
+    Assertions.assertTrue(monitorResultHolder.get());
     scheduler.stop();
   }
   
@@ -310,8 +310,8 @@ public class ClockDriftSafeMonitorSchedulerTest
   {
     ExecutorService executor = Mockito.mock(ExecutorService.class);
     Monitor monitor = Mockito.mock(Monitor.class);
-    MonitorSchedulerConfig config = Mockito.mock(MonitorSchedulerConfig.class);
-    Mockito.when(config.getEmitterPeriod()).thenReturn(new org.joda.time.Duration(1000L));
+    DruidMonitorSchedulerConfig config = Mockito.mock(DruidMonitorSchedulerConfig.class);
+    Mockito.when(config.getEmissionDuration()).thenReturn(new org.joda.time.Duration(1000L));
 
     CountDownLatch latch = new CountDownLatch(1);
     Mockito.doAnswer(new Answer<Future<?>>()

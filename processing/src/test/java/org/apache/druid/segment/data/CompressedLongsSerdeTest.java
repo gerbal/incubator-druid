@@ -23,35 +23,43 @@ import com.google.common.base.Supplier;
 import com.google.common.primitives.Longs;
 import it.unimi.dsi.fastutil.ints.IntArrays;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.common.io.smoosh.FileSmoosher;
+import org.apache.druid.java.util.common.io.smoosh.SmooshedFileMapper;
+import org.apache.druid.segment.file.SegmentFileChannel;
 import org.apache.druid.segment.writeout.OffHeapMemorySegmentWriteOutMedium;
 import org.apache.druid.segment.writeout.SegmentWriteOutMedium;
 import org.apache.druid.segment.writeout.TmpFileSegmentWriteOutMediumFactory;
+import org.apache.druid.testing.TemporaryFolderExtension;
 import org.apache.druid.utils.CloseableUtils;
-import org.junit.Assert;
-import org.junit.Ignore;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
-import org.junit.rules.TemporaryFolder;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.hamcrest.MatcherAssert;
+import org.hamcrest.Matchers;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.Channels;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
-@RunWith(Parameterized.class)
+@ParameterizedClass
+
+@MethodSource("compressionStrategies")
 public class CompressedLongsSerdeTest
 {
-  @Parameterized.Parameters(name = "{0} {1} {2}")
   public static Iterable<Object[]> compressionStrategies()
   {
     List<Object[]> data = new ArrayList<>();
@@ -64,11 +72,8 @@ public class CompressedLongsSerdeTest
     return data;
   }
 
-  @Rule
-  public TemporaryFolder temporaryFolder = new TemporaryFolder();
-
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
+  @RegisterExtension
+  public TemporaryFolderExtension temporaryFolder = TemporaryFolderExtension.testCaseScoped();
 
   protected final CompressionFactory.LongEncodingStrategy encodingStrategy;
   protected final CompressionStrategy compressionStrategy;
@@ -134,7 +139,7 @@ public class CompressedLongsSerdeTest
   }
 
   // this test takes ~50 minutes to run (even skipping 'auto')
-  @Ignore
+  @Disabled
   @Test
   public void testTooManyValues() throws IOException
   {
@@ -142,25 +147,89 @@ public class CompressedLongsSerdeTest
     if (encodingStrategy.equals(CompressionFactory.LongEncodingStrategy.AUTO)) {
       return;
     }
-    expectedException.expect(ColumnCapacityExceededException.class);
-    expectedException.expectMessage(ColumnCapacityExceededException.formatMessage("test"));
+    final ColumnCapacityExceededException exception = Assertions.assertThrows(
+        ColumnCapacityExceededException.class,
+        () -> {
+          try (
+              SegmentWriteOutMedium segmentWriteOutMedium =
+                  TmpFileSegmentWriteOutMediumFactory.instance().makeSegmentWriteOutMedium(temporaryFolder.newFolder())
+          ) {
+            ColumnarLongsSerializer serializer = CompressionFactory.getLongSerializer(
+                "test",
+                segmentWriteOutMedium,
+                "test",
+                order,
+                encodingStrategy,
+                compressionStrategy,
+                segmentWriteOutMedium.getCloser()
+            );
+            serializer.open();
+
+            final long numRows = Integer.MAX_VALUE + 100L;
+            for (long i = 0L; i < numRows; i++) {
+              serializer.add(ThreadLocalRandom.current().nextLong());
+            }
+          }
+        }
+    );
+    Assertions.assertEquals(ColumnCapacityExceededException.formatMessage("test"), exception.getMessage());
+  }
+
+  @Test
+  public void testLargeColumn() throws IOException
+  {
+    // This test only makes sense if we can use BlockLayoutColumnarLongsSerializer directly. Exclude incompatible
+    // combinations of compressionStrategy, encodingStrategy.
+    Assumptions.assumeTrue(compressionStrategy != CompressionStrategy.NONE);
+    Assumptions.assumeTrue(encodingStrategy == CompressionFactory.LongEncodingStrategy.LONGS);
+
+    final File columnDir = temporaryFolder.newFolder();
+    final String columnName = "column";
+    final long numRows = 500_000; // enough values that we expect to switch into large-column mode
+
     try (
         SegmentWriteOutMedium segmentWriteOutMedium =
-            TmpFileSegmentWriteOutMediumFactory.instance().makeSegmentWriteOutMedium(temporaryFolder.newFolder())
+            TmpFileSegmentWriteOutMediumFactory.instance().makeSegmentWriteOutMedium(temporaryFolder.newFolder());
+        FileSmoosher smoosher = new FileSmoosher(columnDir)
     ) {
-      ColumnarLongsSerializer serializer = CompressionFactory.getLongSerializer(
-          "test",
+      final Random random = new Random(0);
+      final int fileSizeLimit = 128_000; // limit to 128KB so we switch to large-column mode sooner
+      final ColumnarLongsSerializer serializer = new BlockLayoutColumnarLongsSerializer(
+          columnName,
           segmentWriteOutMedium,
-          "test",
+          columnName,
           order,
-          encodingStrategy,
-          compressionStrategy
+          new LongsLongEncodingWriter(order),
+          compressionStrategy,
+          fileSizeLimit,
+          segmentWriteOutMedium.getCloser()
       );
       serializer.open();
 
-      final long numRows = Integer.MAX_VALUE + 100L;
-      for (long i = 0L; i < numRows; i++) {
-        serializer.add(ThreadLocalRandom.current().nextLong());
+      for (int i = 0; i < numRows; i++) {
+        serializer.add(random.nextLong());
+      }
+
+      try (SegmentFileChannel primaryWriter = smoosher.addWithChannel(columnName, serializer.getSerializedSize())) {
+        serializer.writeTo(primaryWriter, smoosher);
+      }
+    }
+
+    try (SmooshedFileMapper smooshMapper = SmooshedFileMapper.load(columnDir)) {
+      MatcherAssert.assertThat(
+          "Number of value parts written", // ensure the column actually ended up multi-part
+          smooshMapper.getInternalFilenames().stream().filter(s -> s.startsWith("column_value_")).count(),
+          Matchers.greaterThan(1L)
+      );
+
+      final CompressedColumnarLongsSupplier columnSupplier = CompressedColumnarLongsSupplier.fromByteBuffer(
+          smooshMapper.mapFile(columnName),
+          order,
+          smooshMapper
+      );
+
+      try (final ColumnarLongs column = columnSupplier.get()) {
+        Assertions.assertEquals(numRows, column.size());
       }
     }
   }
@@ -173,26 +242,26 @@ public class CompressedLongsSerdeTest
 
   public void testValues(long[] values) throws Exception
   {
+    SegmentWriteOutMedium segmentWriteOutMedium = new OffHeapMemorySegmentWriteOutMedium();
     ColumnarLongsSerializer serializer = CompressionFactory.getLongSerializer(
         "test",
-        new OffHeapMemorySegmentWriteOutMedium(),
+        segmentWriteOutMedium,
         "test",
         order,
         encodingStrategy,
-        compressionStrategy
+        compressionStrategy,
+        segmentWriteOutMedium.getCloser()
     );
     serializer.open();
 
-    for (long value : values) {
-      serializer.add(value);
-    }
-    Assert.assertEquals(values.length, serializer.size());
+    serializer.addAll(values, 0, values.length);
+    Assertions.assertEquals(values.length, serializer.size());
 
     final ByteArrayOutputStream baos = new ByteArrayOutputStream();
     serializer.writeTo(Channels.newChannel(baos), null);
-    Assert.assertEquals(baos.size(), serializer.getSerializedSize());
+    Assertions.assertEquals(baos.size(), serializer.getSerializedSize());
     CompressedColumnarLongsSupplier supplier = CompressedColumnarLongsSupplier
-        .fromByteBuffer(ByteBuffer.wrap(baos.toByteArray()), order);
+        .fromByteBuffer(ByteBuffer.wrap(baos.toByteArray()), order, null);
     try (ColumnarLongs longs = supplier.get()) {
 
       assertIndexMatchesVals(longs, values);
@@ -206,6 +275,9 @@ public class CompressedLongsSerdeTest
       testSupplierSerde(supplier, values);
       testConcurrentThreadReads(supplier, longs, values);
     }
+    finally {
+      segmentWriteOutMedium.close();
+    }
   }
 
   private void tryFill(ColumnarLongs indexed, long[] vals, final int startIndex, final int size)
@@ -214,13 +286,13 @@ public class CompressedLongsSerdeTest
     indexed.get(filled, startIndex, size);
 
     for (int i = startIndex; i < filled.length; i++) {
-      Assert.assertEquals(vals[i + startIndex], filled[i]);
+      Assertions.assertEquals(vals[i + startIndex], filled[i]);
     }
   }
 
   private void assertIndexMatchesVals(ColumnarLongs indexed, long[] vals)
   {
-    Assert.assertEquals(vals.length, indexed.size());
+    Assertions.assertEquals(vals.length, indexed.size());
 
     // sequential access
     long[] vector = new long[256];
@@ -229,8 +301,8 @@ public class CompressedLongsSerdeTest
       if (i % 256 == 0) {
         indexed.get(vector, i, Math.min(256, indexed.size() - i));
       }
-      Assert.assertEquals(vals[i], indexed.get(i));
-      Assert.assertEquals(vals[i], vector[i % 256]);
+      Assertions.assertEquals(vals[i], indexed.get(i));
+      Assertions.assertEquals(vals[i], vector[i % 256]);
       indices[i] = i;
     }
 
@@ -240,7 +312,7 @@ public class CompressedLongsSerdeTest
     final int limit = Math.min(indexed.size(), 1000);
     for (int i = 0; i < limit; ++i) {
       int k = indices[i];
-      Assert.assertEquals(vals[k], indexed.get(k));
+      Assertions.assertEquals(vals[k], indexed.get(k));
     }
   }
 
@@ -250,11 +322,9 @@ public class CompressedLongsSerdeTest
     supplier.writeTo(Channels.newChannel(baos), null);
 
     final byte[] bytes = baos.toByteArray();
-    Assert.assertEquals(supplier.getSerializedSize(), bytes.length);
-    CompressedColumnarLongsSupplier anotherSupplier = CompressedColumnarLongsSupplier.fromByteBuffer(
-        ByteBuffer.wrap(bytes),
-        order
-    );
+    Assertions.assertEquals(supplier.getSerializedSize(), bytes.length);
+    CompressedColumnarLongsSupplier anotherSupplier =
+        CompressedColumnarLongsSupplier.fromByteBuffer(ByteBuffer.wrap(bytes), order, null);
     try (ColumnarLongs indexed = anotherSupplier.get()) {
       assertIndexMatchesVals(indexed, vals);
     }
@@ -267,7 +337,7 @@ public class CompressedLongsSerdeTest
       final ColumnarLongs indexed, final long[] vals
   ) throws Exception
   {
-    final AtomicReference<String> reason = new AtomicReference<String>("none");
+    final AtomicReference<String> reason = new AtomicReference<>("none");
 
     final int numRuns = 1000;
     final CountDownLatch startLatch = new CountDownLatch(1);
@@ -360,7 +430,7 @@ public class CompressedLongsSerdeTest
     }
 
     if (failureHappened.get()) {
-      Assert.fail("Failure happened.  Reason: " + reason.get());
+      Assertions.fail("Failure happened.  Reason: " + reason.get());
     }
   }
 }

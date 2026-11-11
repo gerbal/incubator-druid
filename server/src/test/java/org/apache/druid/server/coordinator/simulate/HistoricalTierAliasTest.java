@@ -1,0 +1,299 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.druid.server.coordinator.simulate;
+
+import org.apache.druid.client.DruidServer;
+import org.apache.druid.segment.TestDataSource;
+import org.apache.druid.server.coordinator.CoordinatorDynamicConfig;
+import org.apache.druid.server.coordinator.stats.Dimension;
+import org.apache.druid.server.coordinator.stats.Stats;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Verifies that when historical tiers are grouped under an alias (e.g. a blue/green
+ * pair), the coordinator tags the per-tier capacity metrics with the
+ * {@link Dimension#TIER_ALIAS} dimension so they can be aggregated by alias.
+ */
+public class HistoricalTierAliasTest extends CoordinatorSimulationBaseTest
+{
+  private static final long SIZE_1TB = 1_000_000;
+  private static final long SEGMENT_SIZE = 500_000_000;
+  private static final String ALIAS = "hot";
+
+  private DruidServer historicalT1;
+  private DruidServer historicalT2;
+
+  private final String datasource = TestDataSource.WIKI;
+
+  @Override
+  @BeforeEach
+  public void setUp()
+  {
+    // T1 and T2 are interchangeable physical tiers grouped under the alias "hot"
+    historicalT1 = createHistorical(1, Tier.T1, SIZE_1TB);
+    historicalT2 = createHistorical(1, Tier.T2, SIZE_1TB);
+  }
+
+  @Test
+  public void testCapacityMetricsAreTaggedWithAlias()
+  {
+    final CoordinatorSimulation sim =
+        CoordinatorSimulation.builder()
+                             .withSegments(Segments.WIKI_10X1D)
+                             .withServers(historicalT1, historicalT2)
+                             // Rule targets the virtual alias, which expands to T1 and T2
+                             .withRules(datasource, Load.on(ALIAS, 1).forever())
+                             .withDynamicConfig(
+                                 CoordinatorDynamicConfig.builder()
+                                                         .withHistoricalTierAliases(
+                                                             Map.of(ALIAS, Set.of(Tier.T1, Tier.T2))
+                                                         )
+                                                         .withSmartSegmentLoading(true)
+                                                         .build()
+                             )
+                             .withImmediateSegmentLoading(true)
+                             .build();
+
+    startSimulation(sim);
+    runCoordinatorCycle();
+
+    final long expectedCapacity = SIZE_1TB << 20;
+
+    // tier/storage/capacity is emitted per physical tier AND tagged with the alias
+    verifyValue(
+        Stats.Tier.STORAGE_CAPACITY.getMetricName(),
+        aliasedTier(Tier.T1),
+        expectedCapacity
+    );
+    verifyValue(
+        Stats.Tier.STORAGE_CAPACITY.getMetricName(),
+        aliasedTier(Tier.T2),
+        expectedCapacity
+    );
+
+    // The deprecated tier/total/capacity carries the same value while it is still emitted
+    verifyValue(Stats.Tier.TOTAL_CAPACITY.getMetricName(), aliasedTier(Tier.T1), expectedCapacity);
+    verifyValue(Stats.Tier.TOTAL_CAPACITY.getMetricName(), aliasedTier(Tier.T2), expectedCapacity);
+
+    // tier/historical/count carries the alias too, so it can be summed across the pair
+    verifyValue(
+        Stats.Tier.HISTORICAL_COUNT.getMetricName(),
+        Map.of(Dimension.TIER.reportedName(), Tier.T1, Dimension.TIER_ALIAS.reportedName(), ALIAS),
+        1L
+    );
+    verifyValue(
+        Stats.Tier.HISTORICAL_COUNT.getMetricName(),
+        Map.of(Dimension.TIER.reportedName(), Tier.T2, Dimension.TIER_ALIAS.reportedName(), ALIAS),
+        1L
+    );
+  }
+
+  @Test
+  public void testUsedStorageReportsOnlyBytesLoadedAndAnnounced()
+  {
+    // tier/segmentCache/used does not report bytes consumed until historicals have actually loaded and announced the segments. It only reports the actual realized bytes of loaded segments.
+    final CoordinatorSimulation sim =
+        CoordinatorSimulation.builder()
+                             .withSegments(Segments.WIKI_10X1D)
+                             .withServers(historicalT1, historicalT2)
+                             .withRules(datasource, Load.on(ALIAS, 1).forever())
+                             .withDynamicConfig(
+                                 CoordinatorDynamicConfig.builder()
+                                                         .withHistoricalTierAliases(
+                                                             Map.of(ALIAS, Set.of(Tier.T1, Tier.T2))
+                                                         )
+                                                         .withSmartSegmentLoading(true)
+                                                         .build()
+                             )
+                             .withImmediateSegmentLoading(true)
+                             .build();
+
+    startSimulation(sim);
+
+    runCoordinatorCycle();
+    verifyValue(Stats.Tier.CACHE_USED.getMetricName(), aliasedTier(Tier.T1), 0L);
+    verifyValue(Stats.Tier.CACHE_USED.getMetricName(), aliasedTier(Tier.T2), 0L);
+
+    runCoordinatorCycle();
+    final long loadedBytes = 10 * SEGMENT_SIZE;
+    verifyValue(Stats.Tier.CACHE_USED.getMetricName(), aliasedTier(Tier.T1), loadedBytes);
+    verifyValue(Stats.Tier.CACHE_USED.getMetricName(), aliasedTier(Tier.T2), loadedBytes);
+  }
+
+  @Test
+  public void testCacheUtilizationIsEmittedPerTierAndPerAlias()
+  {
+    final DruidServer smallT1 = createHistorical(1, Tier.T1, 10_000);
+    final DruidServer largeT2 = createHistorical(1, Tier.T2, 20_000);
+    final CoordinatorSimulation sim =
+        CoordinatorSimulation.builder()
+                             .withSegments(Segments.WIKI_10X1D)
+                             .withServers(smallT1, largeT2)
+                             .withRules(datasource, Load.on(ALIAS, 1).forever())
+                             .withDynamicConfig(
+                                 CoordinatorDynamicConfig.builder()
+                                                         .withHistoricalTierAliases(
+                                                             Map.of(ALIAS, Set.of(Tier.T1, Tier.T2))
+                                                         )
+                                                         .withSmartSegmentLoading(true)
+                                                         .build()
+                             )
+                             .withImmediateSegmentLoading(true)
+                             .build();
+
+    startSimulation(sim);
+    runCoordinatorCycle();
+    runCoordinatorCycle();
+
+    // Each tier holds 5,000,000,000 bytes: T1 of 10,485,760,000 and T2 of 20,971,520,000
+    verifyValue(Stats.Tier.CACHE_UTILIZATION.getMetricName(), aliasedTier(Tier.T1), 48L);
+    verifyValue(Stats.Tier.CACHE_UTILIZATION.getMetricName(), aliasedTier(Tier.T2), 24L);
+
+    // The alias is the ratio of the summed bytes, not the average of the per-tier percentages
+    verifyValue(
+        Stats.Tier.ALIAS_CACHE_UTILIZATION.getMetricName(),
+        Map.of(Dimension.TIER_ALIAS.reportedName(), ALIAS),
+        32L
+    );
+  }
+
+  @Test
+  public void testCacheUtilizationSkipsTiersWithNoCapacity()
+  {
+    final DruidServer sizedT1 = createHistorical(1, Tier.T1, 10_000);
+    final DruidServer emptyT2 = createHistorical(1, Tier.T2, 0);
+    final CoordinatorSimulation sim =
+        CoordinatorSimulation.builder()
+                             .withSegments(Segments.WIKI_10X1D)
+                             .withServers(sizedT1, emptyT2)
+                             .withRules(datasource, Load.on(ALIAS, 1).forever())
+                             .withDynamicConfig(
+                                 CoordinatorDynamicConfig.builder()
+                                                         .withHistoricalTierAliases(
+                                                             Map.of(ALIAS, Set.of(Tier.T1, Tier.T2))
+                                                         )
+                                                         .withSmartSegmentLoading(true)
+                                                         .build()
+                             )
+                             .withImmediateSegmentLoading(true)
+                             .build();
+
+    startSimulation(sim);
+    runCoordinatorCycle();
+    runCoordinatorCycle();
+
+    verifyValue(Stats.Tier.CACHE_UTILIZATION.getMetricName(), aliasedTier(Tier.T1), 48L);
+    verifyEmitted(Stats.Tier.CACHE_UTILIZATION.getMetricName(), filterByTier(Tier.T2), 0);
+    verifyValue(
+        Stats.Tier.ALIAS_CACHE_UTILIZATION.getMetricName(),
+        Map.of(Dimension.TIER_ALIAS.reportedName(), ALIAS),
+        48L
+    );
+  }
+
+  @Test
+  public void testCacheUtilizationExcludesClones()
+  {
+    final DruidServer sourceT1 = createHistorical(1, Tier.T1, 10_000);
+    // T2 holds only a clone of sourceT1, so it has no managed cache capacity of its own
+    final DruidServer cloneT2 = createHistorical(1, Tier.T2, 20_000);
+    final CoordinatorSimulation sim =
+        CoordinatorSimulation.builder()
+                             .withSegments(Segments.WIKI_10X1D)
+                             .withServers(sourceT1, cloneT2)
+                             .withRules(datasource, Load.on(Tier.T1, 1).forever())
+                             .withDynamicConfig(
+                                 CoordinatorDynamicConfig.builder()
+                                                         .withHistoricalTierAliases(
+                                                             Map.of(ALIAS, Set.of(Tier.T1, Tier.T2))
+                                                         )
+                                                         .withCloneServers(Map.of(cloneT2.getHost(), sourceT1.getHost()))
+                                                         .withSmartSegmentLoading(true)
+                                                         .build()
+                             )
+                             .withImmediateSegmentLoading(true)
+                             .build();
+
+    startSimulation(sim);
+
+    runCoordinatorCycle();
+    verifyValue(Stats.Tier.CACHE_UTILIZATION.getMetricName(), aliasedTier(Tier.T1), 0L);
+
+    runCoordinatorCycle();
+    Assertions.assertEquals(Segments.WIKI_10X1D.size(), cloneT2.getTotalSegments());
+    verifyValue(Stats.Tier.CLONE_COUNT.getMetricName(), aliasedTier(Tier.T2), 1L);
+    verifyValue(Stats.Tier.CACHE_UTILIZATION.getMetricName(), aliasedTier(Tier.T1), 48L);
+    verifyEmitted(Stats.Tier.CACHE_UTILIZATION.getMetricName(), filterByTier(Tier.T2), 0);
+
+    // Counting the clone would give 10,000,000,000 / 31,457,280,000 = 32
+    verifyValue(
+        Stats.Tier.ALIAS_CACHE_UTILIZATION.getMetricName(),
+        Map.of(Dimension.TIER_ALIAS.reportedName(), ALIAS),
+        48L
+    );
+  }
+
+  private static Map<String, Object> aliasedTier(String tier)
+  {
+    return Map.of(Dimension.TIER.reportedName(), tier, Dimension.TIER_ALIAS.reportedName(), ALIAS);
+  }
+
+  @Test
+  public void testCapacityMetricsHaveNoAliasWhenNotConfigured()
+  {
+    final CoordinatorSimulation sim =
+        CoordinatorSimulation.builder()
+                             .withSegments(Segments.WIKI_10X1D)
+                             .withServers(historicalT1, historicalT2)
+                             .withRules(datasource, Load.on(Tier.T1, 1).andOn(Tier.T2, 1).forever())
+                             .withDynamicConfig(
+                                 CoordinatorDynamicConfig.builder()
+                                                         .withSmartSegmentLoading(true)
+                                                         .build()
+                             )
+                             .withImmediateSegmentLoading(true)
+                             .build();
+
+    startSimulation(sim);
+    runCoordinatorCycle();
+
+    final long expectedCapacity = SIZE_1TB << 20;
+
+    // Without an alias configured, capacity is reported against the physical tier only
+    verifyValue(
+        Stats.Tier.STORAGE_CAPACITY.getMetricName(),
+        filterByTier(Tier.T1),
+        expectedCapacity
+    );
+    verifyValue(
+        Stats.Tier.STORAGE_CAPACITY.getMetricName(),
+        filterByTier(Tier.T2),
+        expectedCapacity
+    );
+
+    verifyEmitted(Stats.Tier.CACHE_UTILIZATION.getMetricName(), filterByTier(Tier.T1), 1);
+    verifyNotEmitted(Stats.Tier.ALIAS_CACHE_UTILIZATION.getMetricName());
+  }
+}

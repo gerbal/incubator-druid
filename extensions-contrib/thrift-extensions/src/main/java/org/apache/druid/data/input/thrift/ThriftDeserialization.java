@@ -31,6 +31,7 @@ import org.apache.thrift.protocol.TJSONProtocol;
 import org.apache.thrift.protocol.TProtocolFactory;
 import org.apache.thrift.protocol.TProtocolUtil;
 import org.apache.thrift.protocol.TSimpleJSONProtocol;
+import org.apache.thrift.transport.TTransportException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -39,44 +40,64 @@ public class ThriftDeserialization
   private static final Logger log = LoggerFactory.getLogger(ThriftDeserialization.class);
 
 
-  private static final ThreadLocal<TDeserializer> DESERIALIZER_COMPACT = new ThreadLocal<TDeserializer>()
+  private static final ThreadLocal<TDeserializer> DESERIALIZER_COMPACT = new ThreadLocal<>()
   {
     @Override
     protected TDeserializer initialValue()
     {
-      return new TDeserializer(new TCompactProtocol.Factory());
+      return createDeserializer(new TCompactProtocol.Factory());
     }
   };
 
-  private static final ThreadLocal<TDeserializer> DESERIALIZER_BINARY = new ThreadLocal<TDeserializer>()
+  private static final ThreadLocal<TDeserializer> DESERIALIZER_BINARY = new ThreadLocal<>()
   {
     @Override
     protected TDeserializer initialValue()
     {
-      return new TDeserializer(new TBinaryProtocol.Factory());
+      return createDeserializer(new TBinaryProtocol.Factory());
     }
   };
 
-  private static final ThreadLocal<TDeserializer> DESERIALIZER_JSON = new ThreadLocal<TDeserializer>()
+  private static final ThreadLocal<TDeserializer> DESERIALIZER_JSON = new ThreadLocal<>()
   {
     @Override
     protected TDeserializer initialValue()
     {
-      return new TDeserializer(new TJSONProtocol.Factory());
+      return createDeserializer(new TJSONProtocol.Factory());
     }
   };
 
-  public static final ThreadLocal<TSerializer> SERIALIZER_SIMPLE_JSON = new ThreadLocal<TSerializer>()
+  public static final ThreadLocal<TSerializer> SERIALIZER_SIMPLE_JSON = new ThreadLocal<>()
   {
     @Override
     protected TSerializer initialValue()
     {
-      return new TSerializer(new TSimpleJSONProtocol.Factory());
+      return createSerializer(new TSimpleJSONProtocol.Factory());
     }
   };
 
 
   private static final byte[] EMPTY_BYTES = new byte[0];
+
+  private static TDeserializer createDeserializer(final TProtocolFactory protocolFactory)
+  {
+    try {
+      return new TDeserializer(protocolFactory);
+    }
+    catch (final TTransportException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  private static TSerializer createSerializer(final TProtocolFactory protocolFactory)
+  {
+    try {
+      return new TSerializer(protocolFactory);
+    }
+    catch (final TTransportException e) {
+      throw new IllegalStateException(e);
+    }
+  }
 
   public static byte[] decodeB64IfNeeded(final byte[] src)
   {

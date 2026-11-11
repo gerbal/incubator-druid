@@ -19,6 +19,7 @@
 
 package org.apache.druid.indexing.seekablestream;
 
+import com.google.common.base.Throwables;
 import org.apache.druid.data.input.AbstractInputSource;
 import org.apache.druid.data.input.InputEntity;
 import org.apache.druid.data.input.InputFormat;
@@ -27,6 +28,7 @@ import org.apache.druid.data.input.InputSourceReader;
 import org.apache.druid.data.input.impl.ByteEntity;
 import org.apache.druid.data.input.impl.InputEntityIteratingReader;
 import org.apache.druid.data.input.impl.JsonInputFormat;
+import org.apache.druid.data.input.impl.systemfield.SystemFieldDecoratorFactory;
 import org.apache.druid.indexing.overlord.sampler.SamplerException;
 import org.apache.druid.indexing.seekablestream.common.OrderedPartitionableRecord;
 import org.apache.druid.indexing.seekablestream.common.RecordSupplier;
@@ -36,6 +38,7 @@ import org.apache.druid.java.util.common.parsers.CloseableIterator;
 
 import javax.annotation.Nullable;
 import java.io.File;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -68,29 +71,35 @@ public class RecordSupplierInputSource<PartitionIdType, SequenceOffsetType, Reco
     this.recordSupplier = recordSupplier;
     this.useEarliestOffset = useEarliestOffset;
     this.iteratorTimeoutMs = iteratorTimeoutMs;
-    try {
-      assignAndSeek(recordSupplier);
-    }
-    catch (InterruptedException e) {
-      throw new SamplerException(e, "Exception while seeking to partitions");
-    }
+
+    assignAndSeek(recordSupplier);
   }
 
   private void assignAndSeek(RecordSupplier<PartitionIdType, SequenceOffsetType, RecordType> recordSupplier)
-      throws InterruptedException
   {
-    final Set<StreamPartition<PartitionIdType>> partitions = recordSupplier
-        .getPartitionIds(topic)
-        .stream()
-        .map(partitionId -> StreamPartition.of(topic, partitionId))
-        .collect(Collectors.toSet());
+    try {
+      final Set<StreamPartition<PartitionIdType>> partitions = recordSupplier
+          .getPartitionIds(topic)
+          .stream()
+          .map(partitionId -> StreamPartition.of(topic, partitionId))
+          .collect(Collectors.toSet());
 
-    recordSupplier.assign(partitions);
+      recordSupplier.assign(partitions);
 
-    if (useEarliestOffset) {
-      recordSupplier.seekToEarliest(partitions);
-    } else {
-      recordSupplier.seekToLatest(partitions);
+      if (useEarliestOffset) {
+        recordSupplier.seekToEarliest(partitions);
+      } else {
+        recordSupplier.seekToLatest(partitions);
+      }
+    }
+    catch (Exception e) {
+      throw new SamplerException(
+          e,
+          "Exception while seeking to the [%s] offset of partitions in topic [%s]: %s",
+          useEarliestOffset ? "earliest" : "latest",
+          topic,
+          Throwables.getRootCause(e).getMessage()
+      );
     }
   }
 
@@ -113,11 +122,12 @@ public class RecordSupplierInputSource<PartitionIdType, SequenceOffsetType, Reco
       @Nullable File temporaryDirectory
   )
   {
-    InputFormat format = inputFormat instanceof JsonInputFormat ? ((JsonInputFormat) inputFormat).withLineSplittable(false) : inputFormat;
+    InputFormat format = JsonInputFormat.withLineSplittable(inputFormat, false);
     return new InputEntityIteratingReader(
         inputRowSchema,
         format,
         createEntityIterator(),
+        SystemFieldDecoratorFactory.NONE,
         temporaryDirectory
     );
   }
@@ -128,7 +138,7 @@ public class RecordSupplierInputSource<PartitionIdType, SequenceOffsetType, Reco
    */
   CloseableIterator<InputEntity> createEntityIterator()
   {
-    return new CloseableIterator<InputEntity>()
+    return new CloseableIterator<>()
     {
       private Iterator<OrderedPartitionableRecord<PartitionIdType, SequenceOffsetType, RecordType>> recordIterator;
       private Iterator<? extends ByteEntity> bytesIterator;
@@ -152,7 +162,14 @@ public class RecordSupplierInputSource<PartitionIdType, SequenceOffsetType, Reco
           }
 
           if (!closed) {
-            bytesIterator = recordIterator.next().getData().iterator();
+            final OrderedPartitionableRecord<PartitionIdType, SequenceOffsetType, RecordType> record =
+                recordIterator.next();
+            // Skip records dropped by pre-ingestion filtering (e.g. Kafka header-based filtering) so that sampling
+            // reflects what ingestion actually keeps. The payload is retained on filtered markers for task-side
+            // byte accounting, so it must be explicitly ignored here.
+            bytesIterator = record.isFiltered()
+                            ? Collections.emptyIterator()
+                            : record.getData().iterator();
           }
         }
       }

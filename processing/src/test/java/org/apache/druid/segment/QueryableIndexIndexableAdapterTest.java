@@ -30,28 +30,28 @@ import org.apache.druid.segment.incremental.IncrementalIndex;
 import org.apache.druid.segment.writeout.OffHeapMemorySegmentWriteOutMediumFactory;
 import org.apache.druid.segment.writeout.SegmentWriteOutMediumFactory;
 import org.apache.druid.segment.writeout.TmpFileSegmentWriteOutMediumFactory;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.apache.druid.testing.TemporaryFolderExtension;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.File;
 import java.util.Collection;
 
-@RunWith(Parameterized.class)
+@ParameterizedClass
+
+@MethodSource("constructorFeeder")
 public class QueryableIndexIndexableAdapterTest
 {
-  private static final IndexSpec INDEX_SPEC = IndexMergerTestBase.makeIndexSpec(
-      new ConciseBitmapSerdeFactory(),
-      CompressionStrategy.LZ4,
-      CompressionStrategy.LZ4,
-      CompressionFactory.LongEncodingStrategy.LONGS
-  );
+  private static final IndexSpec INDEX_SPEC = IndexSpec.builder()
+                                                       .withBitmapSerdeFactory(new ConciseBitmapSerdeFactory())
+                                                       .withDimensionCompression(CompressionStrategy.LZ4)
+                                                       .withMetricCompression(CompressionStrategy.LZ4)
+                                                       .withLongEncoding(CompressionFactory.LongEncodingStrategy.LONGS)
+                                                       .build();
 
-
-  @Parameterized.Parameters
   public static Collection<?> constructorFeeder()
   {
     return ImmutableList.of(
@@ -60,10 +60,10 @@ public class QueryableIndexIndexableAdapterTest
     );
   }
 
-  @Rule
-  public final TemporaryFolder temporaryFolder = new TemporaryFolder();
-  @Rule
-  public final CloserRule closer = new CloserRule(false);
+  @RegisterExtension
+  public final TemporaryFolderExtension temporaryFolder = TemporaryFolderExtension.testCaseScoped();
+  @RegisterExtension
+  public final CloserExtension closer = new CloserExtension(false);
 
   private final IndexMerger indexMerger;
   private final IndexIO indexIO;
@@ -100,7 +100,7 @@ public class QueryableIndexIndexableAdapterTest
     try (CloseableIndexed<String> dimValueLookup = adapter.getDimValueLookup(dimension)) {
       for (int i = 0; i < dimValueLookup.size(); i++) {
         bitmapValues = adapter.getBitmapValues(dimension, i);
-        Assert.assertEquals(1, bitmapValues.size());
+        Assertions.assertEquals(1, bitmapValues.size());
       }
     }
   }

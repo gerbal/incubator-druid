@@ -21,12 +21,14 @@ package org.apache.druid.inputsource.hdfs;
 
 import com.fasterxml.jackson.annotation.JacksonInject;
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
 import org.apache.druid.data.input.AbstractInputSource;
+import org.apache.druid.data.input.InputEntity;
 import org.apache.druid.data.input.InputFileAttribute;
 import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.data.input.InputRowSchema;
@@ -35,45 +37,57 @@ import org.apache.druid.data.input.InputSplit;
 import org.apache.druid.data.input.SplitHintSpec;
 import org.apache.druid.data.input.impl.InputEntityIteratingReader;
 import org.apache.druid.data.input.impl.SplittableInputSource;
+import org.apache.druid.data.input.impl.systemfield.SystemField;
+import org.apache.druid.data.input.impl.systemfield.SystemFieldDecoratorFactory;
+import org.apache.druid.data.input.impl.systemfield.SystemFieldInputSource;
+import org.apache.druid.data.input.impl.systemfield.SystemFields;
 import org.apache.druid.guice.Hdfs;
+import org.apache.druid.java.util.common.CloseableIterators;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.storage.hdfs.HdfsStorageDruidModule;
 import org.apache.druid.utils.Streams;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.mapreduce.Job;
-import org.apache.hadoop.mapreduce.JobContext;
-import org.apache.hadoop.mapreduce.RecordReader;
-import org.apache.hadoop.mapreduce.TaskAttemptContext;
-import org.apache.hadoop.mapreduce.lib.input.FileInputFormat;
-import org.apache.hadoop.mapreduce.lib.input.FileSplit;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-public class HdfsInputSource extends AbstractInputSource implements SplittableInputSource<List<Path>>
+public class HdfsInputSource
+    extends AbstractInputSource
+    implements SplittableInputSource<List<Path>>, SystemFieldInputSource
 {
+  static final String TYPE_KEY = HdfsStorageDruidModule.SCHEME;
   private static final String PROP_PATHS = "paths";
 
   private final List<String> inputPaths;
+  private final SystemFields systemFields;
   private final Configuration configuration;
   private final HdfsInputSourceConfig inputSourceConfig;
 
   // Although the javadocs for SplittableInputSource say to avoid caching splits to reduce memory, HdfsInputSource
   // *does* cache the splits for the following reasons:
   //
-  // 1) It will improve compatibility with the index_hadoop task, allowing people to easily migrate from Hadoop.
+  // 1) It improved compatibility with the now removed index_hadoop task, allowing people to easily migrate from Hadoop.
   //    For example, input paths with globs will be supported (lazily expanding the wildcard glob is tricky).
   //
-  // 2) The index_hadoop task allocates splits eagerly, so the memory usage should not be a problem for anyone
+  // 2) The index_hadoop task allocated splits eagerly, so the memory usage should not be a problem for anyone
   //    migrating from Hadoop.
   @Nullable
   private List<Path> cachedPaths = null;
@@ -81,14 +95,24 @@ public class HdfsInputSource extends AbstractInputSource implements SplittableIn
   @JsonCreator
   public HdfsInputSource(
       @JsonProperty(PROP_PATHS) Object inputPaths,
+      @JsonProperty(SYSTEM_FIELDS_PROPERTY) SystemFields systemFields,
       @JacksonInject @Hdfs Configuration configuration,
       @JacksonInject HdfsInputSourceConfig inputSourceConfig
   )
   {
     this.inputPaths = coerceInputPathsToList(inputPaths, PROP_PATHS);
+    this.systemFields = systemFields == null ? SystemFields.none() : systemFields;
     this.configuration = configuration;
     this.inputSourceConfig = inputSourceConfig;
     this.inputPaths.forEach(p -> verifyProtocol(configuration, inputSourceConfig, p));
+  }
+
+  @JsonIgnore
+  @Nonnull
+  @Override
+  public Set<String> getTypes()
+  {
+    return Collections.singleton(TYPE_KEY);
   }
 
   public static List<String> coerceInputPathsToList(Object inputPaths, String propertyName)
@@ -104,13 +128,9 @@ public class HdfsInputSource extends AbstractInputSource implements SplittableIn
 
   public static void verifyProtocol(Configuration conf, HdfsInputSourceConfig config, String pathString)
   {
-    Path path = new Path(pathString);
-    try {
-      throwIfInvalidProtocol(config, path.getFileSystem(conf).getScheme());
-    }
-    catch (IOException e) {
-      throw new RuntimeException(e);
-    }
+    // Resolve the scheme without creating a FileSystem, so a disallowed path never touches the network.
+    final String scheme = new Path(pathString).toUri().getScheme();
+    throwIfInvalidProtocol(config, scheme != null ? scheme : FileSystem.getDefaultUri(conf).getScheme());
   }
 
   private static void throwIfInvalidProtocol(HdfsInputSourceConfig config, String scheme)
@@ -120,45 +140,59 @@ public class HdfsInputSource extends AbstractInputSource implements SplittableIn
     }
   }
 
+  /**
+   * Matches Hadoop's FileInputFormat hidden-file filter: rejects paths whose name starts with '_' or '.'.
+   */
+  private static boolean isHiddenPath(Path path)
+  {
+    final String name = path.getName();
+    return name.startsWith("_") || name.startsWith(".");
+  }
+
   public static Collection<Path> getPaths(List<String> inputPaths, Configuration configuration) throws IOException
   {
     if (inputPaths.isEmpty()) {
       return Collections.emptySet();
     }
 
-    // Use FileInputFormat to read splits. To do this, we need to make a fake Job.
-    Job job = Job.getInstance(configuration);
-
-    // Add paths to the fake JobContext.
-    for (String inputPath : inputPaths) {
-      FileInputFormat.addInputPaths(job, inputPath);
+    final Set<Path> paths = new LinkedHashSet<>();
+    for (final String inputPath : inputPaths) {
+      final String[] splitPaths = org.apache.hadoop.util.StringUtils.split(inputPath);
+      for (final String singlePath : splitPaths) {
+        final Path p = new Path(singlePath);
+        final FileSystem fs = p.getFileSystem(configuration);
+        final FileStatus[] statuses = fs.globStatus(p);
+        if (statuses != null) {
+          for (final FileStatus status : statuses) {
+            if (isHiddenPath(status.getPath())) {
+              continue;
+            }
+            if (status.isDirectory()) {
+              addFilesFromDirectory(fs, status.getPath(), paths);
+            } else if (status.getLen() > 0) {
+              paths.add(status.getPath());
+            }
+          }
+        }
+      }
     }
-
-    return new HdfsFileInputFormat().getSplits(job)
-                                    .stream()
-                                    .filter(split -> ((FileSplit) split).getLength() > 0)
-                                    .map(split -> ((FileSplit) split).getPath())
-                                    .collect(Collectors.toSet());
+    return paths;
   }
 
   /**
-   * Helper for leveraging hadoop code to interpret HDFS paths with globs
+   * Lists files in a directory non-recursively, matching the behavior of Hadoop's FileInputFormat
+   * when mapreduce.input.fileinputformat.input.dir.recursive is not set (the default).
+   * Hidden files (names starting with '_' or '.') and subdirectories are skipped.
    */
-  private static class HdfsFileInputFormat extends FileInputFormat<Object, Object>
+  private static void addFilesFromDirectory(FileSystem fs, Path dir, Set<Path> paths) throws IOException
   {
-    @Override
-    public RecordReader<Object, Object> createRecordReader(
-        org.apache.hadoop.mapreduce.InputSplit inputSplit,
-        TaskAttemptContext taskAttemptContext
-    )
-    {
-      throw new UnsupportedOperationException();
-    }
-
-    @Override
-    protected boolean isSplitable(JobContext context, Path filename)
-    {
-      return false;  // prevent generating extra paths
+    final FileStatus[] children = fs.listStatus(dir);
+    if (children != null) {
+      for (final FileStatus child : children) {
+        if (!child.isDirectory() && !isHiddenPath(child.getPath()) && child.getLen() > 0) {
+          paths.add(child.getPath());
+        }
+      }
     }
   }
 
@@ -167,6 +201,27 @@ public class HdfsInputSource extends AbstractInputSource implements SplittableIn
   List<String> getInputPaths()
   {
     return inputPaths;
+  }
+
+  @Override
+  public Set<SystemField> getConfiguredSystemFields()
+  {
+    return systemFields.getFields();
+  }
+
+  @Override
+  public Object getSystemFieldValue(InputEntity entity, SystemField field)
+  {
+    final HdfsInputEntity hdfsEntity = (HdfsInputEntity) entity;
+
+    switch (field) {
+      case URI:
+        return hdfsEntity.getUri().toString();
+      case PATH:
+        return hdfsEntity.getPath();
+      default:
+        return null;
+    }
   }
 
   @Override
@@ -185,7 +240,9 @@ public class HdfsInputSource extends AbstractInputSource implements SplittableIn
     return new InputEntityIteratingReader(
         inputRowSchema,
         inputFormat,
-        Iterators.transform(cachedPaths.iterator(), path -> new HdfsInputEntity(configuration, path)),
+        CloseableIterators.withEmptyBaggage(
+            Iterators.transform(cachedPaths.iterator(), path -> new HdfsInputEntity(configuration, path))),
+        SystemFieldDecoratorFactory.fromInputSource(this),
         temporaryDirectory
     );
   }
@@ -221,7 +278,7 @@ public class HdfsInputSource extends AbstractInputSource implements SplittableIn
   public SplittableInputSource<List<Path>> withSplit(InputSplit<List<Path>> split)
   {
     List<String> paths = split.get().stream().map(path -> path.toString()).collect(Collectors.toList());
-    return new HdfsInputSource(paths, configuration, inputSourceConfig);
+    return new HdfsInputSource(paths, systemFields, configuration, inputSourceConfig);
   }
 
   @Override
@@ -237,6 +294,37 @@ public class HdfsInputSource extends AbstractInputSource implements SplittableIn
     }
   }
 
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    HdfsInputSource that = (HdfsInputSource) o;
+    return Objects.equals(inputPaths, that.inputPaths)
+           && Objects.equals(systemFields, that.systemFields)
+           && Objects.equals(configuration, that.configuration)
+           && Objects.equals(inputSourceConfig, that.inputSourceConfig);
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return Objects.hash(inputPaths, systemFields, configuration, inputSourceConfig);
+  }
+
+  @Override
+  public String toString()
+  {
+    return "HdfsInputSource{" +
+           "inputPaths=" + inputPaths +
+           (systemFields.getFields().isEmpty() ? "" : ", systemFields=" + systemFields) +
+           '}';
+  }
+
   @VisibleForTesting
   static Builder builder()
   {
@@ -248,6 +336,7 @@ public class HdfsInputSource extends AbstractInputSource implements SplittableIn
     private Object paths;
     private Configuration configuration;
     private HdfsInputSourceConfig inputSourceConfig;
+    private SystemFields systemFields = SystemFields.none();
 
     private Builder()
     {
@@ -271,10 +360,17 @@ public class HdfsInputSource extends AbstractInputSource implements SplittableIn
       return this;
     }
 
+    Builder systemFields(SystemField... systemFields)
+    {
+      this.systemFields = new SystemFields(EnumSet.copyOf(Arrays.asList(systemFields)));
+      return this;
+    }
+
     HdfsInputSource build()
     {
       return new HdfsInputSource(
           Preconditions.checkNotNull(paths, "paths"),
+          systemFields,
           Preconditions.checkNotNull(configuration, "configuration"),
           Preconditions.checkNotNull(inputSourceConfig, "inputSourceConfig")
       );

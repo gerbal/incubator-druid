@@ -19,16 +19,17 @@
 
 package org.apache.druid.query.aggregation.datasketches.tuple;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import nl.jqno.equalsverifier.EqualsVerifier;
+import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.java.util.common.guava.Comparators;
 import org.apache.druid.query.aggregation.PostAggregator;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 
 public class ArrayOfDoublesSketchConstantPostAggregatorTest
 {
-
   @Test
   public void testSketchValue()
   {
@@ -37,7 +38,7 @@ public class ArrayOfDoublesSketchConstantPostAggregatorTest
         "constant_sketch",
         value
     );
-    Assert.assertNotNull(postAgg.getSketchValue());
+    Assertions.assertNotNull(postAgg.getSketchValue());
   }
 
 
@@ -49,7 +50,7 @@ public class ArrayOfDoublesSketchConstantPostAggregatorTest
         "AQEJAwgBzJP/////////fwIAAAAAAAAAzT6NGdX0aWUOJvS5EIhpLwAAAAAAAAAAAAAAAAAAAAA="
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "ArrayOfDoublesSketchConstantPostAggregator{name='constant_sketch', value='AQEJAwgBzJP/////////fwIAAAAAAAAAzT6NGdX0aWUOJvS5EIhpLwAAAAAAAAAAAAAAAAAAAAA='}",
         postAgg.toString()
     );
@@ -63,15 +64,35 @@ public class ArrayOfDoublesSketchConstantPostAggregatorTest
         "AQEJAwgBzJP/////////fwIAAAAAAAAAzT6NGdX0aWUOJvS5EIhpLwAAAAAAAAAAAAAAAAAAAAA="
     );
 
-    Assert.assertEquals(Comparators.alwaysEqual(), postAgg.getComparator());
+    Assertions.assertEquals(Comparators.alwaysEqual(), postAgg.getComparator());
+  }
+
+  @Test
+  public void testSerde() throws JsonProcessingException
+  {
+    final PostAggregator there = new ArrayOfDoublesSketchConstantPostAggregator(
+        "p",
+        "AQEJAwgBzJP/////////fwIAAAAAAAAAzT6NGdX0aWUOJvS5EIhpLwAAAAAAAAAAAAAAAAAAAAA="
+    );
+    DefaultObjectMapper mapper = new DefaultObjectMapper();
+    mapper.registerModules(new ArrayOfDoublesSketchModule().getJacksonModules());
+    PostAggregator andBackAgain = mapper.readValue(
+        mapper.writeValueAsString(there),
+        PostAggregator.class
+    );
+
+    Assertions.assertEquals(there, andBackAgain);
+    Assertions.assertArrayEquals(there.getCacheKey(), andBackAgain.getCacheKey());
   }
 
   @Test
   public void testEqualsAndHashCode()
   {
     EqualsVerifier.forClass(ArrayOfDoublesSketchConstantPostAggregator.class)
-        .usingGetClass()
-        .verify();
+                  .usingGetClass()
+                  .withNonnullFields("name")
+                  .withIgnoredFields("sketchValue")
+                  .verify();
   }
 }
 

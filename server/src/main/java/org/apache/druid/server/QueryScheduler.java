@@ -32,6 +32,8 @@ import org.apache.druid.client.SegmentServerSelector;
 import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.common.guava.LazySequence;
 import org.apache.druid.java.util.common.guava.Sequence;
+import org.apache.druid.java.util.common.guava.SequenceWrapper;
+import org.apache.druid.java.util.common.guava.Sequences;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.java.util.emitter.core.NoopEmitter;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
@@ -64,6 +66,12 @@ public class QueryScheduler implements QueryWatcher
   private static final Logger LOGGER = new Logger(QueryScheduler.class);
   public static final int UNAVAILABLE = -1;
   public static final String TOTAL = "total";
+  /**
+   * Lane name used for queries that are not assigned to any explicit lane (interactive pool). It has special meaning
+   * for the resilience4j bulkhead used to enforce lane limits, and is also emitted as the {@code lane} metric dimension
+   * for un-laned queries. It is therefore reserved and cannot be used as a configured lane name.
+   */
+  public static final String DEFAULT = "default";
   private final int totalCapacity;
   private final QueryPrioritizationStrategy prioritizationStrategy;
   private final QueryLaningStrategy laningStrategy;
@@ -104,9 +112,12 @@ public class QueryScheduler implements QueryWatcher
     this.laningStrategy = laningStrategy;
     this.queryFutures = Multimaps.synchronizedSetMultimap(HashMultimap.create());
     this.queryDatasources = Multimaps.synchronizedSetMultimap(HashMultimap.create());
-    // if totalNumThreads is above 0 and less than druid.server.http.numThreads, enforce total limit
+    // if totalNumThreads is above 0 and less than druid.server.http.numThreads and
+    // requests are not being queued by Jetty, enforce total limit
     final boolean limitTotal;
-    if (totalNumThreads > 0 && totalNumThreads < serverConfig.getNumThreads()) {
+    if (totalNumThreads > 0
+        && totalNumThreads < serverConfig.getNumThreads()
+        && !serverConfig.isEnableQueryRequestsQueuing()) {
       limitTotal = true;
       this.totalCapacity = totalNumThreads;
     } else {
@@ -160,15 +171,15 @@ public class QueryScheduler implements QueryWatcher
     Optional<String> lane = laningStrategy.computeLane(queryPlus.withQuery(query), segments);
     LOGGER.debug(
         "[%s] lane assigned to [%s] query with [%,d] priority",
-        lane.orElse("default"),
+        lane.orElse(DEFAULT),
         query.getType(),
         priority.orElse(0)
     );
     final ServiceMetricEvent.Builder builderUsr = ServiceMetricEvent.builder().setFeed("metrics")
-                                                                    .setDimension("lane", lane.orElse("default"))
+                                                                    .setDimension("lane", lane.orElse(DEFAULT))
                                                                     .setDimension("dataSource", query.getDataSource().getTableNames())
                                                                     .setDimension("type", query.getType());
-    emitter.emit(builderUsr.build("query/priority", priority.orElse(Integer.valueOf(0))));
+    emitter.emit(builderUsr.setMetric("query/priority", priority.orElse(Integer.valueOf(0))));
     return lane.map(query::withLane).orElse(query);
   }
 
@@ -185,8 +196,23 @@ public class QueryScheduler implements QueryWatcher
    */
   public <T> Sequence<T> run(Query<?> query, Sequence<T> resultSequence)
   {
-    List<Bulkhead> bulkheads = acquireLanes(query);
-    return resultSequence.withBaggage(() -> finishLanes(bulkheads));
+    return Sequences.wrap(resultSequence, new SequenceWrapper()
+    {
+      private List<Bulkhead> bulkheads = null;
+      @Override
+      public void before()
+      {
+        bulkheads = acquireLanes(query);
+      }
+
+      @Override
+      public void after(boolean isDone, Throwable thrown)
+      {
+        if (bulkheads != null) {
+          finishLanes(bulkheads);
+        }
+      }
+    });
   }
 
   /**

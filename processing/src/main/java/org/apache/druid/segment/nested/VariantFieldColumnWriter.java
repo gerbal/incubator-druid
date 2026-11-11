@@ -20,15 +20,10 @@
 package org.apache.druid.segment.nested;
 
 import com.google.common.base.Preconditions;
-import org.apache.druid.java.util.common.io.smoosh.FileSmoosher;
-import org.apache.druid.segment.IndexSpec;
 import org.apache.druid.segment.writeout.SegmentWriteOutMedium;
 
-import java.io.IOException;
-import java.nio.channels.WritableByteChannel;
-
 /**
- * Literal field writer for mixed type nested columns of {@link NestedDataColumnSerializer}
+ * Nested field writer for mixed type scalar or array columns of {@link NestedDataColumnSerializer}.
  */
 public final class VariantFieldColumnWriter extends GlobalDictionaryEncodedFieldColumnWriter<Object>
 {
@@ -36,17 +31,18 @@ public final class VariantFieldColumnWriter extends GlobalDictionaryEncodedField
       String columnName,
       String fieldName,
       SegmentWriteOutMedium segmentWriteOutMedium,
-      IndexSpec indexSpec,
-      GlobalDictionaryIdLookup globalDictionaryIdLookup
+      NestedCommonFormatColumnFormatSpec columnFormatSpec,
+      DictionaryIdLookup globalDictionaryIdLookup
   )
   {
-    super(columnName, fieldName, segmentWriteOutMedium, indexSpec, globalDictionaryIdLookup);
+    super(columnName, fieldName, segmentWriteOutMedium, columnFormatSpec, globalDictionaryIdLookup);
   }
 
 
   @Override
   Object processValue(int row, Object value)
   {
+    // replace arrays represented as Object[] with int[] composed of the global ids
     if (value instanceof Object[]) {
       Object[] array = (Object[]) value;
       final int[] globalIds = new int[array.length];
@@ -66,6 +62,7 @@ public final class VariantFieldColumnWriter extends GlobalDictionaryEncodedField
       }
       return globalIds;
     }
+    // non-arrays can be passed directly through
     return super.processValue(row, value);
   }
 
@@ -84,12 +81,5 @@ public final class VariantFieldColumnWriter extends GlobalDictionaryEncodedField
     } else {
       return globalDictionaryIdLookup.lookupString(String.valueOf(value));
     }
-  }
-
-  @Override
-  void writeColumnTo(WritableByteChannel channel, FileSmoosher smoosher) throws IOException
-  {
-    writeLongAndDoubleColumnLength(channel, 0, 0);
-    encodedValueSerializer.writeTo(channel, smoosher);
   }
 }

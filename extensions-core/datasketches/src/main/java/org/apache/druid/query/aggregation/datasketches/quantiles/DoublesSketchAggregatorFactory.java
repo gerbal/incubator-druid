@@ -23,7 +23,7 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.annotations.VisibleForTesting;
-import org.apache.datasketches.Util;
+import org.apache.datasketches.common.Util;
 import org.apache.datasketches.quantiles.DoublesSketch;
 import org.apache.datasketches.quantiles.DoublesUnion;
 import org.apache.druid.jackson.DefaultTrueJsonIncludeFilter;
@@ -123,7 +123,7 @@ public class DoublesSketchAggregatorFactory extends AggregatorFactory
     }
     this.fieldName = fieldName;
     this.k = k == null ? DEFAULT_K : k;
-    Util.checkIfPowerOf2(this.k, "k");
+    Util.checkIfIntPowerOf2(this.k, "k");
     this.maxStreamLength = maxStreamLength == null ? DEFAULT_MAX_STREAM_LENGTH : maxStreamLength;
     this.shouldFinalize = shouldFinalize == null ? DEFAULT_SHOULD_FINALIZE : shouldFinalize;
     this.cacheTypeId = cacheTypeId;
@@ -170,7 +170,7 @@ public class DoublesSketchAggregatorFactory extends AggregatorFactory
   {
     return ColumnProcessors.makeVectorProcessor(
         fieldName,
-        new VectorColumnProcessorFactory<VectorAggregator>()
+        new VectorColumnProcessorFactory<>()
         {
           @Override
           public VectorAggregator makeSingleValueDimensionProcessor(
@@ -209,6 +209,12 @@ public class DoublesSketchAggregatorFactory extends AggregatorFactory
           }
 
           @Override
+          public VectorAggregator makeArrayProcessor(ColumnCapabilities capabilities, VectorObjectSelector selector)
+          {
+            return new NoopDoublesSketchBufferAggregator();
+          }
+
+          @Override
           public VectorAggregator makeObjectProcessor(ColumnCapabilities capabilities, VectorObjectSelector selector)
           {
             return new DoublesSketchMergeVectorAggregator(selector, k, getMaxIntermediateSizeWithNulls());
@@ -240,8 +246,12 @@ public class DoublesSketchAggregatorFactory extends AggregatorFactory
   public Object combine(final Object lhs, final Object rhs)
   {
     final DoublesUnion union = DoublesUnion.builder().setMaxK(k).build();
-    union.update((DoublesSketch) lhs);
-    union.update((DoublesSketch) rhs);
+    if (lhs != null) {
+      union.union((DoublesSketch) lhs);
+    }
+    if (rhs != null) {
+      union.union((DoublesSketch) rhs);
+    }
     return union.getResultAndReset();
   }
 
@@ -263,7 +273,9 @@ public class DoublesSketchAggregatorFactory extends AggregatorFactory
       public void fold(final ColumnValueSelector selector)
       {
         final DoublesSketch sketch = (DoublesSketch) selector.getObject();
-        union.update(sketch);
+        if (sketch != null) {
+          union.union(sketch);
+        }
       }
 
       @Nullable
@@ -348,20 +360,6 @@ public class DoublesSketchAggregatorFactory extends AggregatorFactory
   }
 
   @Override
-  public List<AggregatorFactory> getRequiredColumns()
-  {
-    return Collections.singletonList(
-        new DoublesSketchAggregatorFactory(
-            fieldName,
-            fieldName,
-            k,
-            maxStreamLength,
-            shouldFinalize
-        )
-    );
-  }
-
-  @Override
   public AggregatorFactory getCombiningFactory()
   {
     return new DoublesSketchMergeAggregatorFactory(name, k, maxStreamLength, shouldFinalize);
@@ -412,7 +410,11 @@ public class DoublesSketchAggregatorFactory extends AggregatorFactory
   @Override
   public ColumnType getResultType()
   {
-    return ColumnType.LONG;
+    if (shouldFinalize) {
+      return ColumnType.LONG;
+    } else {
+      return getIntermediateType();
+    }
   }
 
   @Override
@@ -420,6 +422,25 @@ public class DoublesSketchAggregatorFactory extends AggregatorFactory
   {
     // maxStreamLength is not included in the cache key as it does nothing with query result.
     return new CacheKeyBuilder(cacheTypeId).appendString(name).appendString(fieldName).appendInt(k).build();
+  }
+
+  @Nullable
+  @Override
+  public AggregatorFactory substituteCombiningFactory(AggregatorFactory preAggregated)
+  {
+    if (this == preAggregated) {
+      return getCombiningFactory();
+    }
+
+    if (getClass() != preAggregated.getClass()) {
+      return null;
+    }
+
+    DoublesSketchAggregatorFactory that = (DoublesSketchAggregatorFactory) preAggregated;
+    if (k <= that.k && maxStreamLength <= that.getMaxStreamLength() && Objects.equals(fieldName, that.fieldName)) {
+      return getCombiningFactory();
+    }
+    return null;
   }
 
   @Override

@@ -24,6 +24,7 @@ import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.java.util.emitter.service.ServiceMetricEvent;
+import org.apache.druid.query.DruidMetrics;
 import org.apache.druid.query.QueryInterruptedException;
 import org.apache.druid.query.QueryTimeoutException;
 import org.apache.druid.server.QueryStats;
@@ -66,9 +67,22 @@ public class SqlExecutionReporter
     this.startNs = System.nanoTime();
   }
 
+  /**
+   * Report a query failure with an unknown number of byte written. The {@code sqlQuery/bytes} metric will
+   * not be emitted.
+   */
   public void failed(Throwable e)
   {
+    failed(e, -1);
+  }
+
+  /**
+   * Report a query failure with a known number of byte written. It will be emitted as {@code sqlQuery/bytes}.
+   */
+  public void failed(Throwable e, long bytesWritten)
+  {
     this.e = e;
+    this.bytesWritten = bytesWritten;
   }
 
   public void succeeded(final long bytesWritten)
@@ -112,12 +126,16 @@ public class SqlExecutionReporter
       }
       metricBuilder.setDimension("remoteAddress", StringUtils.nullToEmptyNonDruidDataString(remoteAddress));
       metricBuilder.setDimension("success", String.valueOf(success));
-      emitter.emit(metricBuilder.build("sqlQuery/time", TimeUnit.NANOSECONDS.toMillis(queryTimeNs)));
+
+      final int statusCode = DruidMetrics.computeStatusCode(e);
+      metricBuilder.setDimension(DruidMetrics.STATUS_CODE, statusCode);
+
+      emitter.emit(metricBuilder.setMetric("sqlQuery/time", TimeUnit.NANOSECONDS.toMillis(queryTimeNs)));
       if (bytesWritten >= 0) {
-        emitter.emit(metricBuilder.build("sqlQuery/bytes", bytesWritten));
+        emitter.emit(metricBuilder.setMetric("sqlQuery/bytes", bytesWritten));
       }
       if (planningTimeNanos >= 0) {
-        emitter.emit(metricBuilder.build(
+        emitter.emit(metricBuilder.setMetric(
             "sqlQuery/planningTimeMs",
             TimeUnit.NANOSECONDS.toMillis(planningTimeNanos)
         ));
@@ -128,12 +146,12 @@ public class SqlExecutionReporter
       statsMap.put("sqlQuery/planningTimeMs", TimeUnit.NANOSECONDS.toMillis(planningTimeNanos));
       statsMap.put("sqlQuery/bytes", bytesWritten);
       statsMap.put("success", success);
+      statsMap.put(DruidMetrics.STATUS_CODE, statusCode);
       Map<String, Object> queryContext = stmt.queryContext;
       if (plannerContext != null) {
         statsMap.put("identity", plannerContext.getAuthenticationResult().getIdentity());
         queryContext.put("nativeQueryIds", plannerContext.getNativeQueryIds().toString());
       }
-      statsMap.put("context", queryContext);
       if (e != null) {
         statsMap.put("exception", e.toString());
 
@@ -146,6 +164,7 @@ public class SqlExecutionReporter
       stmt.sqlToolbox.requestLogger.logSqlQuery(
           RequestLogLine.forSql(
               stmt.queryPlus.sql(),
+              stmt.queryPlus.sqlParameters(),
               queryContext,
               DateTimes.utc(startMs),
               remoteAddress,

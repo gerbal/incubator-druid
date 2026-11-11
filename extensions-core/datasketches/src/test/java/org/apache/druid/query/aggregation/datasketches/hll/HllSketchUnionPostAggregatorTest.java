@@ -25,8 +25,8 @@ import org.apache.datasketches.hll.TgtHllType;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.query.aggregation.PostAggregator;
 import org.apache.druid.query.aggregation.post.FieldAccessPostAggregator;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 
@@ -45,13 +45,14 @@ public class HllSketchUnionPostAggregatorTest
         TgtHllType.HLL_8.name()
     );
     DefaultObjectMapper mapper = new DefaultObjectMapper();
-    HllSketchUnionPostAggregator andBackAgain = mapper.readValue(
+    mapper.registerModules(new HllSketchModule().getJacksonModules());
+    PostAggregator andBackAgain = mapper.readValue(
         mapper.writeValueAsString(there),
-        HllSketchUnionPostAggregator.class
+        PostAggregator.class
     );
 
-    Assert.assertEquals(there, andBackAgain);
-    Assert.assertArrayEquals(there.getCacheKey(), andBackAgain.getCacheKey());
+    Assertions.assertEquals(there, andBackAgain);
+    Assertions.assertArrayEquals(there.getCacheKey(), andBackAgain.getCacheKey());
   }
 
   @Test
@@ -67,7 +68,7 @@ public class HllSketchUnionPostAggregatorTest
         null
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "HllSketchUnionPostAggregator{name='post', fields=[FieldAccessPostAggregator{name='field1', fieldName='sketch'}, FieldAccessPostAggregator{name='field2', fieldName='sketch'}], lgK=12, tgtHllType=HLL_4}",
         postAgg.toString()
     );

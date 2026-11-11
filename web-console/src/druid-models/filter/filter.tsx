@@ -16,13 +16,13 @@
  * limitations under the License.
  */
 
-import React from 'react';
-
 import type { Field } from '../../components';
 import { ExternalLink } from '../../components';
 import { getLink } from '../../links';
-import { deepGet, EMPTY_ARRAY, oneOf, typeIs } from '../../utils';
+import { deepGet, EMPTY_ARRAY, oneOf, typeIsKnown } from '../../utils';
 import type { IngestionSpec } from '../ingestion-spec/ingestion-spec';
+
+import { FILTER_COMPLETIONS } from './filter-completions';
 
 export interface DruidFilter {
   readonly type: string;
@@ -39,8 +39,8 @@ export function splitFilter(filter: DruidFilter | null): DimensionFiltersWithRes
     ? filter.type === 'and' && Array.isArray(filter.fields)
       ? filter.fields
       : filter.type !== 'true'
-      ? [filter]
-      : EMPTY_ARRAY
+        ? [filter]
+        : EMPTY_ARRAY
     : EMPTY_ARRAY;
 
   const dimensionFilters: DruidFilter[] = inputAndFilters.filter(
@@ -90,32 +90,32 @@ export const FILTER_FIELDS: Field<DruidFilter>[] = [
   {
     name: 'dimension',
     type: 'string',
-    defined: typeIs('selector', 'in', 'interval', 'regex', 'like'),
+    defined: typeIsKnown(KNOWN_FILTER_TYPES, 'selector', 'in', 'interval', 'regex', 'like'),
     required: true,
   },
   {
     name: 'value',
     type: 'string',
-    defined: typeIs('selector'),
+    defined: typeIsKnown(KNOWN_FILTER_TYPES, 'selector'),
     required: true,
   },
   {
     name: 'values',
     type: 'string-array',
-    defined: typeIs('in'),
+    defined: typeIsKnown(KNOWN_FILTER_TYPES, 'in'),
     required: true,
   },
   {
     name: 'intervals',
     type: 'string-array',
-    defined: typeIs('interval'),
+    defined: typeIsKnown(KNOWN_FILTER_TYPES, 'interval'),
     required: true,
     placeholder: 'ex: 2020-01-01/2020-06-01',
   },
   {
     name: 'pattern',
     type: 'string',
-    defined: typeIs('regex', 'like'),
+    defined: typeIsKnown(KNOWN_FILTER_TYPES, 'regex', 'like'),
     required: true,
   },
 
@@ -124,14 +124,14 @@ export const FILTER_FIELDS: Field<DruidFilter>[] = [
     label: 'Sub-filter type',
     type: 'string',
     suggestions: ['selector', 'in', 'interval', 'regex', 'like'],
-    defined: typeIs('not'),
+    defined: typeIsKnown(KNOWN_FILTER_TYPES, 'not'),
     required: true,
   },
   {
     name: 'field.dimension',
     label: 'Sub-filter dimension',
     type: 'string',
-    defined: typeIs('not'),
+    defined: typeIsKnown(KNOWN_FILTER_TYPES, 'not'),
   },
   {
     name: 'field.value',
@@ -166,11 +166,12 @@ export const FILTERS_FIELDS: Field<IngestionSpec>[] = [
     type: 'json',
     height: '350px',
     placeholder: '{ "type": "true" }',
+    jsonCompletions: FILTER_COMPLETIONS,
     info: (
       <>
         <p>
           A Druid{' '}
-          <ExternalLink href={`${getLink('DOCS')}/querying/filters.html`}>
+          <ExternalLink href={`${getLink('DOCS')}/querying/filters`}>
             JSON filter expression
           </ExternalLink>{' '}
           to apply to the data.

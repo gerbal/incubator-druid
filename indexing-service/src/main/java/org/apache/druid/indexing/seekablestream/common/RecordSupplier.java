@@ -20,13 +20,14 @@
 package org.apache.druid.indexing.seekablestream.common;
 
 import com.google.common.annotations.Beta;
+import jakarta.validation.constraints.NotNull;
 import org.apache.druid.data.input.impl.ByteEntity;
 
 import javax.annotation.Nullable;
-import javax.validation.constraints.NotNull;
 import java.io.Closeable;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -127,10 +128,40 @@ public interface RecordSupplier<PartitionIdType, SequenceOffsetType, RecordType 
    * returns the set of partitions under the given stream
    *
    * @param stream name of stream
-   *
    * @return set of partitions
    */
   Set<PartitionIdType> getPartitionIds(String stream);
+
+  /**
+   * Returns the end offsets for all the assigned partitions.
+   *
+   * @return Map from Partition ID to the corresponding end offset
+   */
+  default Map<PartitionIdType, SequenceOffsetType> getLatestSequenceNumbers(Set<StreamPartition<PartitionIdType>> partitions)
+  {
+    throw new UnsupportedOperationException();
+  }
+
+  /**
+   * Average poll-to-idle ratio as reported by the stream consumer.
+   * A value of 0 represents that the consumer is never idle, i.e. always consuming.
+   * A value of 1 represents that the consumer is always idle, i.e. not receiving data.
+   * A negative value indicates that no valid metric is available.
+   * Used by the supervisor auto-scaler to find an optimal task count that minimizes idle time.
+   */
+  default double getPollIdleRatioMetric()
+  {
+    return -1;
+  }
+
+  /**
+   * Running average of the {@link #getPollIdleRatioMetric()} averaged over the
+   * entire lifecycle of the task.
+   */
+  default double getRunningAvgPollIdleRatio()
+  {
+    return -1;
+  }
 
   /**
    * close the RecordSupplier

@@ -23,17 +23,18 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Supplier;
 import org.apache.druid.collections.bitmap.ImmutableBitmap;
-import org.apache.druid.java.util.common.io.smoosh.FileSmoosher;
 import org.apache.druid.segment.column.ValueType;
 import org.apache.druid.segment.data.BitmapSerde;
 import org.apache.druid.segment.data.BitmapSerdeFactory;
 import org.apache.druid.segment.data.ColumnarDoubles;
 import org.apache.druid.segment.data.CompressedColumnarDoublesSuppliers;
+import org.apache.druid.segment.file.SegmentFileBuilder;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
 import java.nio.ByteOrder;
 import java.nio.channels.WritableByteChannel;
+import java.util.Objects;
 
 /**
  */
@@ -123,7 +124,7 @@ public class DoubleNumericColumnPartSerdeV2 implements ColumnPartSerde
         }
 
         @Override
-        public void writeTo(WritableByteChannel channel, FileSmoosher fileSmoosher) throws IOException
+        public void writeTo(WritableByteChannel channel, SegmentFileBuilder fileSmoosher) throws IOException
         {
           delegate.writeTo(channel, fileSmoosher);
         }
@@ -142,12 +143,13 @@ public class DoubleNumericColumnPartSerdeV2 implements ColumnPartSerde
   @Override
   public Deserializer getDeserializer()
   {
-    return (buffer, builder, columnConfig) -> {
+    return (buffer, builder, columnConfig, parent) -> {
       int offset = buffer.getInt();
       int initialPos = buffer.position();
       final Supplier<ColumnarDoubles> column = CompressedColumnarDoublesSuppliers.fromByteBuffer(
           buffer,
-          byteOrder
+          byteOrder,
+          builder.getFileMapper()
       );
 
       buffer.position(initialPos + offset);
@@ -166,5 +168,25 @@ public class DoubleNumericColumnPartSerdeV2 implements ColumnPartSerde
              .setNumericColumnSupplier(new DoubleNumericColumnSupplier(column, bitmap))
              .setNullValueIndexSupplier(bitmap);
     };
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    final DoubleNumericColumnPartSerdeV2 that = (DoubleNumericColumnPartSerdeV2) o;
+    return Objects.equals(byteOrder, that.byteOrder)
+           && Objects.equals(bitmapSerdeFactory, that.bitmapSerdeFactory);
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return Objects.hash(byteOrder, bitmapSerdeFactory);
   }
 }

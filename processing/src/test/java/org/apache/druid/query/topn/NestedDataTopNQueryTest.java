@@ -20,8 +20,7 @@
 package org.apache.druid.query.topn;
 
 import com.google.common.collect.ImmutableList;
-import org.apache.druid.common.config.NullHandling;
-import org.apache.druid.guice.NestedDataModule;
+import org.apache.druid.guice.BuiltInTypesModule;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.granularity.Granularities;
@@ -40,13 +39,13 @@ import org.apache.druid.segment.Segment;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.virtual.NestedFieldVirtualColumn;
 import org.apache.druid.testing.InitializedNullHandlingTest;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.apache.druid.testing.TemporaryFolderExtension;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -56,45 +55,46 @@ import java.util.Collections;
 import java.util.List;
 import java.util.function.BiFunction;
 
-@RunWith(Parameterized.class)
+@ParameterizedClass
+
+@MethodSource("constructorFeeder")
 public class NestedDataTopNQueryTest extends InitializedNullHandlingTest
 {
   private static final Logger LOG = new Logger(NestedDataTopNQueryTest.class);
 
-  @Rule
-  public final TemporaryFolder tempFolder = new TemporaryFolder();
+  @RegisterExtension
+  public final TemporaryFolderExtension tempFolder = TemporaryFolderExtension.testCaseScoped();
 
   private final AggregationTestHelper helper;
-  private final BiFunction<TemporaryFolder, Closer, List<Segment>> segmentsGenerator;
+  private final BiFunction<TemporaryFolderExtension, Closer, List<Segment>> segmentsGenerator;
   private final Closer closer;
 
   public NestedDataTopNQueryTest(
-      BiFunction<TemporaryFolder, Closer, List<Segment>> segmentGenerator
+      BiFunction<TemporaryFolderExtension, Closer, List<Segment>> segmentGenerator
   )
   {
-    NestedDataModule.registerHandlersAndSerde();
+    BuiltInTypesModule.registerHandlersAndSerde();
     this.helper = AggregationTestHelper.createTopNQueryAggregationTestHelper(
-        NestedDataModule.getJacksonModulesList(),
+        BuiltInTypesModule.getJacksonModulesList(),
         tempFolder
     );
     this.segmentsGenerator = segmentGenerator;
     this.closer = Closer.create();
   }
 
-  @Parameterized.Parameters(name = "segments = {0}")
   public static Collection<?> constructorFeeder()
   {
     final List<Object[]> constructors = new ArrayList<>();
-    final List<BiFunction<TemporaryFolder, Closer, List<Segment>>> segmentsGenerators =
-        NestedDataTestUtils.getSegmentGenerators(NestedDataTestUtils.SIMPLE_DATA_FILE);
+    final List<BiFunction<TemporaryFolderExtension, Closer, List<Segment>>> segmentsGenerators =
+        NestedDataTestUtils.getSegmentGeneratorsWithTempDir(NestedDataTestUtils.SIMPLE_DATA_FILE);
 
-    for (BiFunction<TemporaryFolder, Closer, List<Segment>> generatorFn : segmentsGenerators) {
+    for (BiFunction<TemporaryFolderExtension, Closer, List<Segment>> generatorFn : segmentsGenerators) {
       constructors.add(new Object[]{generatorFn});
     }
     return constructors;
   }
 
-  @After
+  @AfterEach
   public void teardown() throws IOException
   {
     closer.close();
@@ -157,7 +157,7 @@ public class NestedDataTopNQueryTest extends InitializedNullHandlingTest
     verifyResults(
         results,
         ImmutableList.of(
-            new Object[]{1672531200000L, null, NullHandling.defaultDoubleValue()},
+            new Object[]{1672531200000L, null, null},
             new Object[]{1672531200000L, "100", 200.0},
             new Object[]{1672531200000L, "200", 400.0},
             new Object[]{1672531200000L, "300", 1200.0}
@@ -167,14 +167,14 @@ public class NestedDataTopNQueryTest extends InitializedNullHandlingTest
 
   private static void verifyResults(List<Object[]> results, List<Object[]> expected)
   {
-    Assert.assertEquals(expected.size(), results.size());
+    Assertions.assertEquals(expected.size(), results.size());
 
     for (int i = 0; i < expected.size(); i++) {
       LOG.info("result #%d, %s", i, Arrays.toString(results.get(i)));
-      Assert.assertArrayEquals(
-          StringUtils.format("result #%d", i + 1),
+      Assertions.assertArrayEquals(
           expected.get(i),
-          results.get(i)
+          results.get(i),
+          StringUtils.format("result #%d", i + 1)
       );
     }
   }

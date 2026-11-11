@@ -21,8 +21,8 @@ package org.apache.druid.indexing.overlord;
 
 import org.apache.druid.timeline.partition.NumberedPartialShardSpec;
 import org.apache.druid.timeline.partition.PartialShardSpec;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 public class SegmentCreateRequestTest
 {
@@ -35,12 +35,13 @@ public class SegmentCreateRequestTest
         "sequence",
         null,
         "version",
-        partialShardSpec
+        partialShardSpec,
+        null
     );
-    Assert.assertEquals("sequence", request.getSequenceName());
-    Assert.assertEquals("", request.getPreviousSegmentId());
-    Assert.assertEquals("version", request.getVersion());
-    Assert.assertEquals(partialShardSpec, request.getPartialShardSpec());
+    Assertions.assertEquals("sequence", request.getSequenceName());
+    Assertions.assertEquals("", request.getPreviousSegmentId());
+    Assertions.assertEquals("version", request.getVersion());
+    Assertions.assertEquals(partialShardSpec, request.getPartialShardSpec());
   }
 
 }

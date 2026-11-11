@@ -26,6 +26,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.inject.Binder;
 import com.google.inject.name.Names;
 import org.apache.druid.common.aws.AWSCredentialsConfig;
+import org.apache.druid.data.input.kinesis.KinesisInputFormat;
 import org.apache.druid.guice.JsonConfigProvider;
 import org.apache.druid.indexing.kinesis.supervisor.KinesisSupervisorSpec;
 import org.apache.druid.indexing.kinesis.supervisor.KinesisSupervisorTuningConfig;
@@ -36,6 +37,7 @@ import java.util.List;
 public class KinesisIndexingServiceModule implements DruidModule
 {
   public static final String AWS_SCOPE = "kinesis";
+  public static final String SCHEME = "kinesis";
   static final String PROPERTY_BASE = "druid.kinesis";
 
   @Override
@@ -45,11 +47,12 @@ public class KinesisIndexingServiceModule implements DruidModule
         new SimpleModule(getClass().getSimpleName())
             .registerSubtypes(
                 new NamedType(KinesisIndexTask.class, "index_kinesis"),
-                new NamedType(KinesisDataSourceMetadata.class, "kinesis"),
-                new NamedType(KinesisIndexTaskIOConfig.class, "kinesis"),
-                new NamedType(KinesisSupervisorTuningConfig.class, "kinesis"),
-                new NamedType(KinesisSupervisorSpec.class, "kinesis"),
-                new NamedType(KinesisSamplerSpec.class, "kinesis")
+                new NamedType(KinesisDataSourceMetadata.class, SCHEME),
+                new NamedType(KinesisIndexTaskIOConfig.class, SCHEME),
+                new NamedType(KinesisSupervisorTuningConfig.class, SCHEME),
+                new NamedType(KinesisSupervisorSpec.class, SCHEME),
+                new NamedType(KinesisSamplerSpec.class, SCHEME),
+                new NamedType(KinesisInputFormat.class, SCHEME)
             )
     );
   }

@@ -29,14 +29,14 @@
   <parent>
     <groupId>org.apache.druid</groupId>
     <artifactId>druid</artifactId>
-    <version>26.0.0-SNAPSHOT</version>
+    <version>40.0.0-SNAPSHOT</version>
   </parent>
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <sigar.base.version>1.6.5</sigar.base.version>
-    <sigar.version>${sigar.base.version}.132</sigar.version>
-    <ipaddress.version>5.3.4</ipaddress.version>
+    <query.context.docs.mode>verify</query.context.docs.mode>
+    <oshi.version>7.7.2</oshi.version>
+    <mariadb.legacy.version>2.7.3</mariadb.legacy.version>
   </properties>
 
   <dependencies>
@@ -65,20 +65,22 @@
       <artifactId>jackson-dataformat-smile</artifactId>
     </dependency>
     <dependency>
-      <groupId>org.skife.config</groupId>
-      <artifactId>config-magic</artifactId>
-    </dependency>
-    <dependency>
       <groupId>commons-io</groupId>
       <artifactId>commons-io</artifactId>
     </dependency>
     <dependency>
-      <groupId>commons-lang</groupId>
-      <artifactId>commons-lang</artifactId>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-lang3</artifactId>
     </dependency>
     <dependency>
       <groupId>org.apache.commons</groupId>
       <artifactId>commons-compress</artifactId>
+    </dependency>
+    <!-- commons-codec is an optional dependency of commons-compress starting with 1.26.0 which we require at runtime -->
+    <dependency>
+      <groupId>commons-codec</groupId>
+      <artifactId>commons-codec</artifactId>
+      <scope>runtime</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.commons</groupId>
@@ -96,10 +98,7 @@
       <groupId>com.google.inject</groupId>
       <artifactId>guice</artifactId>
     </dependency>
-    <dependency>
-      <groupId>com.google.inject.extensions</groupId>
-      <artifactId>guice-multibindings</artifactId>
-    </dependency>
+
     <dependency>
       <groupId>com.google.code.findbugs</groupId>
       <artifactId>jsr305</artifactId>
@@ -109,18 +108,12 @@
       <artifactId>error_prone_annotations</artifactId>
     </dependency>
     <dependency>
-      <groupId>jakarta.inject</groupId>
-      <artifactId>jakarta.inject-api</artifactId>
-    </dependency>
-    <dependency>
       <groupId>javax.inject</groupId>
       <artifactId>javax.inject</artifactId>
-      <version>1</version>
-      <scope>provided</scope>
     </dependency>
     <dependency>
-      <groupId>javax.validation</groupId>
-      <artifactId>validation-api</artifactId>
+      <groupId>jakarta.validation</groupId>
+      <artifactId>jakarta.validation-api</artifactId>
     </dependency>
     <dependency>
       <groupId>org.ow2.asm</groupId>
@@ -133,25 +126,24 @@
     <dependency>
       <groupId>org.checkerframework</groupId>
       <artifactId>checker-qual</artifactId>
-      <version>${checkerframework.version}</version>
     </dependency>
     <dependency>
       <groupId>org.apache.maven</groupId>
       <artifactId>maven-artifact</artifactId>
     </dependency>
     <dependency>
-      <groupId>javax.el</groupId>
-      <artifactId>javax.el-api</artifactId>
+      <groupId>jakarta.el</groupId>
+      <artifactId>jakarta.el-api</artifactId>
       <scope>runtime</scope>
     </dependency>
     <dependency>
-      <groupId>org.glassfish</groupId>
-      <artifactId>jakarta.el</artifactId>
+      <groupId>org.glassfish.expressly</groupId>
+      <artifactId>expressly</artifactId>
       <scope>runtime</scope>
     </dependency>
     <dependency>
-      <groupId>javax.xml.bind</groupId>
-      <artifactId>jaxb-api</artifactId>
+      <groupId>jakarta.xml.bind</groupId>
+      <artifactId>jakarta.xml.bind-api</artifactId>
       <scope>runtime</scope>
     </dependency>
     <dependency>
@@ -169,7 +161,12 @@
     </dependency>
     <dependency>
       <groupId>org.apache.logging.log4j</groupId>
-      <artifactId>log4j-slf4j-impl</artifactId>
+      <artifactId>log4j-layout-template-json</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-slf4j2-impl</artifactId>
       <scope>runtime</scope>
     </dependency>
     <dependency>
@@ -196,13 +193,9 @@
       <artifactId>airline</artifactId>
     </dependency>
     <dependency>
-      <groupId>org.hibernate</groupId>
+      <groupId>org.hibernate.validator</groupId>
       <artifactId>hibernate-validator</artifactId>
       <scope>runtime</scope>
-    </dependency>
-    <dependency>
-      <groupId>io.netty</groupId>
-      <artifactId>netty</artifactId>
     </dependency>
     <dependency>
       <groupId>io.netty</groupId>
@@ -214,7 +207,19 @@
     </dependency>
     <dependency>
       <groupId>io.netty</groupId>
+      <artifactId>netty-codec-base</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
       <artifactId>netty-codec-http</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-transport</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-handler</artifactId>
     </dependency>
     <dependency>
       <groupId>joda-time</groupId>
@@ -227,14 +232,6 @@
     <dependency>
       <groupId>it.unimi.dsi</groupId>
       <artifactId>fastutil</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>it.unimi.dsi</groupId>
-      <artifactId>fastutil-core</artifactId>
-    </dependency>
-    <dependency>
-      <groupId>it.unimi.dsi</groupId>
-      <artifactId>fastutil-extra</artifactId>
     </dependency>
     <dependency>
       <groupId>org.antlr</groupId>
@@ -253,7 +250,7 @@
       <artifactId>compress-lzf</artifactId>
     </dependency>
     <dependency>
-      <groupId>org.lz4</groupId>
+      <groupId>at.yawk.lz4</groupId>
       <artifactId>lz4-java</artifactId>
     </dependency>
     <dependency>
@@ -283,7 +280,6 @@
     <dependency>
       <groupId>com.github.seancfoley</groupId>
       <artifactId>ipaddress</artifactId>
-      <version>${ipaddress.version}</version>
     </dependency>
     <dependency>
       <groupId>com.opencsv</groupId>
@@ -300,6 +296,10 @@
     <dependency>
       <groupId>io.timeandspace</groupId>
       <artifactId>cron-scheduler</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.google.re2j</groupId>
+      <artifactId>re2j</artifactId>
     </dependency>
 
     <!-- com.lmax.disruptor is optional in log4j-core, so we explicitly include it here -->
@@ -320,32 +320,32 @@
       <artifactId>async-http-client</artifactId>
     </dependency>
 
-    <!-- Extra dependencies for server-metrics -->
     <dependency>
-      <groupId>org.hyperic</groupId>
-      <artifactId>sigar</artifactId>
-      <version>${sigar.version}</version>
+      <groupId>com.github.oshi</groupId>
+      <artifactId>oshi-core</artifactId>
+      <version>${oshi.version}</version>
     </dependency>
     <dependency>
-      <groupId>org.hyperic</groupId>
-      <artifactId>sigar-dist</artifactId>
-      <version>${sigar.version}</version>
-      <type>zip</type>
-      <!-- "Provided" because this dependency is used only during the build itself: some files from this
-      dependency are copied as resources. See maven-dependency-plugin configuration and <resources> below. -->
-      <scope>provided</scope>
+      <groupId>com.github.oshi</groupId>
+      <artifactId>oshi-common</artifactId>
+      <version>${oshi.version}</version>
     </dependency>
-
 
     <!-- Tests -->
     <dependency>
-      <groupId>junit</groupId>
-      <artifactId>junit</artifactId>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-api</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>
-      <groupId>com.carrotsearch</groupId>
-      <artifactId>junit-benchmarks</artifactId>
+      <groupId>org.opentest4j</groupId>
+      <artifactId>opentest4j</artifactId>
+      <version>1.3.0</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-engine</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -361,6 +361,13 @@
     <dependency>
       <groupId>org.mockito</groupId>
       <artifactId>mockito-core</artifactId>
+      <version>${mockito.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-junit-jupiter</artifactId>
+      <version>${mockito.version}</version>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -371,32 +378,27 @@
     <dependency>
       <groupId>org.reflections</groupId>
       <artifactId>reflections</artifactId>
-      <version>0.9.12</version>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>pl.pragmatists</groupId>
-      <artifactId>JUnitParams</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>com.google.guava</groupId>
       <artifactId>guava-testlib</artifactId>
       <scope>test</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>junit</groupId>
+          <artifactId>junit</artifactId>
+        </exclusion>
+      </exclusions>
     </dependency>
     <dependency>
       <groupId>org.hamcrest</groupId>
-      <artifactId>hamcrest-all</artifactId>
+      <artifactId>hamcrest</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.hamcrest</groupId>
       <artifactId>hamcrest-core</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.commons</groupId>
-      <artifactId>commons-lang3</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -411,8 +413,8 @@
       <scope>test</scope>
     </dependency>
     <dependency>
-      <groupId>org.eclipse.jetty</groupId>
-      <artifactId>jetty-servlet</artifactId>
+      <groupId>org.eclipse.jetty.ee8</groupId>
+      <artifactId>jetty-ee8-servlet</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>
@@ -421,13 +423,8 @@
       <scope>test</scope>
     </dependency>
     <dependency>
-      <groupId>org.mockito</groupId>
-      <artifactId>mockito-inline</artifactId>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>mysql</groupId>
-      <artifactId>mysql-connector-java</artifactId>
+      <groupId>com.mysql</groupId>
+      <artifactId>mysql-connector-j</artifactId>
       <version>${mysql.version}</version>
       <scope>test</scope>
     </dependency>
@@ -440,12 +437,11 @@
     <dependency>
       <groupId>org.postgresql</groupId>
       <artifactId>postgresql</artifactId>
-      <version>${postgresql.version}</version>
       <scope>test</scope>
     </dependency>
     <dependency>
-      <groupId>com.github.stefanbirkner</groupId>
-      <artifactId>system-rules</artifactId>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-params</artifactId>
       <scope>test</scope>
     </dependency>
   </dependencies>
@@ -484,19 +480,41 @@
         <artifactId>maven-dependency-plugin</artifactId>
         <executions>
           <execution>
-            <id>copy-sigar-lib-to-resources</id>
-            <phase>generate-resources</phase>
+            <id>copy-mariadb-legacy-test-driver</id>
+            <phase>generate-test-resources</phase>
             <goals>
-              <goal>unpack-dependencies</goal>
+              <goal>copy</goal>
             </goals>
             <configuration>
-              <includeGroupIds>org.hyperic</includeGroupIds>
-              <includeArtifactIds>sigar-dist</includeArtifactIds>
-              <includes>**/sigar-bin/lib/*</includes>
-              <excludes>**/sigar-bin/lib/*jar</excludes>
-              <outputDirectory>
-                ${project.build.directory}
-              </outputDirectory>
+              <artifactItems>
+                <artifactItem>
+                  <groupId>org.mariadb.jdbc</groupId>
+                  <artifactId>mariadb-java-client</artifactId>
+                  <version>${mariadb.legacy.version}</version>
+                  <outputDirectory>${project.build.directory}/mariadb-legacy</outputDirectory>
+                </artifactItem>
+              </artifactItems>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>generate-query-context-documentation</id>
+            <phase>process-classes</phase>
+            <goals>
+              <goal>java</goal>
+            </goals>
+            <configuration>
+              <mainClass>org.apache.druid.query.context.docs.ParameterDocumentationGenerator</mainClass>
+              <arguments>
+                <argument>${project.basedir}/..</argument>
+                <argument>${query.context.docs.mode}</argument>
+                <argument>${project.build.directory}/generated-docs</argument>
+              </arguments>
             </configuration>
           </execution>
         </executions>
@@ -509,15 +527,33 @@
 
           <!-- use normal classpath instead of manifest jar for JvmUtilsTest.testSystemClassPath -->
           <useManifestOnlyJar>false</useManifestOnlyJar>
+          <systemPropertyVariables>
+            <druid.test.mariadbLegacyDriver>
+              ${project.build.directory}/mariadb-legacy/mariadb-java-client-${mariadb.legacy.version}.jar
+            </druid.test.mariadbLegacyDriver>
+          </systemPropertyVariables>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <configuration>
+          <excludes>
+            <!-- LoggingEmitter is a delegating class. Skip tests. -->
+            <exclude>org/apache/druid/java/util/emitter/core/LoggingEmitter.class</exclude>
+            <!-- Logger is a facade to the slf4j Logger. No tests needed. -->
+            <exclude>org/apache/druid/java/util/common/logger/Logger.class</exclude>
+          </excludes>
         </configuration>
       </plugin>
     </plugins>
 
     <resources>
       <resource>
-        <directory>
-          ${project.build.directory}/hyperic-sigar-${sigar.base.version}/sigar-bin/lib
-        </directory>
+        <directory>src/main/resources</directory>
+        <includes>
+          <include>loggingEmitterAllowedMetrics.json</include>
+        </includes>
       </resource>
     </resources>
   </build>

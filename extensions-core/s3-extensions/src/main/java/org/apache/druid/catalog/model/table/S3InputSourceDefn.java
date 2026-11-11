@@ -66,11 +66,12 @@ import java.util.Map;
  * and the {@code format}. The user must provide the list of columns.</li>
  * </ul>
  *
- * @see {@link S3InputSource} for details on the meaning of the various properties, and the rules
+ * @see S3InputSource for details on the meaning of the various properties, and the rules
  * about valid combinations
  */
 public class S3InputSourceDefn extends FormattedInputSourceDefn
 {
+  public static final String TYPE_KEY = S3StorageDruidModule.SCHEME;
   public static final String URIS_PARAMETER = "uris";
   public static final String PREFIXES_PARAMETER = "prefixes";
   public static final String BUCKET_PARAMETER = "bucket";
@@ -78,6 +79,7 @@ public class S3InputSourceDefn extends FormattedInputSourceDefn
   public static final String ACCESS_KEY_ID_PARAMETER = "accessKeyId";
   public static final String SECRET_ACCESS_KEY_PARAMETER = "secretAccessKey";
   public static final String ASSUME_ROLE_ARN_PARAMETER = "assumeRoleArn";
+  public static final String SESSION_TOKEN_PARAMETER = "sessionToken";
 
   /**
    * The {@code objectGlob} property exists in S3, but is not documented. The corresponding
@@ -101,7 +103,8 @@ public class S3InputSourceDefn extends FormattedInputSourceDefn
   private static final List<ParameterDefn> SECURITY_PARAMS = Arrays.asList(
       new Parameter(ACCESS_KEY_ID_PARAMETER, ParameterType.VARCHAR, true),
       new Parameter(SECRET_ACCESS_KEY_PARAMETER, ParameterType.VARCHAR, true),
-      new Parameter(ASSUME_ROLE_ARN_PARAMETER, ParameterType.VARCHAR, true)
+      new Parameter(ASSUME_ROLE_ARN_PARAMETER, ParameterType.VARCHAR, true),
+      new Parameter(SESSION_TOKEN_PARAMETER, ParameterType.VARCHAR, true)
   );
 
   // Field names in the S3InputSource
@@ -113,11 +116,12 @@ public class S3InputSourceDefn extends FormattedInputSourceDefn
   private static final String ACCESS_KEY_ID_FIELD = "accessKeyId";
   private static final String SECRET_ACCESS_KEY_FIELD = "secretAccessKey";
   private static final String ASSUME_ROLE_ARN_FIELD = "assumeRoleArn";
+  private static final String SESSION_TOKEN_FIELD = "sessionToken";
 
   @Override
   public String typeValue()
   {
-    return S3StorageDruidModule.SCHEME;
+    return TYPE_KEY;
   }
 
   @Override
@@ -249,6 +253,7 @@ public class S3InputSourceDefn extends FormattedInputSourceDefn
     final String accessKeyId = CatalogUtils.getNonBlankString(args, ACCESS_KEY_ID_PARAMETER);
     final String secretAccessKey = CatalogUtils.getNonBlankString(args, SECRET_ACCESS_KEY_PARAMETER);
     final String assumeRoleArn = CatalogUtils.getNonBlankString(args, ASSUME_ROLE_ARN_PARAMETER);
+    final String sessionToken = CatalogUtils.getNonBlankString(args, SESSION_TOKEN_PARAMETER);
     if (accessKeyId != null || secretAccessKey != null || assumeRoleArn != null) {
       Map<String, Object> properties = new HashMap<>();
       if (accessKeyId != null) {
@@ -256,6 +261,9 @@ public class S3InputSourceDefn extends FormattedInputSourceDefn
       }
       if (secretAccessKey != null) {
         properties.put(SECRET_ACCESS_KEY_FIELD, secretAccessKey);
+      }
+      if (sessionToken != null) {
+        properties.put(SESSION_TOKEN_FIELD, sessionToken);
       }
       if (assumeRoleArn != null) {
         properties.put(ASSUME_ROLE_ARN_FIELD, assumeRoleArn);

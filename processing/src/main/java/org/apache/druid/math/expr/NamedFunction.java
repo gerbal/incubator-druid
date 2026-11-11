@@ -51,6 +51,11 @@ public interface NamedFunction
     throw new ExpressionValidationException(this, e, reasonFormat, args);
   }
 
+  default ExpressionProcessingException processingFailed(String reasonFormat, Object... args)
+  {
+    throw new ExpressionProcessingException(this, reasonFormat, args);
+  }
+
   default ExpressionProcessingException processingFailed(Throwable e, String reasonFormat, Object... args)
   {
     throw new ExpressionProcessingException(this, e, reasonFormat, args);
@@ -123,7 +128,6 @@ public interface NamedFunction
       );
     }
   }
-
 
   /**
    * Helper method for implementors performing validation to check that the argument list is some expected size.

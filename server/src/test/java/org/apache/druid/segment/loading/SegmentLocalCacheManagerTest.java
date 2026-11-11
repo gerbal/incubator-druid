@@ -24,168 +24,392 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.jsontype.NamedType;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import org.apache.druid.jackson.DefaultObjectMapper;
+import com.google.common.collect.ImmutableSet;
+import org.apache.druid.error.DruidException;
+import org.apache.druid.error.DruidExceptionMatcher;
+import org.apache.druid.guice.LocalDataStorageDruidModule;
+import org.apache.druid.jackson.SegmentizerModule;
 import org.apache.druid.java.util.common.FileUtils;
+import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.emitter.EmittingLogger;
+import org.apache.druid.math.expr.ExprMacroTable;
+import org.apache.druid.query.expression.TestExprMacroTable;
+import org.apache.druid.segment.CursorFactory;
+import org.apache.druid.segment.IndexIO;
+import org.apache.druid.segment.IndexSpec;
+import org.apache.druid.segment.QueryableIndex;
+import org.apache.druid.segment.Segment;
+import org.apache.druid.segment.SegmentLazyLoadFailCallback;
+import org.apache.druid.segment.TestHelper;
+import org.apache.druid.segment.TestIndex;
+import org.apache.druid.segment.TestSegmentUtils;
+import org.apache.druid.segment.column.ColumnConfig;
 import org.apache.druid.server.metrics.NoopServiceEmitter;
+import org.apache.druid.testing.InitializedNullHandlingTest;
+import org.apache.druid.testing.TemporaryFolderExtension;
 import org.apache.druid.timeline.DataSegment;
-import org.apache.druid.timeline.partition.NoneShardSpec;
+import org.apache.druid.timeline.SegmentId;
+import org.apache.druid.timeline.partition.LinearShardSpec;
 import org.apache.druid.timeline.partition.TombstoneShardSpec;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
+import org.apache.druid.utils.CompressionUtils;
+import org.joda.time.Interval;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.Executors;
+import java.util.Optional;
 
-public class SegmentLocalCacheManagerTest
+public class SegmentLocalCacheManagerTest extends InitializedNullHandlingTest
 {
-  @Rule
-  public final TemporaryFolder tmpFolder = new TemporaryFolder();
+  private static final String TEST_DATA_BASE_RELATIVE_PATH =
+      "test_segment_loader/2011-01-12T00:00:00.000Z_2011-04-15T00:00:00.001Z/2015-05-27T03:38:35.683Z/";
+  private static final String TEST_DATA_RELATIVE_PATH = TEST_DATA_BASE_RELATIVE_PATH + "0";
+  private static final String TEST_DATA_RELATIVE_PATH_2 = TEST_DATA_BASE_RELATIVE_PATH + "1";
+  private static final String TEST_DATA_RELATIVE_PATH_3 = TEST_DATA_BASE_RELATIVE_PATH + "2";
+  private static final String TEST_DATA_RELATIVE_PATH_4 = TEST_DATA_BASE_RELATIVE_PATH + "3";
 
-  private final ObjectMapper jsonMapper;
+  @RegisterExtension
+  public final TemporaryFolderExtension tmpFolder = TemporaryFolderExtension.testCaseScoped();
 
-  private File localSegmentCacheFolder;
+  private ObjectMapper jsonMapper;
+  private File segmentDeepStorageDir;
+  private File localSegmentCacheDir;
   private SegmentLocalCacheManager manager;
 
-  public SegmentLocalCacheManagerTest()
+  @BeforeEach
+  public void setUp() throws Exception
   {
-    jsonMapper = new DefaultObjectMapper();
-    jsonMapper.registerSubtypes(new NamedType(LocalLoadSpec.class, "local"),
-                                new NamedType(TombstoneLoadSpec.class, "tombstone"));
+    jsonMapper = TestHelper.makeJsonMapper();
+    jsonMapper.registerSubtypes(
+        new NamedType(LocalLoadSpec.class, "local"),
+        new NamedType(TombstoneLoadSpec.class, "tombstone")
+    );
+    jsonMapper.registerSubtypes(TestSegmentUtils.TestLoadSpec.class);
+    jsonMapper.registerSubtypes(TestSegmentUtils.TestSegmentizerFactory.class);
+    jsonMapper.registerModule(new SegmentizerModule());
+    jsonMapper.registerModules(new LocalDataStorageDruidModule().getJacksonModules());
     jsonMapper.setInjectableValues(
-        new InjectableValues.Std().addValue(
-            LocalDataSegmentPuller.class,
-            new LocalDataSegmentPuller()
-        )
+        new InjectableValues.Std()
+            .addValue(LocalDataSegmentPuller.class, new LocalDataSegmentPuller())
+            .addValue(IndexIO.class, TestHelper.getTestIndexIO(jsonMapper, ColumnConfig.DEFAULT))
+            .addValue(ObjectMapper.class, jsonMapper)
+            .addValue(DataSegment.PruneSpecsHolder.class, DataSegment.PruneSpecsHolder.DEFAULT)
+            .addValue(ExprMacroTable.class, TestExprMacroTable.INSTANCE)
+    );
+
+    EmittingLogger.registerEmitter(new NoopServiceEmitter());
+    segmentDeepStorageDir = tmpFolder.newFolder("segment_deep_storage");
+    localSegmentCacheDir = tmpFolder.newFolder("segment_cache");
+
+    manager = makeDefaultManager(jsonMapper);
+    Assertions.assertTrue(manager.canHandleSegments());
+  }
+
+  @Test
+  public void testCanHandleSegmentsWithConfigLocations()
+  {
+    // Only injecting config locations without locations shouldn't really be the case.
+    // It possibly suggests an issue with injection.
+    final SegmentLoaderConfig loaderConfig =
+        SegmentLoaderConfig.builder()
+                           .locations(new StorageLocationConfig(localSegmentCacheDir, null, null))
+                           .build();
+
+    manager = new SegmentLocalCacheManager(
+        ImmutableList.of(),
+        loaderConfig,
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new LeastBytesUsedStorageLocationSelectorStrategy(ImmutableList.of()),
+        TestIndex.INDEX_IO,
+        jsonMapper
+    );
+    Assertions.assertTrue(manager.canHandleSegments());
+  }
+
+  @Test
+  public void testCanHandleSegmentsWithLocations()
+  {
+    final ImmutableList<StorageLocation> locations = ImmutableList.of(
+        new StorageLocation(localSegmentCacheDir, 10000000000L, null)
+    );
+    final SegmentLoaderConfig loaderConfig = SegmentLoaderConfig.builder().build();
+    SegmentLocalCacheManager manager = new SegmentLocalCacheManager(
+        locations,
+        loaderConfig,
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new LeastBytesUsedStorageLocationSelectorStrategy(locations),
+        TestIndex.INDEX_IO,
+        jsonMapper
+    );
+    Assertions.assertTrue(manager.canHandleSegments());
+  }
+
+  @Test
+  public void testCanHandleSegmentsWithEmptyLocationsAndConfigLocations()
+  {
+    final SegmentLoaderConfig loaderConfig = SegmentLoaderConfig.builder().build();
+    SegmentLocalCacheManager manager = new SegmentLocalCacheManager(
+        ImmutableList.of(),
+        loaderConfig,
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new LeastBytesUsedStorageLocationSelectorStrategy(ImmutableList.of()),
+        TestIndex.INDEX_IO,
+        jsonMapper
+    );
+    Assertions.assertFalse(manager.canHandleSegments());
+  }
+
+  @Test
+  public void testGetCachedSegmentsWhenCanHandleSegmentsIsFalse()
+  {
+    final SegmentLoaderConfig loaderConfig = SegmentLoaderConfig.builder().build();
+    SegmentLocalCacheManager manager = new SegmentLocalCacheManager(
+        null,
+        loaderConfig,
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new LeastBytesUsedStorageLocationSelectorStrategy(null),
+        TestIndex.INDEX_IO,
+        jsonMapper
+    );
+    DruidExceptionMatcher.assertThat(
+        Assertions.assertThrows(
+            DruidException.class,
+            () -> manager.getCachedSegments()
+        ),
+        DruidExceptionMatcher.defensive().expectMessageIs(
+            "canHandleSegments() is false. getCachedSegments() must be invoked only"
+            + " when canHandleSegments() returns true.")
     );
   }
 
-  @Before
-  public void setUp() throws Exception
+  @Test
+  public void testGetCachedSegments() throws IOException
   {
-    EmittingLogger.registerEmitter(new NoopServiceEmitter());
-    localSegmentCacheFolder = tmpFolder.newFolder("segment_cache_folder");
+    SegmentLocalCacheManager manager = makeDefaultManager(jsonMapper);
+    final File baseInfoDir = new File(manager.getLocations().get(0).getPath(), "/info_dir/");
+    FileUtils.mkdirp(baseInfoDir);
 
-    final List<StorageLocationConfig> locations = new ArrayList<>();
-    final StorageLocationConfig locationConfig = new StorageLocationConfig(localSegmentCacheFolder, 10000000000L, null);
-    locations.add(locationConfig);
-
-    manager = new SegmentLocalCacheManager(
-        new SegmentLoaderConfig().withLocations(locations),
-        jsonMapper
+    // can use fake segments since we aren't loading them for real
+    final DataSegment segment1 = TestSegmentUtils.makeSegment(
+        "test_segment_loader", "v0", Intervals.of("2014-10-20T00:00:00Z/P1D")
     );
+    writeSegmentFile(segment1);
+    manager.storeInfoFile(segment1);
+
+    final DataSegment segment2 = TestSegmentUtils.makeSegment(
+        "test_segment_loader", "v1", Intervals.of("2015-10-20T00:00:00Z/P1D")
+    );
+    writeSegmentFile(segment2);
+    manager.storeInfoFile(segment2);
+
+    Assertions.assertTrue(manager.canHandleSegments());
+    Assertions.assertEquals(
+        ImmutableSet.of(segment1, segment2),
+        ImmutableSet.copyOf(manager.getCachedSegments())
+    );
+  }
+
+  @Test
+  public void testGetCachedSegmentsWithMissingSegmentFile() throws IOException
+  {
+    SegmentLocalCacheManager manager = makeDefaultManager(jsonMapper);
+    final File baseInfoDir = new File(manager.getLocations().get(0).getPath(), "/info_dir/");
+    FileUtils.mkdirp(baseInfoDir);
+
+    // can use fake segments since we aren't loading them for real
+    final DataSegment segment1 = TestSegmentUtils.makeSegment(
+        "test_segment_loader", "v0", Intervals.of("2014-10-20T00:00:00Z/P1D")
+    );
+    writeSegmentFile(segment1);
+    manager.storeInfoFile(segment1);
+
+    final DataSegment segment2 = TestSegmentUtils.makeSegment(
+        "test_segment_loader", "v1", Intervals.of("2015-10-20T00:00:00Z/P1D")
+    );
+    writeSegmentFile(segment2);
+    manager.storeInfoFile(segment2);
+
+    // Write another segment's info segment3InfoFile, but not the segment segment3InfoFile.
+    final DataSegment segment3 = TestSegmentUtils.makeSegment(
+        "test_segment_loader", "v1", Intervals.of("2016-10-20T00:00:00Z/P1D")
+    );
+    manager.storeInfoFile(segment3);
+    final File segment3InfoFile = new File(baseInfoDir, segment3.getId().toString());
+    Assertions.assertTrue(segment3InfoFile.exists());
+
+    Assertions.assertTrue(manager.canHandleSegments());
+    Assertions.assertEquals(
+        ImmutableSet.of(segment1, segment2),
+        ImmutableSet.copyOf(manager.getCachedSegments())
+    );
+    Assertions.assertFalse(segment3InfoFile.exists());
+  }
+
+  @Test
+  public void testSegmentInfoFileRejectsPathTraversal() throws IOException
+  {
+    final DataSegment segment = TestSegmentUtils.makeSegment(
+        "../../outside",
+        "v0",
+        Intervals.of("2014-10-20T00:00:00Z/P1D")
+    );
+    final File infoDir = new File(localSegmentCacheDir, "info_dir");
+    final File unsafeInfoFile = new File(infoDir, segment.getId().toString());
+    FileUtils.mkdirp(infoDir);
+
+    Assertions.assertThrows(IAE.class, () -> manager.storeInfoFile(segment));
+    Assertions.assertFalse(unsafeInfoFile.exists());
+
+    Files.write(unsafeInfoFile.toPath(), new byte[]{1});
+    manager.removeInfoFile(segment);
+    Assertions.assertTrue(unsafeInfoFile.exists());
+  }
+
+  @Test
+  public void testGetCachedSegmentsLegacyPathsMigrated() throws Exception
+  {
+    final DataSegment segmentToBootstrap = makeTestDataSegment(segmentDeepStorageDir);
+    FileUtils.mkdirp(new File(localSegmentCacheDir, "info_dir"));
+    manager.storeInfoFile(segmentToBootstrap);
+    File segmentZip = createSegmentZipInLocation(
+        segmentDeepStorageDir,
+        TEST_DATA_RELATIVE_PATH
+    );
+    File unzippedSegmentPathInLocation = new File(
+        localSegmentCacheDir,
+        DataSegmentPusher.getDefaultStorageDir(segmentToBootstrap, false)
+    );
+    FileUtils.mkdirp(unzippedSegmentPathInLocation);
+    CompressionUtils.unzip(
+        segmentZip,
+        unzippedSegmentPathInLocation
+    );
+
+    for (DataSegment segment : manager.getCachedSegments()) {
+      manager.bootstrap(segment, SegmentLazyLoadFailCallback.NOOP);
+    }
+
+    // if bootstrapping a file that already exists it will be mounted by bootsrap
+    Assertions.assertNotNull(manager.getSegmentFiles(segmentToBootstrap));
+
+    Assertions.assertFalse(unzippedSegmentPathInLocation.exists());
+    Assertions.assertFalse(new File(localSegmentCacheDir, segmentToBootstrap.getDataSource()).exists());
+    Assertions.assertTrue(new File(localSegmentCacheDir, segmentToBootstrap.getId().toString()).exists());
+  }
+
+  @Test
+  public void testGetCachedSegmentsLegacyPathsMigratedResilience() throws Exception
+  {
+    final DataSegment segmentToBootstrap = makeTestDataSegment(segmentDeepStorageDir);
+    FileUtils.mkdirp(new File(localSegmentCacheDir, "info_dir"));
+    manager.storeInfoFile(segmentToBootstrap);
+    File segmentZip = createSegmentZipInLocation(
+        segmentDeepStorageDir,
+        TEST_DATA_RELATIVE_PATH
+    );
+    File unzippedSegmentPathInLocation = new File(
+        localSegmentCacheDir,
+        DataSegmentPusher.getDefaultStorageDir(segmentToBootstrap, false)
+    );
+    FileUtils.mkdirp(unzippedSegmentPathInLocation);
+    CompressionUtils.unzip(
+        segmentZip,
+        unzippedSegmentPathInLocation
+    );
+
+    File unzippedSegmentInDestination = new File(
+        localSegmentCacheDir,
+        segmentToBootstrap.getId().toString()
+    );
+    FileUtils.mkdirp(unzippedSegmentInDestination);
+    CompressionUtils.unzip(
+        segmentZip,
+        unzippedSegmentInDestination
+    );
+
+    for (DataSegment segment : manager.getCachedSegments()) {
+      manager.bootstrap(segment, SegmentLazyLoadFailCallback.NOOP);
+    }
+
+    // if bootstrapping a file that already exists it will be mounted by bootsrap
+    Assertions.assertNotNull(manager.getSegmentFiles(segmentToBootstrap));
+
+    Assertions.assertFalse(unzippedSegmentPathInLocation.exists());
+    Assertions.assertFalse(new File(localSegmentCacheDir, segmentToBootstrap.getDataSource()).exists());
+    Assertions.assertTrue(new File(localSegmentCacheDir, segmentToBootstrap.getId().toString()).exists());
   }
 
   @Test
   public void testIfSegmentIsLoaded() throws IOException
   {
+    // can use fake segments since we aren't loading them for real and just using utility method
     final DataSegment cachedSegment = dataSegmentWithInterval("2014-10-20T00:00:00Z/P1D");
+
     final File cachedSegmentFile = new File(
-        localSegmentCacheFolder,
-        "test_segment_loader/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0"
+        localSegmentCacheDir,
+        cachedSegment.getId().toString()
     );
     FileUtils.mkdirp(cachedSegmentFile);
 
-    Assert.assertTrue("Expect cache hit", manager.isSegmentCached(cachedSegment));
+    Assertions.assertTrue(manager.isSegmentCached(cachedSegment), "Expect cache hit");
 
     final DataSegment uncachedSegment = dataSegmentWithInterval("2014-10-21T00:00:00Z/P1D");
-    Assert.assertFalse("Expect cache miss", manager.isSegmentCached(uncachedSegment));
-  }
-
-  @Test
-  public void testNoLoadingOfSegmentInPageCache() throws IOException
-  {
-    final DataSegment segment = dataSegmentWithInterval("2014-10-20T00:00:00Z/P1D");
-    final File segmentFile = new File(
-        localSegmentCacheFolder,
-        "test_segment_loader/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0"
-    );
-    FileUtils.mkdirp(segmentFile);
-    // should not throw any exception
-    manager.loadSegmentIntoPageCache(segment, null);
+    Assertions.assertFalse(manager.isSegmentCached(uncachedSegment), "Expect cache miss");
   }
 
   @Test
   public void testLoadSegmentInPageCache() throws IOException
   {
-    final DataSegment segment = dataSegmentWithInterval("2014-10-20T00:00:00Z/P1D");
-    final File segmentFile = new File(
-        localSegmentCacheFolder,
-        "test_segment_loader/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0"
+    final SegmentLoaderConfig loaderConfig =
+        SegmentLoaderConfig.builder()
+                           .numThreadsToLoadSegmentsIntoPageCacheOnDownload(1)
+                           .locations(new StorageLocationConfig(localSegmentCacheDir, null, null))
+                           .build();
+    final List<StorageLocation> locations = loaderConfig.toStorageLocations();
+    SegmentLocalCacheManager manager = new SegmentLocalCacheManager(
+        locations,
+        loaderConfig,
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new LeastBytesUsedStorageLocationSelectorStrategy(locations),
+        TestHelper.getTestIndexIO(jsonMapper, ColumnConfig.DEFAULT),
+        jsonMapper
     );
-    FileUtils.mkdirp(segmentFile);
-    // should not throw any exception
-    manager.loadSegmentIntoPageCache(segment, Executors.newSingleThreadExecutor());
-  }
 
-  @Test
-  public void testIfTombstoneIsLoaded() throws IOException, SegmentLoadingException
-  {
-    final DataSegment tombstone = DataSegment.builder()
-                                             .dataSource("foo")
-                                             .interval(Intervals.of("2014-10-20T00:00:00Z/P1D"))
-                                             .version("version")
-                                             .loadSpec(Collections.singletonMap(
-                                                 "type",
-                                                 DataSegment.TOMBSTONE_LOADSPEC_TYPE
-                                             ))
-                                             .shardSpec(TombstoneShardSpec.INSTANCE)
-                                             .size(1)
-                                             .build();
-
-
-    final File cachedSegmentFile = new File(
-        localSegmentCacheFolder,
-        "test_segment_loader/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0"
+    final DataSegment segmentToDownload = makeTestDataSegment(localSegmentCacheDir);
+    final File localSegmentFile = new File(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH);
+    makeSegmentZip(
+        localSegmentFile,
+        new File(segmentDeepStorageDir.getCanonicalPath() + "/" + TEST_DATA_RELATIVE_PATH + "/index.zip")
     );
-    FileUtils.mkdirp(cachedSegmentFile);
-
-    manager.getSegmentFiles(tombstone);
-    Assert.assertTrue("Expect cache hit after downloading segment", manager.isSegmentCached(tombstone));
+    manager.getSegmentFiles(segmentToDownload);
   }
 
   @Test
   public void testGetAndCleanSegmentFiles() throws Exception
   {
-    final File localStorageFolder = tmpFolder.newFolder("local_storage_folder");
-
-    final DataSegment segmentToDownload = dataSegmentWithInterval("2014-10-20T00:00:00Z/P1D").withLoadSpec(
-        ImmutableMap.of(
-            "type",
-            "local",
-            "path",
-            localStorageFolder.getCanonicalPath()
-            + "/test_segment_loader"
-            + "/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-            + "/0/index.zip"
-        )
+    final DataSegment segmentToDownload = makeTestDataSegment(segmentDeepStorageDir);
+    final File localSegmentFile = new File(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH);
+    makeSegmentZip(
+        localSegmentFile,
+        new File(segmentDeepStorageDir.getCanonicalPath() + "/" + TEST_DATA_RELATIVE_PATH + "/index.zip")
     );
 
-    // manually create a local segment under localStorageFolder
-    final File localSegmentFile = new File(
-        localStorageFolder,
-        "test_segment_loader/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0"
-    );
-    FileUtils.mkdirp(localSegmentFile);
-    final File indexZip = new File(localSegmentFile, "index.zip");
-    indexZip.createNewFile();
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload), "Expect cache miss before downloading segment");
 
-    Assert.assertFalse("Expect cache miss before downloading segment", manager.isSegmentCached(segmentToDownload));
-
+    manager.load(segmentToDownload);
     manager.getSegmentFiles(segmentToDownload);
-    Assert.assertTrue("Expect cache hit after downloading segment", manager.isSegmentCached(segmentToDownload));
+    Assertions.assertTrue(manager.isSegmentCached(segmentToDownload), "Expect cache hit after downloading segment");
 
-    manager.cleanup(segmentToDownload);
-    Assert.assertFalse("Expect cache miss after dropping segment", manager.isSegmentCached(segmentToDownload));
+    manager.drop(segmentToDownload);
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload), "Expect cache miss after dropping segment");
   }
 
   @Test
@@ -200,39 +424,30 @@ public class SegmentLocalCacheManagerTest
     final StorageLocationConfig locationConfig2 = new StorageLocationConfig(localStorageFolder2, 1000000000L, null);
     locations.add(locationConfig2);
 
-    manager = new SegmentLocalCacheManager(
-        new SegmentLoaderConfig().withLocations(locations),
+    final SegmentLoaderConfig loaderConfig = SegmentLoaderConfig.builder().locations(locations).build();
+    final List<StorageLocation> storageLocations = loaderConfig.toStorageLocations();
+    SegmentLocalCacheManager manager = new SegmentLocalCacheManager(
+        storageLocations,
+        loaderConfig,
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new LeastBytesUsedStorageLocationSelectorStrategy(storageLocations),
+        TestHelper.getTestIndexIO(jsonMapper, ColumnConfig.DEFAULT),
         jsonMapper
     );
-    final File segmentSrcFolder = tmpFolder.newFolder("segmentSrcFolder");
-    final DataSegment segmentToDownload = dataSegmentWithInterval("2014-10-20T00:00:00Z/P1D").withLoadSpec(
-        ImmutableMap.of(
-            "type",
-            "local",
-            "path",
-            segmentSrcFolder.getCanonicalPath()
-            + "/test_segment_loader"
-            + "/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-            + "/0/index.zip"
-        )
-    );
-    // manually create a local segment under segmentSrcFolder
-    final File localSegmentFile = new File(
-        segmentSrcFolder,
-        "test_segment_loader/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0"
-    );
-    FileUtils.mkdirp(localSegmentFile);
-    final File indexZip = new File(localSegmentFile, "index.zip");
-    indexZip.createNewFile();
 
-    Assert.assertFalse("Expect cache miss before downloading segment", manager.isSegmentCached(segmentToDownload));
+    final DataSegment segmentToDownload = makeTestDataSegment(segmentDeepStorageDir);
+    final File localSegmentFile = new File(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH);
+    makeSegmentZip(localSegmentFile, new File(localSegmentFile, "index.zip"));
 
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload), "Expect cache miss before downloading segment");
+
+    manager.load(segmentToDownload);
     File segmentFile = manager.getSegmentFiles(segmentToDownload);
-    Assert.assertTrue(segmentFile.getAbsolutePath().contains("/local_storage_folder/"));
-    Assert.assertTrue("Expect cache hit after downloading segment", manager.isSegmentCached(segmentToDownload));
+    Assertions.assertTrue(segmentFile.getAbsolutePath().contains("/local_storage_folder/"));
+    Assertions.assertTrue(manager.isSegmentCached(segmentToDownload), "Expect cache hit after downloading segment");
 
-    manager.cleanup(segmentToDownload);
-    Assert.assertFalse("Expect cache miss after dropping segment", manager.isSegmentCached(segmentToDownload));
+    manager.drop(segmentToDownload);
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload), "Expect cache miss after dropping segment");
   }
 
   @Test
@@ -248,39 +463,30 @@ public class SegmentLocalCacheManagerTest
     final StorageLocationConfig locationConfig2 = new StorageLocationConfig(localStorageFolder2, 10000000L, null);
     locations.add(locationConfig2);
 
-    manager = new SegmentLocalCacheManager(
-        new SegmentLoaderConfig().withLocations(locations),
+    final SegmentLoaderConfig loaderConfig = SegmentLoaderConfig.builder().locations(locations).build();
+    final List<StorageLocation> storageLocations = loaderConfig.toStorageLocations();
+    SegmentLocalCacheManager manager = new SegmentLocalCacheManager(
+        storageLocations,
+        loaderConfig,
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new LeastBytesUsedStorageLocationSelectorStrategy(storageLocations),
+        TestHelper.getTestIndexIO(jsonMapper, ColumnConfig.DEFAULT),
         jsonMapper
     );
-    final File segmentSrcFolder = tmpFolder.newFolder("segmentSrcFolder");
-    final DataSegment segmentToDownload = dataSegmentWithInterval("2014-10-20T00:00:00Z/P1D").withLoadSpec(
-        ImmutableMap.of(
-            "type",
-            "local",
-            "path",
-            segmentSrcFolder.getCanonicalPath()
-            + "/test_segment_loader"
-            + "/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-            + "/0/index.zip"
-        )
-    );
-    // manually create a local segment under segmentSrcFolder
-    final File localSegmentFile = new File(
-        segmentSrcFolder,
-        "test_segment_loader/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0"
-    );
-    FileUtils.mkdirp(localSegmentFile);
-    final File indexZip = new File(localSegmentFile, "index.zip");
-    indexZip.createNewFile();
+    final DataSegment segmentToDownload = makeTestDataSegment(segmentDeepStorageDir);
+    final File localSegmentFile = new File(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH);
 
-    Assert.assertFalse("Expect cache miss before downloading segment", manager.isSegmentCached(segmentToDownload));
+    makeSegmentZip(localSegmentFile, new File(localSegmentFile, "index.zip"));
 
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload), "Expect cache miss before downloading segment");
+
+    manager.load(segmentToDownload);
     File segmentFile = manager.getSegmentFiles(segmentToDownload);
-    Assert.assertTrue(segmentFile.getAbsolutePath().contains("/local_storage_folder2/"));
-    Assert.assertTrue("Expect cache hit after downloading segment", manager.isSegmentCached(segmentToDownload));
+    Assertions.assertTrue(segmentFile.getAbsolutePath().contains("/local_storage_folder2/"));
+    Assertions.assertTrue(manager.isSegmentCached(segmentToDownload), "Expect cache hit after downloading segment");
 
-    manager.cleanup(segmentToDownload);
-    Assert.assertFalse("Expect cache miss after dropping segment", manager.isSegmentCached(segmentToDownload));
+    manager.drop(segmentToDownload);
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload), "Expect cache miss after dropping segment");
   }
 
   @Test
@@ -298,40 +504,31 @@ public class SegmentLocalCacheManagerTest
     final StorageLocationConfig locationConfig2 = new StorageLocationConfig(localStorageFolder2, 10000000L, null);
     locations.add(locationConfig2);
 
-    manager = new SegmentLocalCacheManager(
-        new SegmentLoaderConfig().withLocations(locations),
+    final SegmentLoaderConfig loaderConfig = SegmentLoaderConfig.builder().locations(locations).build();
+    final List<StorageLocation> storageLocations = loaderConfig.toStorageLocations();
+    SegmentLocalCacheManager manager = new SegmentLocalCacheManager(
+        storageLocations,
+        loaderConfig,
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new LeastBytesUsedStorageLocationSelectorStrategy(storageLocations),
+        TestHelper.getTestIndexIO(jsonMapper, ColumnConfig.DEFAULT),
         jsonMapper
     );
-    final File segmentSrcFolder = tmpFolder.newFolder("segmentSrcFolder");
-    final DataSegment segmentToDownload = dataSegmentWithInterval("2014-10-20T00:00:00Z/P1D").withLoadSpec(
-        ImmutableMap.of(
-            "type",
-            "local",
-            "path",
-            segmentSrcFolder.getCanonicalPath()
-            + "/test_segment_loader"
-            + "/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-            + "/0/index.zip"
-        )
-    );
-    // manually create a local segment under segmentSrcFolder
-    final File localSegmentFile = new File(
-        segmentSrcFolder,
-        "test_segment_loader/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0"
-    );
+    final DataSegment segmentToDownload = makeTestDataSegment(segmentDeepStorageDir);
+    final File localSegmentFile = new File(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH);
     FileUtils.mkdirp(localSegmentFile);
     final File indexZip = new File(localSegmentFile, "index.zip");
     indexZip.createNewFile();
 
     try {
       // expect failure
-      manager.getSegmentFiles(segmentToDownload);
-      Assert.fail();
+      manager.load(segmentToDownload);
+      Assertions.fail();
     }
     catch (SegmentLoadingException e) {
     }
-    Assert.assertFalse("Expect cache miss after dropping segment", manager.isSegmentCached(segmentToDownload));
-    manager.cleanup(segmentToDownload);
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload), "Expect cache miss after dropping segment");
+    manager.drop(segmentToDownload);
   }
 
   @Test
@@ -347,90 +544,39 @@ public class SegmentLocalCacheManagerTest
     final StorageLocationConfig locationConfig2 = new StorageLocationConfig(localStorageFolder2, 10L, null);
     locations.add(locationConfig2);
 
-    manager = new SegmentLocalCacheManager(
-        new SegmentLoaderConfig().withLocations(locations),
+    final SegmentLoaderConfig loaderConfig = SegmentLoaderConfig.builder().locations(locations).build();
+    final List<StorageLocation> storageLocations = loaderConfig.toStorageLocations();
+    SegmentLocalCacheManager manager = new SegmentLocalCacheManager(
+        storageLocations,
+        loaderConfig,
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new LeastBytesUsedStorageLocationSelectorStrategy(storageLocations),
+        TestHelper.getTestIndexIO(jsonMapper, ColumnConfig.DEFAULT),
         jsonMapper
     );
-    final File segmentSrcFolder = tmpFolder.newFolder("segmentSrcFolder");
-    final DataSegment segmentToDownload = dataSegmentWithInterval("2014-10-20T00:00:00Z/P1D").withLoadSpec(
-        ImmutableMap.of(
-            "type",
-            "local",
-            "path",
-            segmentSrcFolder.getCanonicalPath()
-                + "/test_segment_loader"
-                + "/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-                + "/0/index.zip"
-        )
-    );
-    // manually create a local segment under segmentSrcFolder
-    final File localSegmentFile = new File(
-        segmentSrcFolder,
-        "test_segment_loader/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0"
-    );
-    FileUtils.mkdirp(localSegmentFile);
-    final File indexZip = new File(localSegmentFile, "index.zip");
-    indexZip.createNewFile();
 
-    Assert.assertFalse("Expect cache miss before downloading segment", manager.isSegmentCached(segmentToDownload));
+    final DataSegment segmentToDownload = makeTestDataSegment(segmentDeepStorageDir);
+    final File localSegmentFile = new File(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH);
+    makeSegmentZip(localSegmentFile, new File(segmentDeepStorageDir + "/" + TEST_DATA_RELATIVE_PATH + "/index.zip"));
 
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload), "Expect cache miss before downloading segment");
+
+    manager.load(segmentToDownload);
     File segmentFile = manager.getSegmentFiles(segmentToDownload);
-    Assert.assertTrue(segmentFile.getAbsolutePath().contains("/local_storage_folder/"));
-    Assert.assertTrue("Expect cache hit after downloading segment", manager.isSegmentCached(segmentToDownload));
+    Assertions.assertTrue(segmentFile.getAbsolutePath().contains("/local_storage_folder/"));
+    Assertions.assertTrue(manager.isSegmentCached(segmentToDownload), "Expect cache hit after downloading segment");
 
-    final DataSegment segmentToDownload2 = dataSegmentWithInterval("2014-11-20T00:00:00Z/P1D").withLoadSpec(
-        ImmutableMap.of(
-            "type",
-            "local",
-            "path",
-            segmentSrcFolder.getCanonicalPath()
-                + "/test_segment_loader"
-                + "/2014-11-20T00:00:00.000Z_2014-11-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-                + "/0/index.zip"
-        )
-    );
-    // manually create a local segment under segmentSrcFolder
-    final File localSegmentFile2 = new File(
-        segmentSrcFolder,
-        "test_segment_loader/2014-11-20T00:00:00.000Z_2014-11-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0"
-    );
-    FileUtils.mkdirp(localSegmentFile2);
-    final File indexZip2 = new File(localSegmentFile2, "index.zip");
-    indexZip2.createNewFile();
+    final DataSegment segmentToDownload2 = makeTestDataSegment(segmentDeepStorageDir, 1, TEST_DATA_RELATIVE_PATH_2);
+    final File localSegmentFile2 = new File(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH_2);
+    makeSegmentZip(localSegmentFile2, new File(segmentDeepStorageDir + "/" + TEST_DATA_RELATIVE_PATH_2 + "/index.zip"));
 
+    manager.load(segmentToDownload2);
     File segmentFile2 = manager.getSegmentFiles(segmentToDownload2);
-    Assert.assertTrue(segmentFile2.getAbsolutePath().contains("/local_storage_folder2/"));
-    Assert.assertTrue("Expect cache hit after downloading segment", manager.isSegmentCached(segmentToDownload2));
+    Assertions.assertTrue(segmentFile2.getAbsolutePath().contains("/local_storage_folder2/"));
+    Assertions.assertTrue(manager.isSegmentCached(segmentToDownload2), "Expect cache hit after downloading segment");
 
-    manager.cleanup(segmentToDownload2);
-    Assert.assertFalse("Expect cache miss after dropping segment", manager.isSegmentCached(segmentToDownload2));
-  }
-
-  private DataSegment dataSegmentWithInterval(String intervalStr)
-  {
-    return dataSegmentWithInterval(intervalStr, 10L);
-  }
-
-  private DataSegment dataSegmentWithInterval(String intervalStr, long size)
-  {
-    return DataSegment.builder()
-                      .dataSource("test_segment_loader")
-                      .interval(Intervals.of(intervalStr))
-                      .loadSpec(
-                          ImmutableMap.of(
-                              "type",
-                              "local",
-                              "path",
-                              "somewhere"
-                          )
-                      )
-                      .version("2015-05-27T03:38:35.683Z")
-                      .dimensions(ImmutableList.of())
-                      .metrics(ImmutableList.of())
-                      .shardSpec(NoneShardSpec.instance())
-                      .binaryVersion(9)
-                      .size(size)
-                      .build();
+    manager.drop(segmentToDownload2);
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload2), "Expect cache miss after dropping segment");
   }
 
   @Test
@@ -455,125 +601,68 @@ public class SegmentLocalCacheManagerTest
       );
     }
 
-    manager = new SegmentLocalCacheManager(
-      new SegmentLoaderConfig().withLocations(locationConfigs),
-      new RoundRobinStorageLocationSelectorStrategy(locations),
-      jsonMapper
+    final SegmentLoaderConfig loaderConfig = SegmentLoaderConfig.builder().locations(locationConfigs).build();
+    SegmentLocalCacheManager manager = new SegmentLocalCacheManager(
+        locations,
+        loaderConfig,
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new RoundRobinStorageLocationSelectorStrategy(locations),
+        TestHelper.getTestIndexIO(jsonMapper, ColumnConfig.DEFAULT),
+        jsonMapper
     );
-    final File segmentSrcFolder = tmpFolder.newFolder("segmentSrcFolder");
 
     // Segment 1 should be downloaded in local_storage_folder
-    final DataSegment segmentToDownload1 = dataSegmentWithInterval("2014-10-20T00:00:00Z/P1D").withLoadSpec(
-        ImmutableMap.of(
-        "type",
-        "local",
-        "path",
-        segmentSrcFolder.getCanonicalPath()
-          + "/test_segment_loader"
-          + "/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-          + "/0/index.zip"
-      )
-    );
-    // manually create a local segment under segmentSrcFolder
-    createLocalSegmentFile(segmentSrcFolder, "test_segment_loader/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0");
+    final DataSegment segmentToDownload1 = makeTestDataSegment(segmentDeepStorageDir);
+    createSegmentZipInLocation(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH);
 
-    Assert.assertFalse("Expect cache miss before downloading segment", manager.isSegmentCached(segmentToDownload1));
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload1), "Expect cache miss before downloading segment");
 
+    manager.load(segmentToDownload1);
     File segmentFile = manager.getSegmentFiles(segmentToDownload1);
-    Assert.assertTrue(segmentFile.getAbsolutePath().contains("/local_storage_folder/"));
-    Assert.assertTrue("Expect cache hit after downloading segment", manager.isSegmentCached(segmentToDownload1));
+    Assertions.assertTrue(segmentFile.getAbsolutePath().contains("/local_storage_folder/"));
+    Assertions.assertTrue(manager.isSegmentCached(segmentToDownload1), "Expect cache hit after downloading segment");
 
-    manager.cleanup(segmentToDownload1);
-    Assert.assertFalse("Expect cache miss after dropping segment", manager.isSegmentCached(segmentToDownload1));
+    manager.drop(segmentToDownload1);
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload1), "Expect cache miss after dropping segment");
 
     // Segment 2 should be downloaded in local_storage_folder2
-    final DataSegment segmentToDownload2 = dataSegmentWithInterval("2014-11-20T00:00:00Z/P1D").withLoadSpec(
-        ImmutableMap.of(
-        "type",
-        "local",
-        "path",
-        segmentSrcFolder.getCanonicalPath()
-          + "/test_segment_loader"
-          + "/2014-11-20T00:00:00.000Z_2014-11-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-          + "/0/index.zip"
-      )
-    );
-    // manually create a local segment under segmentSrcFolder
-    createLocalSegmentFile(segmentSrcFolder, "test_segment_loader/2014-11-20T00:00:00.000Z_2014-11-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0");
+    final DataSegment segmentToDownload2 = makeTestDataSegment(segmentDeepStorageDir, 1, TEST_DATA_RELATIVE_PATH_2);
+    createSegmentZipInLocation(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH_2);
 
-    Assert.assertFalse("Expect cache miss before downloading segment", manager.isSegmentCached(segmentToDownload2));
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload2), "Expect cache miss before downloading segment");
 
+    manager.load(segmentToDownload2);
     File segmentFile2 = manager.getSegmentFiles(segmentToDownload2);
-    Assert.assertTrue(segmentFile2.getAbsolutePath().contains("/local_storage_folder2/"));
-    Assert.assertTrue("Expect cache hit after downloading segment", manager.isSegmentCached(segmentToDownload2));
+    Assertions.assertTrue(segmentFile2.getAbsolutePath().contains("/local_storage_folder2/"));
+    Assertions.assertTrue(manager.isSegmentCached(segmentToDownload2), "Expect cache hit after downloading segment");
 
-    manager.cleanup(segmentToDownload2);
-    Assert.assertFalse("Expect cache miss after dropping segment", manager.isSegmentCached(segmentToDownload2));
+    manager.drop(segmentToDownload2);
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload2), "Expect cache miss after dropping segment");
 
     // Segment 3 should be downloaded in local_storage_folder3
-    final DataSegment segmentToDownload3 = dataSegmentWithInterval("2014-12-20T00:00:00Z/P1D").withLoadSpec(
-        ImmutableMap.of(
-        "type",
-        "local",
-        "path",
-        segmentSrcFolder.getCanonicalPath()
-          + "/test_segment_loader"
-          + "/2014-12-20T00:00:00.000Z_2014-12-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-          + "/0/index.zip"
-      )
-    );
-    // manually create a local segment under segmentSrcFolder
-    createLocalSegmentFile(segmentSrcFolder,
-        "test_segment_loader/2014-12-20T00:00:00.000Z_2014-12-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0");
+    final DataSegment segmentToDownload3 = makeTestDataSegment(segmentDeepStorageDir, 2, TEST_DATA_RELATIVE_PATH_3);
+    createSegmentZipInLocation(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH_3);
 
+    manager.load(segmentToDownload3);
     File segmentFile3 = manager.getSegmentFiles(segmentToDownload3);
-    Assert.assertTrue(segmentFile3.getAbsolutePath().contains("/local_storage_folder3/"));
-    Assert.assertTrue("Expect cache hit after downloading segment", manager.isSegmentCached(segmentToDownload3));
+    Assertions.assertTrue(segmentFile3.getAbsolutePath().contains("/local_storage_folder3/"));
+    Assertions.assertTrue(manager.isSegmentCached(segmentToDownload3), "Expect cache hit after downloading segment");
 
-    manager.cleanup(segmentToDownload3);
-    Assert.assertFalse("Expect cache miss after dropping segment", manager.isSegmentCached(segmentToDownload3));
+    manager.drop(segmentToDownload3);
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload3), "Expect cache miss after dropping segment");
 
     // Segment 4 should be downloaded in local_storage_folder again, asserting round robin distribution of segments
-    final DataSegment segmentToDownload4 = dataSegmentWithInterval("2014-08-20T00:00:00Z/P1D").withLoadSpec(
-        ImmutableMap.of(
-        "type",
-        "local",
-        "path",
-        segmentSrcFolder.getCanonicalPath()
-          + "/test_segment_loader"
-          + "/2014-08-20T00:00:00.000Z_2014-08-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-          + "/0/index.zip"
-      )
-    );
-    // manually create a local segment under segmentSrcFolder
-    createLocalSegmentFile(segmentSrcFolder, "test_segment_loader/2014-08-20T00:00:00.000Z_2014-08-21T00:00:00" +
-        ".000Z/2015-05-27T03:38:35.683Z/0");
+    final DataSegment segmentToDownload4 = makeTestDataSegment(segmentDeepStorageDir, 3, TEST_DATA_RELATIVE_PATH_4);
+    createSegmentZipInLocation(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH_4);
 
-    Assert.assertFalse("Expect cache miss before downloading segment", manager.isSegmentCached(segmentToDownload4));
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload4), "Expect cache miss before downloading segment");
 
+    manager.load(segmentToDownload4);
     File segmentFile1 = manager.getSegmentFiles(segmentToDownload4);
-    Assert.assertTrue(segmentFile1.getAbsolutePath().contains("/local_storage_folder/"));
-    Assert.assertTrue("Expect cache hit after downloading segment", manager.isSegmentCached(segmentToDownload4));
-    manager.cleanup(segmentToDownload4);
-    Assert.assertFalse("Expect cache miss after dropping segment", manager.isSegmentCached(segmentToDownload4));
-  }
-
-  private void createLocalSegmentFile(File segmentSrcFolder, String localSegmentPath) throws Exception
-  {
-    // manually create a local segment under segmentSrcFolder
-    final File localSegmentFile = new File(segmentSrcFolder, localSegmentPath);
-    FileUtils.mkdirp(localSegmentFile);
-    final File indexZip = new File(localSegmentFile, "index.zip");
-    indexZip.createNewFile();
-  }
-
-  private StorageLocationConfig createStorageLocationConfig(String localPath, long maxSize, boolean writable) throws Exception
-  {
-
-    final File localStorageFolder = tmpFolder.newFolder(localPath);
-    localStorageFolder.setWritable(writable);
-    final StorageLocationConfig locationConfig = new StorageLocationConfig(localStorageFolder, maxSize, 1.0);
-    return locationConfig;
+    Assertions.assertTrue(segmentFile1.getAbsolutePath().contains("/local_storage_folder/"));
+    Assertions.assertTrue(manager.isSegmentCached(segmentToDownload4), "Expect cache hit after downloading segment");
+    manager.drop(segmentToDownload4);
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload4), "Expect cache miss after dropping segment");
   }
 
   @Test
@@ -590,100 +679,62 @@ public class SegmentLocalCacheManagerTest
     locations.add(locationConfig2);
     locations.add(locationConfig3);
 
-    manager = new SegmentLocalCacheManager(
-      new SegmentLoaderConfig().withLocations(locations),
-      jsonMapper
+    final SegmentLoaderConfig loaderConfig = SegmentLoaderConfig.builder().locations(locations).build();
+    final List<StorageLocation> storageLocations = loaderConfig.toStorageLocations();
+    SegmentLocalCacheManager manager = new SegmentLocalCacheManager(
+        storageLocations,
+        SegmentLoaderConfig.builder().locations(locations).build(),
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new LeastBytesUsedStorageLocationSelectorStrategy(storageLocations),
+        TestHelper.getTestIndexIO(jsonMapper, ColumnConfig.DEFAULT),
+        jsonMapper
     );
-    final File segmentSrcFolder = tmpFolder.newFolder("segmentSrcFolder");
 
     // Segment 1 should be downloaded in local_storage_folder, segment1 size 10L
-    final DataSegment segmentToDownload = dataSegmentWithInterval("2014-10-20T00:00:00Z/P1D", 10L).withLoadSpec(
-        ImmutableMap.of(
-        "type",
-        "local",
-        "path",
-        segmentSrcFolder.getCanonicalPath()
-          + "/test_segment_loader"
-          + "/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-          + "/0/index.zip"
-      )
-    );
-    // manually create a local segment under segmentSrcFolder
-    createLocalSegmentFile(segmentSrcFolder,
-        "test_segment_loader/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0");
+    final DataSegment segmentToDownload = makeTestDataSegment(segmentDeepStorageDir);
 
-    Assert.assertFalse("Expect cache miss before downloading segment", manager.isSegmentCached(segmentToDownload));
+    createSegmentZipInLocation(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH);
 
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload), "Expect cache miss before downloading segment");
+
+    manager.load(segmentToDownload);
     File segmentFile = manager.getSegmentFiles(segmentToDownload);
-    Assert.assertTrue(segmentFile.getAbsolutePath().contains("/local_storage_folder/"));
-    Assert.assertTrue("Expect cache hit after downloading segment", manager.isSegmentCached(segmentToDownload));
+    Assertions.assertTrue(segmentFile.getAbsolutePath().contains("/local_storage_folder/"));
+    Assertions.assertTrue(manager.isSegmentCached(segmentToDownload), "Expect cache hit after downloading segment");
 
     // Segment 2 should be downloaded in local_storage_folder2, segment2 size 5L
-    final DataSegment segmentToDownload2 = dataSegmentWithInterval("2014-11-20T00:00:00Z/P1D", 5L).withLoadSpec(
-        ImmutableMap.of(
-        "type",
-        "local",
-        "path",
-        segmentSrcFolder.getCanonicalPath()
-          + "/test_segment_loader"
-          + "/2014-11-20T00:00:00.000Z_2014-11-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-          + "/0/index.zip"
-      )
-    );
-    // manually create a local segment under segmentSrcFolder
-    createLocalSegmentFile(segmentSrcFolder,
-        "test_segment_loader/2014-11-20T00:00:00.000Z_2014-11-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0");
+    final DataSegment segmentToDownload2 = makeTestDataSegment(segmentDeepStorageDir, 5L, 1, TEST_DATA_RELATIVE_PATH_2);
+    createSegmentZipInLocation(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH_2);
 
-    Assert.assertFalse("Expect cache miss before downloading segment", manager.isSegmentCached(segmentToDownload2));
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload2), "Expect cache miss before downloading segment");
 
+    manager.load(segmentToDownload2);
     File segmentFile2 = manager.getSegmentFiles(segmentToDownload2);
-    Assert.assertTrue(segmentFile2.getAbsolutePath().contains("/local_storage_folder2/"));
-    Assert.assertTrue("Expect cache hit after downloading segment", manager.isSegmentCached(segmentToDownload2));
+    Assertions.assertTrue(segmentFile2.getAbsolutePath().contains("/local_storage_folder2/"));
+    Assertions.assertTrue(manager.isSegmentCached(segmentToDownload2), "Expect cache hit after downloading segment");
 
 
     // Segment 3 should be downloaded in local_storage_folder3, segment3 size 20L
-    final DataSegment segmentToDownload3 = dataSegmentWithInterval("2014-12-20T00:00:00Z/P1D", 20L).withLoadSpec(
-        ImmutableMap.of(
-        "type",
-        "local",
-        "path",
-        segmentSrcFolder.getCanonicalPath()
-          + "/test_segment_loader"
-          + "/2014-12-20T00:00:00.000Z_2014-12-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-          + "/0/index.zip"
-      )
-    );
-    // manually create a local segment under segmentSrcFolder
-    createLocalSegmentFile(segmentSrcFolder,
-        "test_segment_loader/2014-12-20T00:00:00.000Z_2014-12-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0");
+    final DataSegment segmentToDownload3 = makeTestDataSegment(segmentDeepStorageDir, 20L, 2, TEST_DATA_RELATIVE_PATH_3);
+    createSegmentZipInLocation(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH_3);
 
+    manager.load(segmentToDownload3);
     File segmentFile3 = manager.getSegmentFiles(segmentToDownload3);
-    Assert.assertTrue(segmentFile3.getAbsolutePath().contains("/local_storage_folder3/"));
-    Assert.assertTrue("Expect cache hit after downloading segment", manager.isSegmentCached(segmentToDownload3));
+    Assertions.assertTrue(segmentFile3.getAbsolutePath().contains("/local_storage_folder3/"));
+    Assertions.assertTrue(manager.isSegmentCached(segmentToDownload3), "Expect cache hit after downloading segment");
 
     // Now the storage locations local_storage_folder1, local_storage_folder2 and local_storage_folder3 have 10, 5 and
     // 20 bytes occupied respectively. The default strategy should pick location2 (as it has least bytes used) for the
     // next segment to be downloaded asserting the least bytes used distribution of segments.
-    final DataSegment segmentToDownload4 = dataSegmentWithInterval("2014-08-20T00:00:00Z/P1D").withLoadSpec(
-        ImmutableMap.of(
-        "type",
-        "local",
-        "path",
-        segmentSrcFolder.getCanonicalPath()
-          + "/test_segment_loader"
-          + "/2014-08-20T00:00:00.000Z_2014-08-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-          + "/0/index.zip"
-      )
-    );
-    // manually create a local segment under segmentSrcFolder
-    createLocalSegmentFile(segmentSrcFolder, "test_segment_loader/2014-08-20T00:00:00.000Z_2014-08-21T00:00:00" +
-        ".000Z/2015-05-27T03:38:35.683Z/0");
+    final DataSegment segmentToDownload4 = makeTestDataSegment(segmentDeepStorageDir, 10L, 3, TEST_DATA_RELATIVE_PATH_4);
+    createSegmentZipInLocation(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH_4);
 
-    Assert.assertFalse("Expect cache miss before downloading segment", manager.isSegmentCached(segmentToDownload4));
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload4), "Expect cache miss before downloading segment");
 
+    manager.load(segmentToDownload4);
     File segmentFile1 = manager.getSegmentFiles(segmentToDownload4);
-    Assert.assertTrue(segmentFile1.getAbsolutePath().contains("/local_storage_folder2/"));
-    Assert.assertTrue("Expect cache hit after downloading segment", manager.isSegmentCached(segmentToDownload4));
+    Assertions.assertTrue(segmentFile1.getAbsolutePath().contains("/local_storage_folder2/"));
+    Assertions.assertTrue(manager.isSegmentCached(segmentToDownload4), "Expect cache hit after downloading segment");
 
   }
 
@@ -691,281 +742,709 @@ public class SegmentLocalCacheManagerTest
   public void testSegmentDistributionUsingRandomStrategy() throws Exception
   {
     final List<StorageLocationConfig> locationConfigs = new ArrayList<>();
-    final StorageLocationConfig locationConfig = createStorageLocationConfig("local_storage_folder", 10L,
-            true);
-    final StorageLocationConfig locationConfig2 = createStorageLocationConfig("local_storage_folder2", 100L,
-            false);
-    final StorageLocationConfig locationConfig3 = createStorageLocationConfig("local_storage_folder3", 9L,
-            true);
+    final StorageLocationConfig locationConfig = createStorageLocationConfig(
+        "local_storage_folder",
+        10L,
+        true
+    );
+    final StorageLocationConfig locationConfig2 = createStorageLocationConfig(
+        "local_storage_folder2",
+        100L,
+        false
+    );
+    final StorageLocationConfig locationConfig3 = createStorageLocationConfig(
+        "local_storage_folder3",
+        9L,
+        true
+    );
     locationConfigs.add(locationConfig);
     locationConfigs.add(locationConfig2);
     locationConfigs.add(locationConfig3);
 
-    SegmentLoaderConfig segmentLoaderConfig = new SegmentLoaderConfig().withLocations(locationConfigs);
+    SegmentLoaderConfig segmentLoaderConfig = SegmentLoaderConfig.builder().locations(locationConfigs).build();
 
-    manager = new SegmentLocalCacheManager(
-            new SegmentLoaderConfig().withLocations(locationConfigs),
-            new RandomStorageLocationSelectorStrategy(segmentLoaderConfig.toStorageLocations()),
-            jsonMapper
+    final List<StorageLocation> locations = segmentLoaderConfig.toStorageLocations();
+    SegmentLocalCacheManager manager = new SegmentLocalCacheManager(
+        locations,
+        segmentLoaderConfig,
+        StorageLoadingThreadPool.createFromConfig(segmentLoaderConfig),
+        new RandomStorageLocationSelectorStrategy(locations),
+        TestHelper.getTestIndexIO(jsonMapper, ColumnConfig.DEFAULT),
+        jsonMapper
     );
-
-    final File segmentSrcFolder = tmpFolder.newFolder("segmentSrcFolder");
 
     // Segment 1 should be downloaded in local_storage_folder, segment1 size 10L
-    final DataSegment segmentToDownload = dataSegmentWithInterval("2014-10-20T00:00:00Z/P1D", 10L).withLoadSpec(
-            ImmutableMap.of(
-                    "type",
-                    "local",
-                    "path",
-                    segmentSrcFolder.getCanonicalPath()
-                            + "/test_segment_loader"
-                            + "/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-                            + "/0/index.zip"
-            )
-    );
-    // manually create a local segment under segmentSrcFolder
-    createLocalSegmentFile(segmentSrcFolder,
-            "test_segment_loader/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0");
+    final DataSegment segmentToDownload = makeTestDataSegment(segmentDeepStorageDir);
 
-    Assert.assertFalse("Expect cache miss before downloading segment", manager.isSegmentCached(segmentToDownload));
+    createSegmentZipInLocation(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH);
 
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload), "Expect cache miss before downloading segment");
+
+    manager.load(segmentToDownload);
     File segmentFile = manager.getSegmentFiles(segmentToDownload);
-    Assert.assertTrue(segmentFile.getAbsolutePath().contains("/local_storage_folder/"));
-    Assert.assertTrue("Expect cache hit after downloading segment", manager.isSegmentCached(segmentToDownload));
+    Assertions.assertTrue(segmentFile.getAbsolutePath().contains("/local_storage_folder/"));
+    Assertions.assertTrue(manager.isSegmentCached(segmentToDownload), "Expect cache hit after downloading segment");
 
     // Segment 2 should be downloaded in local_storage_folder3, segment2 size 9L
-    final DataSegment segmentToDownload2 = dataSegmentWithInterval("2014-11-20T00:00:00Z/P1D", 9L).withLoadSpec(
-            ImmutableMap.of(
-                    "type",
-                    "local",
-                    "path",
-                    segmentSrcFolder.getCanonicalPath()
-                            + "/test_segment_loader"
-                            + "/2014-11-20T00:00:00.000Z_2014-11-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-                            + "/0/index.zip"
-            )
-    );
-    // manually create a local segment under segmentSrcFolder
-    createLocalSegmentFile(segmentSrcFolder,
-            "test_segment_loader/2014-11-20T00:00:00.000Z_2014-11-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0");
+    final DataSegment segmentToDownload2 = makeTestDataSegment(segmentDeepStorageDir, 9L, 1, TEST_DATA_RELATIVE_PATH_2);
+    createSegmentZipInLocation(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH_2);
 
-    Assert.assertFalse("Expect cache miss before downloading segment", manager.isSegmentCached(segmentToDownload2));
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload2), "Expect cache miss before downloading segment");
 
+    manager.load(segmentToDownload2);
     File segmentFile2 = manager.getSegmentFiles(segmentToDownload2);
-    Assert.assertTrue(segmentFile2.getAbsolutePath().contains("/local_storage_folder3/"));
-    Assert.assertTrue("Expect cache hit after downloading segment", manager.isSegmentCached(segmentToDownload2));
+    Assertions.assertTrue(segmentFile2.getAbsolutePath().contains("/local_storage_folder3/"));
+    Assertions.assertTrue(manager.isSegmentCached(segmentToDownload2), "Expect cache hit after downloading segment");
 
 
     // Segment 3 should not be downloaded, segment3 size 20L
-    final DataSegment segmentToDownload3 = dataSegmentWithInterval("2014-12-20T00:00:00Z/P1D", 20L).withLoadSpec(
-            ImmutableMap.of(
-                    "type",
-                    "local",
-                    "path",
-                    segmentSrcFolder.getCanonicalPath()
-                            + "/test_segment_loader"
-                            + "/2014-12-20T00:00:00.000Z_2014-12-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-                            + "/0/index.zip"
-            )
-    );
-    // manually create a local segment under segmentSrcFolder
-    createLocalSegmentFile(segmentSrcFolder,
-            "test_segment_loader/2014-12-20T00:00:00.000Z_2014-12-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0");
+    final DataSegment segmentToDownload3 = makeTestDataSegment(segmentDeepStorageDir, 20L, 2, TEST_DATA_RELATIVE_PATH_3);
+    createSegmentZipInLocation(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH_3);
 
     try {
       // expect failure
-      manager.getSegmentFiles(segmentToDownload3);
-      Assert.fail();
+      manager.load(segmentToDownload3);
+      Assertions.fail();
     }
     catch (SegmentLoadingException e) {
     }
-    Assert.assertFalse("Expect cache miss after dropping segment", manager.isSegmentCached(segmentToDownload3));
+    Assertions.assertFalse(manager.isSegmentCached(segmentToDownload3), "Expect cache miss after dropping segment");
   }
 
   @Test
   public void testGetSegmentFilesWhenDownloadStartMarkerExists() throws Exception
   {
-    final File localStorageFolder = tmpFolder.newFolder("local_storage_folder");
+    final DataSegment segmentToDownload = makeTestDataSegment(segmentDeepStorageDir);
 
-    final DataSegment segmentToDownload = dataSegmentWithInterval("2014-10-20T00:00:00Z/P1D").withLoadSpec(
-        ImmutableMap.of(
-            "type",
-            "local",
-            "path",
-            localStorageFolder.getCanonicalPath()
-            + "/test_segment_loader"
-            + "/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-            + "/0/index.zip"
-        )
-    );
+    final File localSegmentFile = new File(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH);
+    makeSegmentZip(localSegmentFile, new File(localSegmentFile, "index.zip"));
 
-    // manually create a local segment under localStorageFolder
-    final File localSegmentFile = new File(
-        localStorageFolder,
-        "test_segment_loader/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0"
-    );
-    FileUtils.mkdirp(localSegmentFile);
-    final File indexZip = new File(localSegmentFile, "index.zip");
-    Assert.assertTrue(indexZip.createNewFile());
-
+    manager.load(segmentToDownload);
     final File cachedSegmentDir = manager.getSegmentFiles(segmentToDownload);
-    Assert.assertTrue("Expect cache hit after downloading segment", manager.isSegmentCached(segmentToDownload));
+    Assertions.assertTrue(manager.isSegmentCached(segmentToDownload), "Expect cache hit after downloading segment");
 
     // Emulate a corrupted segment file
     final File downloadMarker = new File(
-        cachedSegmentDir,
+        new File(localSegmentCacheDir, segmentToDownload.getId().toString()),
         SegmentLocalCacheManager.DOWNLOAD_START_MARKER_FILE_NAME
     );
-    Assert.assertTrue(downloadMarker.createNewFile());
+    Assertions.assertTrue(downloadMarker.createNewFile());
+    // create a new manager, expect corrupted segment to be cleaned out and freshly downloaded after startup
+    SegmentLocalCacheManager manager = makeDefaultManager(jsonMapper);
 
-    Assert.assertFalse("Expect cache miss for corrupted segment file", manager.isSegmentCached(segmentToDownload));
-    Assert.assertFalse(cachedSegmentDir.exists());
+    manager.load(segmentToDownload);
+    manager.getSegmentFiles(segmentToDownload);
+    // this is still true becuase
+    Assertions.assertTrue(manager.isSegmentCached(segmentToDownload), "Don't expect cache miss for corrupted segment file");
+    Assertions.assertTrue(cachedSegmentDir.exists());
+    Assertions.assertFalse(downloadMarker.exists());
   }
 
   @Test
-  public void testReserveSegment()
+  public void testGetBootstrapSegment() throws SegmentLoadingException
   {
-    final DataSegment dataSegment = dataSegmentWithInterval("2014-10-20T00:00:00Z/P1D").withSize(100L);
-    final StorageLocation firstLocation = new StorageLocation(localSegmentCacheFolder, 200L, 0.0d);
-    final StorageLocation secondLocation = new StorageLocation(localSegmentCacheFolder, 150L, 0.0d);
-
-    manager = new SegmentLocalCacheManager(
-        Arrays.asList(secondLocation, firstLocation),
-        new SegmentLoaderConfig(),
-        new RoundRobinStorageLocationSelectorStrategy(Arrays.asList(firstLocation, secondLocation)),
-        jsonMapper
-    );
-    Assert.assertTrue(manager.reserve(dataSegment));
-    Assert.assertTrue(firstLocation.isReserved(DataSegmentPusher.getDefaultStorageDir(dataSegment, false)));
-    Assert.assertEquals(100L, firstLocation.availableSizeBytes());
-    Assert.assertEquals(150L, secondLocation.availableSizeBytes());
-
-    // Reserving again should be no-op
-    Assert.assertTrue(manager.reserve(dataSegment));
-    Assert.assertTrue(firstLocation.isReserved(DataSegmentPusher.getDefaultStorageDir(dataSegment, false)));
-    Assert.assertEquals(100L, firstLocation.availableSizeBytes());
-    Assert.assertEquals(150L, secondLocation.availableSizeBytes());
-
-    // Reserving a second segment should now go to a different location
-    final DataSegment otherSegment = dataSegmentWithInterval("2014-10-21T00:00:00Z/P1D").withSize(100L);
-    Assert.assertTrue(manager.reserve(otherSegment));
-    Assert.assertTrue(firstLocation.isReserved(DataSegmentPusher.getDefaultStorageDir(dataSegment, false)));
-    Assert.assertFalse(firstLocation.isReserved(DataSegmentPusher.getDefaultStorageDir(otherSegment, false)));
-    Assert.assertTrue(secondLocation.isReserved(DataSegmentPusher.getDefaultStorageDir(otherSegment, false)));
-    Assert.assertEquals(100L, firstLocation.availableSizeBytes());
-    Assert.assertEquals(50L, secondLocation.availableSizeBytes());
-  }
-
-  @Test
-  public void testReserveNotEnoughSpace()
-  {
-    final DataSegment dataSegment = dataSegmentWithInterval("2014-10-20T00:00:00Z/P1D").withSize(100L);
-    final StorageLocation firstLocation = new StorageLocation(localSegmentCacheFolder, 50L, 0.0d);
-    final StorageLocation secondLocation = new StorageLocation(localSegmentCacheFolder, 150L, 0.0d);
-
-    manager = new SegmentLocalCacheManager(
-        Arrays.asList(secondLocation, firstLocation),
-        new SegmentLoaderConfig(),
-        new RoundRobinStorageLocationSelectorStrategy(Arrays.asList(firstLocation, secondLocation)),
+    final StorageLocationConfig locationConfig = new StorageLocationConfig(localSegmentCacheDir, 10000L, null);
+    final SegmentLoaderConfig loaderConfig = SegmentLoaderConfig.builder().locations(locationConfig).build();
+    final List<StorageLocation> storageLocations = loaderConfig.toStorageLocations();
+    SegmentLocalCacheManager manager = new SegmentLocalCacheManager(
+        storageLocations,
+        loaderConfig,
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new LeastBytesUsedStorageLocationSelectorStrategy(storageLocations),
+        TestHelper.getTestIndexIO(jsonMapper, ColumnConfig.DEFAULT),
         jsonMapper
     );
 
-    // should go to second location if first one doesn't have enough space
-    Assert.assertTrue(manager.reserve(dataSegment));
-    Assert.assertTrue(secondLocation.isReserved(DataSegmentPusher.getDefaultStorageDir(dataSegment, false)));
-    Assert.assertEquals(50L, firstLocation.availableSizeBytes());
-    Assert.assertEquals(50L, secondLocation.availableSizeBytes());
+    final DataSegment dataSegment = TestSegmentUtils.makeSegment("foo", "v1", Intervals.of("2020/2021"));
 
-    final DataSegment otherSegment = dataSegmentWithInterval("2014-10-21T00:00:00Z/P1D").withSize(100L);
-    Assert.assertFalse(manager.reserve(otherSegment));
-    Assert.assertEquals(50L, firstLocation.availableSizeBytes());
-    Assert.assertEquals(50L, secondLocation.availableSizeBytes());
+    manager.bootstrap(dataSegment, SegmentLazyLoadFailCallback.NOOP);
+    Segment actualBootstrapSegment = manager.acquireCachedSegment(dataSegment.getId(), AcquireMode.FULL).orElse(null);
+    Assertions.assertNotNull(actualBootstrapSegment);
+    Assertions.assertEquals(dataSegment.getId(), actualBootstrapSegment.getId());
+    Assertions.assertEquals(dataSegment.getInterval(), actualBootstrapSegment.getDataInterval());
+  }
+
+
+  @Test
+  public void testGetBootstrapSegmentLazy() throws SegmentLoadingException
+  {
+    final StorageLocationConfig locationConfig = new StorageLocationConfig(localSegmentCacheDir, 10000L, null);
+    final SegmentLoaderConfig loaderConfig = SegmentLoaderConfig.builder()
+                                                                .lazyLoadOnStart(true)
+                                                                .locations(locationConfig)
+                                                                .build();
+    final List<StorageLocation> storageLocations = loaderConfig.toStorageLocations();
+    SegmentLocalCacheManager manager = new SegmentLocalCacheManager(
+        storageLocations,
+        loaderConfig,
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new LeastBytesUsedStorageLocationSelectorStrategy(storageLocations),
+        TestHelper.getTestIndexIO(jsonMapper, ColumnConfig.DEFAULT),
+        jsonMapper
+    );
+
+    final DataSegment dataSegment = TestSegmentUtils.makeSegment("foo", "v1", Intervals.of("2020/2021"));
+
+    manager.bootstrap(dataSegment, () -> {});
+    Segment actualBootstrapSegment = manager.acquireCachedSegment(dataSegment.getId(), AcquireMode.FULL).orElse(null);
+    Assertions.assertNotNull(actualBootstrapSegment);
+    Assertions.assertEquals(dataSegment.getId(), actualBootstrapSegment.getId());
+    Assertions.assertEquals(dataSegment.getInterval(), actualBootstrapSegment.getDataInterval());
   }
 
   @Test
-  public void testSegmentDownloadWhenLocationReserved() throws Exception
+  public void testGetSegmentVirtualStorage() throws Exception
   {
-    final List<StorageLocationConfig> locationConfigs = new ArrayList<>();
-    final StorageLocationConfig locationConfig = createStorageLocationConfig("local_storage_folder", 10000000000L, true);
-    final StorageLocationConfig locationConfig2 = createStorageLocationConfig("local_storage_folder2", 1000000000L, true);
-    final StorageLocationConfig locationConfig3 = createStorageLocationConfig("local_storage_folder3", 1000000000L, true);
-    locationConfigs.add(locationConfig);
-    locationConfigs.add(locationConfig2);
-    locationConfigs.add(locationConfig3);
+    final StorageLocationConfig locationConfig = new StorageLocationConfig(localSegmentCacheDir, 10000L, null);
+    final SegmentLoaderConfig loaderConfig = SegmentLoaderConfig.builder()
+                                                                .locations(locationConfig)
+                                                                .virtualStorage(true)
+                                                                .infoDir(tmpFolder.newFolder())
+                                                                .build();
+    final List<StorageLocation> storageLocations = loaderConfig.toStorageLocations();
+    SegmentLocalCacheManager manager = new SegmentLocalCacheManager(
+        storageLocations,
+        loaderConfig,
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new LeastBytesUsedStorageLocationSelectorStrategy(storageLocations),
+        TestHelper.getTestIndexIO(jsonMapper, ColumnConfig.DEFAULT),
+        jsonMapper
+    );
 
-    List<StorageLocation> locations = new ArrayList<>();
-    for (StorageLocationConfig locConfig : locationConfigs) {
-      locations.add(
-          new StorageLocation(
-              locConfig.getPath(),
-              locConfig.getMaxSize(),
-              locConfig.getFreeSpacePercent()
-          )
-      );
+    final DataSegment segmentToLoad = makeTestDataSegment(segmentDeepStorageDir);
+    createSegmentZipInLocation(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH);
+
+    manager.load(segmentToLoad);
+    Assertions.assertNull(manager.getSegmentFiles(segmentToLoad));
+    Assertions.assertFalse(manager.acquireCachedSegment(segmentToLoad.getId(), AcquireMode.FULL).isPresent());
+    AcquireSegmentAction segmentAction = manager.acquireSegment(segmentToLoad, AcquireMode.FULL);
+    segmentAction.await();
+    AcquireSegmentResult result = segmentAction.release();
+    Optional<Segment> theSegment = result.getSegment();
+    Assertions.assertTrue(theSegment.isPresent());
+    Assertions.assertNotNull(manager.getSegmentFiles(segmentToLoad));
+    Assertions.assertEquals(segmentToLoad.getId(), theSegment.get().getId());
+    Assertions.assertEquals(segmentToLoad.getInterval(), theSegment.get().getDataInterval());
+    theSegment.get().close();
+    segmentAction.close();
+
+    manager.drop(segmentToLoad);
+    // drop doesn't really drop, segments hang out until evicted
+    Assertions.assertNotNull(manager.getSegmentFiles(segmentToLoad));
+
+    // can actually load them again because load doesn't really do anything
+    AcquireSegmentAction segmentActionAfterDrop = manager.acquireSegment(segmentToLoad, AcquireMode.FULL);
+    segmentActionAfterDrop.await();
+    AcquireSegmentResult resultAfterDrop = segmentActionAfterDrop.release();
+    Optional<Segment> theSegmentAfterDrop = resultAfterDrop.getSegment();
+    Assertions.assertTrue(theSegmentAfterDrop.isPresent());
+    Assertions.assertNotNull(manager.getSegmentFiles(segmentToLoad));
+    Assertions.assertEquals(segmentToLoad.getId(), theSegmentAfterDrop.get().getId());
+    Assertions.assertEquals(segmentToLoad.getInterval(), theSegmentAfterDrop.get().getDataInterval());
+
+    theSegmentAfterDrop.get().close();
+    segmentActionAfterDrop.close();
+  }
+
+  @Test
+  public void testAcquireExistingSegmentRacingDropDoesNotExplode() throws Exception
+  {
+    // The acquire takes the segment reference eagerly at acquireSegment() time now (there is no separate supplier
+    // step), so a drop can only land before or after the acquire. Before: the dropped segment must be reported
+    // absent (empty result) rather than NPE or reload. After: the eagerly-taken reference must keep the segment
+    // usable despite the drop. (acquireReference re-reads referenceProvider under the entry lock, so the old
+    // dropped-between-check-and-read NPE cannot recur.)
+    final DataSegment segmentToLoad = makeTestDataSegment(segmentDeepStorageDir);
+    final File localSegmentFile = new File(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH);
+    makeSegmentZip(
+        localSegmentFile,
+        new File(segmentDeepStorageDir.getCanonicalPath() + "/" + TEST_DATA_RELATIVE_PATH + "/index.zip")
+    );
+
+    manager.load(segmentToLoad);
+    Assertions.assertTrue(manager.isSegmentCached(segmentToLoad), "segment should be cached (static, mounted) after load");
+
+    // acquire-then-drop: the reference taken at acquire time protects the segment across the drop
+    final AcquireSegmentAction actionBeforeDrop = manager.acquireSegment(segmentToLoad, AcquireMode.FULL);
+    actionBeforeDrop.await();
+    final AcquireSegmentResult resultBeforeDrop = actionBeforeDrop.release();
+    final Optional<Segment> segmentBeforeDrop = resultBeforeDrop.getSegment();
+    Assertions.assertTrue(segmentBeforeDrop.isPresent());
+
+    manager.drop(segmentToLoad);
+
+    Assertions.assertEquals(segmentToLoad.getId(), segmentBeforeDrop.get().getId());
+    Assertions.assertEquals(segmentToLoad.getInterval(), segmentBeforeDrop.get().getDataInterval());
+    segmentBeforeDrop.get().close();
+    actionBeforeDrop.close();
+
+    // drop-then-acquire: the dropped segment is reported absent (empty), not an NPE and not a reload
+    final AcquireSegmentAction actionAfterDrop = manager.acquireSegment(segmentToLoad, AcquireMode.FULL);
+    actionAfterDrop.await();
+    final AcquireSegmentResult resultAfterDrop = actionAfterDrop.release();
+    Assertions.assertFalse(
+        resultAfterDrop.getSegment().isPresent(),
+        "a segment dropped before the acquire should be reported absent"
+    );
+    actionAfterDrop.close();
+  }
+
+  @Test
+  public void testVirtualStorageRejectsNonPositiveLoadThreads()
+  {
+    final StorageLocationConfig locationConfig = new StorageLocationConfig(localSegmentCacheDir, 10000L, null);
+    final SegmentLoaderConfig loaderConfig = SegmentLoaderConfig.builder()
+                                                                .locations(locationConfig)
+                                                                .virtualStorage(true)
+                                                                .virtualStorageLoadThreads(0)
+                                                                .build();
+    final List<StorageLocation> storageLocations = loaderConfig.toStorageLocations();
+    DruidExceptionMatcher.assertThat(
+        Assertions.assertThrows(
+            DruidException.class,
+            () -> new SegmentLocalCacheManager(
+                storageLocations,
+                loaderConfig,
+                StorageLoadingThreadPool.createFromConfig(loaderConfig),
+                new LeastBytesUsedStorageLocationSelectorStrategy(storageLocations),
+                TestHelper.getTestIndexIO(jsonMapper, ColumnConfig.DEFAULT),
+                jsonMapper
+            )
+        ),
+        new DruidExceptionMatcher(
+            DruidException.Persona.OPERATOR,
+            DruidException.Category.INVALID_INPUT,
+            "general"
+        ).expectMessageIs("virtualStorageLoadThreads must be greater than 0, got [0]")
+    );
+  }
+
+  @Test
+  public void testGetBootstrapSegmentVirtualStorage() throws Exception
+  {
+    final StorageLocationConfig locationConfig = new StorageLocationConfig(localSegmentCacheDir, 10000L, null);
+    final SegmentLoaderConfig loaderConfig = SegmentLoaderConfig.builder()
+                                                                .locations(locationConfig)
+                                                                .virtualStorage(true)
+                                                                .infoDir(tmpFolder.newFolder())
+                                                                .build();
+    final List<StorageLocation> storageLocations = loaderConfig.toStorageLocations();
+    SegmentLocalCacheManager manager = new SegmentLocalCacheManager(
+        storageLocations,
+        loaderConfig,
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new LeastBytesUsedStorageLocationSelectorStrategy(storageLocations),
+        TestHelper.getTestIndexIO(jsonMapper, ColumnConfig.DEFAULT),
+        jsonMapper
+    );
+    final DataSegment segmentToBootstrap = makeTestDataSegment(segmentDeepStorageDir);
+    createSegmentZipInLocation(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH);
+
+    manager.bootstrap(segmentToBootstrap, SegmentLazyLoadFailCallback.NOOP);
+    Assertions.assertNull(manager.getSegmentFiles(segmentToBootstrap));
+    Assertions.assertFalse(manager.acquireCachedSegment(segmentToBootstrap.getId(), AcquireMode.FULL).isPresent());
+    AcquireSegmentAction segmentAction = manager.acquireSegment(segmentToBootstrap, AcquireMode.FULL);
+    segmentAction.await();
+    AcquireSegmentResult result = segmentAction.release();
+    Optional<Segment> theSegment = result.getSegment();
+    Assertions.assertTrue(theSegment.isPresent());
+    Assertions.assertNotNull(manager.getSegmentFiles(segmentToBootstrap));
+    Assertions.assertEquals(segmentToBootstrap.getId(), theSegment.get().getId());
+    Assertions.assertEquals(segmentToBootstrap.getInterval(), theSegment.get().getDataInterval());
+
+    theSegment.get().close();
+    segmentAction.close();
+
+    manager.drop(segmentToBootstrap);
+    // drop doesn't really drop, segments hang out until evicted
+    Assertions.assertNotNull(manager.getSegmentFiles(segmentToBootstrap));
+
+    // can actually load them again because bootstrap doesn't really do anything unless the segment is already
+    // present in the cache
+    AcquireSegmentAction segmentActionAfterDrop = manager.acquireSegment(segmentToBootstrap, AcquireMode.FULL);
+    segmentActionAfterDrop.await();
+    AcquireSegmentResult resultAfterDrop = segmentActionAfterDrop.release();
+    Optional<Segment> theSegmentAfterDrop = resultAfterDrop.getSegment();
+    Assertions.assertTrue(theSegmentAfterDrop.isPresent());
+    Assertions.assertNotNull(manager.getSegmentFiles(segmentToBootstrap));
+    Assertions.assertEquals(segmentToBootstrap.getId(), theSegmentAfterDrop.get().getId());
+    Assertions.assertEquals(segmentToBootstrap.getInterval(), theSegmentAfterDrop.get().getDataInterval());
+
+    theSegmentAfterDrop.get().close();
+    segmentActionAfterDrop.close();
+  }
+
+  @Test
+  public void testGetBootstrapSegmentVirtualStorageSegmentAlreadyCached() throws Exception
+  {
+    final StorageLocationConfig locationConfig = new StorageLocationConfig(localSegmentCacheDir, 10000L, null);
+    final SegmentLoaderConfig loaderConfig = SegmentLoaderConfig.builder()
+                                                                .locations(locationConfig)
+                                                                .virtualStorage(true)
+                                                                .build();
+    final List<StorageLocation> storageLocations = loaderConfig.toStorageLocations();
+    SegmentLocalCacheManager manager = new SegmentLocalCacheManager(
+        storageLocations,
+        loaderConfig,
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new LeastBytesUsedStorageLocationSelectorStrategy(storageLocations),
+        TestHelper.getTestIndexIO(jsonMapper, ColumnConfig.DEFAULT),
+        jsonMapper
+    );
+
+    final DataSegment segmentToBootstrap = makeTestDataSegment(segmentDeepStorageDir);
+    FileUtils.mkdirp(new File(localSegmentCacheDir, "info_dir"));
+    manager.storeInfoFile(segmentToBootstrap);
+    File segmentZip = createSegmentZipInLocation(
+        segmentDeepStorageDir,
+        TEST_DATA_RELATIVE_PATH
+    );
+    File unzippedSegmentPathInLocation = new File(
+        localSegmentCacheDir,
+        segmentToBootstrap.getId().toString()
+    );
+    FileUtils.mkdirp(unzippedSegmentPathInLocation);
+    CompressionUtils.unzip(
+        segmentZip,
+        unzippedSegmentPathInLocation
+    );
+
+    final SegmentCacheEntryIdentifier id = new SegmentCacheEntryIdentifier(segmentToBootstrap.getId());
+    final List<DataSegment> cached = manager.getCachedSegments();
+    Assertions.assertEquals(ImmutableList.of(segmentToBootstrap), cached);
+    // under virtual storage getCachedSegments only recognizes the layout; the reservation is bootstrap's job, so that
+    // the mount happens under a hold and cannot be evicted out from under itself
+    Assertions.assertNull(manager.getLocations().get(0).getCacheEntry(id));
+
+    for (DataSegment segment : cached) {
+      manager.bootstrap(segment, SegmentLazyLoadFailCallback.NOOP);
     }
 
-    manager = new SegmentLocalCacheManager(
-        new SegmentLoaderConfig().withLocations(locationConfigs),
-        new RoundRobinStorageLocationSelectorStrategy(locations),
-        jsonMapper
-    );
-
-    StorageLocation location3 = manager.getLocations().get(2);
-    Assert.assertEquals(locationConfig3.getPath(), location3.getPath());
-    final File segmentSrcFolder = tmpFolder.newFolder("segmentSrcFolder");
-
-    // Segment should be downloaded in local_storage_folder3 even if that is the third location
-    final DataSegment segmentToDownload = dataSegmentWithInterval("2014-10-20T00:00:00Z/P1D").withLoadSpec(
-        ImmutableMap.of(
-            "type",
-            "local",
-            "path",
-            segmentSrcFolder.getCanonicalPath()
-                + "/test_segment_loader"
-                + "/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z"
-                + "/0/index.zip"
-        )
-    );
-    String segmentDir = DataSegmentPusher.getDefaultStorageDir(segmentToDownload, false);
-    location3.reserve(segmentDir, segmentToDownload);
-    // manually create a local segment under segmentSrcFolder
-    createLocalSegmentFile(segmentSrcFolder, "test_segment_loader/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0");
-
-    Assert.assertFalse("Expect cache miss before downloading segment", manager.isSegmentCached(segmentToDownload));
-
-    File segmentFile = manager.getSegmentFiles(segmentToDownload);
-    Assert.assertTrue(segmentFile.getAbsolutePath().contains("/local_storage_folder3/"));
-    Assert.assertTrue("Expect cache hit after downloading segment", manager.isSegmentCached(segmentToDownload));
-
-    manager.cleanup(segmentToDownload);
-    Assert.assertFalse("Expect cache miss after dropping segment", manager.isSegmentCached(segmentToDownload));
-    Assert.assertFalse(location3.isReserved(segmentDir));
+    final CacheEntry entry = manager.getLocations().get(0).getCacheEntry(id);
+    Assertions.assertNotNull(entry, "bootstrap must reserve the complete entry it mounts");
+    Assertions.assertTrue(entry.isMounted());
+    // if bootstrapping a file that already exists it will be mounted by bootsrap
+    Assertions.assertNotNull(manager.getSegmentFiles(segmentToBootstrap));
   }
 
   @Test
-  public void testRelease()
+  public void testGetSegmentAfterDroppedWithNoVirtualStorageEnabled() throws Exception
   {
-    final DataSegment dataSegment = dataSegmentWithInterval("2014-10-20T00:00:00Z/P1D").withSize(100L);
-    final StorageLocation firstLocation = new StorageLocation(localSegmentCacheFolder, 50L, 0.0d);
-    final StorageLocation secondLocation = new StorageLocation(localSegmentCacheFolder, 150L, 0.0d);
+    SegmentLocalCacheManager manager = makeDefaultManager(jsonMapper);
 
-    manager = new SegmentLocalCacheManager(
-        Arrays.asList(secondLocation, firstLocation),
-        new SegmentLoaderConfig(),
-        new RoundRobinStorageLocationSelectorStrategy(Arrays.asList(firstLocation, secondLocation)),
+    final DataSegment segmentToLoad = makeTestDataSegment(segmentDeepStorageDir);
+    createSegmentZipInLocation(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH);
+
+    manager.load(segmentToLoad);
+    Assertions.assertNotNull(manager.getSegmentFiles(segmentToLoad));
+    manager.drop(segmentToLoad);
+    Assertions.assertNull(manager.getSegmentFiles(segmentToLoad));
+
+    // ensure that if virtual storage is not enabled, we do not download the segment (callers might have a DataSegment
+    // reference which was originally cached and then dropped before attempting to acquire a segment. if virtual storage
+    // is not enabled, this should return a missing segment instead of downloading
+    AcquireSegmentAction segmentAction = manager.acquireSegment(segmentToLoad, AcquireMode.FULL);
+    segmentAction.await();
+    AcquireSegmentResult result = segmentAction.release();
+    Optional<Segment> theSegment = result.getSegment();
+    Assertions.assertFalse(theSegment.isPresent());
+    segmentAction.close();
+
+    Assertions.assertNull(manager.getSegmentFiles(segmentToLoad));
+  }
+
+  @Test
+  public void testGetSegmentVirtualStorageMountAfterDrop() throws Exception
+  {
+    final StorageLocationConfig locationConfig = new StorageLocationConfig(localSegmentCacheDir, 10L, null);
+    final SegmentLoaderConfig loaderConfig = SegmentLoaderConfig.builder()
+                                                                .locations(locationConfig)
+                                                                .virtualStorage(true)
+                                                                .infoDir(tmpFolder.newFolder())
+                                                                .build();
+    final List<StorageLocation> storageLocations = loaderConfig.toStorageLocations();
+    SegmentLocalCacheManager manager = new SegmentLocalCacheManager(
+        storageLocations,
+        loaderConfig,
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new LeastBytesUsedStorageLocationSelectorStrategy(storageLocations),
+        TestHelper.getTestIndexIO(jsonMapper, ColumnConfig.DEFAULT),
         jsonMapper
     );
 
-    manager.reserve(dataSegment);
-    manager.release(dataSegment);
-    Assert.assertEquals(50L, firstLocation.availableSizeBytes());
-    Assert.assertEquals(150L, secondLocation.availableSizeBytes());
-    Assert.assertFalse(firstLocation.isReserved(DataSegmentPusher.getDefaultStorageDir(dataSegment, false)));
-    Assert.assertFalse(secondLocation.isReserved(DataSegmentPusher.getDefaultStorageDir(dataSegment, false)));
+    final DataSegment segmentToLoad = makeTestDataSegment(segmentDeepStorageDir);
+    createSegmentZipInLocation(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH);
 
-    // calling release again should have no effect
-    manager.release(dataSegment);
-    Assert.assertEquals(50L, firstLocation.availableSizeBytes());
-    Assert.assertEquals(150L, secondLocation.availableSizeBytes());
+    manager.load(segmentToLoad);
+    Assertions.assertNull(manager.getSegmentFiles(segmentToLoad));
+    Assertions.assertFalse(manager.acquireCachedSegment(segmentToLoad.getId(), AcquireMode.FULL).isPresent());
+    AcquireSegmentAction segmentAction = manager.acquireSegment(segmentToLoad, AcquireMode.FULL);
+
+    // now drop it before we actually load it, but dropping a weakly held reference does not remove the entry from the
+    // cache, deferring it until eviction
+    manager.drop(segmentToLoad);
+
+    // however, we also have a hold, so it will not be evicted
+    final DataSegment cannotLoad = makeTestDataSegment(segmentDeepStorageDir, 1, TEST_DATA_RELATIVE_PATH_2);
+    Assertions.assertThrows(DruidException.class, () -> manager.acquireSegment(cannotLoad, AcquireMode.FULL));
+
+    // and we can still mount and use the segment we are holding
+    segmentAction.await();
+    AcquireSegmentResult result = segmentAction.release();
+    Assertions.assertNotNull(result);
+    Optional<Segment> theSegment = result.getSegment();
+    Assertions.assertTrue(theSegment.isPresent());
+    Assertions.assertNotNull(manager.getSegmentFiles(segmentToLoad));
+    Assertions.assertEquals(segmentToLoad.getId(), theSegment.get().getId());
+    Assertions.assertEquals(segmentToLoad.getInterval(), theSegment.get().getDataInterval());
+    theSegment.get().close();
+    segmentAction.close();
+    Assertions.assertNotNull(manager.getSegmentFiles(segmentToLoad));
+
+    // now that the hold has been released, we can load the other segment and evict the one that was held
+    createSegmentZipInLocation(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH_2);
+    manager.load(cannotLoad);
+    AcquireSegmentAction segmentActionAfterDrop = manager.acquireSegment(cannotLoad, AcquireMode.FULL);
+    segmentActionAfterDrop.await();
+    AcquireSegmentResult resultDrop = segmentActionAfterDrop.release();
+    Optional<Segment> theSegmentAfterDrop = resultDrop.getSegment();
+    Assertions.assertTrue(theSegmentAfterDrop.isPresent());
+    Assertions.assertNotNull(manager.getSegmentFiles(cannotLoad));
+    Assertions.assertEquals(cannotLoad.getId(), theSegmentAfterDrop.get().getId());
+    Assertions.assertEquals(cannotLoad.getInterval(), theSegmentAfterDrop.get().getDataInterval());
+    Assertions.assertNull(manager.getSegmentFiles(segmentToLoad));
+
+    theSegmentAfterDrop.get().close();
+    segmentActionAfterDrop.close();
+  }
+
+  @Test
+  public void testGetSegmentVirtualStorageFabricEvictImmediately() throws Exception
+  {
+    final StorageLocationConfig locationConfig = new StorageLocationConfig(localSegmentCacheDir, 10000L, null);
+    final File infoDir = tmpFolder.newFolder();
+    final SegmentLoaderConfig loaderConfig = SegmentLoaderConfig.builder()
+                                                                .locations(locationConfig)
+                                                                .virtualStorage(true)
+                                                                .virtualStorageIsEphemeral(true)
+                                                                .infoDir(infoDir)
+                                                                .build();
+    final List<StorageLocation> storageLocations = loaderConfig.toStorageLocations();
+    final SegmentLocalCacheManager manager = new SegmentLocalCacheManager(
+        storageLocations,
+        loaderConfig,
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new LeastBytesUsedStorageLocationSelectorStrategy(storageLocations),
+        TestHelper.getTestIndexIO(jsonMapper, ColumnConfig.DEFAULT),
+        jsonMapper
+    );
+
+    final DataSegment segmentToLoad = makeTestDataSegment(segmentDeepStorageDir);
+    createSegmentZipInLocation(segmentDeepStorageDir, TEST_DATA_RELATIVE_PATH);
+
+    // Acquire the segment (load() is not allowed with evictImmediately)
+    AcquireSegmentAction segmentAction = manager.acquireSegment(segmentToLoad, AcquireMode.FULL);
+    segmentAction.await();
+    AcquireSegmentResult result = segmentAction.release();
+    Optional<Segment> theSegment = result.getSegment();
+    Assertions.assertTrue(theSegment.isPresent());
+    Assertions.assertNotNull(manager.getSegmentFiles(segmentToLoad));
+    Assertions.assertEquals(segmentToLoad.getId(), theSegment.get().getId());
+
+    // Info file should exist
+    final File infoFile = new File(infoDir, segmentToLoad.getId().toString());
+    Assertions.assertTrue(infoFile.exists());
+
+    // Drop the segment while still holding
+    manager.drop(segmentToLoad);
+
+    // Segment files and info file should still exist because we still have a hold
+    Assertions.assertNotNull(manager.getSegmentFiles(segmentToLoad));
+    Assertions.assertTrue(infoFile.exists());
+
+    // Release the hold - with evictImmediately, the segment should be evicted immediately
+    theSegment.get().close();
+    segmentAction.close();
+
+    // Both segment files and info file should be deleted
+    Assertions.assertNull(manager.getSegmentFiles(segmentToLoad));
+    Assertions.assertFalse(infoFile.exists());
+
+    // Verify the segment can be loaded again if needed
+    AcquireSegmentAction segmentActionAfterEvict = manager.acquireSegment(segmentToLoad, AcquireMode.FULL);
+    segmentActionAfterEvict.await();
+    AcquireSegmentResult resultAfterEvict = segmentActionAfterEvict.release();
+    Optional<Segment> theSegmentAfterEvict = resultAfterEvict.getSegment();
+    Assertions.assertTrue(theSegmentAfterEvict.isPresent());
+    Assertions.assertNotNull(manager.getSegmentFiles(segmentToLoad));
+    Assertions.assertEquals(segmentToLoad.getId(), theSegmentAfterEvict.get().getId());
+
+    // Info file should exist again
+    Assertions.assertTrue(infoFile.exists());
+
+    theSegmentAfterEvict.get().close();
+    segmentActionAfterEvict.close();
+
+    // After final release, info file should be deleted again
+    Assertions.assertFalse(infoFile.exists());
+  }
+
+  @Test
+  public void testIfTombstoneIsLoaded() throws IOException, SegmentLoadingException
+  {
+    final DataSegment tombstone = DataSegment.builder(SegmentId.of("foo", Intervals.of("2014-10-20T00:00:00Z/P1D"), "version", 0))
+                                             .loadSpec(Collections.singletonMap(
+                                                 "type",
+                                                 DataSegment.TOMBSTONE_LOADSPEC_TYPE
+                                             ))
+                                             .shardSpec(TombstoneShardSpec.INSTANCE)
+                                             .size(1)
+                                             .build();
+
+
+    final File cachedSegmentFile = new File(
+        localSegmentCacheDir,
+        "test_segment_loader/2014-10-20T00:00:00.000Z_2014-10-21T00:00:00.000Z/2015-05-27T03:38:35.683Z/0"
+    );
+    FileUtils.mkdirp(cachedSegmentFile);
+
+    manager.load(tombstone);
+    manager.getSegmentFiles(tombstone);
+    Assertions.assertTrue(manager.isSegmentCached(tombstone), "Expect cache hit after downloading segment");
+  }
+
+  @Test
+  public void testGetTombstoneSegment() throws SegmentLoadingException
+  {
+    final Interval interval = Intervals.of("2014-01-01/2014-01-02");
+    final DataSegment tombstone = DataSegment.builder(SegmentId.of("foo", interval, "v1", 0))
+                                             .loadSpec(ImmutableMap.of("type", "tombstone"))
+                                             .shardSpec(TombstoneShardSpec.INSTANCE)
+                                             .size(100)
+                                             .build();
+
+    manager.load(tombstone);
+    Segment segment = manager.acquireCachedSegment(tombstone.getId(), AcquireMode.FULL).orElse(null);
+
+    Assertions.assertEquals(tombstone.getId(), segment.getId());
+    Assertions.assertEquals(interval, segment.getDataInterval());
+
+    final CursorFactory cursorFactory = segment.as(CursorFactory.class);
+    Assertions.assertNotNull(cursorFactory);
+    Assertions.assertTrue(segment.isTombstone());
+
+    final QueryableIndex queryableIndex = segment.as(QueryableIndex.class);
+    Assertions.assertNotNull(queryableIndex);
+    Assertions.assertEquals(interval, queryableIndex.getDataInterval());
+    Assertions.assertThrows(UnsupportedOperationException.class, queryableIndex::getMetadata);
+    Assertions.assertThrows(UnsupportedOperationException.class, queryableIndex::getNumRows);
+    Assertions.assertThrows(UnsupportedOperationException.class, queryableIndex::getAvailableDimensions);
+    Assertions.assertThrows(UnsupportedOperationException.class, queryableIndex::getBitmapFactoryForDimensions);
+    Assertions.assertThrows(UnsupportedOperationException.class, queryableIndex::getDimensionHandlers);
+    Assertions.assertThrows(UnsupportedOperationException.class, () -> queryableIndex.getColumnHolder("foo"));
+  }
+
+  private SegmentLocalCacheManager makeDefaultManager(ObjectMapper jsonMapper)
+  {
+    final List<StorageLocationConfig> locationConfigs = new ArrayList<>();
+    final StorageLocationConfig locationConfig = new StorageLocationConfig(localSegmentCacheDir, 10000000000L, null);
+    locationConfigs.add(locationConfig);
+    final SegmentLoaderConfig loaderConfig = SegmentLoaderConfig.builder().locations(locationConfigs).build();
+    final List<StorageLocation> locations = loaderConfig.toStorageLocations();
+    return new SegmentLocalCacheManager(
+        locations,
+        loaderConfig,
+        StorageLoadingThreadPool.createFromConfig(loaderConfig),
+        new LeastBytesUsedStorageLocationSelectorStrategy(locations),
+        TestHelper.getTestIndexIO(jsonMapper, ColumnConfig.DEFAULT),
+        jsonMapper
+    );
+  }
+
+  private File createSegmentZipInLocation(File src, String relativePath) throws Exception
+  {
+    final File tmpSegmentFile = tmpFolder.newFile();
+    FileUtils.mkdirp(new File(src, relativePath));
+    return makeSegmentZip(tmpSegmentFile, new File(src, relativePath + "/index.zip"));
+  }
+
+  private StorageLocationConfig createStorageLocationConfig(String localPath, long maxSize, boolean writable) throws Exception
+  {
+
+    final File localStorageFolder = tmpFolder.newFolder(localPath);
+    localStorageFolder.setWritable(writable);
+    final StorageLocationConfig locationConfig = new StorageLocationConfig(localStorageFolder, maxSize, 1.0);
+    return locationConfig;
+  }
+
+  private DataSegment dataSegmentWithInterval(String intervalStr)
+  {
+    return dataSegmentWithInterval(intervalStr, 10L);
+  }
+
+  private DataSegment dataSegmentWithInterval(String intervalStr, long size)
+  {
+    return dataSegmentWithInterval(intervalStr, size, 0);
+  }
+
+  private DataSegment dataSegmentWithInterval(String intervalStr, long size, int partition)
+  {
+    return DataSegment.builder(SegmentId.of("test_segment_loader", Intervals.of(intervalStr), "2015-05-27T03:38:35.683Z", partition))
+                      .loadSpec(
+                          ImmutableMap.of(
+                              "type",
+                              "local",
+                              "path",
+                              "somewhere"
+                          )
+                      )
+                      .dimensions(ImmutableList.of())
+                      .metrics(ImmutableList.of())
+                      .shardSpec(new LinearShardSpec(partition))
+                      .binaryVersion(9)
+                      .size(size)
+                      .build();
+  }
+
+
+
+  private DataSegment makeTestDataSegment(File segmentSrcFolder) throws IOException
+  {
+    return makeTestDataSegment(segmentSrcFolder, 10L, 0, TEST_DATA_RELATIVE_PATH);
+  }
+
+  private DataSegment makeTestDataSegment(File segmentSrcFolder, int partition, String relativePath) throws IOException
+  {
+    return makeTestDataSegment(segmentSrcFolder, 10L, partition, relativePath);
+  }
+
+  private DataSegment makeTestDataSegment(File segmentSrcFolder, long size, int partition, String relativePath) throws IOException
+  {
+    return dataSegmentWithInterval("2011-01-12T00:00:00.000Z/2011-04-15T00:00:00.001Z", size, partition)
+        .withLoadSpec(
+            ImmutableMap.of(
+                "type",
+                "local",
+                "path",
+                segmentSrcFolder.getCanonicalPath() + "/" + relativePath + "/index.zip"
+            )
+        );
+  }
+
+  private void writeSegmentFile(final DataSegment segment) throws IOException
+  {
+    final File segmentFile = new File(
+        localSegmentCacheDir,
+        segment.getId().toString()
+    );
+    FileUtils.mkdirp(segmentFile);
+  }
+
+  static File makeSegmentZip(File segmentFiles, File zipOutFile) throws IOException
+  {
+    TestIndex.persist(TestIndex.getIncrementalTestIndex(), IndexSpec.getDefault(), segmentFiles);
+    FileUtils.mkdirp(zipOutFile.getParentFile());
+    CompressionUtils.zip(segmentFiles, zipOutFile);
+    return zipOutFile;
   }
 }

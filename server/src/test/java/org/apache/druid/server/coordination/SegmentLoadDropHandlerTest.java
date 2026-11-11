@@ -19,471 +19,272 @@
 
 package org.apache.druid.server.coordination;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Iterables;
 import com.google.common.util.concurrent.ListenableFuture;
-import org.apache.druid.guice.ServerTypeConfig;
 import org.apache.druid.java.util.common.Intervals;
-import org.apache.druid.java.util.common.MapUtils;
 import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.common.concurrent.ScheduledExecutorFactory;
 import org.apache.druid.java.util.emitter.EmittingLogger;
-import org.apache.druid.segment.IndexIO;
-import org.apache.druid.segment.TestHelper;
-import org.apache.druid.segment.loading.CacheTestSegmentLoader;
-import org.apache.druid.segment.loading.NoopSegmentCacheManager;
-import org.apache.druid.segment.loading.SegmentCacheManager;
+import org.apache.druid.java.util.metrics.StubServiceEmitter;
 import org.apache.druid.segment.loading.SegmentLoaderConfig;
 import org.apache.druid.segment.loading.StorageLocationConfig;
 import org.apache.druid.server.SegmentManager;
-import org.apache.druid.server.coordination.SegmentLoadDropHandler.DataSegmentChangeRequestAndStatus;
-import org.apache.druid.server.coordination.SegmentLoadDropHandler.Status.STATE;
-import org.apache.druid.server.metrics.NoopServiceEmitter;
+import org.apache.druid.server.coordination.SegmentChangeStatus.State;
+import org.apache.druid.server.http.SegmentLoadingMode;
+import org.apache.druid.test.utils.TestSegmentCacheManager;
+import org.apache.druid.testing.TemporaryFolderExtension;
 import org.apache.druid.timeline.DataSegment;
-import org.apache.druid.timeline.partition.NoneShardSpec;
-import org.joda.time.Interval;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
-import org.junit.rules.TemporaryFolder;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.Timeout.ThreadMode;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ConcurrentSkipListSet;
-import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- */
+import static org.apache.druid.segment.TestSegmentUtils.makeSegment;
+
 public class SegmentLoadDropHandlerTest
 {
-  public static final int COUNT = 50;
-
-  private final ObjectMapper jsonMapper = TestHelper.makeJsonMapper();
-
-  private SegmentLoadDropHandler segmentLoadDropHandler;
-
-  private DataSegmentAnnouncer announcer;
-  private File infoDir;
-  private TestStorageLocation testStorageLocation;
-  private AtomicInteger announceCount;
-  private ConcurrentSkipListSet<DataSegment> segmentsAnnouncedByMe;
-  private SegmentCacheManager segmentCacheManager;
-  private Set<DataSegment> segmentsRemovedFromCache;
-  private SegmentManager segmentManager;
+  private TestDataSegmentAnnouncer segmentAnnouncer;
   private List<Runnable> scheduledRunnable;
   private SegmentLoaderConfig segmentLoaderConfig;
-  private SegmentLoaderConfig noAnnouncerSegmentLoaderConfig;
   private ScheduledExecutorFactory scheduledExecutorFactory;
-  private List<StorageLocationConfig> locations;
 
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
+  @RegisterExtension
+  public final TemporaryFolderExtension temporaryFolder = TemporaryFolderExtension.testCaseScoped();
 
-  @Rule
-  public TemporaryFolder temporaryFolder = new TemporaryFolder();
-
-  public SegmentLoadDropHandlerTest()
-  {
-    EmittingLogger.registerEmitter(new NoopServiceEmitter());
-  }
-
-  @Before
+  @BeforeEach
   public void setUp() throws IOException
   {
-    try {
-      testStorageLocation = new TestStorageLocation(temporaryFolder);
-      infoDir = testStorageLocation.getInfoDir();
-    }
-    catch (IOException e) {
-      throw new RuntimeException(e);
-    }
-
-    locations = Collections.singletonList(
-        testStorageLocation.toStorageLocationConfig()
-    );
+    final File segmentCacheDir = temporaryFolder.newFolder();
 
     scheduledRunnable = new ArrayList<>();
+    segmentAnnouncer = new TestDataSegmentAnnouncer();
+    segmentLoaderConfig = SegmentLoaderConfig.builder()
+        .infoDir(segmentCacheDir)
+        .numLoadingThreads(5)
+        .announceIntervalMillis(50)
+        .locations(new StorageLocationConfig(segmentCacheDir, null, null))
+        .dropSegmentDelayMillis(0)
+        .build();
 
-    segmentsRemovedFromCache = new HashSet<>();
-    segmentCacheManager = new NoopSegmentCacheManager()
-    {
-      @Override
-      public boolean isSegmentCached(DataSegment segment)
+    scheduledExecutorFactory = (corePoolSize, nameFormat) ->
+      // Override normal behavior by adding the runnable to a list so that you can make sure
+      // all the scheduled runnables are executed by explicitly calling run() on each item in the list
+      new ScheduledThreadPoolExecutor(corePoolSize, Execs.makeThreadFactory(nameFormat))
       {
-        Map<String, Object> loadSpec = segment.getLoadSpec();
-        return new File(MapUtils.getString(loadSpec, "cacheDir")).exists();
-      }
-
-      @Override
-      public void cleanup(DataSegment segment)
-      {
-        segmentsRemovedFromCache.add(segment);
-      }
-    };
-
-    segmentManager = new SegmentManager(new CacheTestSegmentLoader());
-    segmentsAnnouncedByMe = new ConcurrentSkipListSet<>();
-    announceCount = new AtomicInteger(0);
-
-    announcer = new DataSegmentAnnouncer()
-    {
-      @Override
-      public void announceSegment(DataSegment segment)
-      {
-        segmentsAnnouncedByMe.add(segment);
-        announceCount.incrementAndGet();
-      }
-
-      @Override
-      public void unannounceSegment(DataSegment segment)
-      {
-        segmentsAnnouncedByMe.remove(segment);
-        announceCount.decrementAndGet();
-      }
-
-      @Override
-      public void announceSegments(Iterable<DataSegment> segments)
-      {
-        for (DataSegment segment : segments) {
-          segmentsAnnouncedByMe.add(segment);
-        }
-        announceCount.addAndGet(Iterables.size(segments));
-      }
-
-      @Override
-      public void unannounceSegments(Iterable<DataSegment> segments)
-      {
-        for (DataSegment segment : segments) {
-          segmentsAnnouncedByMe.remove(segment);
-        }
-        announceCount.addAndGet(-Iterables.size(segments));
-      }
-    };
-
-
-    segmentLoaderConfig = new SegmentLoaderConfig()
-    {
-      @Override
-      public File getInfoDir()
-      {
-        return testStorageLocation.getInfoDir();
-      }
-
-      @Override
-      public int getNumLoadingThreads()
-      {
-        return 5;
-      }
-
-      @Override
-      public int getAnnounceIntervalMillis()
-      {
-        return 50;
-      }
-
-      @Override
-      public List<StorageLocationConfig> getLocations()
-      {
-        return locations;
-      }
-
-      @Override
-      public int getDropSegmentDelayMillis()
-      {
-        return 0;
-      }
-    };
-
-    noAnnouncerSegmentLoaderConfig = new SegmentLoaderConfig()
-    {
-      @Override
-      public File getInfoDir()
-      {
-        return testStorageLocation.getInfoDir();
-      }
-
-      @Override
-      public int getNumLoadingThreads()
-      {
-        return 5;
-      }
-
-      @Override
-      public int getAnnounceIntervalMillis()
-      {
-        return 0;
-      }
-
-      @Override
-      public List<StorageLocationConfig> getLocations()
-      {
-        return locations;
-      }
-
-      @Override
-      public int getDropSegmentDelayMillis()
-      {
-        return 0;
-      }
-    };
-
-    scheduledExecutorFactory = new ScheduledExecutorFactory()
-    {
-      @Override
-      public ScheduledExecutorService create(int corePoolSize, String nameFormat)
-      {
-            /*
-               Override normal behavoir by adding the runnable to a list so that you can make sure
-               all the shceduled runnables are executed by explicitly calling run() on each item in the list
-             */
-        return new ScheduledThreadPoolExecutor(corePoolSize, Execs.makeThreadFactory(nameFormat))
+        @Override
+        public ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit)
         {
-          @Override
-          public ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit)
-          {
-            scheduledRunnable.add(command);
-            return null;
-          }
-        };
-      }
-    };
+          scheduledRunnable.add(command);
+          return null;
+        }
+      };
 
-    segmentLoadDropHandler = new SegmentLoadDropHandler(
-        jsonMapper,
-        segmentLoaderConfig,
-        announcer,
-        Mockito.mock(DataSegmentServerAnnouncer.class),
-        segmentManager,
-        segmentCacheManager,
-        scheduledExecutorFactory.create(5, "SegmentLoadDropHandlerTest-[%d]"),
-        new ServerTypeConfig(ServerType.HISTORICAL)
+    EmittingLogger.registerEmitter(new StubServiceEmitter());
+  }
+
+  /**
+   * Steps:
+   * <ul>
+   * <li> {@code removeSegment()} schedules a delete runnable to deletes segment files. </li>
+   * <li> {@code addSegment()} succesfully loads the segment and announces it. </li>
+   * <li> scheduled delete task executes and realizes it should not delete the segment files. </li>
+   * </ul>
+   */
+  @Test
+  public void testSegmentLoading1()
+  {
+    final TestSegmentCacheManager cacheManager = new TestSegmentCacheManager();
+    final SegmentManager segmentManager = new SegmentManager(cacheManager);
+    final SegmentLoadDropHandler handler = initSegmentLoadDropHandler(segmentManager);
+
+    final DataSegment segment = makeSegment("test", "1", Intervals.of("P1d/2011-04-01"));
+
+    handler.removeSegment(segment, DataSegmentChangeCallback.NOOP);
+
+    Assertions.assertFalse(segmentAnnouncer.getObservedSegments().contains(segment));
+
+    handler.addSegment(segment, DataSegmentChangeCallback.NOOP, null);
+
+    // Make sure the scheduled runnable that "deletes" segment files has been executed.
+    // Because another addSegment() call is executed, which removes the segment from segmentsToDelete field in
+    // SegmentLoadDropHandler, the scheduled runnable will not actually delete segment files.
+    for (Runnable runnable : scheduledRunnable) {
+      runnable.run();
+    }
+    Assertions.assertEquals(ImmutableList.of(segment), cacheManager.getObservedSegments());
+    Assertions.assertEquals(ImmutableList.of(), cacheManager.getObservedBootstrapSegments());
+
+    Assertions.assertEquals(ImmutableList.of(segment), segmentAnnouncer.getObservedSegments());
+    Assertions.assertFalse(
+        cacheManager.getObservedSegmentsRemovedFromCache().contains(segment.getId()),
+        "segment files shouldn't be deleted"
     );
   }
 
   /**
    * Steps:
-   * 1. removeSegment() schedules a delete runnable that deletes segment files,
-   * 2. addSegment() succesfully loads the segment and annouces it
-   * 3. scheduled delete task executes and realizes it should not delete the segment files.
+   * <ul>
+   * <li> {@code addSegment()} succesfully loads the segment and announces it. </li>
+   * <li> {@code removeSegment()} unannounces the segment and schedules a delete runnable to delete segment files. </li>
+   * <li> {@code addSegment()} calls {@code loadSegment()} and announces it again. </li>
+   * <li> scheduled delete task executes and realizes it should not delete the segment files. </li>
+   * </ul>
    */
   @Test
-  public void testSegmentLoading1() throws Exception
+  public void testSegmentLoading2()
   {
-    segmentLoadDropHandler.start();
+    final TestSegmentCacheManager cacheManager = new TestSegmentCacheManager();
+    final SegmentManager segmentManager = new SegmentManager(cacheManager);
+    final SegmentLoadDropHandler handler = initSegmentLoadDropHandler(segmentManager);
+
+    // handler.start();
+
+    // Assert.assertEquals(1, serverAnnouncer.getObservedCount());
 
     final DataSegment segment = makeSegment("test", "1", Intervals.of("P1d/2011-04-01"));
 
-    segmentLoadDropHandler.removeSegment(segment, DataSegmentChangeCallback.NOOP);
+    handler.addSegment(segment, DataSegmentChangeCallback.NOOP, null);
 
-    Assert.assertFalse(segmentsAnnouncedByMe.contains(segment));
+    Assertions.assertTrue(segmentAnnouncer.getObservedSegments().contains(segment));
 
-    segmentLoadDropHandler.addSegment(segment, DataSegmentChangeCallback.NOOP);
+    handler.removeSegment(segment, DataSegmentChangeCallback.NOOP);
 
-    /*
-       make sure the scheduled runnable that "deletes" segment files has been executed.
-       Because another addSegment() call is executed, which removes the segment from segmentsToDelete field in
-       ZkCoordinator, the scheduled runnable will not actually delete segment files.
-     */
+    Assertions.assertFalse(segmentAnnouncer.getObservedSegments().contains(segment));
+
+    handler.addSegment(segment, DataSegmentChangeCallback.NOOP, null);
+
+    // Make sure the scheduled runnable that "deletes" segment files has been executed.
+    // Because another addSegment() call is executed, which removes the segment from segmentsToDelete field in
+    // SegmentLoadDropHandler, the scheduled runnable will not actually delete segment files.
     for (Runnable runnable : scheduledRunnable) {
       runnable.run();
     }
 
-    Assert.assertTrue(segmentsAnnouncedByMe.contains(segment));
-    Assert.assertFalse("segment files shouldn't be deleted", segmentsRemovedFromCache.contains(segment));
+    // The same segment reference will be fetched more than once in the above sequence, but the segment should
+    // be loaded only once onto the page cache.
+    Assertions.assertEquals(ImmutableList.of(segment, segment), cacheManager.getObservedSegments());
+    Assertions.assertEquals(ImmutableList.of(), cacheManager.getObservedBootstrapSegments());
 
-    segmentLoadDropHandler.stop();
+    Assertions.assertTrue(segmentAnnouncer.getObservedSegments().contains(segment));
+    Assertions.assertFalse(
+        cacheManager.getObservedSegmentsRemovedFromCache().contains(segment.getId()),
+        "segment files shouldn't be deleted"
+    );
   }
 
-  /**
-   * Steps:
-   * 1. addSegment() succesfully loads the segment and annouces it
-   * 2. removeSegment() unannounces the segment and schedules a delete runnable that deletes segment files
-   * 3. addSegment() calls loadSegment() and annouces it again
-   * 4. scheduled delete task executes and realizes it should not delete the segment files.
-   */
   @Test
-  public void testSegmentLoading2() throws Exception
+  public void testFailedReloadKeepsTheSegmentServing()
   {
-    segmentLoadDropHandler.start();
+    final TestSegmentCacheManager cacheManager = new TestSegmentCacheManager();
+    cacheManager.failLoadsAfter(1);
+    final SegmentManager segmentManager = new SegmentManager(cacheManager);
+    final SegmentLoadDropHandler handler = initSegmentLoadDropHandler(segmentManager);
 
     final DataSegment segment = makeSegment("test", "1", Intervals.of("P1d/2011-04-01"));
 
-    segmentLoadDropHandler.addSegment(segment, DataSegmentChangeCallback.NOOP);
+    handler.addSegment(segment, DataSegmentChangeCallback.NOOP, null);
+    Assertions.assertTrue(segmentManager.isSegmentLoaded(segment));
+    Assertions.assertTrue(segmentAnnouncer.getObservedSegments().contains(segment));
 
-    Assert.assertTrue(segmentsAnnouncedByMe.contains(segment));
-
-    segmentLoadDropHandler.removeSegment(segment, DataSegmentChangeCallback.NOOP);
-
-    Assert.assertFalse(segmentsAnnouncedByMe.contains(segment));
-
-    segmentLoadDropHandler.addSegment(segment, DataSegmentChangeCallback.NOOP);
-
-    /*
-       make sure the scheduled runnable that "deletes" segment files has been executed.
-       Because another addSegment() call is executed, which removes the segment from segmentsToDelete field in
-       ZkCoordinator, the scheduled runnable will not actually delete segment files.
-     */
+    // Second request for the same segment is a reload, and this cache manager fails it.
+    handler.addSegment(segment, DataSegmentChangeCallback.NOOP, null);
     for (Runnable runnable : scheduledRunnable) {
       runnable.run();
     }
 
-    Assert.assertTrue(segmentsAnnouncedByMe.contains(segment));
-    Assert.assertFalse("segment files shouldn't be deleted", segmentsRemovedFromCache.contains(segment));
-
-    segmentLoadDropHandler.stop();
-  }
-
-  @Test
-  public void testLoadCache() throws Exception
-  {
-    Set<DataSegment> segments = new HashSet<>();
-    for (int i = 0; i < COUNT; ++i) {
-      segments.add(makeSegment("test" + i, "1", Intervals.of("P1d/2011-04-01")));
-      segments.add(makeSegment("test" + i, "1", Intervals.of("P1d/2011-04-02")));
-      segments.add(makeSegment("test" + i, "2", Intervals.of("P1d/2011-04-02")));
-      segments.add(makeSegment("test" + i, "1", Intervals.of("P1d/2011-04-03")));
-      segments.add(makeSegment("test" + i, "1", Intervals.of("P1d/2011-04-04")));
-      segments.add(makeSegment("test" + i, "1", Intervals.of("P1d/2011-04-05")));
-      segments.add(makeSegment("test" + i, "2", Intervals.of("PT1h/2011-04-04T01")));
-      segments.add(makeSegment("test" + i, "2", Intervals.of("PT1h/2011-04-04T02")));
-      segments.add(makeSegment("test" + i, "2", Intervals.of("PT1h/2011-04-04T03")));
-      segments.add(makeSegment("test" + i, "2", Intervals.of("PT1h/2011-04-04T05")));
-      segments.add(makeSegment("test" + i, "2", Intervals.of("PT1h/2011-04-04T06")));
-      segments.add(makeSegment("test_two" + i, "1", Intervals.of("P1d/2011-04-01")));
-      segments.add(makeSegment("test_two" + i, "1", Intervals.of("P1d/2011-04-02")));
-    }
-
-    for (DataSegment segment : segments) {
-      testStorageLocation.writeSegmentInfoToCache(segment);
-    }
-
-    testStorageLocation.checkInfoCache(segments);
-    Assert.assertTrue(segmentManager.getDataSourceCounts().isEmpty());
-    segmentLoadDropHandler.start();
-    Assert.assertTrue(!segmentManager.getDataSourceCounts().isEmpty());
-    for (int i = 0; i < COUNT; ++i) {
-      Assert.assertEquals(11L, segmentManager.getDataSourceCounts().get("test" + i).longValue());
-      Assert.assertEquals(2L, segmentManager.getDataSourceCounts().get("test_two" + i).longValue());
-    }
-    Assert.assertEquals(13 * COUNT, announceCount.get());
-    segmentLoadDropHandler.stop();
-
-    for (DataSegment segment : segments) {
-      testStorageLocation.deleteSegmentInfoFromCache(segment);
-    }
-
-    Assert.assertEquals(0, infoDir.listFiles().length);
-    Assert.assertTrue(infoDir.delete());
-  }
-
-  private DataSegment makeSegment(String dataSource, String version, Interval interval)
-  {
-    return new DataSegment(
-        dataSource,
-        interval,
-        version,
-        ImmutableMap.of("version", version, "interval", interval, "cacheDir", infoDir),
-        Arrays.asList("dim1", "dim2", "dim3"),
-        Arrays.asList("metric1", "metric2"),
-        NoneShardSpec.instance(),
-        IndexIO.CURRENT_VERSION_ID,
-        123L
+    Assertions.assertTrue(
+        segmentManager.isSegmentLoaded(segment),
+        "a failed reload must leave the replica in the timeline, still queryable"
+    );
+    Assertions.assertTrue(
+        segmentAnnouncer.getObservedSegments().contains(segment),
+        "a failed reload must not unannounce the replica, the coordinator still counts it and asks again"
+    );
+    Assertions.assertFalse(
+        cacheManager.getObservedSegmentsRemovedFromCache().contains(segment.getId()),
+        "a failed reload must not drop the replica's cached data"
     );
   }
 
   @Test
-  public void testStartStop() throws Exception
+  public void testFailedFirstLoadIsStillCleanedUp()
   {
-    SegmentLoadDropHandler handler = new SegmentLoadDropHandler(
-        jsonMapper,
-        new SegmentLoaderConfig()
-        {
-          @Override
-          public File getInfoDir()
-          {
-            return infoDir;
-          }
+    final TestSegmentCacheManager cacheManager = new TestSegmentCacheManager();
+    cacheManager.failLoadsAfter(0);
+    final SegmentManager segmentManager = new SegmentManager(cacheManager);
+    final SegmentLoadDropHandler handler = initSegmentLoadDropHandler(segmentManager);
 
-          @Override
-          public int getNumLoadingThreads()
-          {
-            return 5;
-          }
+    final DataSegment segment = makeSegment("test", "1", Intervals.of("P1d/2011-04-01"));
 
-          @Override
-          public List<StorageLocationConfig> getLocations()
-          {
-            return locations;
-          }
+    handler.addSegment(segment, DataSegmentChangeCallback.NOOP, null);
+    for (Runnable runnable : scheduledRunnable) {
+      runnable.run();
+    }
 
-          @Override
-          public int getAnnounceIntervalMillis()
-          {
-            return 50;
-          }
-        },
-        announcer,
-        Mockito.mock(DataSegmentServerAnnouncer.class),
-        segmentManager,
-        segmentCacheManager,
-        new ServerTypeConfig(ServerType.HISTORICAL)
+    Assertions.assertFalse(segmentManager.isSegmentLoaded(segment));
+    Assertions.assertFalse(segmentAnnouncer.getObservedSegments().contains(segment));
+    Assertions.assertTrue(
+        cacheManager.getObservedSegmentsRemovedFromCache().contains(segment.getId()),
+        "a failed new load is cleaned up"
     );
-
-    Set<DataSegment> segments = new HashSet<>();
-    for (int i = 0; i < COUNT; ++i) {
-      segments.add(makeSegment("test" + i, "1", Intervals.of("P1d/2011-04-01")));
-      segments.add(makeSegment("test" + i, "1", Intervals.of("P1d/2011-04-02")));
-      segments.add(makeSegment("test" + i, "2", Intervals.of("P1d/2011-04-02")));
-      segments.add(makeSegment("test_two" + i, "1", Intervals.of("P1d/2011-04-01")));
-      segments.add(makeSegment("test_two" + i, "1", Intervals.of("P1d/2011-04-02")));
-    }
-
-    for (DataSegment segment : segments) {
-      testStorageLocation.writeSegmentInfoToCache(segment);
-    }
-
-    testStorageLocation.checkInfoCache(segments);
-    Assert.assertTrue(segmentManager.getDataSourceCounts().isEmpty());
-
-    handler.start();
-    Assert.assertTrue(!segmentManager.getDataSourceCounts().isEmpty());
-    for (int i = 0; i < COUNT; ++i) {
-      Assert.assertEquals(3L, segmentManager.getDataSourceCounts().get("test" + i).longValue());
-      Assert.assertEquals(2L, segmentManager.getDataSourceCounts().get("test_two" + i).longValue());
-    }
-    Assert.assertEquals(5 * COUNT, announceCount.get());
-    handler.stop();
-
-    for (DataSegment segment : segments) {
-      testStorageLocation.deleteSegmentInfoFromCache(segment);
-    }
-
-    Assert.assertEquals(0, infoDir.listFiles().length);
-    Assert.assertTrue(infoDir.delete());
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  public void testFailedLoadPreservesAReplicaThatAppearedWhileItWasLoading()
+  {
+    final TestSegmentCacheManager cacheManager = new TestSegmentCacheManager();
+    final SegmentManager segmentManager = new SegmentManager(cacheManager);
+    final SegmentLoadDropHandler handler = initSegmentLoadDropHandler(segmentManager);
+
+    final DataSegment segment = makeSegment("test", "1", Intervals.of("P1d/2011-04-01"));
+
+    // Stand in for the concurrent loader: the segment lands in the timeline, then this load fails. A snapshot taken
+    // before the load would have said "not serving" and torn the replica down.
+    cacheManager.failLoadsAfter(1);
+    handler.addSegment(segment, DataSegmentChangeCallback.NOOP, null);
+    Assertions.assertTrue(segmentManager.isSegmentLoaded(segment), "precondition: the replica is serving");
+    segmentAnnouncer.getObservedSegments().clear();
+    segmentAnnouncer.announceSegment(segment);
+
+    handler.addSegment(segment, DataSegmentChangeCallback.NOOP, null);
+    for (Runnable runnable : scheduledRunnable) {
+      runnable.run();
+    }
+
+    Assertions.assertTrue(segmentManager.isSegmentLoaded(segment), "the serving replica stays in the timeline");
+    Assertions.assertTrue(
+        segmentAnnouncer.getObservedSegments().contains(segment),
+        "and stays announced"
+    );
+    Assertions.assertFalse(
+        cacheManager.getObservedSegmentsRemovedFromCache().contains(segment.getId()),
+        "and keeps its cached data"
+    );
+  }
+
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS, threadMode = ThreadMode.SEPARATE_THREAD)
   public void testProcessBatch() throws Exception
   {
-    segmentLoadDropHandler.start();
+    final TestSegmentCacheManager cacheManager = new TestSegmentCacheManager();
+    final SegmentManager segmentManager = new SegmentManager(cacheManager);
+    final SegmentLoadDropHandler handler = initSegmentLoadDropHandler(segmentManager);
 
     DataSegment segment1 = makeSegment("batchtest1", "1", Intervals.of("P1d/2011-04-01"));
     DataSegment segment2 = makeSegment("batchtest2", "1", Intervals.of("P1d/2011-04-01"));
@@ -493,146 +294,235 @@ public class SegmentLoadDropHandlerTest
         new SegmentChangeRequestDrop(segment2)
     );
 
-    ListenableFuture<List<SegmentLoadDropHandler.DataSegmentChangeRequestAndStatus>> future = segmentLoadDropHandler
-        .processBatch(batch);
+    ListenableFuture<List<DataSegmentChangeResponse>> future = handler.processBatch(batch, SegmentLoadingMode.TURBO);
 
-    Map<DataSegmentChangeRequest, SegmentLoadDropHandler.Status> expectedStatusMap = new HashMap<>();
-    expectedStatusMap.put(batch.get(0), SegmentLoadDropHandler.Status.PENDING);
-    expectedStatusMap.put(batch.get(1), SegmentLoadDropHandler.Status.SUCCESS);
-    List<SegmentLoadDropHandler.DataSegmentChangeRequestAndStatus> result = future.get();
-    for (SegmentLoadDropHandler.DataSegmentChangeRequestAndStatus requestAndStatus : result) {
-      Assert.assertEquals(expectedStatusMap.get(requestAndStatus.getRequest()), requestAndStatus.getStatus());
+    Map<DataSegmentChangeRequest, SegmentChangeStatus> expectedStatusMap = new HashMap<>();
+    expectedStatusMap.put(batch.get(0), SegmentChangeStatus.pending(SegmentLoadingMode.TURBO));
+    expectedStatusMap.put(batch.get(1), SegmentChangeStatus.success());
+    List<DataSegmentChangeResponse> result = future.get();
+    for (DataSegmentChangeResponse requestAndStatus : result) {
+      Assertions.assertEquals(expectedStatusMap.get(requestAndStatus.getRequest()), requestAndStatus.getStatus());
     }
 
     for (Runnable runnable : scheduledRunnable) {
       runnable.run();
     }
 
-    result = segmentLoadDropHandler.processBatch(ImmutableList.of(new SegmentChangeRequestLoad(segment1))).get();
-    Assert.assertEquals(SegmentLoadDropHandler.Status.SUCCESS, result.get(0).getStatus());
+    result = handler.processBatch(ImmutableList.of(new SegmentChangeRequestLoad(segment1)), SegmentLoadingMode.TURBO).get();
+    Assertions.assertEquals(SegmentChangeStatus.success(SegmentLoadingMode.TURBO), result.get(0).getStatus());
 
-    segmentLoadDropHandler.stop();
+    Assertions.assertEquals(ImmutableList.of(segment1), segmentAnnouncer.getObservedSegments());
+
+    final ImmutableList<DataSegment> expectedSegments = ImmutableList.of(segment1);
+    Assertions.assertEquals(expectedSegments, cacheManager.getObservedSegments());
+    Assertions.assertEquals(ImmutableList.of(), cacheManager.getObservedBootstrapSegments());
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS, threadMode = ThreadMode.SEPARATE_THREAD)
   public void testProcessBatchDuplicateLoadRequestsWhenFirstRequestFailsSecondRequestShouldSucceed() throws Exception
   {
     final SegmentManager segmentManager = Mockito.mock(SegmentManager.class);
-    Mockito.when(segmentManager.loadSegment(ArgumentMatchers.any(), ArgumentMatchers.anyBoolean(),
-                                            ArgumentMatchers.any(), ArgumentMatchers.any()))
+    // loadSegment returns DataSegment, so doNothing() would be rejected by Mockito. Throw on the first call,
+    // then return the input segment on subsequent calls (the announcement path uses the returned segment).
+    Mockito.when(segmentManager.loadSegment(ArgumentMatchers.any()))
            .thenThrow(new RuntimeException("segment loading failure test"))
-           .thenReturn(true);
-    final SegmentLoadDropHandler segmentLoadDropHandler = new SegmentLoadDropHandler(
-        jsonMapper,
-        segmentLoaderConfig,
-        announcer,
-        Mockito.mock(DataSegmentServerAnnouncer.class),
-        segmentManager,
-        segmentCacheManager,
-        scheduledExecutorFactory.create(5, "SegmentLoadDropHandlerTest-[%d]"),
-        new ServerTypeConfig(ServerType.HISTORICAL)
-    );
+           .thenAnswer(invocation -> invocation.getArgument(0));
 
-    segmentLoadDropHandler.start();
+    final SegmentLoadDropHandler handler = initSegmentLoadDropHandler(segmentManager);
+
 
     DataSegment segment1 = makeSegment("batchtest1", "1", Intervals.of("P1d/2011-04-01"));
-
     List<DataSegmentChangeRequest> batch = ImmutableList.of(new SegmentChangeRequestLoad(segment1));
 
-    ListenableFuture<List<DataSegmentChangeRequestAndStatus>> future = segmentLoadDropHandler
-        .processBatch(batch);
+    ListenableFuture<List<DataSegmentChangeResponse>> future = handler.processBatch(batch, SegmentLoadingMode.NORMAL);
 
     for (Runnable runnable : scheduledRunnable) {
       runnable.run();
     }
-    List<DataSegmentChangeRequestAndStatus> result = future.get();
-    Assert.assertEquals(STATE.FAILED, result.get(0).getStatus().getState());
+    List<DataSegmentChangeResponse> result = future.get();
+    Assertions.assertEquals(State.FAILED, result.get(0).getStatus().getState());
+    Assertions.assertEquals(ImmutableList.of(), segmentAnnouncer.getObservedSegments());
 
-    future = segmentLoadDropHandler.processBatch(batch);
+    future = handler.processBatch(batch, SegmentLoadingMode.NORMAL);
     for (Runnable runnable : scheduledRunnable) {
       runnable.run();
     }
     result = future.get();
-    Assert.assertEquals(STATE.SUCCESS, result.get(0).getStatus().getState());
+    Assertions.assertEquals(SegmentChangeStatus.success(SegmentLoadingMode.NORMAL), result.get(0).getStatus());
+    Assertions.assertEquals(ImmutableList.of(segment1, segment1), segmentAnnouncer.getObservedSegments());
 
-    segmentLoadDropHandler.stop();
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS, threadMode = ThreadMode.SEPARATE_THREAD)
   public void testProcessBatchLoadDropLoadSequenceForSameSegment() throws Exception
   {
     final SegmentManager segmentManager = Mockito.mock(SegmentManager.class);
-    Mockito.when(segmentManager.loadSegment(ArgumentMatchers.any(), ArgumentMatchers.anyBoolean(), ArgumentMatchers.any(), ArgumentMatchers.any()))
-           .thenReturn(true);
+    // loadSegment returns DataSegment; return the input so the announcement path sees a plain DataSegment.
+    Mockito.when(segmentManager.loadSegment(ArgumentMatchers.any()))
+           .thenAnswer(invocation -> invocation.getArgument(0));
     Mockito.doNothing().when(segmentManager).dropSegment(ArgumentMatchers.any());
-    final SegmentLoadDropHandler segmentLoadDropHandler = new SegmentLoadDropHandler(
-        jsonMapper,
+
+    final File storageDir = temporaryFolder.newFolder();
+    final SegmentLoaderConfig noAnnouncerSegmentLoaderConfig = SegmentLoaderConfig.builder()
+        .infoDir(storageDir)
+        .numLoadingThreads(5)
+        .announceIntervalMillis(0)
+        .locations(new StorageLocationConfig(storageDir, null, null))
+        .dropSegmentDelayMillis(0)
+        .build();
+
+    final SegmentLoadDropHandler handler = initSegmentLoadDropHandler(
         noAnnouncerSegmentLoaderConfig,
-        announcer,
-        Mockito.mock(DataSegmentServerAnnouncer.class),
-        segmentManager,
-        segmentCacheManager,
-        scheduledExecutorFactory.create(5, "SegmentLoadDropHandlerTest-[%d]"),
-        new ServerTypeConfig(ServerType.HISTORICAL)
+        segmentManager
     );
 
-    segmentLoadDropHandler.start();
 
-    DataSegment segment1 = makeSegment("batchtest1", "1", Intervals.of("P1d/2011-04-01"));
-
+    final DataSegment segment1 = makeSegment("batchtest1", "1", Intervals.of("P1d/2011-04-01"));
     List<DataSegmentChangeRequest> batch = ImmutableList.of(new SegmentChangeRequestLoad(segment1));
 
-    // load the segment
-    ListenableFuture<List<DataSegmentChangeRequestAndStatus>> future = segmentLoadDropHandler
-        .processBatch(batch);
+    // Request 1: Load the segment
+    ListenableFuture<List<DataSegmentChangeResponse>> future = handler.processBatch(batch, SegmentLoadingMode.NORMAL);
     for (Runnable runnable : scheduledRunnable) {
       runnable.run();
     }
-    List<DataSegmentChangeRequestAndStatus> result = future.get();
-    Assert.assertEquals(STATE.SUCCESS, result.get(0).getStatus().getState());
+    List<DataSegmentChangeResponse> result = future.get();
+    Assertions.assertEquals(State.SUCCESS, result.get(0).getStatus().getState());
+    Assertions.assertEquals(ImmutableList.of(segment1), segmentAnnouncer.getObservedSegments());
     scheduledRunnable.clear();
 
-    // drop the segment
+    // Request 2: Drop the segment
     batch = ImmutableList.of(new SegmentChangeRequestDrop(segment1));
-    future = segmentLoadDropHandler.processBatch(batch);
+    future = handler.processBatch(batch, SegmentLoadingMode.NORMAL);
     for (Runnable runnable : scheduledRunnable) {
       runnable.run();
     }
     result = future.get();
-    Assert.assertEquals(STATE.SUCCESS, result.get(0).getStatus().getState());
+    Assertions.assertEquals(State.SUCCESS, result.get(0).getStatus().getState());
+    Assertions.assertEquals(ImmutableList.of(), segmentAnnouncer.getObservedSegments());
+    Assertions.assertFalse(segmentAnnouncer.getObservedSegments().contains(segment1)); //
     scheduledRunnable.clear();
 
     // check invocations after a load-drop sequence
-    Mockito.verify(segmentManager, Mockito.times(1)).loadSegment(ArgumentMatchers.any(), ArgumentMatchers.anyBoolean(), ArgumentMatchers.any(), ArgumentMatchers.any());
-    Mockito.verify(segmentManager, Mockito.times(1)).dropSegment(ArgumentMatchers.any());
+    Mockito.verify(segmentManager, Mockito.times(1))
+           .loadSegment(ArgumentMatchers.any());
+    Mockito.verify(segmentManager, Mockito.times(1))
+           .dropSegment(ArgumentMatchers.any());
 
-    // try to reload the segment - this should be a no-op since it might be the case that this is the first load client
-    // with this request, we'll forget about the success of the load request
+    // Request 3: Reload the segment
     batch = ImmutableList.of(new SegmentChangeRequestLoad(segment1));
-    future = segmentLoadDropHandler.processBatch(batch);
-    Assert.assertEquals(scheduledRunnable.size(), 0);
-    result = future.get();
-    Assert.assertEquals(STATE.SUCCESS, result.get(0).getStatus().getState());
-
-    // check invocations - should stay the same
-    Mockito.verify(segmentManager, Mockito.times(1)).loadSegment(ArgumentMatchers.any(), ArgumentMatchers.anyBoolean(), ArgumentMatchers.any(), ArgumentMatchers.any());
-    Mockito.verify(segmentManager, Mockito.times(1)).dropSegment(ArgumentMatchers.any());
-
-    // try to reload the segment - this time the loader will know that is a fresh request to load
-    // so, the segment manager will be asked to load
-    batch = ImmutableList.of(new SegmentChangeRequestLoad(segment1));
-    future = segmentLoadDropHandler.processBatch(batch);
+    future = handler.processBatch(batch, SegmentLoadingMode.NORMAL);
     for (Runnable runnable : scheduledRunnable) {
       runnable.run();
     }
     result = future.get();
-    Assert.assertEquals(STATE.SUCCESS, result.get(0).getStatus().getState());
+    Assertions.assertEquals(State.SUCCESS, result.get(0).getStatus().getState());
+    Assertions.assertEquals(ImmutableList.of(segment1), segmentAnnouncer.getObservedSegments());
+    scheduledRunnable.clear();
+
+    // check invocations - 1 more load has happened
+    Mockito.verify(segmentManager, Mockito.times(2))
+           .loadSegment(ArgumentMatchers.any());
+    Mockito.verify(segmentManager, Mockito.times(1))
+           .dropSegment(ArgumentMatchers.any());
+
+    // Request 4: Try to reload the segment - segment is loaded and announced again
+    batch = ImmutableList.of(new SegmentChangeRequestLoad(segment1));
+    future = handler.processBatch(batch, SegmentLoadingMode.NORMAL);
+    for (Runnable runnable : scheduledRunnable) {
+      runnable.run();
+    }
+    result = future.get();
+    Assertions.assertEquals(State.SUCCESS, result.get(0).getStatus().getState());
+    Assertions.assertEquals(ImmutableList.of(segment1, segment1), segmentAnnouncer.getObservedSegments());
     scheduledRunnable.clear();
 
     // check invocations - the load segment counter should bump up
-    Mockito.verify(segmentManager, Mockito.times(2)).loadSegment(ArgumentMatchers.any(), ArgumentMatchers.anyBoolean(), ArgumentMatchers.any(), ArgumentMatchers.any());
-    Mockito.verify(segmentManager, Mockito.times(1)).dropSegment(ArgumentMatchers.any());
+    Mockito.verify(segmentManager, Mockito.times(3))
+           .loadSegment(ArgumentMatchers.any());
+    Mockito.verify(segmentManager, Mockito.times(1))
+           .dropSegment(ArgumentMatchers.any());
 
-    segmentLoadDropHandler.stop();
   }
+
+  /**
+   * A load finishes, and its callback resolves the waiting futures, after {@code processBatch()} has seen it as
+   * pending but before the future for the batch has been registered. The future must still be resolved right away,
+   * rather than waiting for another request to finish or for the HTTP request to time out.
+   */
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS, threadMode = ThreadMode.SEPARATE_THREAD)
+  public void testProcessBatchResolvesWhenLoadFinishesBeforeFutureIsRegistered() throws Exception
+  {
+    final SegmentManager segmentManager = Mockito.mock(SegmentManager.class);
+    Mockito.when(segmentManager.loadSegment(ArgumentMatchers.any()))
+           .thenAnswer(invocation -> invocation.getArgument(0));
+
+    // Holds back each submitted load until the next one is submitted, and then runs it on the submitting thread.
+    // The first load thus finishes after processBatch() has checked its status, and the second load never finishes.
+    final List<Runnable> heldLoads = new ArrayList<>();
+    final ScheduledThreadPoolExecutor normalLoadExec =
+        new ScheduledThreadPoolExecutor(1, Execs.makeThreadFactory("LoadDropHandlerTest-[%d]"))
+        {
+          @Override
+          public Future<?> submit(Runnable task)
+          {
+            if (!heldLoads.isEmpty()) {
+              heldLoads.remove(0).run();
+            }
+            heldLoads.add(task);
+            return null;
+          }
+        };
+
+    final SegmentLoadDropHandler handler = new SegmentLoadDropHandler(
+        segmentLoaderConfig,
+        segmentAnnouncer,
+        segmentManager,
+        normalLoadExec,
+        (ThreadPoolExecutor) scheduledExecutorFactory.create(5, "TurboSegmentLoadDropHandlerTest-[%d]")
+    );
+
+    final DataSegment segment1 = makeSegment("batchtest1", "1", Intervals.of("P1d/2011-04-01"));
+    final DataSegment segment2 = makeSegment("batchtest2", "1", Intervals.of("P1d/2011-04-01"));
+    final List<DataSegmentChangeRequest> batch = ImmutableList.of(
+        new SegmentChangeRequestLoad(segment1),
+        new SegmentChangeRequestLoad(segment2)
+    );
+
+    final ListenableFuture<List<DataSegmentChangeResponse>> future =
+        handler.processBatch(batch, SegmentLoadingMode.NORMAL);
+    Assertions.assertEquals(1, heldLoads.size(), "Loads must go through the overridden submit() to force the race");
+    Assertions.assertTrue(future.isDone());
+
+    final Map<DataSegmentChangeRequest, SegmentChangeStatus> expectedStatusMap = Map.of(
+        batch.get(0), SegmentChangeStatus.success(SegmentLoadingMode.NORMAL),
+        batch.get(1), SegmentChangeStatus.pending(SegmentLoadingMode.NORMAL)
+    );
+    for (DataSegmentChangeResponse requestAndStatus : future.get()) {
+      Assertions.assertEquals(expectedStatusMap.get(requestAndStatus.getRequest()), requestAndStatus.getStatus());
+    }
+    Assertions.assertEquals(ImmutableList.of(segment1), segmentAnnouncer.getObservedSegments());
+  }
+
+  private SegmentLoadDropHandler initSegmentLoadDropHandler(SegmentManager segmentManager)
+  {
+    return initSegmentLoadDropHandler(segmentLoaderConfig, segmentManager);
+  }
+
+  private SegmentLoadDropHandler initSegmentLoadDropHandler(
+      SegmentLoaderConfig config,
+      SegmentManager segmentManager
+  )
+  {
+    return new SegmentLoadDropHandler(
+        config,
+        segmentAnnouncer,
+        segmentManager,
+        scheduledExecutorFactory.create(5, "LoadDropHandlerTest-[%d]"),
+        (ThreadPoolExecutor) scheduledExecutorFactory.create(5, "TurboSegmentLoadDropHandlerTest-[%d]")
+    );
+  }
+
 }

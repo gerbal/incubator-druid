@@ -31,12 +31,12 @@ public class Yielders
   {
     return sequence.toYielder(
         null,
-        new YieldingAccumulator<T, T>()
+        new YieldingAccumulator<>()
         {
           @Override
           public T accumulate(T accumulated, T in)
           {
-            yield();
+            this.yield();
             return in;
           }
         }
@@ -45,7 +45,7 @@ public class Yielders
 
   public static <T> Yielder<T> done(final T finalVal, final AutoCloseable closeable)
   {
-    return new Yielder<T>()
+    return new Yielder<>()
     {
       @Override
       public T get()

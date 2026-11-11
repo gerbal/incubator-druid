@@ -18,39 +18,40 @@
 
 import { Button, ButtonGroup } from '@blueprintjs/core';
 import React from 'react';
-import type { CellInfo, Column } from 'react-table';
-import ReactTable from 'react-table';
 
+import type { ConsoleTableCellInfo, ConsoleTableColumn } from '../../../components';
+import {
+  ConsoleTable,
+  SMALL_TABLE_PAGE_SIZE,
+  SMALL_TABLE_PAGE_SIZE_OPTIONS,
+} from '../../../components';
 import { Loader } from '../../../components/loader/loader';
-import { useQueryManager } from '../../../hooks';
-import { SMALL_TABLE_PAGE_SIZE, SMALL_TABLE_PAGE_SIZE_OPTIONS } from '../../../react-table';
+import type { RowStats, RowStatsCounter, SupervisorStats } from '../../../druid-models';
+import { useInterval, useQueryManager } from '../../../hooks';
 import { Api, UrlBaser } from '../../../singletons';
-import { deepGet } from '../../../utils';
+import { deepGet, formatByteRate, formatBytes, formatInteger, formatRate } from '../../../utils';
 
 import './supervisor-statistics-table.scss';
 
-export interface TaskSummary {
-  totals: Record<string, StatsEntry>;
-  movingAverages: Record<string, Record<string, StatsEntry>>;
-}
-
-export interface StatsEntry {
-  processed?: number;
-  processedWithError?: number;
-  thrownAway?: number;
-  unparseable?: number;
-  [key: string]: number | undefined;
-}
-
 export interface SupervisorStatisticsTableRow {
+  groupId: string;
   taskId: string;
-  summary: TaskSummary;
+  rowStats: RowStats;
 }
 
 export function normalizeSupervisorStatisticsResults(
-  data: Record<string, Record<string, TaskSummary>>,
+  data: SupervisorStats,
 ): SupervisorStatisticsTableRow[] {
-  return Object.values(data).flatMap(v => Object.keys(v).map(k => ({ taskId: k, summary: v[k] })));
+  return Object.entries(data).flatMap(([groupId, v]) =>
+    Object.entries(v).map(([taskId, rowStats]) => ({ groupId, taskId, rowStats })),
+  );
+}
+
+function sortByProcessedBytes(
+  a: RowStatsCounter | undefined,
+  b: RowStatsCounter | undefined,
+): number {
+  return Number(a?.processedBytes || 0) - Number(b?.processedBytes || 0);
 }
 
 export interface SupervisorStatisticsTableProps {
@@ -62,34 +63,56 @@ export const SupervisorStatisticsTable = React.memo(function SupervisorStatistic
   props: SupervisorStatisticsTableProps,
 ) {
   const { supervisorId } = props;
-  const endpoint = `/druid/indexer/v1/supervisor/${Api.encodePath(supervisorId)}/stats`;
+  const statsEndpoint = `/druid/indexer/v1/supervisor/${Api.encodePath(supervisorId)}/stats`;
 
-  const [supervisorStatisticsState] = useQueryManager<null, SupervisorStatisticsTableRow[]>({
-    processQuery: async () => {
-      const resp = await Api.instance.get(endpoint);
+  const [supervisorStatisticsState, supervisorStatisticsQueryManager] = useQueryManager<
+    null,
+    SupervisorStatisticsTableRow[]
+  >({
+    initQuery: null,
+    processQuery: async (_, signal) => {
+      const resp = await Api.instance.get<SupervisorStats>(statsEndpoint, { signal });
       return normalizeSupervisorStatisticsResults(resp.data);
     },
-    initQuery: null,
   });
 
-  function renderCell(cell: CellInfo) {
-    const cellValue = cell.value;
-    if (!cellValue) {
-      return <div>No data found</div>;
-    }
+  useInterval(() => {
+    supervisorStatisticsQueryManager.rerunLastQuery(true);
+  }, 1500);
 
-    return Object.keys(cellValue)
-      .sort()
-      .map(key => <div key={key}>{`${key}: ${Number(cellValue[key]).toFixed(1)}`}</div>);
+  function renderCounters(cell: ConsoleTableCellInfo<any>, isRate: boolean) {
+    const c: RowStatsCounter = cell.value;
+    if (!c) return null;
+
+    const formatNumber = isRate ? formatRate : formatInteger;
+    const formatData = isRate ? formatByteRate : formatBytes;
+    return c.processedBytes ? (
+      <div>
+        <div>{`Input: ${formatData(c.processedBytes)}`}</div>
+        {Boolean(c.processed) && <div>{`Processed: ${formatNumber(c.processed)}`}</div>}
+        {Boolean(c.processedWithError) && (
+          <div>{`Processed with error: ${formatNumber(c.processedWithError)}`}</div>
+        )}
+        {Boolean(c.thrownAway) && <div>{`Thrown away: ${formatNumber(c.thrownAway)}`}</div>}
+        {Boolean(c.unparseable) && <div>{`Unparseable: ${formatNumber(c.unparseable)}`}</div>}
+      </div>
+    ) : (
+      <div>No activity</div>
+    );
   }
 
   function renderTable() {
-    let columns: Column<SupervisorStatisticsTableRow>[] = [
+    let columns: ConsoleTableColumn<SupervisorStatisticsTableRow>[] = [
+      {
+        Header: 'Group ID',
+        accessor: 'groupId',
+        className: 'padded',
+        width: 100,
+      },
       {
         Header: 'Task ID',
-        id: 'task_id',
+        accessor: 'taskId',
         className: 'padded',
-        accessor: d => d.taskId,
         width: 400,
       },
       {
@@ -97,31 +120,29 @@ export const SupervisorStatisticsTable = React.memo(function SupervisorStatistic
         id: 'total',
         className: 'padded',
         width: 200,
-        accessor: d => {
-          return deepGet(d, 'summary.totals.buildSegments') as StatsEntry;
-        },
-        Cell: renderCell,
+        accessor: 'rowStats.totals.buildSegments',
+        sortMethod: sortByProcessedBytes,
+        Cell: c => renderCounters(c, false),
       },
     ];
 
     const movingAveragesBuildSegments = deepGet(
       supervisorStatisticsState.data as any,
-      '0.summary.movingAverages.buildSegments',
+      '0.rowStats.movingAverages.buildSegments',
     );
     if (movingAveragesBuildSegments) {
       columns = columns.concat(
         Object.keys(movingAveragesBuildSegments)
           .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-          .map((interval: string): Column<SupervisorStatisticsTableRow> => {
+          .map((interval: string): ConsoleTableColumn<SupervisorStatisticsTableRow> => {
             return {
               Header: interval,
               id: interval,
               className: 'padded',
               width: 200,
-              accessor: d => {
-                return deepGet(d, `summary.movingAverages.buildSegments.${interval}`);
-              },
-              Cell: renderCell,
+              accessor: `rowStats.movingAverages.buildSegments.${interval}`,
+              sortMethod: sortByProcessedBytes,
+              Cell: c => renderCounters(c, true),
             };
           }),
       );
@@ -129,7 +150,7 @@ export const SupervisorStatisticsTable = React.memo(function SupervisorStatistic
 
     const statisticsData = supervisorStatisticsState.data || [];
     return (
-      <ReactTable
+      <ConsoleTable
         data={statisticsData}
         defaultPageSize={SMALL_TABLE_PAGE_SIZE}
         pageSizeOptions={SMALL_TABLE_PAGE_SIZE_OPTIONS}
@@ -147,8 +168,8 @@ export const SupervisorStatisticsTable = React.memo(function SupervisorStatistic
           <Button
             text="View raw"
             disabled={supervisorStatisticsState.loading}
-            minimal
-            onClick={() => window.open(UrlBaser.base(endpoint), '_blank')}
+            variant="minimal"
+            onClick={() => window.open(UrlBaser.base(statsEndpoint), '_blank')}
           />
         </ButtonGroup>
       </div>

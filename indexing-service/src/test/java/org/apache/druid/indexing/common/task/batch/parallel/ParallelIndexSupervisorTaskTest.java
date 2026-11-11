@@ -23,19 +23,23 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Ordering;
 import com.google.common.util.concurrent.Futures;
+import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http.HttpResponseStatus;
 import org.apache.commons.codec.Charsets;
 import org.apache.druid.data.input.InputSource;
 import org.apache.druid.data.input.impl.DimensionsSpec;
 import org.apache.druid.data.input.impl.InlineInputSource;
-import org.apache.druid.data.input.impl.JSONParseSpec;
 import org.apache.druid.data.input.impl.JsonInputFormat;
-import org.apache.druid.data.input.impl.StringInputRowParser;
 import org.apache.druid.data.input.impl.TimestampSpec;
 import org.apache.druid.indexer.partitions.HashedPartitionsSpec;
 import org.apache.druid.indexer.partitions.PartitionsSpec;
 import org.apache.druid.indexer.partitions.SingleDimensionPartitionsSpec;
-import org.apache.druid.jackson.DefaultObjectMapper;
-import org.apache.druid.java.util.common.IAE;
+import org.apache.druid.indexer.report.KillTaskReport;
+import org.apache.druid.indexer.report.TaskReport;
+import org.apache.druid.indexing.common.TaskToolbox;
+import org.apache.druid.indexing.common.config.TaskConfig;
+import org.apache.druid.indexing.common.task.TuningConfigBuilder;
+import org.apache.druid.indexing.worker.shuffle.DeepStorageIntermediaryDataManager;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.http.client.response.StringFullResponseHolder;
 import org.apache.druid.rpc.HttpResponseException;
@@ -45,28 +49,20 @@ import org.apache.druid.segment.data.CompressionFactory.LongEncodingStrategy;
 import org.apache.druid.segment.data.CompressionStrategy;
 import org.apache.druid.segment.data.RoaringBitmapSerdeFactory;
 import org.apache.druid.segment.indexing.DataSchema;
+import org.apache.druid.segment.loading.DataSegmentKiller;
 import org.apache.druid.segment.writeout.OffHeapMemorySegmentWriteOutMediumFactory;
 import org.apache.druid.timeline.partition.BuildingHashBasedNumberedShardSpec;
 import org.apache.druid.timeline.partition.DimensionRangeBucketShardSpec;
 import org.apache.druid.timeline.partition.HashPartitionFunction;
 import org.easymock.EasyMock;
-import org.hamcrest.CoreMatchers;
-import org.hamcrest.MatcherAssert;
-import org.hamcrest.Matchers;
-import org.jboss.netty.buffer.ChannelBuffers;
-import org.jboss.netty.handler.codec.http.HttpResponse;
-import org.jboss.netty.handler.codec.http.HttpResponseStatus;
 import org.joda.time.Duration;
 import org.joda.time.Interval;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.experimental.runners.Enclosed;
-import org.junit.internal.matchers.ThrowableMessageMatcher;
-import org.junit.rules.ExpectedException;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
 
+import java.io.IOException;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -82,17 +78,16 @@ import java.util.stream.IntStream;
 import static org.easymock.EasyMock.expect;
 import static org.easymock.EasyMock.mock;
 
-@RunWith(Enclosed.class)
 public class ParallelIndexSupervisorTaskTest
 {
-  @RunWith(Parameterized.class)
+  @ParameterizedClass(name = "count = {0}, partitionLocationType = {1}")
+  @MethodSource("data")
   public static class CreateMergeIoConfigsTest
   {
     private static final int TOTAL_NUM_MERGE_TASKS = 10;
     private static final Function<List<PartitionLocation>, PartialSegmentMergeIOConfig>
         CREATE_PARTIAL_SEGMENT_MERGE_IO_CONFIG = PartialSegmentMergeIOConfig::new;
 
-    @Parameterized.Parameters(name = "count = {0}, partitionLocationType = {1}")
     public static Iterable<? extends Object[]> data()
     {
       // different scenarios for last (index = 10 - 1 = 9) partition:
@@ -134,10 +129,9 @@ public class ParallelIndexSupervisorTaskTest
       int maxPartitionSize = sortedPartitionSizes.get(sortedPartitionSizes.size() - 1);
       int partitionSizeRange = maxPartitionSize - minPartitionSize;
 
-      Assert.assertThat(
-          "partition sizes = " + actualPartitionSizes,
-          partitionSizeRange,
-          Matchers.is(Matchers.both(Matchers.greaterThanOrEqualTo(0)).and(Matchers.lessThanOrEqualTo(1)))
+      Assertions.assertTrue(
+          partitionSizeRange >= 0 && partitionSizeRange <= 1,
+          "partition sizes = " + actualPartitionSizes
       );
     }
 
@@ -214,162 +208,70 @@ public class ParallelIndexSupervisorTaskTest
                                                          .sorted()
                                                          .collect(Collectors.toList());
 
-      Assert.assertEquals(expectedIds, actualIds);
+      Assertions.assertEquals(expectedIds, actualIds);
     }
   }
 
   public static class ConstructorTest
   {
-    @Rule
-    public ExpectedException expectedException = ExpectedException.none();
-
     @Test
     public void testFailToConstructWhenBothAppendToExistingAndForceGuaranteedRollupAreSet()
     {
       final boolean appendToExisting = true;
       final boolean forceGuaranteedRollup = true;
       final ParallelIndexIOConfig ioConfig = new ParallelIndexIOConfig(
-          null,
           new InlineInputSource("test"),
           new JsonInputFormat(null, null, null, null, null),
           appendToExisting,
           null
       );
-      final ParallelIndexTuningConfig tuningConfig = new ParallelIndexTuningConfig(
-          null,
-          null,
-          null,
-          10,
-          1000L,
-          null,
-          null,
-          null,
-          null,
-          new HashedPartitionsSpec(null, 10, null),
-          new IndexSpec(
-              RoaringBitmapSerdeFactory.getInstance(),
-              CompressionStrategy.UNCOMPRESSED,
-              CompressionStrategy.LZF,
-              LongEncodingStrategy.LONGS
-          ),
-          new IndexSpec(),
-          1,
-          forceGuaranteedRollup,
-          true,
-          10000L,
-          OffHeapMemorySegmentWriteOutMediumFactory.instance(),
-          null,
-          10,
-          100,
-          20L,
-          new Duration(3600),
-          128,
-          null,
-          null,
-          false,
-          null,
-          null,
-          null,
-          null,
-          null
-      );
+      final ParallelIndexTuningConfig tuningConfig = TuningConfigBuilder
+          .forParallelIndexTask()
+          .withMaxRowsInMemory(10)
+          .withMaxBytesInMemory(1000L)
+          .withPartitionsSpec(new HashedPartitionsSpec(null, 10, null))
+          .withIndexSpec(
+              IndexSpec.builder()
+                       .withBitmapSerdeFactory(RoaringBitmapSerdeFactory.getInstance())
+                       .withDimensionCompression(CompressionStrategy.UNCOMPRESSED)
+                       .withMetricCompression(CompressionStrategy.LZF)
+                       .withLongEncoding(LongEncodingStrategy.LONGS)
+                       .build()
+          )
+          .withIndexSpecForIntermediatePersists(IndexSpec.getDefault())
+          .withMaxPendingPersists(1)
+          .withForceGuaranteedRollup(forceGuaranteedRollup)
+          .withReportParseExceptions(true)
+          .withPushTimeout(10000L)
+          .withSegmentWriteOutMediumFactory(OffHeapMemorySegmentWriteOutMediumFactory.instance())
+          .withMaxNumConcurrentSubTasks(10)
+          .withMaxRetry(100)
+          .withTaskStatusCheckPeriodMs(20L)
+          .withChatHandlerTimeout(new Duration(3600))
+          .withChatHandlerNumRetries(128)
+          .withLogParseExceptions(false)
+          .build();
       final ParallelIndexIngestionSpec indexIngestionSpec = new ParallelIndexIngestionSpec(
-          new DataSchema(
-              "datasource",
-              new TimestampSpec(null, null, null),
-              DimensionsSpec.EMPTY,
+          DataSchema.builder()
+                    .withDataSource("datasource")
+                    .withTimestamp(TimestampSpec.DEFAULT)
+                    .withDimensions(DimensionsSpec.EMPTY)
+                    .build(),
+          ioConfig,
+          tuningConfig
+      );
+      final IllegalArgumentException exception = Assertions.assertThrows(
+          IllegalArgumentException.class,
+          () -> new ParallelIndexSupervisorTask(
               null,
               null,
+              null,
+              indexIngestionSpec,
               null
-          ),
-          ioConfig,
-          tuningConfig
+          )
       );
-      expectedException.expect(IllegalArgumentException.class);
-      expectedException.expectMessage("Perfect rollup cannot be guaranteed when appending to existing dataSources");
-      new ParallelIndexSupervisorTask(
-          null,
-          null,
-          null,
-          indexIngestionSpec,
-          null
-      );
-    }
-
-    @Test
-    public void testFailToConstructWhenBothInputSourceAndParserAreSet()
-    {
-      final ObjectMapper mapper = new DefaultObjectMapper();
-      final ParallelIndexIOConfig ioConfig = new ParallelIndexIOConfig(
-          null,
-          new InlineInputSource("test"),
-          null,
-          false,
-          null
-      );
-      final ParallelIndexTuningConfig tuningConfig = new ParallelIndexTuningConfig(
-          null,
-          null,
-          null,
-          10,
-          1000L,
-          null,
-          null,
-          null,
-          null,
-          new HashedPartitionsSpec(null, 10, null),
-          new IndexSpec(
-              RoaringBitmapSerdeFactory.getInstance(),
-              CompressionStrategy.UNCOMPRESSED,
-              CompressionStrategy.LZF,
-              LongEncodingStrategy.LONGS
-          ),
-          new IndexSpec(),
-          1,
-          true,
-          true,
-          10000L,
-          OffHeapMemorySegmentWriteOutMediumFactory.instance(),
-          null,
-          10,
-          100,
-          20L,
-          new Duration(3600),
-          128,
-          null,
-          null,
-          false,
-          null,
-          null,
-          null,
-          null,
-          null
-      );
-
-      expectedException.expect(IAE.class);
-      expectedException.expectMessage("Cannot use parser and inputSource together. Try using inputFormat instead of parser.");
-      new ParallelIndexIngestionSpec(
-          new DataSchema(
-              "datasource",
-              mapper.convertValue(
-                  new StringInputRowParser(
-                      new JSONParseSpec(
-                          new TimestampSpec(null, null, null),
-                          DimensionsSpec.EMPTY,
-                          null,
-                          null,
-                          null
-                      )
-                  ),
-                  Map.class
-              ),
-              null,
-              null,
-              null,
-              mapper
-          ),
-          ioConfig,
-          tuningConfig
+      Assertions.assertTrue(
+          exception.getMessage().contains("Perfect rollup cannot be guaranteed when appending to existing dataSources")
       );
     }
   }
@@ -380,7 +282,7 @@ public class ParallelIndexSupervisorTaskTest
     public void testIsParallelModeFalse_nullTuningConfig()
     {
       InputSource inputSource = mock(InputSource.class);
-      Assert.assertFalse(ParallelIndexSupervisorTask.isParallelMode(inputSource, null));
+      Assertions.assertFalse(ParallelIndexSupervisorTask.isParallelMode(inputSource, null));
     }
 
     @Test
@@ -395,9 +297,9 @@ public class ParallelIndexSupervisorTaskTest
       expect(tuningConfig.getMaxNumConcurrentSubTasks()).andReturn(0).andReturn(1).andReturn(2);
       EasyMock.replay(inputSource, tuningConfig);
 
-      Assert.assertFalse(ParallelIndexSupervisorTask.isParallelMode(inputSource, tuningConfig));
-      Assert.assertTrue(ParallelIndexSupervisorTask.isParallelMode(inputSource, tuningConfig));
-      Assert.assertTrue(ParallelIndexSupervisorTask.isParallelMode(inputSource, tuningConfig));
+      Assertions.assertFalse(ParallelIndexSupervisorTask.isParallelMode(inputSource, tuningConfig));
+      Assertions.assertTrue(ParallelIndexSupervisorTask.isParallelMode(inputSource, tuningConfig));
+      Assertions.assertTrue(ParallelIndexSupervisorTask.isParallelMode(inputSource, tuningConfig));
     }
 
     @Test
@@ -412,9 +314,9 @@ public class ParallelIndexSupervisorTaskTest
       expect(tuningConfig.getMaxNumConcurrentSubTasks()).andReturn(1).andReturn(2).andReturn(3);
       EasyMock.replay(inputSource, tuningConfig);
 
-      Assert.assertFalse(ParallelIndexSupervisorTask.isParallelMode(inputSource, tuningConfig));
-      Assert.assertTrue(ParallelIndexSupervisorTask.isParallelMode(inputSource, tuningConfig));
-      Assert.assertTrue(ParallelIndexSupervisorTask.isParallelMode(inputSource, tuningConfig));
+      Assertions.assertFalse(ParallelIndexSupervisorTask.isParallelMode(inputSource, tuningConfig));
+      Assertions.assertTrue(ParallelIndexSupervisorTask.isParallelMode(inputSource, tuningConfig));
+      Assertions.assertTrue(ParallelIndexSupervisorTask.isParallelMode(inputSource, tuningConfig));
     }
 
     @Test
@@ -429,7 +331,7 @@ public class ParallelIndexSupervisorTaskTest
       expect(tuningConfig.getMaxNumConcurrentSubTasks()).andReturn(3);
       EasyMock.replay(inputSource, tuningConfig);
 
-      Assert.assertFalse(ParallelIndexSupervisorTask.isParallelMode(inputSource, tuningConfig));
+      Assertions.assertFalse(ParallelIndexSupervisorTask.isParallelMode(inputSource, tuningConfig));
     }
 
     @Test
@@ -458,7 +360,7 @@ public class ParallelIndexSupervisorTaskTest
 
       Map<ParallelIndexSupervisorTask.Partition, List<PartitionLocation>> partitionToLocations
           = ParallelIndexSupervisorTask.getPartitionToLocations(taskIdToReport);
-      Assert.assertEquals(6, partitionToLocations.size());
+      Assertions.assertEquals(6, partitionToLocations.size());
 
       // Verify that partitionIds are packed and in the same order as bucketIds
       verifyPartitionIdAndLocations(day1, 0, partitionToLocations,
@@ -480,13 +382,13 @@ public class ParallelIndexSupervisorTaskTest
     public void testGetTaskReportOk() throws Exception
     {
       final String taskId = "task";
-      final Map<String, Object> report = ImmutableMap.of("foo", "bar");
+      final TaskReport.ReportMap report = TaskReport.buildTaskReports(new KillTaskReport("taskId", null));
 
       final OverlordClient client = mock(OverlordClient.class);
       expect(client.taskReportAsMap(taskId)).andReturn(Futures.immediateFuture(report));
       EasyMock.replay(client);
 
-      Assert.assertEquals(report, ParallelIndexSupervisorTask.getTaskReport(client, taskId));
+      Assertions.assertEquals(report, ParallelIndexSupervisorTask.getTaskReport(client, taskId));
       EasyMock.verify(client);
     }
 
@@ -497,8 +399,7 @@ public class ParallelIndexSupervisorTaskTest
 
       final OverlordClient client = mock(OverlordClient.class);
       final HttpResponse response = mock(HttpResponse.class);
-      expect(response.getContent()).andReturn(ChannelBuffers.buffer(0));
-      expect(response.getStatus()).andReturn(HttpResponseStatus.NOT_FOUND).anyTimes();
+      expect(response.status()).andReturn(HttpResponseStatus.NOT_FOUND).anyTimes();
       EasyMock.replay(response);
 
       expect(client.taskReportAsMap(taskId)).andReturn(
@@ -508,7 +409,7 @@ public class ParallelIndexSupervisorTaskTest
       );
       EasyMock.replay(client);
 
-      Assert.assertNull(ParallelIndexSupervisorTask.getTaskReport(client, taskId));
+      Assertions.assertNull(ParallelIndexSupervisorTask.getTaskReport(client, taskId));
       EasyMock.verify(client, response);
     }
 
@@ -519,8 +420,7 @@ public class ParallelIndexSupervisorTaskTest
 
       final OverlordClient client = mock(OverlordClient.class);
       final HttpResponse response = mock(HttpResponse.class);
-      expect(response.getContent()).andReturn(ChannelBuffers.buffer(0));
-      expect(response.getStatus()).andReturn(HttpResponseStatus.FORBIDDEN).anyTimes();
+      expect(response.status()).andReturn(HttpResponseStatus.FORBIDDEN).anyTimes();
       EasyMock.replay(response);
 
       expect(client.taskReportAsMap(taskId)).andReturn(
@@ -530,18 +430,259 @@ public class ParallelIndexSupervisorTaskTest
       );
       EasyMock.replay(client);
 
-      final ExecutionException e = Assert.assertThrows(
+      final ExecutionException e = Assertions.assertThrows(
           ExecutionException.class,
           () -> ParallelIndexSupervisorTask.getTaskReport(client, taskId)
       );
 
-      MatcherAssert.assertThat(e.getCause(), CoreMatchers.instanceOf(HttpResponseException.class));
-      MatcherAssert.assertThat(
-          e.getCause(),
-          ThrowableMessageMatcher.hasMessage(CoreMatchers.containsString("Server error [403 Forbidden]"))
-      );
+      Assertions.assertInstanceOf(HttpResponseException.class, e.getCause());
+      Assertions.assertTrue(e.getCause().getMessage().contains("Server error [403 Forbidden]"));
 
       EasyMock.verify(client, response);
+    }
+
+    @Test
+    public void testCompactionTaskDoesntCleanup() throws Exception
+    {
+      final boolean appendToExisting = false;
+      final boolean forceGuaranteedRollup = true;
+      final ParallelIndexIOConfig ioConfig = new ParallelIndexIOConfig(
+              new InlineInputSource("test"),
+              new JsonInputFormat(null, null, null, null, null),
+              appendToExisting,
+              null
+      );
+      final ParallelIndexTuningConfig tuningConfig = TuningConfigBuilder
+          .forParallelIndexTask()
+          .withMaxRowsInMemory(10)
+          .withMaxBytesInMemory(1000L)
+          .withPartitionsSpec(new HashedPartitionsSpec(null, 10, null))
+          .withIndexSpec(
+              IndexSpec.builder()
+                       .withBitmapSerdeFactory(RoaringBitmapSerdeFactory.getInstance())
+                       .withDimensionCompression(CompressionStrategy.UNCOMPRESSED)
+                       .withMetricCompression(CompressionStrategy.LZF)
+                       .withLongEncoding(LongEncodingStrategy.LONGS)
+                       .build()
+          )
+          .withIndexSpecForIntermediatePersists(IndexSpec.getDefault())
+          .withMaxPendingPersists(1)
+          .withForceGuaranteedRollup(forceGuaranteedRollup)
+          .withReportParseExceptions(true)
+          .withPushTimeout(10000L)
+          .withSegmentWriteOutMediumFactory(OffHeapMemorySegmentWriteOutMediumFactory.instance())
+          .withMaxNumConcurrentSubTasks(10)
+          .withMaxRetry(100)
+          .withTaskStatusCheckPeriodMs(20L)
+          .withChatHandlerTimeout(new Duration(3600))
+          .withChatHandlerNumRetries(128)
+          .withLogParseExceptions(false)
+          .build();
+
+      final ParallelIndexIngestionSpec indexIngestionSpec = new ParallelIndexIngestionSpec(
+          DataSchema.builder()
+                    .withDataSource("datasource")
+                    .withTimestamp(TimestampSpec.DEFAULT)
+                    .withDimensions(DimensionsSpec.EMPTY)
+                    .build(),
+              ioConfig,
+              tuningConfig
+      );
+
+      // Compaction skips super.cleanUp but still runs killRecursively for intermediary deep-storage files.
+      TaskToolbox toolbox = EasyMock.createMock(TaskToolbox.class);
+      final DataSegmentKiller killer = EasyMock.createNiceMock(DataSegmentKiller.class);
+      EasyMock.expect(toolbox.getDataSegmentKiller()).andReturn(killer).anyTimes();
+      EasyMock.replay(toolbox, killer);
+
+      new ParallelIndexSupervisorTask(
+              null,
+              null,
+              null,
+              indexIngestionSpec,
+              null,
+              null,
+              true
+      ).cleanUp(toolbox, null);
+
+      EasyMock.verify(toolbox);
+    }
+
+    @Test
+    public void testCleanUpInvokesKillRecursivelyForIntermediates() throws Exception
+    {
+      final boolean appendToExisting = false;
+      final boolean forceGuaranteedRollup = true;
+      final ParallelIndexIOConfig ioConfig = new ParallelIndexIOConfig(
+          new InlineInputSource("test"),
+          new JsonInputFormat(null, null, null, null, null),
+          appendToExisting,
+          null
+      );
+      final ParallelIndexTuningConfig tuningConfig = TuningConfigBuilder
+          .forParallelIndexTask()
+          .withMaxRowsInMemory(10)
+          .withMaxBytesInMemory(1000L)
+          .withPartitionsSpec(new HashedPartitionsSpec(null, 10, null))
+          .withIndexSpec(
+              IndexSpec.builder()
+                       .withBitmapSerdeFactory(RoaringBitmapSerdeFactory.getInstance())
+                       .withDimensionCompression(CompressionStrategy.UNCOMPRESSED)
+                       .withMetricCompression(CompressionStrategy.LZF)
+                       .withLongEncoding(LongEncodingStrategy.LONGS)
+                       .build()
+          )
+          .withIndexSpecForIntermediatePersists(IndexSpec.getDefault())
+          .withMaxPendingPersists(1)
+          .withForceGuaranteedRollup(forceGuaranteedRollup)
+          .withReportParseExceptions(true)
+          .withPushTimeout(10000L)
+          .withSegmentWriteOutMediumFactory(OffHeapMemorySegmentWriteOutMediumFactory.instance())
+          .withMaxNumConcurrentSubTasks(10)
+          .withMaxRetry(100)
+          .withTaskStatusCheckPeriodMs(20L)
+          .withChatHandlerTimeout(new Duration(3600))
+          .withChatHandlerNumRetries(128)
+          .withLogParseExceptions(false)
+          .build();
+
+      final ParallelIndexIngestionSpec indexIngestionSpec = new ParallelIndexIngestionSpec(
+          DataSchema.builder()
+                    .withDataSource("datasource")
+                    .withTimestamp(TimestampSpec.DEFAULT)
+                    .withDimensions(DimensionsSpec.EMPTY)
+                    .build(),
+          ioConfig,
+          tuningConfig
+      );
+
+      final String supervisorTaskId = "index_parallel_cleanup_supervisor_id";
+      TaskToolbox toolbox = EasyMock.createMock(TaskToolbox.class);
+      final DataSegmentKiller killer = EasyMock.createStrictMock(DataSegmentKiller.class);
+      EasyMock.expect(toolbox.getDataSegmentKiller()).andReturn(killer);
+      killer.killRecursively(DeepStorageIntermediaryDataManager.retrieveShuffleDataStoragePath(supervisorTaskId));
+      EasyMock.expectLastCall();
+      EasyMock.replay(toolbox, killer);
+
+      new ParallelIndexSupervisorTask(
+          supervisorTaskId,
+          null,
+          null,
+          indexIngestionSpec,
+          null,
+          null,
+          true
+      ).cleanUp(toolbox, null);
+
+      EasyMock.verify(toolbox, killer);
+    }
+
+    @Test
+    public void testCleanUp_nonCompactionRunsAbstractTaskCleanUp() throws Exception
+    {
+      final ParallelIndexIngestionSpec indexIngestionSpec = buildParallelIngestionSpecForCleanUpTests();
+
+      final String supervisorTaskId = "index_parallel_ds_2024-01-01";
+      final TaskToolbox toolbox = EasyMock.createMock(TaskToolbox.class);
+      final TaskConfig taskConfig = EasyMock.createMock(TaskConfig.class);
+      final DataSegmentKiller killer = EasyMock.createStrictMock(DataSegmentKiller.class);
+
+      EasyMock.expect(toolbox.getDataSegmentKiller()).andReturn(killer);
+      killer.killRecursively(DeepStorageIntermediaryDataManager.retrieveShuffleDataStoragePath(supervisorTaskId));
+      EasyMock.expectLastCall();
+      EasyMock.expect(toolbox.getConfig()).andReturn(taskConfig);
+      EasyMock.expect(taskConfig.isEncapsulatedTask()).andReturn(false);
+      EasyMock.replay(toolbox, taskConfig, killer);
+
+      new ParallelIndexSupervisorTask(
+          supervisorTaskId,
+          null,
+          null,
+          indexIngestionSpec,
+          null,
+          null,
+          false
+      ).cleanUp(toolbox, null);
+
+      EasyMock.verify(toolbox, taskConfig, killer);
+    }
+
+    @Test
+    public void testCleanUp_killRecursivelyFailureDoesNotAbortCleanUp() throws Exception
+    {
+      final ParallelIndexIngestionSpec indexIngestionSpec = buildParallelIngestionSpecForCleanUpTests();
+
+      final String supervisorTaskId = "index_parallel_deep_storage_cleanup_fail";
+      final TaskToolbox toolbox = EasyMock.createMock(TaskToolbox.class);
+      final TaskConfig taskConfig = EasyMock.createMock(TaskConfig.class);
+      final DataSegmentKiller killer = EasyMock.createStrictMock(DataSegmentKiller.class);
+
+      EasyMock.expect(toolbox.getDataSegmentKiller()).andReturn(killer);
+      killer.killRecursively(DeepStorageIntermediaryDataManager.retrieveShuffleDataStoragePath(supervisorTaskId));
+      EasyMock.expectLastCall().andThrow(new IOException("deep storage cleanup failed"));
+      EasyMock.expect(toolbox.getConfig()).andReturn(taskConfig);
+      EasyMock.expect(taskConfig.isEncapsulatedTask()).andReturn(false);
+      EasyMock.replay(toolbox, taskConfig, killer);
+
+      new ParallelIndexSupervisorTask(
+          supervisorTaskId,
+          null,
+          null,
+          indexIngestionSpec,
+          null,
+          null,
+          false
+      ).cleanUp(toolbox, null);
+
+      EasyMock.verify(toolbox, taskConfig, killer);
+    }
+
+    private static ParallelIndexIngestionSpec buildParallelIngestionSpecForCleanUpTests()
+    {
+      final boolean appendToExisting = false;
+      final boolean forceGuaranteedRollup = true;
+      final ParallelIndexIOConfig ioConfig = new ParallelIndexIOConfig(
+          new InlineInputSource("test"),
+          new JsonInputFormat(null, null, null, null, null),
+          appendToExisting,
+          null
+      );
+      final ParallelIndexTuningConfig tuningConfig = TuningConfigBuilder
+          .forParallelIndexTask()
+          .withMaxRowsInMemory(10)
+          .withMaxBytesInMemory(1000L)
+          .withPartitionsSpec(new HashedPartitionsSpec(null, 10, null))
+          .withIndexSpec(
+              IndexSpec.builder()
+                       .withBitmapSerdeFactory(RoaringBitmapSerdeFactory.getInstance())
+                       .withDimensionCompression(CompressionStrategy.UNCOMPRESSED)
+                       .withMetricCompression(CompressionStrategy.LZF)
+                       .withLongEncoding(LongEncodingStrategy.LONGS)
+                       .build()
+          )
+          .withIndexSpecForIntermediatePersists(IndexSpec.getDefault())
+          .withMaxPendingPersists(1)
+          .withForceGuaranteedRollup(forceGuaranteedRollup)
+          .withReportParseExceptions(true)
+          .withPushTimeout(10000L)
+          .withSegmentWriteOutMediumFactory(OffHeapMemorySegmentWriteOutMediumFactory.instance())
+          .withMaxNumConcurrentSubTasks(10)
+          .withMaxRetry(100)
+          .withTaskStatusCheckPeriodMs(20L)
+          .withChatHandlerTimeout(new Duration(3600))
+          .withChatHandlerNumRetries(128)
+          .withLogParseExceptions(false)
+          .build();
+
+      return new ParallelIndexIngestionSpec(
+          DataSchema.builder()
+                    .withDataSource("datasource")
+                    .withTimestamp(TimestampSpec.DEFAULT)
+                    .withDimensions(DimensionsSpec.EMPTY)
+                    .build(),
+          ioConfig,
+          tuningConfig
+      );
     }
 
     private PartitionStat createRangePartitionStat(Interval interval, int bucketId)
@@ -564,19 +705,19 @@ public class ParallelIndexSupervisorTaskTest
       final ParallelIndexSupervisorTask.Partition partition
           = new ParallelIndexSupervisorTask.Partition(interval, bucketId);
       List<PartitionLocation> locations = partitionToLocations.get(partition);
-      Assert.assertEquals(expectedTaskIds.length, locations.size());
+      Assertions.assertEquals(expectedTaskIds.length, locations.size());
 
       final Set<String> observedTaskIds = new HashSet<>();
       for (PartitionLocation location : locations) {
-        Assert.assertEquals(bucketId, location.getBucketId());
-        Assert.assertEquals(interval, location.getInterval());
-        Assert.assertEquals(expectedPartitionId, location.getShardSpec().getPartitionNum());
+        Assertions.assertEquals(bucketId, location.getBucketId());
+        Assertions.assertEquals(interval, location.getInterval());
+        Assertions.assertEquals(expectedPartitionId, location.getShardSpec().getPartitionNum());
 
         observedTaskIds.add(location.getSubTaskId());
       }
 
       // Verify the taskIds of the locations
-      Assert.assertEquals(
+      Assertions.assertEquals(
           new HashSet<>(Arrays.asList(expectedTaskIds)),
           observedTaskIds
       );

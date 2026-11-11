@@ -25,7 +25,7 @@ import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.query.DruidProcessingConfig;
 import org.apache.druid.query.QueryContext;
 import org.apache.druid.query.QueryContexts;
-import org.apache.druid.query.groupby.strategy.GroupByStrategySelector;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.utils.JvmUtils;
 
 /**
@@ -36,26 +36,51 @@ public class GroupByQueryConfig
   private static final Logger logger = new Logger(GroupByQueryConfig.class);
 
   public static final long AUTOMATIC = 0;
-
-  public static final String CTX_KEY_STRATEGY = "groupByStrategy";
+  /**
+   * @deprecated Use {@link QueryContextParameters#FORCE_LIMIT_PUSH_DOWN} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
   public static final String CTX_KEY_FORCE_LIMIT_PUSH_DOWN = "forceLimitPushDown";
+  /**
+   * @deprecated Use {@link QueryContextParameters#APPLY_LIMIT_PUSH_DOWN} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
   public static final String CTX_KEY_APPLY_LIMIT_PUSH_DOWN = "applyLimitPushDown";
+  /**
+   * @deprecated Use {@link QueryContextParameters#APPLY_LIMIT_PUSH_DOWN_TO_SEGMENT} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
   public static final String CTX_KEY_APPLY_LIMIT_PUSH_DOWN_TO_SEGMENT = "applyLimitPushDownToSegment";
+  /**
+   * @deprecated Use {@link QueryContextParameters#FORCE_PUSH_DOWN_NESTED_QUERY} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
   public static final String CTX_KEY_FORCE_PUSH_DOWN_NESTED_QUERY = "forcePushDownNestedQuery";
+  /**
+   * @deprecated Use {@link QueryContextParameters#EXECUTING_NESTED_QUERY} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
   public static final String CTX_KEY_EXECUTING_NESTED_QUERY = "executingNestedQuery";
+  /**
+   * @deprecated Use {@link QueryContextParameters#RESULT_AS_ARRAY} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
   public static final String CTX_KEY_ARRAY_RESULT_ROWS = "resultAsArray";
+  /**
+   * @deprecated Use {@link QueryContextParameters#GROUP_BY_ENABLE_MULTI_VALUE_UNNESTING} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
   public static final String CTX_KEY_ENABLE_MULTI_VALUE_UNNESTING = "groupByEnableMultiValueUnnesting";
+  /**
+   * @deprecated Use {@link QueryContextParameters#BUFFER_GROUPER_MAX_SIZE} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
   public static final String CTX_KEY_BUFFER_GROUPER_MAX_SIZE = "bufferGrouperMaxSize";
-  private static final String CTX_KEY_IS_SINGLE_THREADED = "groupByIsSingleThreaded";
-  private static final String CTX_KEY_MAX_INTERMEDIATE_ROWS = "maxIntermediateRows";
-  private static final String CTX_KEY_MAX_RESULTS = "maxResults";
-  private static final String CTX_KEY_BUFFER_GROUPER_INITIAL_BUCKETS = "bufferGrouperInitialBuckets";
-  private static final String CTX_KEY_BUFFER_GROUPER_MAX_LOAD_FACTOR = "bufferGrouperMaxLoadFactor";
-  private static final String CTX_KEY_MAX_ON_DISK_STORAGE = "maxOnDiskStorage";
-  private static final String CTX_KEY_FORCE_HASH_AGGREGATION = "forceHashAggregation";
-  private static final String CTX_KEY_INTERMEDIATE_COMBINE_DEGREE = "intermediateCombineDegree";
-  private static final String CTX_KEY_NUM_PARALLEL_COMBINE_THREADS = "numParallelCombineThreads";
-  private static final String CTX_KEY_MERGE_THREAD_LOCAL = "mergeThreadLocal";
+  /**
+   * @deprecated Use {@link QueryContextParameters#DEFER_EXPRESSION_DIMENSIONS} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
+  public static final String CTX_KEY_DEFER_EXPRESSION_DIMENSIONS = "deferExpressionDimensions";
 
   // Constants for sizing merging and selector dictionaries. Rationale for these constants:
   //  1) In no case do we want total aggregate dictionary size to exceed 40% of max memory.
@@ -72,16 +97,7 @@ public class GroupByQueryConfig
   private static final long MAX_AUTOMATIC_DICTIONARY_SIZE = 1_000_000_000;
 
   @JsonProperty
-  private String defaultStrategy = GroupByStrategySelector.STRATEGY_V2;
-
-  @JsonProperty
   private boolean singleThreaded = false;
-
-  @JsonProperty
-  private int maxIntermediateRows = 50000;
-
-  @JsonProperty
-  private int maxResults = 500000;
 
   @JsonProperty
   // Not documented, only used for tests to force spilling
@@ -103,8 +119,23 @@ public class GroupByQueryConfig
   private HumanReadableBytes maxMergingDictionarySize = HumanReadableBytes.valueOf(AUTOMATIC);
 
   @JsonProperty
+  // Maximum number of spill files per query; when exceeded, the query fails.
+  // This is a safety valve to prevent OOM errors.
+  private int maxSpillFileCount = Integer.MAX_VALUE;
+
+  @JsonProperty
   // Max on-disk temporary storage, per-query; when exceeded, the query fails
   private HumanReadableBytes maxOnDiskStorage = HumanReadableBytes.valueOf(0);
+
+  @JsonProperty
+  // Minimum number of serialized bytes that must accumulate across pending in-memory spill runs before they are
+  // flushed as a single file to disk. Aggregators like ThetaSketch pre-allocate a large fixed buffer per row
+  // (e.g. ~131KB for ThetaSketch(K=16384)), causing the in-memory grouper to flush frequently. However, when
+  // each key has been seen only a few times, the sketch serializes to just a handful of bytes in compact form.
+  // Without batching, this produces thousands of tiny spill files. By accumulating runs in heap memory first
+  // and writing to disk only once this threshold is reached, we avoid that explosion in file count without any
+  // extra disk I/O for small spills.
+  private HumanReadableBytes minSpillFileSize = HumanReadableBytes.valueOf(1024 * 1024L);
 
   @JsonProperty
   private HumanReadableBytes defaultOnDiskStorage = HumanReadableBytes.valueOf(-1);
@@ -131,6 +162,9 @@ public class GroupByQueryConfig
   private boolean mergeThreadLocal = false;
 
   @JsonProperty
+  private DeferExpressionDimensions deferExpressionDimensions = DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC;
+
+  @JsonProperty
   private boolean vectorize = true;
 
   @JsonProperty
@@ -138,11 +172,6 @@ public class GroupByQueryConfig
 
   @JsonProperty
   private boolean enableMultiValueUnnesting = true;
-
-  public String getDefaultStrategy()
-  {
-    return defaultStrategy;
-  }
 
   public boolean isSingleThreaded()
   {
@@ -152,26 +181,6 @@ public class GroupByQueryConfig
   public void setSingleThreaded(boolean singleThreaded)
   {
     this.singleThreaded = singleThreaded;
-  }
-
-  public int getMaxIntermediateRows()
-  {
-    return maxIntermediateRows;
-  }
-
-  public void setMaxIntermediateRows(int maxIntermediateRows)
-  {
-    this.maxIntermediateRows = maxIntermediateRows;
-  }
-
-  public int getMaxResults()
-  {
-    return maxResults;
-  }
-
-  public void setMaxResults(int maxResults)
-  {
-    this.maxResults = maxResults;
   }
 
   public int getBufferGrouperMaxSize()
@@ -202,7 +211,7 @@ public class GroupByQueryConfig
    */
   long getActualMaxSelectorDictionarySize(final long maxHeapSize, final int numConcurrentQueries)
   {
-    if (maxSelectorDictionarySize.getBytes() == AUTOMATIC) {
+    if (getConfiguredMaxSelectorDictionarySize() == AUTOMATIC) {
       final long heapForDictionaries = (long) (maxHeapSize * SELECTOR_DICTIONARY_HEAP_FRACTION);
 
       return Math.max(
@@ -213,7 +222,7 @@ public class GroupByQueryConfig
           )
       );
     } else {
-      return maxSelectorDictionarySize.getBytes();
+      return getConfiguredMaxSelectorDictionarySize();
     }
   }
 
@@ -270,6 +279,16 @@ public class GroupByQueryConfig
     return maxOnDiskStorage;
   }
 
+  public int getMaxSpillFileCount()
+  {
+    return maxSpillFileCount;
+  }
+
+  public long getMinSpillFileSize()
+  {
+    return minSpillFileSize.getBytes();
+  }
+
   /**
    * Mirror maxOnDiskStorage if defaultOnDiskStorage's default is not overridden by cluster operator.
    *
@@ -313,6 +332,11 @@ public class GroupByQueryConfig
     return mergeThreadLocal;
   }
 
+  public DeferExpressionDimensions getDeferExpressionDimensions()
+  {
+    return deferExpressionDimensions;
+  }
+
   public boolean isVectorize()
   {
     return vectorize;
@@ -337,26 +361,20 @@ public class GroupByQueryConfig
   {
     final GroupByQueryConfig newConfig = new GroupByQueryConfig();
     final QueryContext queryContext = query.context();
-    newConfig.defaultStrategy = queryContext.getString(CTX_KEY_STRATEGY, getDefaultStrategy());
-    newConfig.singleThreaded = queryContext.getBoolean(CTX_KEY_IS_SINGLE_THREADED, isSingleThreaded());
-    newConfig.maxIntermediateRows = Math.min(
-        queryContext.getInt(CTX_KEY_MAX_INTERMEDIATE_ROWS, getMaxIntermediateRows()),
-        getMaxIntermediateRows()
-    );
-    newConfig.maxResults = Math.min(
-        queryContext.getInt(CTX_KEY_MAX_RESULTS, getMaxResults()),
-        getMaxResults()
+    newConfig.singleThreaded = queryContext.getOrDefault(
+        QueryContextParameters.GROUP_BY_IS_SINGLE_THREADED,
+        isSingleThreaded()
     );
     newConfig.bufferGrouperMaxSize = Math.min(
-        queryContext.getInt(CTX_KEY_BUFFER_GROUPER_MAX_SIZE, getBufferGrouperMaxSize()),
+        queryContext.getOrDefault(QueryContextParameters.BUFFER_GROUPER_MAX_SIZE, getBufferGrouperMaxSize()),
         getBufferGrouperMaxSize()
     );
-    newConfig.bufferGrouperMaxLoadFactor = queryContext.getFloat(
-        CTX_KEY_BUFFER_GROUPER_MAX_LOAD_FACTOR,
+    newConfig.bufferGrouperMaxLoadFactor = queryContext.getOrDefault(
+        QueryContextParameters.BUFFER_GROUPER_MAX_LOAD_FACTOR,
         getBufferGrouperMaxLoadFactor()
     );
-    newConfig.bufferGrouperInitialBuckets = queryContext.getInt(
-        CTX_KEY_BUFFER_GROUPER_INITIAL_BUCKETS,
+    newConfig.bufferGrouperInitialBuckets = queryContext.getOrDefault(
+        QueryContextParameters.BUFFER_GROUPER_INITIAL_BUCKETS,
         getBufferGrouperInitialBuckets()
     );
     // If the client overrides do not provide "maxOnDiskStorage" context key, the server side "defaultOnDiskStorage"
@@ -364,38 +382,73 @@ public class GroupByQueryConfig
     // choose a default value lower than the max allowed when the context key is missing in the client query.
     newConfig.maxOnDiskStorage = HumanReadableBytes.valueOf(
         Math.min(
-            queryContext.getHumanReadableBytes(CTX_KEY_MAX_ON_DISK_STORAGE, getDefaultOnDiskStorage()).getBytes(),
+            queryContext.getOrDefault(QueryContextParameters.MAX_ON_DISK_STORAGE, getDefaultOnDiskStorage()).getBytes(),
             getMaxOnDiskStorage().getBytes()
         )
     );
-    newConfig.maxSelectorDictionarySize = maxSelectorDictionarySize; // No overrides
-    newConfig.maxMergingDictionarySize = maxMergingDictionarySize; // No overrides
-    newConfig.forcePushDownLimit = queryContext.getBoolean(CTX_KEY_FORCE_LIMIT_PUSH_DOWN, isForcePushDownLimit());
-    newConfig.applyLimitPushDownToSegment = queryContext.getBoolean(
-        CTX_KEY_APPLY_LIMIT_PUSH_DOWN_TO_SEGMENT,
+
+    newConfig.maxSelectorDictionarySize = queryContext.getOrDefault(
+        QueryContextParameters.MAX_SELECTOR_DICTIONARY_SIZE,
+        HumanReadableBytes.valueOf(getConfiguredMaxSelectorDictionarySize())
+    );
+
+    newConfig.maxMergingDictionarySize = queryContext.getOrDefault(
+        QueryContextParameters.MAX_MERGING_DICTIONARY_SIZE,
+        HumanReadableBytes.valueOf(getConfiguredMaxMergingDictionarySize())
+    );
+
+    newConfig.maxSpillFileCount = queryContext.getOrDefault(
+        QueryContextParameters.MAX_SPILL_FILE_COUNT,
+        getMaxSpillFileCount()
+    );
+
+    newConfig.minSpillFileSize = queryContext.getOrDefault(
+        QueryContextParameters.MIN_SPILL_FILE_SIZE,
+        HumanReadableBytes.valueOf(getMinSpillFileSize())
+    );
+
+    newConfig.forcePushDownLimit = queryContext.getOrDefault(
+        QueryContextParameters.FORCE_LIMIT_PUSH_DOWN,
+        isForcePushDownLimit()
+    );
+    newConfig.applyLimitPushDownToSegment = queryContext.getOrDefault(
+        QueryContextParameters.APPLY_LIMIT_PUSH_DOWN_TO_SEGMENT,
         isApplyLimitPushDownToSegment()
     );
-    newConfig.forceHashAggregation = queryContext.getBoolean(CTX_KEY_FORCE_HASH_AGGREGATION, isForceHashAggregation());
-    newConfig.forcePushDownNestedQuery = queryContext.getBoolean(
-        CTX_KEY_FORCE_PUSH_DOWN_NESTED_QUERY,
+    newConfig.forceHashAggregation = queryContext.getOrDefault(
+        QueryContextParameters.FORCE_HASH_AGGREGATION,
+        isForceHashAggregation()
+    );
+    newConfig.forcePushDownNestedQuery = queryContext.getOrDefault(
+        QueryContextParameters.FORCE_PUSH_DOWN_NESTED_QUERY,
         isForcePushDownNestedQuery()
     );
-    newConfig.intermediateCombineDegree = queryContext.getInt(
-        CTX_KEY_INTERMEDIATE_COMBINE_DEGREE,
+    newConfig.intermediateCombineDegree = queryContext.getOrDefault(
+        QueryContextParameters.INTERMEDIATE_COMBINE_DEGREE,
         getIntermediateCombineDegree()
     );
-    newConfig.numParallelCombineThreads = queryContext.getInt(
-        CTX_KEY_NUM_PARALLEL_COMBINE_THREADS,
+    newConfig.numParallelCombineThreads = queryContext.getOrDefault(
+        QueryContextParameters.NUM_PARALLEL_COMBINE_THREADS,
         getNumParallelCombineThreads()
     );
-    newConfig.mergeThreadLocal = queryContext.getBoolean(CTX_KEY_MERGE_THREAD_LOCAL, isMergeThreadLocal());
-    newConfig.vectorize = queryContext.getBoolean(QueryContexts.VECTORIZE_KEY, isVectorize());
-    newConfig.enableMultiValueUnnesting = queryContext.getBoolean(
-        CTX_KEY_ENABLE_MULTI_VALUE_UNNESTING,
+    newConfig.mergeThreadLocal = queryContext.getOrDefault(
+        QueryContextParameters.MERGE_THREAD_LOCAL,
+        isMergeThreadLocal()
+    );
+    newConfig.deferExpressionDimensions = queryContext.getOrDefault(
+        QueryContextParameters.DEFER_EXPRESSION_DIMENSIONS,
+        getDeferExpressionDimensions()
+    );
+    newConfig.vectorize = queryContext.getOrDefault(
+        QueryContextParameters.VECTORIZE,
+        isVectorize() ? QueryContexts.Vectorize.TRUE : QueryContexts.Vectorize.FALSE
+    ) != QueryContexts.Vectorize.FALSE;
+    newConfig.enableMultiValueUnnesting = queryContext.getOrDefault(
+        QueryContextParameters.GROUP_BY_ENABLE_MULTI_VALUE_UNNESTING,
         isMultiValueUnnestingEnabled()
     );
 
-    logger.debug("Override config for GroupBy query %s - %s", query.getId(), newConfig.toString());
+    logger.debug("Override config for GroupBy query %s - %s", query.getId(), newConfig);
     return newConfig;
   }
 
@@ -403,15 +456,13 @@ public class GroupByQueryConfig
   public String toString()
   {
     return "GroupByQueryConfig{" +
-           "defaultStrategy='" + defaultStrategy + '\'' +
-           ", singleThreaded=" + singleThreaded +
-           ", maxIntermediateRows=" + maxIntermediateRows +
-           ", maxResults=" + maxResults +
+           "singleThreaded=" + singleThreaded +
            ", bufferGrouperMaxSize=" + bufferGrouperMaxSize +
            ", bufferGrouperMaxLoadFactor=" + bufferGrouperMaxLoadFactor +
            ", bufferGrouperInitialBuckets=" + bufferGrouperInitialBuckets +
            ", maxMergingDictionarySize=" + maxMergingDictionarySize +
            ", maxOnDiskStorage=" + maxOnDiskStorage.getBytes() +
+           ", minSpillFileSize=" + minSpillFileSize.getBytes() +
            ", defaultOnDiskStorage=" + getDefaultOnDiskStorage().getBytes() + // use the getter because of special behavior for mirroring maxOnDiskStorage if defaultOnDiskStorage not explicitly set.
            ", forcePushDownLimit=" + forcePushDownLimit +
            ", forceHashAggregation=" + forceHashAggregation +
@@ -420,6 +471,8 @@ public class GroupByQueryConfig
            ", vectorize=" + vectorize +
            ", forcePushDownNestedQuery=" + forcePushDownNestedQuery +
            ", enableMultiValueUnnesting=" + enableMultiValueUnnesting +
+           ", mergeThreadLocal=" + mergeThreadLocal +
+           ", deferExpressionDimensions=" + deferExpressionDimensions +
            '}';
   }
 }

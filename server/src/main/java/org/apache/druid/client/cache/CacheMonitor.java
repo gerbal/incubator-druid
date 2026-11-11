@@ -20,11 +20,19 @@
 package org.apache.druid.client.cache;
 
 import com.google.inject.Inject;
+import org.apache.druid.discovery.NodeRole;
+import org.apache.druid.guice.annotations.LoadScope;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.java.util.emitter.service.ServiceMetricEvent;
 import org.apache.druid.java.util.metrics.AbstractMonitor;
 
+@LoadScope(roles = {
+    NodeRole.BROKER_JSON_NAME,
+    NodeRole.HISTORICAL_JSON_NAME,
+    NodeRole.INDEXER_JSON_NAME,
+    NodeRole.PEON_JSON_NAME
+})
 public class CacheMonitor extends AbstractMonitor
 {
   // package private for tests
@@ -83,21 +91,21 @@ public class CacheMonitor extends AbstractMonitor
   {
     if (cache != null) {
       // Cache stats.
-      emitter.emit(builder.build(StringUtils.format("%s/numEntries", metricPrefix), cacheStats.getNumEntries()));
-      emitter.emit(builder.build(StringUtils.format("%s/sizeBytes", metricPrefix), cacheStats.getSizeInBytes()));
-      emitter.emit(builder.build(StringUtils.format("%s/hits", metricPrefix), cacheStats.getNumHits()));
-      emitter.emit(builder.build(StringUtils.format("%s/misses", metricPrefix), cacheStats.getNumMisses()));
-      emitter.emit(builder.build(StringUtils.format("%s/evictions", metricPrefix), cacheStats.getNumEvictions()));
-      emitter.emit(builder.build(StringUtils.format("%s/hitRate", metricPrefix), cacheStats.hitRate()));
-      emitter.emit(builder.build(StringUtils.format("%s/averageBytes", metricPrefix), cacheStats.averageBytes()));
-      emitter.emit(builder.build(StringUtils.format("%s/timeouts", metricPrefix), cacheStats.getNumTimeouts()));
-      emitter.emit(builder.build(StringUtils.format("%s/errors", metricPrefix), cacheStats.getNumErrors()));
+      emitter.emit(builder.setMetric(StringUtils.format("%s/numEntries", metricPrefix), cacheStats.getNumEntries()));
+      emitter.emit(builder.setMetric(StringUtils.format("%s/sizeBytes", metricPrefix), cacheStats.getSizeInBytes()));
+      emitter.emit(builder.setMetric(StringUtils.format("%s/hits", metricPrefix), cacheStats.getNumHits()));
+      emitter.emit(builder.setMetric(StringUtils.format("%s/misses", metricPrefix), cacheStats.getNumMisses()));
+      emitter.emit(builder.setMetric(StringUtils.format("%s/evictions", metricPrefix), cacheStats.getNumEvictions()));
+      emitter.emit(builder.setMetric(StringUtils.format("%s/hitRate", metricPrefix), cacheStats.hitRate()));
+      emitter.emit(builder.setMetric(StringUtils.format("%s/averageBytes", metricPrefix), cacheStats.averageBytes()));
+      emitter.emit(builder.setMetric(StringUtils.format("%s/timeouts", metricPrefix), cacheStats.getNumTimeouts()));
+      emitter.emit(builder.setMetric(StringUtils.format("%s/errors", metricPrefix), cacheStats.getNumErrors()));
 
       // Cache populator stats.
-      emitter.emit(builder.build(StringUtils.format("%s/put/ok", metricPrefix), cachePopulatorStats.getNumOk()));
-      emitter.emit(builder.build(StringUtils.format("%s/put/error", metricPrefix), cachePopulatorStats.getNumError()));
+      emitter.emit(builder.setMetric(StringUtils.format("%s/put/ok", metricPrefix), cachePopulatorStats.getNumOk()));
+      emitter.emit(builder.setMetric(StringUtils.format("%s/put/error", metricPrefix), cachePopulatorStats.getNumError()));
       emitter.emit(
-          builder.build(StringUtils.format("%s/put/oversized", metricPrefix), cachePopulatorStats.getNumOversized())
+          builder.setMetric(StringUtils.format("%s/put/oversized", metricPrefix), cachePopulatorStats.getNumOversized())
       );
     }
   }

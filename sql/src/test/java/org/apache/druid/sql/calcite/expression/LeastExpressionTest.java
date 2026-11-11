@@ -28,8 +28,9 @@ import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.sql.calcite.expression.builtin.LeastOperatorConversion;
-import org.junit.Before;
-import org.junit.Test;
+import org.apache.druid.sql.calcite.util.CalciteTestBase;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.util.Arrays;
@@ -37,7 +38,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
-public class LeastExpressionTest extends ExpressionTestBase
+public class LeastExpressionTest extends CalciteTestBase
 {
   private static final String DOUBLE_KEY = "d";
   private static final double DOUBLE_VALUE = 3.1;
@@ -60,7 +61,7 @@ public class LeastExpressionTest extends ExpressionTestBase
   private LeastOperatorConversion target;
   private ExpressionTestHelper testHelper;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
     target = new LeastOperatorConversion();
@@ -72,7 +73,7 @@ public class LeastExpressionTest extends ExpressionTestBase
   {
     testExpression(
         Collections.emptyList(),
-        buildExpectedExpression(),
+        expectedLeastFunctionCall(ColumnType.STRING),
         null
     );
   }
@@ -85,7 +86,7 @@ public class LeastExpressionTest extends ExpressionTestBase
             testHelper.getConstantNull(),
             testHelper.getConstantNull()
         ),
-        buildExpectedExpression(null, null),
+        expectedLeastFunctionCall(ColumnType.STRING, null, null),
         null
     );
   }
@@ -99,7 +100,8 @@ public class LeastExpressionTest extends ExpressionTestBase
             testHelper.getConstantNull(),
             testHelper.makeInputRef(STRING_KEY)
         ),
-        buildExpectedExpression(
+        expectedLeastFunctionCall(
+            ColumnType.STRING,
             testHelper.makeVariable(DOUBLE_KEY),
             null,
             testHelper.makeVariable(STRING_KEY)
@@ -118,7 +120,8 @@ public class LeastExpressionTest extends ExpressionTestBase
             testHelper.makeLiteral(5.2),
             testHelper.makeLiteral(767.3)
         ),
-        buildExpectedExpression(
+        expectedLeastFunctionCall(
+            ColumnType.DOUBLE,
             34.1,
             testHelper.makeVariable(DOUBLE_KEY),
             5.2,
@@ -136,7 +139,8 @@ public class LeastExpressionTest extends ExpressionTestBase
             testHelper.makeInputRef(LONG_KEY),
             testHelper.makeLiteral(0)
         ),
-        buildExpectedExpression(
+        expectedLeastFunctionCall(
+            ColumnType.LONG,
             testHelper.makeVariable(LONG_KEY),
             0
         ),
@@ -153,7 +157,8 @@ public class LeastExpressionTest extends ExpressionTestBase
             testHelper.makeInputRef(STRING_KEY),
             testHelper.makeLiteral("A")
         ),
-        buildExpectedExpression(
+        expectedLeastFunctionCall(
+            ColumnType.STRING,
             "B",
             testHelper.makeVariable(STRING_KEY),
             "A"
@@ -171,7 +176,8 @@ public class LeastExpressionTest extends ExpressionTestBase
             testHelper.makeInputRef(DOUBLE_KEY),
             testHelper.makeLiteral("A")
         ),
-        buildExpectedExpression(
+        expectedLeastFunctionCall(
+            ColumnType.STRING,
             -1,
             testHelper.makeVariable(DOUBLE_KEY),
             "A"
@@ -188,7 +194,8 @@ public class LeastExpressionTest extends ExpressionTestBase
             testHelper.makeLiteral(-1),
             testHelper.makeInputRef(DOUBLE_KEY)
         ),
-        buildExpectedExpression(
+        expectedLeastFunctionCall(
+            ColumnType.DOUBLE,
             -1,
             testHelper.makeVariable(DOUBLE_KEY)
         ),
@@ -204,7 +211,8 @@ public class LeastExpressionTest extends ExpressionTestBase
             testHelper.makeLiteral(BigDecimal.valueOf(1.2)),
             testHelper.makeLiteral(BigDecimal.valueOf(3.4))
         ),
-        buildExpectedExpression(
+        expectedLeastFunctionCall(
+            ColumnType.DOUBLE,
             1.2,
             3.4
         ),
@@ -213,7 +221,7 @@ public class LeastExpressionTest extends ExpressionTestBase
   }
 
   @Test
-  public void testDecimalWithNullShouldReturnString()
+  public void testDecimalWithNullShouldNotReturnString()
   {
     testExpression(
         Arrays.asList(
@@ -221,12 +229,13 @@ public class LeastExpressionTest extends ExpressionTestBase
             testHelper.makeLiteral(BigDecimal.valueOf(3.4)),
             testHelper.getConstantNull()
         ),
-        buildExpectedExpression(
+        expectedLeastFunctionCall(
+            ColumnType.DOUBLE,
             1.2,
             3.4,
             null
         ),
-        "1.2"
+        1.2
     );
   }
 
@@ -238,7 +247,8 @@ public class LeastExpressionTest extends ExpressionTestBase
             testHelper.makeLiteral(DateTimes.utc(1000)),
             testHelper.makeLiteral(DateTimes.utc(2000))
         ),
-        buildExpectedExpression(
+        expectedLeastFunctionCall(
+            ColumnType.LONG,
             1000,
             2000
         ),
@@ -256,7 +266,7 @@ public class LeastExpressionTest extends ExpressionTestBase
                 new SqlIntervalQualifier(TimeUnit.YEAR, TimeUnit.MONTH, SqlParserPos.ZERO)
             )
         ),
-        buildExpectedExpression(13),
+        expectedLeastFunctionCall(ColumnType.LONG, 13),
         13L
     );
   }
@@ -267,11 +277,11 @@ public class LeastExpressionTest extends ExpressionTestBase
       final Object expectedResult
   )
   {
-    testHelper.testExpressionString(target.calciteOperator(), exprs, expectedExpression, expectedResult);
+    testHelper.testExpression(target.calciteOperator(), exprs, expectedExpression, expectedResult);
   }
 
-  private DruidExpression buildExpectedExpression(Object... args)
+  private DruidExpression expectedLeastFunctionCall(ColumnType type, Object... args)
   {
-    return testHelper.buildExpectedExpression(target.getDruidFunctionName(), args);
+    return testHelper.expectedFunctionCall(type, target.getDruidFunctionName(), args);
   }
 }

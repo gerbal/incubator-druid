@@ -1,0 +1,285 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.druid.indexing.rabbitstream.supervisor;
+
+import com.fasterxml.jackson.databind.JsonMappingException;
+import com.fasterxml.jackson.databind.Module;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Optional;
+import nl.jqno.equalsverifier.EqualsVerifier;
+import nl.jqno.equalsverifier.Warning;
+import org.apache.druid.data.input.InputFormat;
+import org.apache.druid.indexing.rabbitstream.RabbitStreamIndexTaskModule;
+import org.apache.druid.indexing.seekablestream.supervisor.LagAggregator;
+import org.apache.druid.indexing.seekablestream.supervisor.autoscaler.AutoScalerConfig;
+import org.apache.druid.jackson.DefaultObjectMapper;
+import org.joda.time.Duration;
+import org.joda.time.Period;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+import static org.easymock.EasyMock.createMock;
+
+public class RabbitStreamSupervisorIOConfigTest
+{
+  private final ObjectMapper mapper;
+
+  public RabbitStreamSupervisorIOConfigTest()
+  {
+    mapper = new DefaultObjectMapper();
+    mapper.registerModules((Iterable<Module>) new RabbitStreamIndexTaskModule().getJacksonModules());
+  }
+
+  @Test
+  public void testSerdeWithDefaults() throws Exception
+  {
+    String jsonStr = "{\n"
+        + "  \"type\": \"rabbit\",\n"
+        + "  \"stream\": \"my-stream\",\n"
+        + "  \"uri\": \"rabbitmq-stream://localhost:5552\"\n"
+        + "}";
+
+    RabbitStreamSupervisorIOConfig config = mapper.readValue(
+        jsonStr,
+        RabbitStreamSupervisorIOConfig.class);
+
+    Assertions.assertEquals("my-stream", config.getStream());
+    Assertions.assertEquals(config.getUri(), "rabbitmq-stream://localhost:5552");
+    Assertions.assertEquals(1, (int) config.getReplicas());
+    Assertions.assertEquals(1, (int) config.getTaskCount());
+    Assertions.assertEquals(Duration.standardMinutes(60), config.getTaskDuration());
+    Assertions.assertEquals(Duration.standardSeconds(5), config.getStartDelay());
+    Assertions.assertEquals(Duration.standardSeconds(30), config.getPeriod());
+    Assertions.assertFalse(config.isUseEarliestSequenceNumber());
+    Assertions.assertEquals(Duration.standardMinutes(30), config.getCompletionTimeout());
+    Assertions.assertFalse(config.getLateMessageRejectionPeriod().isPresent(), "lateMessageRejectionPeriod");
+    Assertions.assertFalse(config.getEarlyMessageRejectionPeriod().isPresent(), "earlyMessageRejectionPeriod");
+    Assertions.assertFalse(config.getLateMessageRejectionStartDateTime().isPresent(), "lateMessageRejectionStartDateTime");
+  }
+
+  @Test
+  public void testSerdeWithNonDefaults() throws Exception
+  {
+    String jsonStr = "{\n"
+        + "  \"type\": \"rabbit\",\n"
+        + "  \"stream\": \"my-stream\",\n"
+        + "  \"uri\": \"rabbitmq-stream://localhost:5552\",\n"
+        + "  \"replicas\": 3,\n"
+        + "  \"taskCount\": 9,\n"
+        + "  \"taskDuration\": \"PT30M\",\n"
+        + "  \"startDelay\": \"PT1M\",\n"
+        + "  \"period\": \"PT10S\",\n"
+        + "  \"useEarliestOffset\": true,\n"
+        + "  \"completionTimeout\": \"PT45M\",\n"
+        + "  \"lateMessageRejectionPeriod\": \"PT1H\",\n"
+        + "  \"earlyMessageRejectionPeriod\": \"PT1H\",\n"
+        + "  \"recordsPerFetch\": 4000\n"
+        + "}";
+
+    RabbitStreamSupervisorIOConfig config = mapper.readValue(
+        jsonStr,
+        RabbitStreamSupervisorIOConfig.class);
+
+    Assertions.assertEquals("my-stream", config.getStream());
+    Assertions.assertEquals(config.getUri(), "rabbitmq-stream://localhost:5552");
+    Assertions.assertEquals(3, (int) config.getReplicas());
+    Assertions.assertEquals(9, (int) config.getTaskCount());
+    Assertions.assertEquals(Duration.standardMinutes(30), config.getTaskDuration());
+    Assertions.assertEquals(Duration.standardMinutes(1), config.getStartDelay());
+    Assertions.assertEquals(Duration.standardSeconds(10), config.getPeriod());
+    Assertions.assertTrue(config.isUseEarliestSequenceNumber());
+    Assertions.assertEquals(Duration.standardMinutes(45), config.getCompletionTimeout());
+    Assertions.assertEquals(Duration.standardHours(1), config.getLateMessageRejectionPeriod().get());
+    Assertions.assertEquals(Duration.standardHours(1), config.getEarlyMessageRejectionPeriod().get());
+    // Assertions.assertEquals((Integer) 4000, config.getRecordsPerFetch());
+    // Assertions.assertEquals(1000, config.getFetchDelayMillis());
+  }
+
+  @Test
+  public void testStreamRequired() throws Exception
+  {
+    String jsonStr = "{\n"
+        + "  \"type\": \"rabbit\"\n"
+        + "}";
+
+    final JsonMappingException exception = Assertions.assertThrows(
+        JsonMappingException.class,
+        () -> mapper.readValue(jsonStr, RabbitStreamSupervisorIOConfig.class)
+    );
+    Assertions.assertInstanceOf(NullPointerException.class, exception.getCause());
+    Assertions.assertTrue(exception.getMessage().contains("stream"));
+  }
+
+  @Test
+  public void testURIRequired() throws Exception
+  {
+    String jsonStr = "{\n"
+        + "  \"type\": \"rabbit\",\n"
+        + "  \"stream\": \"my-stream\"\n"
+        + "}";
+
+    final JsonMappingException exception = Assertions.assertThrows(
+        JsonMappingException.class,
+        () -> mapper.readValue(jsonStr, RabbitStreamSupervisorIOConfig.class)
+    );
+    Assertions.assertInstanceOf(NullPointerException.class, exception.getCause());
+    Assertions.assertTrue(exception.getMessage().contains("uri"));
+  }
+
+  @Test
+  public void testBoundedModeSerdeWithIntegerOffsets() throws Exception
+  {
+    String jsonStr = "{\n"
+        + "  \"type\": \"rabbit\",\n"
+        + "  \"stream\": \"my-stream\",\n"
+        + "  \"uri\": \"rabbitmq-stream://localhost:5552\",\n"
+        + "  \"boundedStreamConfig\": {\n"
+        + "    \"startSequenceNumbers\": {\"queue-0\": 100, \"queue-1\": 200},\n"
+        + "    \"endSequenceNumbers\": {\"queue-0\": 500, \"queue-1\": 600}\n"
+        + "  }\n"
+        + "}";
+
+    RabbitStreamSupervisorIOConfig config = mapper.readValue(jsonStr, RabbitStreamSupervisorIOConfig.class);
+
+    Assertions.assertTrue(config.isBounded());
+    Assertions.assertNotNull(config.getBoundedStreamConfig());
+    Assertions.assertEquals(2, config.getBoundedStreamConfig().getStartSequenceNumbers().size());
+    Assertions.assertEquals(2, config.getBoundedStreamConfig().getEndSequenceNumbers().size());
+  }
+
+  @Test
+  public void testBoundedModeSerdeWithStringOffsets() throws Exception
+  {
+    String jsonStr = "{\n"
+        + "  \"type\": \"rabbit\",\n"
+        + "  \"stream\": \"my-stream\",\n"
+        + "  \"uri\": \"rabbitmq-stream://localhost:5552\",\n"
+        + "  \"boundedStreamConfig\": {\n"
+        + "    \"startSequenceNumbers\": {\"queue-0\": \"100\", \"queue-1\": \"200\"},\n"
+        + "    \"endSequenceNumbers\": {\"queue-0\": \"500\", \"queue-1\": \"600\"}\n"
+        + "  }\n"
+        + "}";
+
+    RabbitStreamSupervisorIOConfig config = mapper.readValue(jsonStr, RabbitStreamSupervisorIOConfig.class);
+
+    Assertions.assertTrue(config.isBounded());
+    Assertions.assertNotNull(config.getBoundedStreamConfig());
+    Assertions.assertEquals(2, config.getBoundedStreamConfig().getStartSequenceNumbers().size());
+    Assertions.assertEquals(2, config.getBoundedStreamConfig().getEndSequenceNumbers().size());
+  }
+
+  @Test
+  public void testBoundedModeSerdeWithMixedOffsets() throws Exception
+  {
+    String jsonStr = "{\n"
+        + "  \"type\": \"rabbit\",\n"
+        + "  \"stream\": \"my-stream\",\n"
+        + "  \"uri\": \"rabbitmq-stream://localhost:5552\",\n"
+        + "  \"boundedStreamConfig\": {\n"
+        + "    \"startSequenceNumbers\": {\"queue-0\": 100, \"queue-1\": \"200\"},\n"
+        + "    \"endSequenceNumbers\": {\"queue-0\": 500, \"queue-1\": \"600\"}\n"
+        + "  }\n"
+        + "}";
+
+    RabbitStreamSupervisorIOConfig config = mapper.readValue(jsonStr, RabbitStreamSupervisorIOConfig.class);
+
+    Assertions.assertTrue(config.isBounded());
+    Assertions.assertNotNull(config.getBoundedStreamConfig());
+  }
+
+  @Test
+  public void testUnboundedModeByDefault() throws Exception
+  {
+    String jsonStr = "{\n"
+        + "  \"type\": \"rabbit\",\n"
+        + "  \"stream\": \"my-stream\",\n"
+        + "  \"uri\": \"rabbitmq-stream://localhost:5552\"\n"
+        + "}";
+
+    RabbitStreamSupervisorIOConfig config = mapper.readValue(jsonStr, RabbitStreamSupervisorIOConfig.class);
+
+    Assertions.assertFalse(config.isBounded());
+    Assertions.assertNull(config.getBoundedStreamConfig());
+  }
+
+  private static RabbitStreamIOConfigBuilder ioConfigBuilder()
+  {
+    return new RabbitStreamIOConfigBuilder()
+        .withStream("stream")
+        .withUri("rabbit://localhost")
+        .withReplicas(1)
+        .withTaskCount(2)
+        .withTaskDuration(new Period("PT1H"));
+  }
+
+  @Test
+  public void testEqualsAndHashCode()
+  {
+    final RabbitStreamSupervisorIOConfig config = ioConfigBuilder().build();
+    Assertions.assertEquals(config, ioConfigBuilder().build());
+    Assertions.assertEquals(config.hashCode(), ioConfigBuilder().build().hashCode());
+    Assertions.assertNotEquals(config, null);
+    Assertions.assertNotEquals(config, "not an io config");
+    Assertions.assertNotEquals(config, ioConfigBuilder().withUri("rabbit://other").build());
+    Assertions.assertNotEquals(config, ioConfigBuilder().withReplicas(9).build());
+    Assertions.assertNotEquals(config, ioConfigBuilder().withTaskCount(9).build());
+    Assertions.assertNotEquals(config, ioConfigBuilder().withPollTimeout(999L).build());
+  }
+
+  @Test
+  public void testTuningConfigEqualsAndHashCode()
+  {
+    final RabbitStreamSupervisorTuningConfig config = RabbitStreamSupervisorTuningConfig.defaultConfig();
+    Assertions.assertEquals(config, RabbitStreamSupervisorTuningConfig.defaultConfig());
+    Assertions.assertEquals(config.hashCode(), RabbitStreamSupervisorTuningConfig.defaultConfig().hashCode());
+    Assertions.assertNotEquals(config, null);
+    Assertions.assertNotEquals(config, "not a tuning config");
+  }
+
+  /**
+   * Drift guard for this class's own fields (base fields are covered by SeekableStreamSupervisorIOConfigTest):
+   * a field omitted from {@code equals} would let a changed spec persist without restarting the supervisor.
+   */
+  @Test
+  public void testEqualsContractCoversAllFields()
+  {
+    EqualsVerifier.forClass(RabbitStreamSupervisorIOConfig.class)
+                  .usingGetClass()
+                  .withRedefinedSuperclass()
+                  .withIgnoredFields("taskCountExplicit", "autoScalerEnabled")
+                  .suppress(Warning.NONFINAL_FIELDS)
+                  .withPrefabValues(Optional.class, Optional.of("a"), Optional.of("b"))
+                  .withPrefabValues(InputFormat.class, createMock(InputFormat.class), createMock(InputFormat.class))
+                  .withPrefabValues(AutoScalerConfig.class, createMock(AutoScalerConfig.class), createMock(AutoScalerConfig.class))
+                  .withPrefabValues(LagAggregator.class, createMock(LagAggregator.class), createMock(LagAggregator.class))
+                  .verify();
+  }
+
+  @Test
+  public void testTuningConfigEqualsContractCoversAllFields()
+  {
+    EqualsVerifier.forClass(RabbitStreamSupervisorTuningConfig.class)
+                  .usingGetClass()
+                  .withRedefinedSuperclass()
+                  .suppress(Warning.NONFINAL_FIELDS)
+                  .verify();
+  }
+
+}

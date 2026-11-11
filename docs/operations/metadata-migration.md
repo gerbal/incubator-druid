@@ -24,7 +24,8 @@ title: "Metadata Migration"
 
 
 If you have been running an evaluation Druid cluster using the built-in Derby metadata storage and wish to migrate to a
-more production-capable metadata store such as MySQL or PostgreSQL, this document describes the necessary steps.
+more production-capable metadata store such as MySQL or PostgreSQL, or if you need to migrate metadata between
+production stores (e.g., from PostgreSQL to MySQL), this document describes the necessary steps.
 
 ## Shut down cluster services
 
@@ -35,7 +36,7 @@ When migrating from Derby, the coordinator processes will still need to be up in
 
 ## Exporting metadata
 
-Druid provides an [Export Metadata Tool](../operations/export-metadata.md) for exporting metadata from Derby into CSV files
+Druid provides an [Export Metadata Tool](../operations/export-metadata.md) for exporting metadata from Derby or PostgreSQL into CSV files
 which can then be imported into your new metadata store.
 
 The tool also provides options for rewriting the deep storage locations of segments; this is useful
@@ -57,6 +58,8 @@ Update your Druid runtime properties with the new metadata configuration.
 
 ### Create Druid tables
 
+**If you have set `druid.metadata.storage.connector.createTables` to `true` (which is the default), and your metadata connect user has DDL privileges, you can disregard this section as Druid will create metadata tables automatically on start up.**
+
 Druid provides a `metadata-init` tool for creating Druid's metadata tables. After initializing the Druid database, you can run the commands shown below from the root of the Druid package to initialize the tables.
 
 In the example commands below:
@@ -67,6 +70,8 @@ In the example commands below:
 - The `--connectURI` parameter corresponds to the value of `druid.metadata.storage.connector.connectURI`.
 - The `--user` parameter corresponds to the value of `druid.metadata.storage.connector.user`.
 - The `--password` parameter corresponds to the value of `druid.metadata.storage.connector.password`.
+
+The commands do not read the runtime properties of the cluster, so any property which affects the tables must be passed on the command line. In particular, the `druid_segmentSchemas` table and the `schema_fingerprint` and `num_rows` columns of `druid_segments` are only created with `-Ddruid.centralizedDatasourceSchema.enabled=true`. Pass it if the cluster uses centralized datasource schema, or if it is being populated from a metadata store which has those tables and columns: disabling the feature does not drop them.
 
 #### MySQL
 
@@ -81,6 +86,10 @@ java -classpath "lib/*" -Dlog4j.configurationFile=conf/druid/cluster/_common/log
 cd ${DRUID_ROOT}
 java -classpath "lib/*" -Dlog4j.configurationFile=conf/druid/cluster/_common/log4j2.xml -Ddruid.extensions.directory="extensions" -Ddruid.extensions.loadList="[\"postgresql-metadata-storage\"]" -Ddruid.metadata.storage.type=postgresql -Ddruid.node.type=metadata-init org.apache.druid.cli.Main tools metadata-init --connectURI="<postgresql-uri>" --user <user> --password <pass> --base druid
 ```
+
+### Update Druid tables to latest compatible schema
+
+The same command as above can be used to update Druid metadata tables to the latest version. If any table already exists, it is not created again but any ALTER statements that may be required are still executed.
 
 ### Import metadata
 

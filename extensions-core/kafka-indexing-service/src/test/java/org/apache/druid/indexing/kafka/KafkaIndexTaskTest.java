@@ -35,7 +35,15 @@ import com.google.common.util.concurrent.AsyncFunction;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.MoreExecutors;
-import org.apache.curator.test.TestingCluster;
+import com.google.inject.Guice;
+import com.google.inject.Injector;
+import com.google.inject.Scopes;
+import jakarta.validation.Validation;
+import jakarta.validation.Validator;
+import org.apache.commons.io.FileUtils;
+import org.apache.druid.cli.CliPeon;
+import org.apache.druid.cli.PeonLoadSpecHolder;
+import org.apache.druid.cli.PeonTaskHolder;
 import org.apache.druid.data.input.InputEntity;
 import org.apache.druid.data.input.InputEntityReader;
 import org.apache.druid.data.input.InputFormat;
@@ -49,11 +57,18 @@ import org.apache.druid.data.input.impl.LongDimensionSchema;
 import org.apache.druid.data.input.impl.StringDimensionSchema;
 import org.apache.druid.data.input.impl.TimestampSpec;
 import org.apache.druid.data.input.kafka.KafkaRecordEntity;
+import org.apache.druid.data.input.kafka.KafkaTopicPartition;
 import org.apache.druid.data.input.kafkainput.KafkaInputFormat;
 import org.apache.druid.data.input.kafkainput.KafkaStringHeaderFormat;
+import org.apache.druid.discovery.NodeRole;
+import org.apache.druid.guice.GuiceInjectors;
+import org.apache.druid.guice.LazySingleton;
+import org.apache.druid.guice.LifecycleModule;
+import org.apache.druid.indexer.IngestionState;
 import org.apache.druid.indexer.TaskState;
 import org.apache.druid.indexer.TaskStatus;
-import org.apache.druid.indexing.common.IngestionStatsAndErrorsTaskReportData;
+import org.apache.druid.indexer.granularity.UniformGranularitySpec;
+import org.apache.druid.indexer.report.IngestionStatsAndErrors;
 import org.apache.druid.indexing.common.LockGranularity;
 import org.apache.druid.indexing.common.TestUtils;
 import org.apache.druid.indexing.common.task.IndexTaskTest;
@@ -62,7 +77,7 @@ import org.apache.druid.indexing.common.task.Task;
 import org.apache.druid.indexing.common.task.Tasks;
 import org.apache.druid.indexing.kafka.supervisor.KafkaSupervisor;
 import org.apache.druid.indexing.kafka.supervisor.KafkaSupervisorIOConfig;
-import org.apache.druid.indexing.kafka.test.TestBroker;
+import org.apache.druid.indexing.kafka.test.EmbeddedKafkaBroker;
 import org.apache.druid.indexing.overlord.DataSourceMetadata;
 import org.apache.druid.indexing.seekablestream.SeekableStreamEndSequenceNumbers;
 import org.apache.druid.indexing.seekablestream.SeekableStreamIndexTaskRunner;
@@ -71,16 +86,21 @@ import org.apache.druid.indexing.seekablestream.SeekableStreamIndexTaskTestBase;
 import org.apache.druid.indexing.seekablestream.SeekableStreamStartSequenceNumbers;
 import org.apache.druid.indexing.seekablestream.SettableByteEntity;
 import org.apache.druid.indexing.seekablestream.supervisor.SeekableStreamSupervisor;
+import org.apache.druid.jackson.JacksonModule;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.guava.Sequences;
-import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.java.util.common.parsers.CloseableIterator;
-import org.apache.druid.java.util.emitter.EmittingLogger;
-import org.apache.druid.java.util.emitter.core.NoopEmitter;
-import org.apache.druid.java.util.emitter.service.ServiceEmitter;
+import org.apache.druid.java.util.common.parsers.ParseException;
+import org.apache.druid.java.util.emitter.core.Emitter;
+import org.apache.druid.java.util.emitter.core.Event;
+import org.apache.druid.java.util.emitter.core.EventMap;
+import org.apache.druid.java.util.emitter.service.ServiceMetricEvent;
+import org.apache.druid.java.util.metrics.StubServiceEmitter;
+import org.apache.druid.java.util.metrics.StubServiceEmitterModule;
+import org.apache.druid.java.util.metrics.TaskHolder;
 import org.apache.druid.math.expr.ExprMacroTable;
 import org.apache.druid.query.DefaultGenericQueryMetricsFactory;
 import org.apache.druid.query.DefaultQueryRunnerFactoryConglomerate;
@@ -90,7 +110,6 @@ import org.apache.druid.query.QueryPlus;
 import org.apache.druid.query.QueryRunnerFactory;
 import org.apache.druid.query.QueryRunnerFactoryConglomerate;
 import org.apache.druid.query.SegmentDescriptor;
-import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
 import org.apache.druid.query.aggregation.DoubleSumAggregatorFactory;
 import org.apache.druid.query.filter.SelectorDimFilter;
@@ -104,30 +123,45 @@ import org.apache.druid.query.timeseries.TimeseriesQuery;
 import org.apache.druid.query.timeseries.TimeseriesQueryEngine;
 import org.apache.druid.query.timeseries.TimeseriesQueryQueryToolChest;
 import org.apache.druid.query.timeseries.TimeseriesQueryRunnerFactory;
+import org.apache.druid.segment.incremental.InputRowFilterResult;
 import org.apache.druid.segment.incremental.RowIngestionMeters;
 import org.apache.druid.segment.incremental.RowIngestionMetersTotals;
 import org.apache.druid.segment.incremental.RowMeters;
 import org.apache.druid.segment.indexing.DataSchema;
-import org.apache.druid.segment.indexing.granularity.UniformGranularitySpec;
+import org.apache.druid.segment.realtime.SegmentGenerationMetrics;
 import org.apache.druid.segment.transform.ExpressionTransform;
 import org.apache.druid.segment.transform.TransformSpec;
+import org.apache.druid.server.coordination.BroadcastDatasourceLoadingSpec;
+import org.apache.druid.server.lookup.cache.LookupLoadingSpec;
+import org.apache.druid.server.metrics.LoadSpecHolder;
+import org.apache.druid.server.security.Action;
+import org.apache.druid.server.security.Resource;
+import org.apache.druid.server.security.ResourceAction;
+import org.apache.druid.server.security.ResourceType;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.OffsetSpec;
+import org.apache.kafka.clients.admin.RecordsToDelete;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.header.Header;
+import org.joda.time.Duration;
 import org.joda.time.Period;
-import org.junit.After;
-import org.junit.AfterClass;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
@@ -135,6 +169,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Properties;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
@@ -144,10 +180,10 @@ import java.util.concurrent.TimeoutException;
 import java.util.stream.Stream;
 
 @SuppressWarnings("unchecked")
-@RunWith(Parameterized.class)
+@ParameterizedClass
+@MethodSource("constructorFeeder")
 public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
 {
-  private static final Logger log = new Logger(KafkaIndexTaskTest.class);
   private static final long POLL_RETRY_MS = 100;
   private static final Iterable<Header> SAMPLE_HEADERS = ImmutableList.of(new Header()
   {
@@ -167,16 +203,14 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
       new KafkaStringHeaderFormat(null),
       INPUT_FORMAT,
       INPUT_FORMAT,
-      "kafka.testheader.", "kafka.key", "kafka.timestamp"
+      "kafka.testheader.", "kafka.key", "kafka.timestamp", "kafka.topic", "kafka.partition", "kafka.offset"
   );
 
-  private static TestingCluster zkServer;
-  private static TestBroker kafkaServer;
-  private static ServiceEmitter emitter;
+  private static EmbeddedKafkaBroker kafkaServer;
   private static int topicPostfix;
-
   static final Module TEST_MODULE = new SimpleModule("kafkaTestModule").registerSubtypes(
-      new NamedType(TestKafkaInputFormat.class, "testKafkaInputFormat")
+      new NamedType(TestKafkaInputFormat.class, "testKafkaInputFormat"),
+      new NamedType(TestKafkaFormatWithMalformedDataDetection.class, "testKafkaFormatWithMalformedDataDetection")
   );
 
   static {
@@ -186,7 +220,6 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     ).forEach(OBJECT_MAPPER::registerModule);
   }
 
-  @Parameterized.Parameters(name = "{0}")
   public static Iterable<Object[]> constructorFeeder()
   {
     return ImmutableList.of(
@@ -260,26 +293,10 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     super(lockGranularity);
   }
 
-  @BeforeClass
-  public static void setupClass() throws Exception
+  @BeforeAll
+  public static void setupClass()
   {
-    emitter = new ServiceEmitter(
-        "service",
-        "host",
-        new NoopEmitter()
-    );
-    emitter.start();
-    EmittingLogger.registerEmitter(emitter);
-
-    zkServer = new TestingCluster(1);
-    zkServer.start();
-
-    kafkaServer = new TestBroker(
-        zkServer.getConnectString(),
-        null,
-        1,
-        ImmutableMap.of("num.partitions", "2")
-    );
+    kafkaServer = new EmbeddedKafkaBroker(ImmutableMap.of("KAFKA_NUM_PARTITIONS", "2"));
     kafkaServer.start();
 
     taskExec = MoreExecutors.listeningDecorator(
@@ -289,7 +306,7 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     );
   }
 
-  @Before
+  @BeforeEach
   public void setupTest() throws IOException
   {
     handoffConditionTimeout = 0;
@@ -300,11 +317,11 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     doHandoff = true;
     topic = getTopicName();
     records = generateRecords(topic);
-    reportsFile = File.createTempFile("KafkaIndexTaskTestReports-" + System.currentTimeMillis(), "json");
+    reportsFile = temporaryFolder.newFile("KafkaIndexTaskTestReports.json");
     makeToolboxFactory();
   }
 
-  @After
+  @AfterEach
   public void tearDownTest()
   {
     synchronized (runningTasks) {
@@ -318,7 +335,7 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     destroyToolboxFactory();
   }
 
-  @AfterClass
+  @AfterAll
   public static void tearDownClass() throws Exception
   {
     taskExec.shutdown();
@@ -326,14 +343,10 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
 
     kafkaServer.close();
     kafkaServer = null;
-
-    zkServer.stop();
-    zkServer = null;
-
-    emitter.close();
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunAfterDataInserted() throws Exception
   {
     // Insert data
@@ -344,25 +357,25 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
-    Assert.assertTrue(task.supportsQueries());
 
     final ListenableFuture<TaskStatus> future = runTask(task);
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
     verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(2, 5)).totalProcessed(3));
-    Assert.assertTrue(task.getRunner().getFireDepartmentMetrics().isProcessingDone());
 
     // Check published metadata and segments in deep storage
     assertEqualsExceptVersion(
@@ -372,13 +385,20 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
-    Assert.assertEquals(
-        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L))),
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L))),
         newDataSchemaMetadata()
     );
+
+    final SegmentGenerationMetrics observedSegmentGenerationMetrics = task.getRunner().getSegmentGenerationMetrics();
+    Assertions.assertTrue(observedSegmentGenerationMetrics.isProcessingDone());
+    Assertions.assertEquals(3, observedSegmentGenerationMetrics.rowOutput());
+    Assertions.assertEquals(2, observedSegmentGenerationMetrics.handOffCount());
+    verifyPersistAndMergeTimeMetricsArePositive(observedSegmentGenerationMetrics);
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testIngestNullColumnAfterDataInserted() throws Exception
   {
     // Insert data
@@ -396,36 +416,45 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     );
     final KafkaIndexTask task = createTask(
         null,
-        NEW_DATA_SCHEMA.withDimensionsSpec(dimensionsSpec),
+        DATA_SCHEMA.withDimensionsSpec(dimensionsSpec),
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
     final ListenableFuture<TaskStatus> future = runTask(task);
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
     verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(2, 5)).totalProcessed(3));
 
     final Collection<DataSegment> segments = publishedSegments();
     for (DataSegment segment : segments) {
       for (int i = 0; i < dimensionsSpec.getDimensions().size(); i++) {
-        Assert.assertEquals(dimensionsSpec.getDimensionNames().get(i), segment.getDimensions().get(i));
+        Assertions.assertEquals(dimensionsSpec.getDimensionNames().get(i), segment.getDimensions().get(i));
       }
     }
+
+    final SegmentGenerationMetrics observedSegmentGenerationMetrics = task.getRunner().getSegmentGenerationMetrics();
+    Assertions.assertTrue(observedSegmentGenerationMetrics.isProcessingDone());
+    Assertions.assertEquals(3, observedSegmentGenerationMetrics.rowOutput());
+    Assertions.assertEquals(2, observedSegmentGenerationMetrics.handOffCount());
+    verifyPersistAndMergeTimeMetricsArePositive(observedSegmentGenerationMetrics);
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testIngestNullColumnAfterDataInserted_storeEmptyColumnsOff_shouldNotStoreEmptyColumns() throws Exception
   {
     // Insert data
@@ -433,7 +462,7 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
 
     final KafkaIndexTask task = createTask(
         null,
-        NEW_DATA_SCHEMA.withDimensionsSpec(
+        DATA_SCHEMA.withDimensionsSpec(
             new DimensionsSpec(
                 ImmutableList.of(
                     new StringDimensionSchema("dim1"),
@@ -448,14 +477,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -463,60 +494,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     final ListenableFuture<TaskStatus> future = runTask(task);
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
 
     final Collection<DataSegment> segments = publishedSegments();
     for (DataSegment segment : segments) {
-      Assert.assertFalse(segment.getDimensions().contains("unknownDim"));
+      Assertions.assertFalse(segment.getDimensions().contains("unknownDim"));
     }
   }
 
-  @Test(timeout = 60_000L)
-  public void testRunAfterDataInsertedWithLegacyParser() throws Exception
-  {
-    // Insert data
-    insertData();
-
-    final KafkaIndexTask task = createTask(
-        null,
-        OLD_DATA_SCHEMA,
-        new KafkaIndexTaskIOConfig(
-            0,
-            "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
-            kafkaServer.consumerProperties(),
-            KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
-            true,
-            null,
-            null,
-            null,
-            null
-        )
-    );
-
-    final ListenableFuture<TaskStatus> future = runTask(task);
-
-    // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
-    verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(2, 5)).totalProcessed(3));
-    Assert.assertTrue(task.getRunner().getFireDepartmentMetrics().isProcessingDone());
-
-    // Check published metadata and segments in deep storage
-    assertEqualsExceptVersion(
-        ImmutableList.of(
-            sdd("2010/P1D", 0, ImmutableList.of("c")),
-            sdd("2011/P1D", 0, ImmutableList.of("d", "e"))
-        ),
-        publishedDescriptors()
-    );
-    Assert.assertEquals(
-        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L))),
-        newDataSchemaMetadata()
-    );
-  }
-
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunBeforeDataInserted() throws Exception
   {
     final KafkaIndexTask task = createTask(
@@ -524,14 +511,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -547,9 +536,9 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     insertData();
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
     verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(2, 5)).totalProcessed(3));
-    Assert.assertTrue(task.getRunner().getFireDepartmentMetrics().isProcessingDone());
+    Assertions.assertTrue(task.getRunner().getSegmentGenerationMetrics().isProcessingDone());
 
     // Check published metadata and segments in deep storage
     assertEqualsExceptVersion(
@@ -559,13 +548,14 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
-    Assert.assertEquals(
-        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L))),
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L))),
         newDataSchemaMetadata()
     );
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunAfterDataInsertedLiveReport() throws Exception
   {
     // Insert data
@@ -575,14 +565,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 12L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 12L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -607,16 +599,17 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     runner.resume();
 
     // Check metrics
-    Assert.assertEquals(buildSegments, task.getRunner().getRowIngestionMeters().getTotals());
+    Assertions.assertEquals(buildSegments, task.getRunner().getRowIngestionMeters().getTotals());
 
-    Assert.assertEquals(avg_1min.get("processed"), 0.0);
-    Assert.assertEquals(avg_5min.get("processed"), 0.0);
-    Assert.assertEquals(avg_15min.get("processed"), 0.0);
+    Assertions.assertEquals(avg_1min.get("processed"), 0.0);
+    Assertions.assertEquals(avg_5min.get("processed"), 0.0);
+    Assertions.assertEquals(avg_15min.get("processed"), 0.0);
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testIncrementalHandOff() throws Exception
   {
     final String baseSequenceName = "sequence0";
@@ -628,24 +621,24 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     Map<String, Object> consumerProps = kafkaServer.consumerProperties();
     consumerProps.put("max.poll.records", "1");
 
-    final SeekableStreamStartSequenceNumbers<Integer, Long> startPartitions = new SeekableStreamStartSequenceNumbers<>(
+    final SeekableStreamStartSequenceNumbers<KafkaTopicPartition, Long> startPartitions = new SeekableStreamStartSequenceNumbers<>(
         topic,
-        ImmutableMap.of(0, 0L, 1, 0L),
+        ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L, new KafkaTopicPartition(false, topic, 1), 0L),
         ImmutableSet.of()
     );
     // Checkpointing will happen at either checkpoint1 or checkpoint2 depending on ordering
     // of events fetched across two partitions from Kafka
-    final SeekableStreamEndSequenceNumbers<Integer, Long> checkpoint1 = new SeekableStreamEndSequenceNumbers<>(
+    final SeekableStreamEndSequenceNumbers<KafkaTopicPartition, Long> checkpoint1 = new SeekableStreamEndSequenceNumbers<>(
         topic,
-        ImmutableMap.of(0, 5L, 1, 0L)
+        ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L, new KafkaTopicPartition(false, topic, 1), 0L)
     );
-    final SeekableStreamEndSequenceNumbers<Integer, Long> checkpoint2 = new SeekableStreamEndSequenceNumbers<>(
+    final SeekableStreamEndSequenceNumbers<KafkaTopicPartition, Long> checkpoint2 = new SeekableStreamEndSequenceNumbers<>(
         topic,
-        ImmutableMap.of(0, 4L, 1, 2L)
+        ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 4L, new KafkaTopicPartition(false, topic, 1), 2L)
     );
-    final SeekableStreamEndSequenceNumbers<Integer, Long> endPartitions = new SeekableStreamEndSequenceNumbers<>(
+    final SeekableStreamEndSequenceNumbers<KafkaTopicPartition, Long> endPartitions = new SeekableStreamEndSequenceNumbers<>(
         topic,
-        ImmutableMap.of(0, 10L, 1, 2L)
+        ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 10L, new KafkaTopicPartition(false, topic, 1), 2L)
     );
     final KafkaIndexTask task = createTask(
         null,
@@ -660,6 +653,8 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -667,18 +662,18 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     while (task.getRunner().getStatus() != Status.PAUSED) {
       Thread.sleep(10);
     }
-    final Map<Integer, Long> currentOffsets = ImmutableMap.copyOf(task.getRunner().getCurrentOffsets());
-    Assert.assertTrue(checkpoint1.getPartitionSequenceNumberMap().equals(currentOffsets)
+    final Map<KafkaTopicPartition, Long> currentOffsets = ImmutableMap.copyOf(task.getRunner().getCurrentOffsets());
+    Assertions.assertTrue(checkpoint1.getPartitionSequenceNumberMap().equals(currentOffsets)
                       || checkpoint2.getPartitionSequenceNumberMap()
                                     .equals(currentOffsets));
     task.getRunner().setEndOffsets(currentOffsets, false);
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
 
-    Assert.assertEquals(1, checkpointRequestsHash.size());
-    Assert.assertTrue(
+    Assertions.assertEquals(1, checkpointRequestsHash.size());
+    Assertions.assertTrue(
         checkpointRequestsHash.contains(
             Objects.hash(
-                NEW_DATA_SCHEMA.getDataSource(),
+                DATA_SCHEMA.getDataSource(),
                 0,
                 new KafkaDataSourceMetadata(startPartitions)
             )
@@ -686,7 +681,7 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     );
 
     long totalBytes = getTotalSizeOfRecords(0, 10) + getTotalSizeOfRecords(13, 15);
-    verifyTaskMetrics(task, RowMeters.with().bytes(totalBytes).unparseable(3).thrownAway(1).totalProcessed(8));
+    verifyTaskMetrics(task, RowMeters.with().bytes(totalBytes).unparseable(3).thrownAwayByReason(InputRowFilterResult.NULL_OR_EMPTY_RECORD, 1).totalProcessed(8));
 
     // Check published metadata and segments in deep storage
     assertEqualsExceptVersion(
@@ -701,15 +696,23 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         new KafkaDataSourceMetadata(
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 10L, 1, 2L))
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 10L, new KafkaTopicPartition(false, topic, 1), 2L))
         ),
         newDataSchemaMetadata()
     );
+
+    final SegmentGenerationMetrics observedSegmentGenerationMetrics = task.getRunner().getSegmentGenerationMetrics();
+    Assertions.assertTrue(observedSegmentGenerationMetrics.isProcessingDone());
+    Assertions.assertEquals(8, observedSegmentGenerationMetrics.rowOutput());
+    Assertions.assertEquals(7, observedSegmentGenerationMetrics.handOffCount());
+    Assertions.assertEquals(4, observedSegmentGenerationMetrics.numPersists());
+    verifyPersistAndMergeTimeMetricsArePositive(observedSegmentGenerationMetrics);
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testIncrementalHandOffMaxTotalRows() throws Exception
   {
     final String baseSequenceName = "sequence0";
@@ -732,23 +735,23 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     Map<String, Object> consumerProps = kafkaServer.consumerProperties();
     consumerProps.put("max.poll.records", "1");
 
-    final SeekableStreamStartSequenceNumbers<Integer, Long> startPartitions = new SeekableStreamStartSequenceNumbers<>(
+    final SeekableStreamStartSequenceNumbers<KafkaTopicPartition, Long> startPartitions = new SeekableStreamStartSequenceNumbers<>(
         topic,
-        ImmutableMap.of(0, 0L, 1, 0L),
+        ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L, new KafkaTopicPartition(false, topic, 1), 0L),
         ImmutableSet.of()
     );
-    final SeekableStreamEndSequenceNumbers<Integer, Long> checkpoint1 = new SeekableStreamEndSequenceNumbers<>(
+    final SeekableStreamEndSequenceNumbers<KafkaTopicPartition, Long> checkpoint1 = new SeekableStreamEndSequenceNumbers<>(
         topic,
-        ImmutableMap.of(0, 3L, 1, 0L)
+        ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 3L, new KafkaTopicPartition(false, topic, 1), 0L)
     );
-    final SeekableStreamEndSequenceNumbers<Integer, Long> checkpoint2 = new SeekableStreamEndSequenceNumbers<>(
+    final SeekableStreamEndSequenceNumbers<KafkaTopicPartition, Long> checkpoint2 = new SeekableStreamEndSequenceNumbers<>(
         topic,
-        ImmutableMap.of(0, 10L, 1, 0L)
+        ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 10L, new KafkaTopicPartition(false, topic, 1), 0L)
     );
 
-    final SeekableStreamEndSequenceNumbers<Integer, Long> endPartitions = new SeekableStreamEndSequenceNumbers<>(
+    final SeekableStreamEndSequenceNumbers<KafkaTopicPartition, Long> endPartitions = new SeekableStreamEndSequenceNumbers<>(
         topic,
-        ImmutableMap.of(0, 10L, 1, 2L)
+        ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 10L, new KafkaTopicPartition(false, topic, 1), 2L)
     );
     final KafkaIndexTask task = createTask(
         null,
@@ -763,6 +766,8 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -770,9 +775,9 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     while (task.getRunner().getStatus() != Status.PAUSED) {
       Thread.sleep(10);
     }
-    final Map<Integer, Long> currentOffsets = ImmutableMap.copyOf(task.getRunner().getCurrentOffsets());
+    final Map<KafkaTopicPartition, Long> currentOffsets = ImmutableMap.copyOf(task.getRunner().getCurrentOffsets());
 
-    Assert.assertEquals(checkpoint1.getPartitionSequenceNumberMap(), currentOffsets);
+    Assertions.assertEquals(checkpoint1.getPartitionSequenceNumberMap(), currentOffsets);
     task.getRunner().setEndOffsets(currentOffsets, false);
 
     while (task.getRunner().getStatus() != Status.PAUSED) {
@@ -788,28 +793,28 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
       }
       kafkaProducer.commitTransaction();
     }
-    final Map<Integer, Long> nextOffsets = ImmutableMap.copyOf(task.getRunner().getCurrentOffsets());
+    final Map<KafkaTopicPartition, Long> nextOffsets = ImmutableMap.copyOf(task.getRunner().getCurrentOffsets());
 
 
-    Assert.assertEquals(checkpoint2.getPartitionSequenceNumberMap(), nextOffsets);
+    Assertions.assertEquals(checkpoint2.getPartitionSequenceNumberMap(), nextOffsets);
     task.getRunner().setEndOffsets(nextOffsets, false);
 
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
 
-    Assert.assertEquals(2, checkpointRequestsHash.size());
-    Assert.assertTrue(
+    Assertions.assertEquals(2, checkpointRequestsHash.size());
+    Assertions.assertTrue(
         checkpointRequestsHash.contains(
             Objects.hash(
-                NEW_DATA_SCHEMA.getDataSource(),
+                DATA_SCHEMA.getDataSource(),
                 0,
                 new KafkaDataSourceMetadata(startPartitions)
             )
         )
     );
-    Assert.assertTrue(
+    Assertions.assertTrue(
         checkpointRequestsHash.contains(
             Objects.hash(
-                NEW_DATA_SCHEMA.getDataSource(),
+                DATA_SCHEMA.getDataSource(),
                 0,
                 new KafkaDataSourceMetadata(
                     new SeekableStreamStartSequenceNumbers<>(topic, currentOffsets, ImmutableSet.of())
@@ -819,7 +824,7 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     );
 
     long totalBytes = getTotalSizeOfRecords(0, 10) + getTotalSizeOfRecords(13, 15);
-    verifyTaskMetrics(task, RowMeters.with().bytes(totalBytes).unparseable(3).thrownAway(1).totalProcessed(8));
+    verifyTaskMetrics(task, RowMeters.with().bytes(totalBytes).unparseable(3).thrownAwayByReason(InputRowFilterResult.NULL_OR_EMPTY_RECORD, 1).totalProcessed(8));
 
     // Check published metadata and segments in deep storage
     assertEqualsExceptVersion(
@@ -834,22 +839,23 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         new KafkaDataSourceMetadata(
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 10L, 1, 2L))
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 10L, new KafkaTopicPartition(false, topic, 1), 2L))
         ),
         newDataSchemaMetadata()
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         new KafkaDataSourceMetadata(
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 10L, 1, 2L))
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 10L, new KafkaTopicPartition(false, topic, 1), 2L))
         ),
         newDataSchemaMetadata()
     );
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testTimeBasedIncrementalHandOff() throws Exception
   {
     final String baseSequenceName = "sequence0";
@@ -862,19 +868,19 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     Map<String, Object> consumerProps = kafkaServer.consumerProperties();
     consumerProps.put("max.poll.records", "1");
 
-    final SeekableStreamStartSequenceNumbers<Integer, Long> startPartitions = new SeekableStreamStartSequenceNumbers<>(
+    final SeekableStreamStartSequenceNumbers<KafkaTopicPartition, Long> startPartitions = new SeekableStreamStartSequenceNumbers<>(
         topic,
-        ImmutableMap.of(0, 0L, 1, 0L),
+        ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L, new KafkaTopicPartition(false, topic, 1), 0L),
         ImmutableSet.of()
     );
     // Checkpointing will happen at checkpoint
-    final SeekableStreamEndSequenceNumbers<Integer, Long> checkpoint = new SeekableStreamEndSequenceNumbers<>(
+    final SeekableStreamEndSequenceNumbers<KafkaTopicPartition, Long> checkpoint = new SeekableStreamEndSequenceNumbers<>(
         topic,
-        ImmutableMap.of(0, 1L, 1, 0L)
+        ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 1L, new KafkaTopicPartition(false, topic, 1), 0L)
     );
-    final SeekableStreamEndSequenceNumbers<Integer, Long> endPartitions = new SeekableStreamEndSequenceNumbers<>(
+    final SeekableStreamEndSequenceNumbers<KafkaTopicPartition, Long> endPartitions = new SeekableStreamEndSequenceNumbers<>(
         topic,
-        ImmutableMap.of(0, 2L, 1, 0L)
+        ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L, new KafkaTopicPartition(false, topic, 1), 0L)
     );
     final KafkaIndexTask task = createTask(
         null,
@@ -889,6 +895,8 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -898,16 +906,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     while (task.getRunner().getStatus() != Status.PAUSED) {
       Thread.sleep(10);
     }
-    final Map<Integer, Long> currentOffsets = ImmutableMap.copyOf(task.getRunner().getCurrentOffsets());
-    Assert.assertEquals(checkpoint.getPartitionSequenceNumberMap(), currentOffsets);
+    final Map<KafkaTopicPartition, Long> currentOffsets = ImmutableMap.copyOf(task.getRunner().getCurrentOffsets());
+    Assertions.assertEquals(checkpoint.getPartitionSequenceNumberMap(), currentOffsets);
     task.getRunner().setEndOffsets(currentOffsets, false);
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
 
-    Assert.assertEquals(1, checkpointRequestsHash.size());
-    Assert.assertTrue(
+    Assertions.assertEquals(1, checkpointRequestsHash.size());
+    Assertions.assertTrue(
         checkpointRequestsHash.contains(
             Objects.hash(
-                NEW_DATA_SCHEMA.getDataSource(),
+                DATA_SCHEMA.getDataSource(),
                 0,
                 new KafkaDataSourceMetadata(startPartitions)
             )
@@ -924,15 +932,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         new KafkaDataSourceMetadata(
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 2L, 1, 0L))
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L, new KafkaTopicPartition(false, topic, 1), 0L))
         ),
         newDataSchemaMetadata()
     );
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testCheckpointResetWithSameEndOffsets() throws Exception
   {
     final String baseSequenceName = "sequence0";
@@ -945,14 +954,14 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     Map<String, Object> consumerProps = kafkaServer.consumerProperties();
     consumerProps.put("max.poll.records", "1");
 
-    final SeekableStreamStartSequenceNumbers<Integer, Long> startPartitions = new SeekableStreamStartSequenceNumbers<>(
+    final SeekableStreamStartSequenceNumbers<KafkaTopicPartition, Long> startPartitions = new SeekableStreamStartSequenceNumbers<>(
         topic,
-        ImmutableMap.of(0, 0L, 1, 0L),
+        ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L, new KafkaTopicPartition(false, topic, 1), 0L),
         ImmutableSet.of()
     );
-    final SeekableStreamEndSequenceNumbers<Integer, Long> endPartitions = new SeekableStreamEndSequenceNumbers<>(
+    final SeekableStreamEndSequenceNumbers<KafkaTopicPartition, Long> endPartitions = new SeekableStreamEndSequenceNumbers<>(
         topic,
-        ImmutableMap.of(0, 2L, 1, 0L)
+        ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L, new KafkaTopicPartition(false, topic, 1), 0L)
     );
     final KafkaIndexTask task = createTask(
         null,
@@ -967,6 +976,8 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -977,24 +988,25 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
       Thread.sleep(10);
     }
     long currentNextCheckpointTime = task.getRunner().getNextCheckpointTime();
-    final Map<Integer, Long> nextEndOffsets = task.getRunner().getLastSequenceMetadata().getStartOffsets();
+    final Map<KafkaTopicPartition, Long> nextEndOffsets = task.getRunner().getLastSequenceMetadata().getStartOffsets();
     task.getRunner().setEndOffsets(nextEndOffsets, false);
     long newNextCheckpointTime = task.getRunner().getNextCheckpointTime();
-    Assert.assertTrue(
+    Assertions.assertTrue(
+        newNextCheckpointTime > currentNextCheckpointTime,
         StringUtils.format(
             "Old checkpoint time: [%d], new checkpoint time: [%d]",
             currentNextCheckpointTime,
-            newNextCheckpointTime),
-        newNextCheckpointTime > currentNextCheckpointTime);
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+            newNextCheckpointTime));
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
   }
 
   DataSourceMetadata newDataSchemaMetadata()
   {
-    return metadataStorageCoordinator.retrieveDataSourceMetadata(NEW_DATA_SCHEMA.getDataSource());
+    return metadataStorageCoordinator.retrieveDataSourceMetadata(DATA_SCHEMA.getDataSource());
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testIncrementalHandOffReadsThroughEndOffsets() throws Exception
   {
     records = generateSinglePartitionRecords(topic);
@@ -1008,14 +1020,14 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     Map<String, Object> consumerProps = kafkaServer.consumerProperties();
     consumerProps.put("max.poll.records", "1");
 
-    final SeekableStreamStartSequenceNumbers<Integer, Long> startPartitions =
-        new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 0L), ImmutableSet.of());
-    final SeekableStreamEndSequenceNumbers<Integer, Long> checkpoint1 =
-        new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L));
-    final SeekableStreamEndSequenceNumbers<Integer, Long> checkpoint2 =
-        new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 9L));
-    final SeekableStreamEndSequenceNumbers<Integer, Long> endPartitions =
-        new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, Long.MAX_VALUE));
+    final SeekableStreamStartSequenceNumbers<KafkaTopicPartition, Long> startPartitions =
+        new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L), ImmutableSet.of());
+    final SeekableStreamEndSequenceNumbers<KafkaTopicPartition, Long> checkpoint1 =
+        new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L));
+    final SeekableStreamEndSequenceNumbers<KafkaTopicPartition, Long> checkpoint2 =
+        new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 9L));
+    final SeekableStreamEndSequenceNumbers<KafkaTopicPartition, Long> endPartitions =
+        new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), Long.MAX_VALUE));
 
     final KafkaIndexTask normalReplica = createTask(
         null,
@@ -1030,6 +1042,8 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1046,18 +1060,21 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
 
     final ListenableFuture<TaskStatus> normalReplicaFuture = runTask(normalReplica);
     // Simulating one replica is slower than the other
-    final ListenableFuture<TaskStatus> staleReplicaFuture = Futures.transform(
+    final ListenableFuture<TaskStatus> staleReplicaFuture = Futures.transformAsync(
         taskExec.submit(() -> {
           Thread.sleep(1000);
           return staleReplica;
         }),
-        (AsyncFunction<Task, TaskStatus>) this::runTask
+        (AsyncFunction<Task, TaskStatus>) this::runTask,
+        MoreExecutors.directExecutor()
     );
 
     while (normalReplica.getRunner().getStatus() != Status.PAUSED) {
@@ -1067,8 +1084,8 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     while (staleReplica.getRunner().getStatus() != Status.PAUSED) {
       Thread.sleep(10);
     }
-    Map<Integer, Long> currentOffsets = ImmutableMap.copyOf(normalReplica.getRunner().getCurrentOffsets());
-    Assert.assertEquals(checkpoint1.getPartitionSequenceNumberMap(), currentOffsets);
+    Map<KafkaTopicPartition, Long> currentOffsets = ImmutableMap.copyOf(normalReplica.getRunner().getCurrentOffsets());
+    Assertions.assertEquals(checkpoint1.getPartitionSequenceNumberMap(), currentOffsets);
 
     normalReplica.getRunner().setEndOffsets(currentOffsets, false);
     staleReplica.getRunner().setEndOffsets(currentOffsets, false);
@@ -1080,22 +1097,23 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
       Thread.sleep(10);
     }
     currentOffsets = ImmutableMap.copyOf(normalReplica.getRunner().getCurrentOffsets());
-    Assert.assertEquals(checkpoint2.getPartitionSequenceNumberMap(), currentOffsets);
+    Assertions.assertEquals(checkpoint2.getPartitionSequenceNumberMap(), currentOffsets);
     currentOffsets = ImmutableMap.copyOf(staleReplica.getRunner().getCurrentOffsets());
-    Assert.assertEquals(checkpoint2.getPartitionSequenceNumberMap(), currentOffsets);
+    Assertions.assertEquals(checkpoint2.getPartitionSequenceNumberMap(), currentOffsets);
 
     normalReplica.getRunner().setEndOffsets(currentOffsets, true);
     staleReplica.getRunner().setEndOffsets(currentOffsets, true);
 
-    Assert.assertEquals(TaskState.SUCCESS, normalReplicaFuture.get().getStatusCode());
-    Assert.assertEquals(TaskState.SUCCESS, staleReplicaFuture.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, normalReplicaFuture.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, staleReplicaFuture.get().getStatusCode());
 
     long totalBytes = getTotalSizeOfRecords(0, 9);
     verifyTaskMetrics(normalReplica, RowMeters.with().bytes(totalBytes).totalProcessed(9));
     verifyTaskMetrics(staleReplica, RowMeters.with().bytes(totalBytes).totalProcessed(9));
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunWithMinimumMessageTime() throws Exception
   {
     final KafkaIndexTask task = createTask(
@@ -1103,14 +1121,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 0L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             DateTimes.of("2010"),
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1126,8 +1146,8 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     insertData();
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
-    verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(0, 5)).thrownAway(2).totalProcessed(3));
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(0, 5)).thrownAwayByReason(InputRowFilterResult.BEFORE_MIN_MESSAGE_TIME, 2).totalProcessed(3));
 
     // Check published metadata and segments in deep storage
     assertEqualsExceptVersion(
@@ -1137,13 +1157,14 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
-    Assert.assertEquals(
-        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L))),
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L))),
         newDataSchemaMetadata()
     );
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunWithMaximumMessageTime() throws Exception
   {
     final KafkaIndexTask task = createTask(
@@ -1151,14 +1172,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 0L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             DateTimes.of("2010"),
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1174,8 +1197,8 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     insertData();
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
-    verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(0, 5)).thrownAway(2).totalProcessed(3));
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(0, 5)).thrownAwayByReason(InputRowFilterResult.AFTER_MAX_MESSAGE_TIME, 2).totalProcessed(3));
 
     // Check published metadata and segments in deep storage
     assertEqualsExceptVersion(
@@ -1186,18 +1209,19 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
-    Assert.assertEquals(
-        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L))),
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L))),
         newDataSchemaMetadata()
     );
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunWithTransformSpec() throws Exception
   {
     final KafkaIndexTask task = createTask(
         null,
-        NEW_DATA_SCHEMA.withTransformSpec(
+        DATA_SCHEMA.withTransformSpec(
             new TransformSpec(
                 new SelectorDimFilter("dim1", "b", null),
                 ImmutableList.of(
@@ -1208,14 +1232,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 0L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1231,23 +1257,24 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     insertData();
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
-    verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(0, 5)).thrownAway(4).totalProcessed(1));
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(0, 5)).thrownAwayByReason(InputRowFilterResult.CUSTOM_FILTER, 4).totalProcessed(1));
 
     // Check published metadata
     final List<SegmentDescriptor> publishedDescriptors = publishedDescriptors();
     assertEqualsExceptVersion(ImmutableList.of(sdd("2009/P1D", 0)), publishedDescriptors);
-    Assert.assertEquals(
-        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L))),
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L))),
         newDataSchemaMetadata()
     );
 
     // Check segments in deep storage
-    Assert.assertEquals(ImmutableList.of("b"), readSegmentColumn("dim1", publishedDescriptors.get(0)));
-    Assert.assertEquals(ImmutableList.of("bb"), readSegmentColumn("dim1t", publishedDescriptors.get(0)));
+    Assertions.assertEquals(ImmutableList.of("b"), readSegmentColumn("dim1", publishedDescriptors.get(0)));
+    Assertions.assertEquals(ImmutableList.of("bb"), readSegmentColumn("dim1t", publishedDescriptors.get(0)));
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testKafkaRecordEntityInputFormat() throws Exception
   {
     // Insert data
@@ -1255,43 +1282,43 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
 
     final KafkaIndexTask task = createTask(
         null,
-        new DataSchema(
-            "test_ds",
-            new TimestampSpec("timestamp", "iso", null),
-            new DimensionsSpec(
-                Arrays.asList(
-                    new StringDimensionSchema("dim1"),
-                    new StringDimensionSchema("dim1t"),
-                    new StringDimensionSchema("dim2"),
-                    new LongDimensionSchema("dimLong"),
-                    new FloatDimensionSchema("dimFloat"),
-                    new StringDimensionSchema("kafka.topic"),
-                    new LongDimensionSchema("kafka.offset"),
-                    new StringDimensionSchema("kafka.header.encoding")
-                )
-            ),
-            new AggregatorFactory[]{
-                new DoubleSumAggregatorFactory("met1sum", "met1"),
-                new CountAggregatorFactory("rows")
-            },
-            new UniformGranularitySpec(Granularities.DAY, Granularities.NONE, null),
-            null
-        ),
+        DataSchema.builder()
+                  .withDataSource("test_ds")
+                  .withTimestamp(new TimestampSpec("timestamp", "iso", null))
+                  .withDimensions(
+                      new StringDimensionSchema("dim1"),
+                      new StringDimensionSchema("dim1t"),
+                      new StringDimensionSchema("dim2"),
+                      new LongDimensionSchema("dimLong"),
+                      new FloatDimensionSchema("dimFloat"),
+                      new StringDimensionSchema("kafka.topic"),
+                      new LongDimensionSchema("kafka.offset"),
+                      new StringDimensionSchema("kafka.header.encoding")
+                  )
+                  .withAggregators(
+                      new DoubleSumAggregatorFactory("met1sum", "met1"),
+                      new CountAggregatorFactory("rows")
+                  )
+                  .withGranularity(
+                      new UniformGranularitySpec(Granularities.DAY, Granularities.NONE, null)
+                  )
+                  .build(),
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 0L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             new TestKafkaInputFormat(INPUT_FORMAT),
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
-    Assert.assertTrue(task.supportsQueries());
 
     final ListenableFuture<TaskStatus> future = runTask(task);
 
@@ -1299,30 +1326,31 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
       Thread.sleep(25);
     }
 
-    Assert.assertEquals(Status.READING, task.getRunner().getStatus());
+    Assertions.assertEquals(Status.READING, task.getRunner().getStatus());
 
     final QuerySegmentSpec interval = OBJECT_MAPPER.readValue(
         "\"2008/2012\"", QuerySegmentSpec.class
     );
     List<Map<String, Object>> scanResultValues = scanData(task, interval);
     //verify that there are no records indexed in the rollbacked time period
-    Assert.assertEquals(3, Iterables.size(scanResultValues));
+    Assertions.assertEquals(3, Iterables.size(scanResultValues));
 
     int i = 0;
     for (Map<String, Object> event : scanResultValues) {
-      Assert.assertEquals((long) i++, event.get("kafka.offset"));
-      Assert.assertEquals(topic, event.get("kafka.topic"));
-      Assert.assertEquals("application/json", event.get("kafka.header.encoding"));
+      Assertions.assertEquals((long) i++, event.get("kafka.offset"));
+      Assertions.assertEquals(topic, event.get("kafka.topic"));
+      Assertions.assertEquals("application/json", event.get("kafka.header.encoding"));
     }
     // insert remaining data
     insertData(Iterables.skip(records, 3));
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
     verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(0, 4)).totalProcessed(4));
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testKafkaInputFormat() throws Exception
   {
     // Insert data
@@ -1330,41 +1358,41 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
 
     final KafkaIndexTask task = createTask(
         null,
-        new DataSchema(
-            "test_ds",
-            new TimestampSpec("timestamp", "iso", null),
-            new DimensionsSpec(
-                Arrays.asList(
-                    new StringDimensionSchema("dim1"),
-                    new StringDimensionSchema("dim1t"),
-                    new StringDimensionSchema("dim2"),
-                    new LongDimensionSchema("dimLong"),
-                    new FloatDimensionSchema("dimFloat"),
-                    new StringDimensionSchema("kafka.testheader.encoding")
-                )
-            ),
-            new AggregatorFactory[]{
-                new DoubleSumAggregatorFactory("met1sum", "met1"),
-                new CountAggregatorFactory("rows")
-            },
-            new UniformGranularitySpec(Granularities.DAY, Granularities.NONE, null),
-            null
-        ),
+        DataSchema.builder()
+                  .withDataSource("test_ds")
+                  .withTimestamp(new TimestampSpec("timestamp", "iso", null))
+                  .withDimensions(
+                      new StringDimensionSchema("dim1"),
+                      new StringDimensionSchema("dim1t"),
+                      new StringDimensionSchema("dim2"),
+                      new LongDimensionSchema("dimLong"),
+                      new FloatDimensionSchema("dimFloat"),
+                      new StringDimensionSchema("kafka.testheader.encoding")
+                  )
+                  .withAggregators(
+                      new DoubleSumAggregatorFactory("met1sum", "met1"),
+                      new CountAggregatorFactory("rows")
+                  )
+                  .withGranularity(
+                      new UniformGranularitySpec(Granularities.DAY, Granularities.NONE, null)
+                  )
+                  .build(),
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 0L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             KAFKA_INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
-    Assert.assertTrue(task.supportsQueries());
 
     final ListenableFuture<TaskStatus> future = runTask(task);
 
@@ -1372,28 +1400,29 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
       Thread.sleep(25);
     }
 
-    Assert.assertEquals(Status.READING, task.getRunner().getStatus());
+    Assertions.assertEquals(Status.READING, task.getRunner().getStatus());
 
     final QuerySegmentSpec interval = OBJECT_MAPPER.readValue(
         "\"2008/2012\"", QuerySegmentSpec.class
     );
     List<Map<String, Object>> scanResultValues = scanData(task, interval);
-    Assert.assertEquals(3, Iterables.size(scanResultValues));
+    Assertions.assertEquals(3, Iterables.size(scanResultValues));
 
     for (Map<String, Object> event : scanResultValues) {
-      Assert.assertEquals("application/json", event.get("kafka.testheader.encoding"));
-      Assert.assertEquals("y", event.get("dim2"));
+      Assertions.assertEquals("application/json", event.get("kafka.testheader.encoding"));
+      Assertions.assertEquals("y", event.get("dim2"));
     }
 
     // insert remaining data
     insertData(Iterables.skip(records, 3));
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
     verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(0, 4)).totalProcessed(4));
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunOnNothing() throws Exception
   {
     // Insert data
@@ -1404,14 +1433,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 2L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1419,14 +1450,15 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     final ListenableFuture<TaskStatus> future = runTask(task);
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
     verifyTaskMetrics(task, RowMeters.with().totalProcessed(0));
 
     // Check published metadata
-    Assert.assertEquals(ImmutableList.of(), publishedDescriptors());
+    Assertions.assertEquals(ImmutableList.of(), publishedDescriptors());
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testHandoffConditionTimeoutWhenHandoffOccurs() throws Exception
   {
     handoffConditionTimeout = 5_000;
@@ -1439,14 +1471,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1454,7 +1488,7 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     final ListenableFuture<TaskStatus> future = runTask(task);
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
     verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(2, 5)).totalProcessed(3));
 
     // Check published metadata and segments in deep storage
@@ -1465,13 +1499,14 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
-    Assert.assertEquals(
-        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L))),
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L))),
         newDataSchemaMetadata()
     );
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testHandoffConditionTimeoutWhenHandoffDoesNotOccur() throws Exception
   {
     doHandoff = false;
@@ -1485,14 +1520,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1500,7 +1537,7 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     final ListenableFuture<TaskStatus> future = runTask(task);
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
     verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(2, 5)).totalProcessed(3));
 
     // Check published metadata and segments in deep storage
@@ -1511,15 +1548,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         new KafkaDataSourceMetadata(
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L))
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L))
         ),
         newDataSchemaMetadata()
     );
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testReportParseExceptions() throws Exception
   {
     reportParseExceptions = true;
@@ -1536,14 +1574,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 7L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 7L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1551,15 +1591,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     final ListenableFuture<TaskStatus> future = runTask(task);
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.FAILED, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.FAILED, future.get().getStatusCode());
     verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(2, 6)).unparseable(1).totalProcessed(3));
 
     // Check published metadata
-    Assert.assertEquals(ImmutableList.of(), publishedDescriptors());
-    Assert.assertNull(newDataSchemaMetadata());
+    Assertions.assertEquals(ImmutableList.of(), publishedDescriptors());
+    Assertions.assertNull(newDataSchemaMetadata());
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testMultipleParseExceptionsSuccess() throws Exception
   {
     reportParseExceptions = false;
@@ -1574,14 +1615,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 13L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 13L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1591,26 +1634,32 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     TaskStatus status = future.get();
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, status.getStatusCode());
-    Assert.assertNull(status.getErrorMsg());
+    Assertions.assertEquals(TaskState.SUCCESS, status.getStatusCode());
+    Assertions.assertNull(status.getErrorMsg());
     final long totalRecordBytes = getTotalSizeOfRecords(2, 13);
     verifyTaskMetrics(task, RowMeters.with()
                                      .bytes(totalRecordBytes)
                                      .unparseable(3).errors(3)
-                                     .thrownAway(1).totalProcessed(4));
+                                     .thrownAwayByReason(InputRowFilterResult.NULL_OR_EMPTY_RECORD, 1).totalProcessed(4));
 
     // Check published metadata
     assertEqualsExceptVersion(
         ImmutableList.of(sdd("2010/P1D", 0), sdd("2011/P1D", 0), sdd("2013/P1D", 0), sdd("2049/P1D", 0)),
         publishedDescriptors()
     );
-    Assert.assertEquals(
-        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 13L))),
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 13L))),
         newDataSchemaMetadata()
     );
 
-    IngestionStatsAndErrorsTaskReportData reportData = getTaskReportData();
+    IngestionStatsAndErrors reportData = getTaskReportData();
 
+    // Verify ingestion state and error message
+    Assertions.assertEquals(IngestionState.COMPLETED, reportData.getIngestionState());
+    Assertions.assertNull(reportData.getErrorMsg());
+
+    // Jackson will serde numerics ≤ 32bits as Integers, rather than Longs
+    Map<String, Integer> expectedThrownAwayByReason = Map.of(InputRowFilterResult.NULL_OR_EMPTY_RECORD.getReason(), 1);
     Map<String, Object> expectedMetrics = ImmutableMap.of(
         RowIngestionMeters.BUILD_SEGMENTS,
         ImmutableMap.of(
@@ -1618,23 +1667,25 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
             RowIngestionMeters.PROCESSED_BYTES, (int) totalRecordBytes,
             RowIngestionMeters.PROCESSED_WITH_ERROR, 3,
             RowIngestionMeters.UNPARSEABLE, 3,
-            RowIngestionMeters.THROWN_AWAY, 1
+            RowIngestionMeters.THROWN_AWAY, 1,
+            RowIngestionMeters.THROWN_AWAY_BY_REASON, expectedThrownAwayByReason,
+            RowIngestionMeters.FILTERED, 0
         )
     );
-    Assert.assertEquals(expectedMetrics, reportData.getRowStats());
+    Assertions.assertEquals(expectedMetrics, reportData.getRowStats());
 
     ParseExceptionReport parseExceptionReport =
         ParseExceptionReport.forPhase(reportData, RowIngestionMeters.BUILD_SEGMENTS);
 
     List<String> expectedMessages = Arrays.asList(
         "Unable to parse value[notanumber] for field[met1]",
-        "could not convert value [notanumber] to float",
-        "could not convert value [notanumber] to long",
+        "Could not convert value [notanumber] to float for dimension [dimFloat].",
+        "Could not convert value [notanumber] to long for dimension [dimLong].",
         "Unable to parse [] as the intermediateRow resulted in empty input row (Record: 1)",
         "Unable to parse row [unparseable] (Record: 1)",
         "Encountered row with timestamp[246140482-04-24T15:36:27.903Z] that cannot be represented as a long: [{timestamp=246140482-04-24T15:36:27.903Z, dim1=x, dim2=z, dimLong=10, dimFloat=20.0, met1=1.0}] (Record: 1)"
     );
-    Assert.assertEquals(expectedMessages, parseExceptionReport.getErrorMessages());
+    Assertions.assertEquals(expectedMessages, parseExceptionReport.getErrorMessages());
 
     List<String> expectedInputs = Arrays.asList(
         "{timestamp=2049, dim1=f, dim2=y, dimLong=10, dimFloat=20.0, met1=notanumber}",
@@ -1644,10 +1695,19 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         "unparseable",
         "{timestamp=246140482-04-24T15:36:27.903Z, dim1=x, dim2=z, dimLong=10, dimFloat=20.0, met1=1.0}"
     );
-    Assert.assertEquals(expectedInputs, parseExceptionReport.getInputs());
+    Assertions.assertEquals(expectedInputs, parseExceptionReport.getInputs());
+
+    emitter.verifyValue("ingest/segments/count", 4);
+
+    final SegmentGenerationMetrics observedSegmentGenerationMetrics = task.getRunner().getSegmentGenerationMetrics();
+    Assertions.assertTrue(observedSegmentGenerationMetrics.isProcessingDone());
+    Assertions.assertEquals(7, observedSegmentGenerationMetrics.rowOutput());
+    Assertions.assertEquals(4, observedSegmentGenerationMetrics.handOffCount());
+    verifyPersistAndMergeTimeMetricsArePositive(observedSegmentGenerationMetrics);
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testMultipleParseExceptionsFailure() throws Exception
   {
     reportParseExceptions = false;
@@ -1662,14 +1722,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 10L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 10L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1679,18 +1741,24 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     TaskStatus status = future.get();
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.FAILED, status.getStatusCode());
+    Assertions.assertEquals(TaskState.FAILED, status.getStatusCode());
     IndexTaskTest.checkTaskStatusErrorMsgForParseExceptionsExceeded(status);
 
     final long totalBytes = getTotalSizeOfRecords(2, 8);
     verifyTaskMetrics(task, RowMeters.with().bytes(totalBytes).unparseable(3).totalProcessed(3));
 
     // Check published metadata
-    Assert.assertEquals(ImmutableList.of(), publishedDescriptors());
-    Assert.assertNull(newDataSchemaMetadata());
+    Assertions.assertEquals(ImmutableList.of(), publishedDescriptors());
+    Assertions.assertNull(newDataSchemaMetadata());
 
-    IngestionStatsAndErrorsTaskReportData reportData = getTaskReportData();
+    IngestionStatsAndErrors reportData = getTaskReportData();
 
+    // Verify ingestion state and error message
+    Assertions.assertEquals(IngestionState.BUILD_SEGMENTS, reportData.getIngestionState());
+    Assertions.assertNotNull(reportData.getErrorMsg());
+
+    // Jackson will serde numerics ≤ 32bits as Integers, rather than Longs
+    Map<String, Integer> expectedThrownAwayByReason = Map.of();
     Map<String, Object> expectedMetrics = ImmutableMap.of(
         RowIngestionMeters.BUILD_SEGMENTS,
         ImmutableMap.of(
@@ -1698,10 +1766,12 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
             RowIngestionMeters.PROCESSED_BYTES, (int) totalBytes,
             RowIngestionMeters.PROCESSED_WITH_ERROR, 0,
             RowIngestionMeters.UNPARSEABLE, 3,
-            RowIngestionMeters.THROWN_AWAY, 0
+            RowIngestionMeters.THROWN_AWAY, 0,
+            RowIngestionMeters.THROWN_AWAY_BY_REASON, expectedThrownAwayByReason,
+            RowIngestionMeters.FILTERED, 0
         )
     );
-    Assert.assertEquals(expectedMetrics, reportData.getRowStats());
+    Assertions.assertEquals(expectedMetrics, reportData.getRowStats());
 
     ParseExceptionReport parseExceptionReport =
         ParseExceptionReport.forPhase(reportData, RowIngestionMeters.BUILD_SEGMENTS);
@@ -1710,13 +1780,22 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         "Unable to parse [] as the intermediateRow resulted in empty input row (Record: 1)",
         "Unable to parse row [unparseable] (Record: 1)"
     );
-    Assert.assertEquals(expectedMessages, parseExceptionReport.getErrorMessages());
+    Assertions.assertEquals(expectedMessages, parseExceptionReport.getErrorMessages());
 
     List<String> expectedInputs = Arrays.asList("", "unparseable");
-    Assert.assertEquals(expectedInputs, parseExceptionReport.getInputs());
+    Assertions.assertEquals(expectedInputs, parseExceptionReport.getInputs());
+
+    emitter.verifyNotEmitted("ingest/segments/count");
+
+    final SegmentGenerationMetrics observedSegmentGenerationMetrics = task.getRunner().getSegmentGenerationMetrics();
+    Assertions.assertTrue(observedSegmentGenerationMetrics.isProcessingDone());
+    Assertions.assertEquals(0, observedSegmentGenerationMetrics.rowOutput());
+    Assertions.assertEquals(0, observedSegmentGenerationMetrics.numPersists());
+    Assertions.assertEquals(0, observedSegmentGenerationMetrics.handOffCount());
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunReplicas() throws Exception
   {
     final KafkaIndexTask task1 = createTask(
@@ -1724,14 +1803,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1740,14 +1821,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1759,8 +1842,8 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     insertData();
 
     // Wait for tasks to exit
-    Assert.assertEquals(TaskState.SUCCESS, future1.get().getStatusCode());
-    Assert.assertEquals(TaskState.SUCCESS, future2.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future1.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future2.get().getStatusCode());
 
     final long totalBytes = getTotalSizeOfRecords(2, 5);
     verifyTaskMetrics(task1, RowMeters.with().bytes(totalBytes).totalProcessed(3));
@@ -1774,13 +1857,14 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
-    Assert.assertEquals(
-        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L))),
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L))),
         newDataSchemaMetadata()
     );
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunConflicting() throws Exception
   {
     final KafkaIndexTask task1 = createTask(
@@ -1788,14 +1872,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1804,14 +1890,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             1,
             "sequence1",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 3L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 10L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 3L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 10L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1821,15 +1909,15 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
 
     // Run first task
     final ListenableFuture<TaskStatus> future1 = runTask(task1);
-    Assert.assertEquals(TaskState.SUCCESS, future1.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future1.get().getStatusCode());
 
     // Run second task
     final ListenableFuture<TaskStatus> future2 = runTask(task2);
-    Assert.assertEquals(TaskState.FAILED, future2.get().getStatusCode());
+    Assertions.assertEquals(TaskState.FAILED, future2.get().getStatusCode());
 
     verifyTaskMetrics(task1, RowMeters.with().bytes(getTotalSizeOfRecords(2, 5)).totalProcessed(3));
     verifyTaskMetrics(task2, RowMeters.with().bytes(getTotalSizeOfRecords(3, 10))
-                                      .unparseable(3).thrownAway(1).totalProcessed(3));
+                                      .unparseable(3).thrownAwayByReason(InputRowFilterResult.NULL_OR_EMPTY_RECORD, 1).totalProcessed(3));
 
     // Check published segments & metadata, should all be from the first task
     final List<SegmentDescriptor> publishedDescriptors = publishedDescriptors();
@@ -1840,13 +1928,14 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors
     );
-    Assert.assertEquals(
-        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L))),
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L))),
         newDataSchemaMetadata()
     );
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunConflictingWithoutTransactions() throws Exception
   {
     final KafkaIndexTask task1 = createTask(
@@ -1854,14 +1943,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             false,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1870,14 +1961,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             1,
             "sequence1",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 3L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 10L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 3L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 10L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             false,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1887,30 +1980,31 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
 
     // Run first task
     final ListenableFuture<TaskStatus> future1 = runTask(task1);
-    Assert.assertEquals(TaskState.SUCCESS, future1.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future1.get().getStatusCode());
 
     // Check published segments & metadata
     SegmentDescriptorAndExpectedDim1Values desc1 = sdd("2010/P1D", 0, ImmutableList.of("c"));
     SegmentDescriptorAndExpectedDim1Values desc2 = sdd("2011/P1D", 0, ImmutableList.of("d", "e"));
     assertEqualsExceptVersion(ImmutableList.of(desc1, desc2), publishedDescriptors());
-    Assert.assertNull(newDataSchemaMetadata());
+    Assertions.assertNull(newDataSchemaMetadata());
 
     // Run second task
     final ListenableFuture<TaskStatus> future2 = runTask(task2);
-    Assert.assertEquals(TaskState.SUCCESS, future2.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future2.get().getStatusCode());
 
     verifyTaskMetrics(task1, RowMeters.with().bytes(getTotalSizeOfRecords(2, 5)).totalProcessed(3));
     verifyTaskMetrics(task2, RowMeters.with().bytes(getTotalSizeOfRecords(3, 10))
-                                      .unparseable(3).thrownAway(1).totalProcessed(3));
+                                      .unparseable(3).thrownAwayByReason(InputRowFilterResult.NULL_OR_EMPTY_RECORD, 1).totalProcessed(3));
 
     // Check published segments & metadata
     SegmentDescriptorAndExpectedDim1Values desc3 = sdd("2011/P1D", 1, ImmutableList.of("d", "e"));
     SegmentDescriptorAndExpectedDim1Values desc4 = sdd("2013/P1D", 0, ImmutableList.of("f"));
     assertEqualsExceptVersion(ImmutableList.of(desc1, desc2, desc3, desc4), publishedDescriptors());
-    Assert.assertNull(newDataSchemaMetadata());
+    Assertions.assertNull(newDataSchemaMetadata());
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunOneTaskTwoPartitions() throws Exception
   {
     final KafkaIndexTask task = createTask(
@@ -1918,14 +2012,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L, 1, 0L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L, 1, 2L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L, new KafkaTopicPartition(false, topic, 1), 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L, new KafkaTopicPartition(false, topic, 1), 2L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1936,7 +2032,7 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     insertData();
 
     // Wait for tasks to exit
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
     long totalBytes = getTotalSizeOfRecords(2, 5) + getTotalSizeOfRecords(13, 15);
     verifyTaskMetrics(task, RowMeters.with().bytes(totalBytes).totalProcessed(5));
 
@@ -1948,15 +2044,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     SegmentDescriptor desc3 = sd("2011/P1D", 1);
     SegmentDescriptorAndExpectedDim1Values desc4 = sdd("2012/P1D", 0, ImmutableList.of("g"));
     assertEqualsExceptVersion(ImmutableList.of(desc1, desc2, desc4), publishedDescriptors());
-    Assert.assertEquals(
+    Assertions.assertEquals(
         new KafkaDataSourceMetadata(
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L, 1, 2L))
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L, new KafkaTopicPartition(false, topic, 1), 2L))
         ),
         newDataSchemaMetadata()
     );
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunTwoTasksTwoPartitions() throws Exception
   {
     final KafkaIndexTask task1 = createTask(
@@ -1964,14 +2061,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1980,14 +2079,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             1,
             "sequence1",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(1, 0L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(1, 1L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 1), 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 1), 1L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -1999,8 +2100,8 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     insertData();
 
     // Wait for tasks to exit
-    Assert.assertEquals(TaskState.SUCCESS, future1.get().getStatusCode());
-    Assert.assertEquals(TaskState.SUCCESS, future2.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future1.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future2.get().getStatusCode());
 
     verifyTaskMetrics(task1, RowMeters.with().bytes(getTotalSizeOfRecords(2, 5)).totalProcessed(3));
     verifyTaskMetrics(task2, RowMeters.with().bytes(getTotalSizeOfRecords(13, 14)).totalProcessed(1));
@@ -2014,15 +2115,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         new KafkaDataSourceMetadata(
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L, 1, 1L))
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L, new KafkaTopicPartition(false, topic, 1), 1L))
         ),
         newDataSchemaMetadata()
     );
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRestore() throws Exception
   {
     final KafkaIndexTask task1 = createTask(
@@ -2030,14 +2132,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 6L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 6L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -2050,13 +2154,13 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     while (countEvents(task1) != 2) {
       Thread.sleep(25);
     }
-    Assert.assertEquals(2, countEvents(task1));
+    Assertions.assertEquals(2, countEvents(task1));
 
     // Stop without publishing segment
     task1.stopGracefully(toolboxFactory.build(task1).getConfig());
     unlockAppenderatorBasePersistDirForTask(task1);
 
-    Assert.assertEquals(TaskState.SUCCESS, future1.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future1.get().getStatusCode());
 
     // Start a new task
     final KafkaIndexTask task2 = createTask(
@@ -2064,14 +2168,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 6L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 6L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -2082,7 +2188,7 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     insertData(Iterables.skip(records, 4));
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future2.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future2.get().getStatusCode());
 
     verifyTaskMetrics(task1, RowMeters.with().bytes(getTotalSizeOfRecords(2, 4)).totalProcessed(2));
     verifyTaskMetrics(task2, RowMeters.with().bytes(getTotalSizeOfRecords(4, 5)).totalProcessed(1));
@@ -2095,13 +2201,14 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
-    Assert.assertEquals(
-        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 6L))),
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 6L))),
         newDataSchemaMetadata()
     );
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRestoreAfterPersistingSequences() throws Exception
   {
     records = generateSinglePartitionRecords(topic);
@@ -2114,22 +2221,24 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 0L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 10L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 10L)),
             consumerProps,
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
 
-    final SeekableStreamStartSequenceNumbers<Integer, Long> checkpoint = new SeekableStreamStartSequenceNumbers<>(
+    final SeekableStreamStartSequenceNumbers<KafkaTopicPartition, Long> checkpoint = new SeekableStreamStartSequenceNumbers<>(
         topic,
-        ImmutableMap.of(0, 5L),
-        ImmutableSet.of(0)
+        ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L),
+        ImmutableSet.of(new KafkaTopicPartition(false, topic, 0))
     );
 
     final ListenableFuture<TaskStatus> future1 = runTask(task1);
@@ -2140,16 +2249,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     while (task1.getRunner().getStatus() != Status.PAUSED) {
       Thread.sleep(10);
     }
-    final Map<Integer, Long> currentOffsets = ImmutableMap.copyOf(task1.getRunner().getCurrentOffsets());
-    Assert.assertEquals(checkpoint.getPartitionSequenceNumberMap(), currentOffsets);
+    final Map<KafkaTopicPartition, Long> currentOffsets = ImmutableMap.copyOf(task1.getRunner().getCurrentOffsets());
+    Assertions.assertEquals(checkpoint.getPartitionSequenceNumberMap(), currentOffsets);
     // Set endOffsets to persist sequences
-    task1.getRunner().setEndOffsets(ImmutableMap.of(0, 5L), false);
+    task1.getRunner().setEndOffsets(ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L), false);
 
     // Stop without publishing segment
     task1.stopGracefully(toolboxFactory.build(task1).getConfig());
     unlockAppenderatorBasePersistDirForTask(task1);
 
-    Assert.assertEquals(TaskState.SUCCESS, future1.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future1.get().getStatusCode());
 
     // Start a new task
     final KafkaIndexTask task2 = createTask(
@@ -2157,14 +2266,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 0L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 10L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 10L)),
             consumerProps,
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -2176,7 +2287,7 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     insertData(Iterables.skip(records, 5));
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future2.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future2.get().getStatusCode());
 
     verifyTaskMetrics(task1, RowMeters.with().bytes(getTotalSizeOfRecords(0, 5)).totalProcessed(5));
     verifyTaskMetrics(task2, RowMeters.with().bytes(getTotalSizeOfRecords(6, 10)).totalProcessed(4));
@@ -2194,13 +2305,14 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
-    Assert.assertEquals(
-        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 10L))),
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 10L))),
         newDataSchemaMetadata()
     );
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunWithPauseAndResume() throws Exception
   {
     final KafkaIndexTask task = createTask(
@@ -2208,17 +2320,21 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 6L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 6L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
+
+    Assertions.assertEquals(Status.NOT_STARTED.toString(), task.getCurrentRunnerStatus());
 
     final ListenableFuture<TaskStatus> future = runTask(task);
 
@@ -2228,33 +2344,35 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     while (countEvents(task) != 2) {
       Thread.sleep(25);
     }
-    Assert.assertEquals(2, countEvents(task));
-    Assert.assertEquals(Status.READING, task.getRunner().getStatus());
+    Assertions.assertEquals(2, countEvents(task));
+    Assertions.assertEquals(Status.READING, task.getRunner().getStatus());
+    Assertions.assertEquals(Status.READING.toString(), task.getCurrentRunnerStatus());
 
-    Map<Integer, Long> currentOffsets = OBJECT_MAPPER.readValue(
+
+    Map<KafkaTopicPartition, Long> currentOffsets = OBJECT_MAPPER.readValue(
         task.getRunner().pause().getEntity().toString(),
-        new TypeReference<Map<Integer, Long>>()
-        {
-        }
+        new TypeReference<>() {}
     );
-    Assert.assertEquals(Status.PAUSED, task.getRunner().getStatus());
+    Assertions.assertEquals(Status.PAUSED, task.getRunner().getStatus());
+    Assertions.assertEquals(Status.PAUSED.toString(), task.getCurrentRunnerStatus());
     // Insert remaining data
     insertData(Iterables.skip(records, 4));
 
     try {
       future.get(10, TimeUnit.SECONDS);
-      Assert.fail("Task completed when it should have been paused");
+      Assertions.fail("Task completed when it should have been paused");
     }
     catch (TimeoutException e) {
       // carry on..
     }
 
-    Assert.assertEquals(currentOffsets, task.getRunner().getCurrentOffsets());
+    Assertions.assertEquals(currentOffsets, task.getRunner().getCurrentOffsets());
 
     task.getRunner().resume();
 
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
-    Assert.assertEquals(task.getRunner().getEndOffsets(), task.getRunner().getCurrentOffsets());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(task.getRunner().getEndOffsets(), task.getRunner().getCurrentOffsets());
+    Assertions.assertEquals(Status.PUBLISHING.toString(), task.getCurrentRunnerStatus());
     verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(2, 5)).totalProcessed(3));
 
     // Check published metadata and segments in deep storage
@@ -2265,13 +2383,14 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
-    Assert.assertEquals(
-        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 6L))),
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 6L))),
         newDataSchemaMetadata()
     );
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunWithOffsetOutOfRangeExceptionAndPause() throws Exception
   {
     final KafkaIndexTask task = createTask(
@@ -2279,14 +2398,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -2304,7 +2425,8 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     }
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunWithOffsetOutOfRangeExceptionAndNextOffsetGreaterThanLeastAvailable() throws Exception
   {
     resetOffsetAutomatically = true;
@@ -2316,14 +2438,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 200L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 500L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 200L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 500L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -2335,22 +2459,126 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     }
 
     for (int i = 0; i < 5; i++) {
-      Assert.assertEquals(Status.READING, task.getRunner().getStatus());
+      Assertions.assertEquals(Status.READING, task.getRunner().getStatus());
       // Offset should not be reset
-      Assert.assertEquals(200L, (long) task.getRunner().getCurrentOffsets().get(0));
+      Assertions.assertEquals(200L, (long) task.getRunner().getCurrentOffsets().get(new KafkaTopicPartition(false, topic, 0)));
     }
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
+  public void testRunWithOffsetOutOfRangeExceptionBelowEarliestOffsetFailsTask() throws Exception
+  {
+    insertData();
+    // Remove the records the task is going to read, as the retention of the topic would do
+    deleteRecords(0, 5L);
+
+    final KafkaIndexTask task = createTask(
+        null,
+        new KafkaIndexTaskIOConfig(
+            0,
+            "sequence0",
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 10L)),
+            kafkaServer.consumerProperties(),
+            KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
+            true,
+            null,
+            null,
+            INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
+            null
+        )
+    );
+
+    final TaskStatus status = runTask(task).get();
+
+    Assertions.assertEquals(TaskState.FAILED, status.getStatusCode());
+    Assertions.assertTrue(
+        status.getErrorMsg().contains("are no longer available in the stream"),
+        status.getErrorMsg()
+    );
+    Assertions.assertEquals(ImmutableList.of(), publishedDescriptors());
+    Assertions.assertNull(newDataSchemaMetadata());
+
+    final IngestionStatsAndErrors reportData = getTaskReportData();
+    Assertions.assertEquals(IngestionState.COMPLETED, reportData.getIngestionState());
+    Assertions.assertEquals(status.getErrorMsg(), reportData.getErrorMsg());
+  }
+
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
+  public void testRunWithOffsetOutOfRangeExceptionBelowEarliestOffsetPublishesReadData() throws Exception
+  {
+    insertData();
+
+    final KafkaIndexTask task = createTask(
+        null,
+        new KafkaIndexTaskIOConfig(
+            0,
+            "sequence0",
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 100L)),
+            kafkaServer.consumerProperties(),
+            KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
+            true,
+            null,
+            null,
+            INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
+            null
+        )
+    );
+
+    final ListenableFuture<TaskStatus> future = runTask(task);
+
+    final KafkaTopicPartition partition = new KafkaTopicPartition(false, topic, 0);
+    while (!Long.valueOf(13L).equals(task.getRunner().getCurrentOffsets().get(partition))) {
+      Thread.sleep(25);
+    }
+
+    // While the task is paused, write more records and remove all of them, so that the next offset the task reads
+    // is below the earliest available offset when it resumes.
+    task.getRunner().pause();
+    Assertions.assertEquals(Status.PAUSED, task.getRunner().getStatus());
+    // Let the fetch the consumer may have sent before pausing complete, so it does not pick up the records below
+    Thread.sleep(1000);
+    insertData();
+    deleteRecords(0, getLatestOffset(0));
+    task.getRunner().resume();
+
+    final TaskStatus status = future.get();
+
+    Assertions.assertEquals(TaskState.FAILED, status.getStatusCode());
+    Assertions.assertTrue(
+        status.getErrorMsg().contains("are no longer available in the stream"),
+        status.getErrorMsg()
+    );
+
+    // The records read before the offsets became unavailable are published
+    assertEqualsExceptVersion(
+        ImmutableList.of(sdd("2010/P1D", 0), sdd("2011/P1D", 0), sdd("2013/P1D", 0), sdd("2049/P1D", 0)),
+        publishedDescriptors()
+    );
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(partition, 13L))),
+        newDataSchemaMetadata()
+    );
+  }
+
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunContextSequenceAheadOfStartingOffsets() throws Exception
   {
     // Insert data
     insertData();
 
-    final TreeMap<Integer, Map<Integer, Long>> sequences = new TreeMap<>();
+    final TreeMap<Integer, Map<KafkaTopicPartition, Long>> sequences = new TreeMap<>();
     // Here the sequence number is 1 meaning that one incremental handoff was done by the failed task
     // and this task should start reading from offset 2 for partition 0
-    sequences.put(1, ImmutableMap.of(0, 2L));
+    sequences.put(1, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L));
     final Map<String, Object> context = new HashMap<>();
     context.put(
         SeekableStreamSupervisor.CHECKPOINTS_CTX_KEY,
@@ -2363,14 +2591,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
             0,
             "sequence0",
             // task should ignore these and use sequence info sent in the context
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 0L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         ),
         context
@@ -2379,7 +2609,7 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     final ListenableFuture<TaskStatus> future = runTask(task);
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
     verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(2, 5)).totalProcessed(3));
 
     // Check published metadata and segments in deep storage
@@ -2390,13 +2620,14 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
-    Assert.assertEquals(
-        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L))),
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L))),
         newDataSchemaMetadata()
     );
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunWithDuplicateRequest() throws Exception
   {
     // Insert data
@@ -2407,14 +2638,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 200L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 500L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 200L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 500L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -2427,16 +2660,17 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
 
     // first setEndOffsets request
     task.getRunner().pause();
-    task.getRunner().setEndOffsets(ImmutableMap.of(0, 500L), true);
-    Assert.assertEquals(Status.READING, task.getRunner().getStatus());
+    task.getRunner().setEndOffsets(ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 500L), true);
+    Assertions.assertEquals(Status.READING, task.getRunner().getStatus());
 
     // duplicate setEndOffsets request
     task.getRunner().pause();
-    task.getRunner().setEndOffsets(ImmutableMap.of(0, 500L), true);
-    Assert.assertEquals(Status.READING, task.getRunner().getStatus());
+    task.getRunner().setEndOffsets(ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 500L), true);
+    Assertions.assertEquals(Status.READING, task.getRunner().getStatus());
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunTransactionModeRollback() throws Exception
   {
     final KafkaIndexTask task = createTask(
@@ -2444,16 +2678,18 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 0L), ImmutableSet.of()),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L), ImmutableSet.of()),
 
             // End offset is one after 12 real messages + 2 txn control messages (last seen message: offset 13).
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 14L)),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 14L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -2463,14 +2699,14 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     // Insert 2 records initially
     insertData(records.subList(0, 2));
 
-    awaitConsumedOffsets(task, ImmutableMap.of(0, 1L)); // Consume two real messages
-    Assert.assertEquals(2, countEvents(task));
-    Assert.assertEquals(Status.READING, task.getRunner().getStatus());
+    awaitConsumedOffsets(task, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 1L)); // Consume two real messages
+    Assertions.assertEquals(2, countEvents(task));
+    Assertions.assertEquals(Status.READING, task.getRunner().getStatus());
 
     //verify the 2 indexed records
     final QuerySegmentSpec firstInterval = OBJECT_MAPPER.readValue("\"2008/2010\"", QuerySegmentSpec.class);
     Iterable<Map<String, Object>> scanResultValues = scanData(task, firstInterval);
-    Assert.assertEquals(2, Iterables.size(scanResultValues));
+    Assertions.assertEquals(2, Iterables.size(scanResultValues));
 
     // Insert 3 more records and rollback
     insertData(records.subList(2, 5), true);
@@ -2478,28 +2714,28 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     // Insert up through first 8 items
     insertData(records.subList(5, 8));
 
-    awaitConsumedOffsets(task, ImmutableMap.of(0, 9L)); // Consume 8 real messages + 2 txn controls
-    Assert.assertEquals(2, countEvents(task));
+    awaitConsumedOffsets(task, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 9L)); // Consume 8 real messages + 2 txn controls
+    Assertions.assertEquals(2, countEvents(task));
 
     final QuerySegmentSpec rollbackedInterval = OBJECT_MAPPER.readValue("\"2010/2012\"", QuerySegmentSpec.class);
     scanResultValues = scanData(task, rollbackedInterval);
     //verify that there are no records indexed in the rollbacked time period
-    Assert.assertEquals(0, Iterables.size(scanResultValues));
+    Assertions.assertEquals(0, Iterables.size(scanResultValues));
 
     final QuerySegmentSpec endInterval = OBJECT_MAPPER.readValue("\"2008/2049\"", QuerySegmentSpec.class);
     Iterable<Map<String, Object>> scanResultValues1 = scanData(task, endInterval);
-    Assert.assertEquals(2, Iterables.size(scanResultValues1));
+    Assertions.assertEquals(2, Iterables.size(scanResultValues1));
 
     // Insert all remaining messages. One will get picked up.
     insertData(Iterables.skip(records, 8));
 
     // Wait for task to exit and publish
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
-    Assert.assertEquals(task.getRunner().getEndOffsets(), task.getRunner().getCurrentOffsets());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(task.getRunner().getEndOffsets(), task.getRunner().getCurrentOffsets());
 
     long totalBytes = getTotalSizeOfRecords(0, 2) + getTotalSizeOfRecords(5, 11);
     verifyTaskMetrics(task, RowMeters.with().bytes(totalBytes)
-                                     .unparseable(3).errors(1).thrownAway(1).totalProcessed(3));
+                                     .unparseable(3).errors(1).thrownAwayByReason(InputRowFilterResult.NULL_OR_EMPTY_RECORD, 1).totalProcessed(3));
 
     // Check published metadata and segments in deep storage
     assertEqualsExceptVersion(
@@ -2511,14 +2747,15 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
-    Assert.assertEquals(
-        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 14L))),
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 14L))),
         newDataSchemaMetadata()
     );
   }
 
-  @Test(timeout = 60_000L)
-  public void testRunUnTransactionMode() throws Exception
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
+  public void testRunInTransactionMode() throws Exception
   {
     Map<String, Object> configs = kafkaServer.consumerProperties();
     configs.put("isolation.level", "read_uncommitted");
@@ -2527,14 +2764,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
             new KafkaIndexTaskIOConfig(
                     0,
                     "sequence0",
-                    new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 0L), ImmutableSet.of()),
-                    new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 13L)),
+                    new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L), ImmutableSet.of()),
+                    new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 13L)),
                     configs,
                     KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
                     true,
                     null,
                     null,
                     INPUT_FORMAT,
+                    null,
+                    Duration.standardHours(2).getStandardMinutes(),
                     null
             )
     );
@@ -2556,10 +2795,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
       Thread.sleep(25);
     }
 
-    Assert.assertEquals(2, countEvents(task));
+    Assertions.assertEquals(2, countEvents(task));
+
+    task.getRunner().stopGracefully();
+
+    // Wait for task to exit
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testCanStartFromLaterThanEarliestOffset() throws Exception
   {
     final String baseSequenceName = "sequence0";
@@ -2571,15 +2816,15 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     Map<String, Object> consumerProps = kafkaServer.consumerProperties();
     consumerProps.put("max.poll.records", "1");
 
-    final SeekableStreamStartSequenceNumbers<Integer, Long> startPartitions = new SeekableStreamStartSequenceNumbers<>(
+    final SeekableStreamStartSequenceNumbers<KafkaTopicPartition, Long> startPartitions = new SeekableStreamStartSequenceNumbers<>(
         topic,
-        ImmutableMap.of(0, 0L, 1, 1L),
+        ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L, new KafkaTopicPartition(false, topic, 1), 1L),
         ImmutableSet.of()
     );
 
-    final SeekableStreamEndSequenceNumbers<Integer, Long> endPartitions = new SeekableStreamEndSequenceNumbers<>(
+    final SeekableStreamEndSequenceNumbers<KafkaTopicPartition, Long> endPartitions = new SeekableStreamEndSequenceNumbers<>(
         topic,
-        ImmutableMap.of(0, 10L, 1, 2L)
+        ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 10L, new KafkaTopicPartition(false, topic, 1), 2L)
     );
 
     final KafkaIndexTask task = createTask(
@@ -2595,14 +2840,17 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
     final ListenableFuture<TaskStatus> future = runTask(task);
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testRunWithoutDataInserted() throws Exception
   {
     final KafkaIndexTask task = createTask(
@@ -2610,14 +2858,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 5L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -2626,18 +2876,18 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
 
     Thread.sleep(1000);
 
-    Assert.assertEquals(0, countEvents(task));
-    Assert.assertEquals(SeekableStreamIndexTaskRunner.Status.READING, task.getRunner().getStatus());
+    Assertions.assertEquals(0, countEvents(task));
+    Assertions.assertEquals(SeekableStreamIndexTaskRunner.Status.READING, task.getRunner().getStatus());
 
     task.getRunner().stopGracefully();
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
     verifyTaskMetrics(task, RowMeters.with().totalProcessed(0));
 
     // Check published metadata and segments in deep storage
     assertEqualsExceptVersion(Collections.emptyList(), publishedDescriptors());
-    Assert.assertNull(newDataSchemaMetadata());
+    Assertions.assertNull(newDataSchemaMetadata());
   }
 
   @Test
@@ -2647,7 +2897,7 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
 
     final KafkaIndexTask task = createTask(
         "taskid",
-        NEW_DATA_SCHEMA.withTransformSpec(
+        DATA_SCHEMA.withTransformSpec(
             new TransformSpec(
                 null,
                 ImmutableList.of(new ExpressionTransform("beep", "nofunc()", ExprMacroTable.nil()))
@@ -2664,26 +2914,69 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
 
     final Task task1 = OBJECT_MAPPER.readValue(OBJECT_MAPPER.writeValueAsBytes(task), Task.class);
-    Assert.assertEquals(task, task1);
+    Assertions.assertEquals(task, task1);
   }
+
+  @Test
+  public void testCorrectInputSources() throws Exception
+  {
+    // This is both a serde test and a regression test for https://github.com/apache/druid/issues/7724.
+
+    final KafkaIndexTask task = createTask(
+        "taskid",
+        DATA_SCHEMA.withTransformSpec(
+            new TransformSpec(
+                null,
+                ImmutableList.of(new ExpressionTransform("beep", "nofunc()", ExprMacroTable.nil()))
+            )
+        ),
+        new KafkaIndexTaskIOConfig(
+            0,
+            "sequence",
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of()),
+            ImmutableMap.of(),
+            KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
+            true,
+            null,
+            null,
+            INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
+            null
+        )
+    );
+
+    Assertions.assertEquals(
+        Collections.singleton(
+            new ResourceAction(new Resource(
+                KafkaIndexTaskModule.SCHEME,
+                ResourceType.EXTERNAL
+            ), Action.READ)),
+        task.getInputSourceResources()
+    );
+  }
+
 
   /**
    * Wait for a task to consume certain offsets (inclusive).
    */
-  private void awaitConsumedOffsets(final KafkaIndexTask task, final Map<Integer, Long> targetOffsets)
+  private void awaitConsumedOffsets(final KafkaIndexTask task, final Map<KafkaTopicPartition, Long> targetOffsets)
       throws InterruptedException
   {
     while (true) {
-      final ConcurrentMap<Integer, Long> currentOffsets = task.getRunner().getCurrentOffsets();
+      final ConcurrentMap<KafkaTopicPartition, Long> currentOffsets = task.getRunner().getCurrentOffsets();
 
       // For Kafka, currentOffsets are the last read offsets plus one.
       boolean allDone = true;
-      for (final Map.Entry<Integer, Long> entry : targetOffsets.entrySet()) {
+      for (final Map.Entry<KafkaTopicPartition, Long> entry : targetOffsets.entrySet()) {
         final Long currentOffset = currentOffsets.get(entry.getKey());
         if (currentOffset == null || currentOffset <= entry.getValue()) {
           allDone = false;
@@ -2701,7 +2994,7 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
 
   private List<Map<String, Object>> scanData(final Task task, QuerySegmentSpec spec)
   {
-    ScanQuery query = new Druids.ScanQueryBuilder().dataSource(NEW_DATA_SCHEMA.getDataSource())
+    ScanQuery query = new Druids.ScanQueryBuilder().dataSource(DATA_SCHEMA.getDataSource())
                                                    .intervals(spec)
                                                    .resultFormat(ScanQuery.ResultFormat.RESULT_FORMAT_LIST)
                                                    .build();
@@ -2723,6 +3016,26 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     return records.subList(startIndexInclusive, endIndexExclusive).stream()
                   .mapToLong(this::getRecordSize)
                   .sum();
+  }
+
+  private void deleteRecords(int partition, long beforeOffset) throws ExecutionException, InterruptedException
+  {
+    try (Admin admin = kafkaServer.newAdminClient()) {
+      admin.deleteRecords(
+          Map.of(new TopicPartition(topic, partition), RecordsToDelete.beforeOffset(beforeOffset))
+      ).all().get();
+    }
+  }
+
+  private long getLatestOffset(int partition) throws ExecutionException, InterruptedException
+  {
+    final TopicPartition topicPartition = new TopicPartition(topic, partition);
+    try (Admin admin = kafkaServer.newAdminClient()) {
+      return admin.listOffsets(Map.of(topicPartition, OffsetSpec.latest()))
+                  .partitionResult(topicPartition)
+                  .get()
+                  .offset();
+    }
   }
 
   private void insertData() throws ExecutionException, InterruptedException
@@ -2758,7 +3071,7 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
       final KafkaIndexTaskIOConfig ioConfig
   ) throws JsonProcessingException
   {
-    return createTask(taskId, NEW_DATA_SCHEMA, ioConfig);
+    return createTask(taskId, DATA_SCHEMA, ioConfig);
   }
 
   private KafkaIndexTask createTask(
@@ -2767,7 +3080,7 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
       final Map<String, Object> context
   ) throws JsonProcessingException
   {
-    return createTask(taskId, NEW_DATA_SCHEMA, ioConfig, context);
+    return createTask(taskId, DATA_SCHEMA, ioConfig, context);
   }
 
   private KafkaIndexTask createTask(
@@ -2806,10 +3119,14 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         intermediateHandoffPeriod,
         logParseExceptions,
         maxParseExceptions,
-        maxSavedParseExceptions
+        maxSavedParseExceptions,
+        null,
+        null,
+        null,
+        null
     );
     if (!context.containsKey(SeekableStreamSupervisor.CHECKPOINTS_CTX_KEY)) {
-      final TreeMap<Integer, Map<Integer, Long>> checkpoints = new TreeMap<>();
+      final TreeMap<Integer, Map<KafkaTopicPartition, Long>> checkpoints = new TreeMap<>();
       checkpoints.put(0, ioConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap());
       final String checkpointsJson = OBJECT_MAPPER
           .writerFor(KafkaSupervisor.CHECKPOINTS_TYPE_REF)
@@ -2820,11 +3137,13 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     final KafkaIndexTask task = new KafkaIndexTask(
         taskId,
         null,
+        null,
         cloneDataSchema(dataSchema),
         tuningConfig,
         ioConfig,
         context,
-        OBJECT_MAPPER
+        OBJECT_MAPPER,
+        null
     );
     task.setPollRetryMs(POLL_RETRY_MS);
     return task;
@@ -2832,51 +3151,37 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
 
   private static DataSchema cloneDataSchema(final DataSchema dataSchema)
   {
-    return new DataSchema(
-        dataSchema.getDataSource(),
-        dataSchema.getTimestampSpec(),
-        dataSchema.getDimensionsSpec(),
-        dataSchema.getAggregators(),
-        dataSchema.getGranularitySpec(),
-        dataSchema.getTransformSpec(),
-        dataSchema.getParserMap(),
-        OBJECT_MAPPER
-    );
+    return DataSchema.builder(dataSchema).build();
   }
 
   @Override
   protected QueryRunnerFactoryConglomerate makeQueryRunnerConglomerate()
   {
-    return new DefaultQueryRunnerFactoryConglomerate(
-        ImmutableMap.<Class<? extends Query>, QueryRunnerFactory>builder()
-                    .put(
-                        TimeseriesQuery.class,
-                        new TimeseriesQueryRunnerFactory(
-                            new TimeseriesQueryQueryToolChest(),
-                            new TimeseriesQueryEngine(),
-                            (query, future) -> {
-                              // do nothing
-                            }
-                        )
+    return DefaultQueryRunnerFactoryConglomerate.buildFromQueryRunnerFactories(ImmutableMap.<Class<? extends Query>, QueryRunnerFactory>builder()
+                .put(
+                    TimeseriesQuery.class,
+                    new TimeseriesQueryRunnerFactory(
+                        new TimeseriesQueryQueryToolChest(),
+                        new TimeseriesQueryEngine(),
+                        (query, future) -> {
+                          // do nothing
+                        }
                     )
-                    .put(
-                        ScanQuery.class,
-                        new ScanQueryRunnerFactory(
-                            new ScanQueryQueryToolChest(
-                                new ScanQueryConfig(),
-                                new DefaultGenericQueryMetricsFactory()
-                            ),
-                            new ScanQueryEngine(),
-                            new ScanQueryConfig()
-                        )
+                )
+                .put(
+                    ScanQuery.class,
+                    new ScanQueryRunnerFactory(
+                        new ScanQueryQueryToolChest(DefaultGenericQueryMetricsFactory.instance()),
+                        new ScanQueryEngine(),
+                        new ScanQueryConfig()
                     )
-                    .build()
-    );
+                )
+                .build());
   }
 
   private void makeToolboxFactory() throws IOException
   {
-    directory = tempFolder.newFolder();
+    directory = temporaryFolder.newFolder();
     final TestUtils testUtils = new TestUtils();
     final ObjectMapper objectMapper = testUtils.getTestObjectMapper();
 
@@ -2887,7 +3192,8 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     makeToolboxFactory(testUtils, emitter, doHandoff);
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testMultipleLinesJSONText() throws Exception
   {
     reportParseExceptions = false;
@@ -2921,14 +3227,16 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new KafkaIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(0, 0L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 4L)),
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 4L)),
             kafkaServer.consumerProperties(),
             KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             true,
             null,
             null,
             INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
             null
         )
     );
@@ -2936,7 +3244,7 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     final ListenableFuture<TaskStatus> future = runTask(task);
 
     // Wait for task to exit
-    Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
     verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(0, 4)).unparseable(1).totalProcessed(4));
 
     // Check published metadata
@@ -2947,10 +3255,472 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
-    Assert.assertEquals(
-        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(0, 4L))),
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 4L))),
         newDataSchemaMetadata()
     );
+  }
+
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
+  public void testParseExceptionsInIteratorConstructionSuccess() throws Exception
+  {
+    reportParseExceptions = false;
+    maxParseExceptions = 2;
+    maxSavedParseExceptions = 2;
+
+    // Prepare records and insert data
+    records = Arrays.asList(
+        new ProducerRecord<byte[], byte[]>(topic, 0, null,
+                                           jbb("2049", "a", "y", "10", "20.0", "1.0"),
+                                           SAMPLE_HEADERS),
+        new ProducerRecord<byte[], byte[]>(topic, 0, null,
+                                           jbb("200", TestKafkaFormatWithMalformedDataDetection.MALFORMED_KEY, "y", "10", "20.0", "1.0"),
+                                           SAMPLE_HEADERS),
+        new ProducerRecord<byte[], byte[]>(topic, 0, null,
+                                           jbb("2009", TestKafkaFormatWithMalformedDataDetection.MALFORMED_KEY, "y", "10", "20.0", "1.0"),
+                                           SAMPLE_HEADERS),
+        new ProducerRecord<byte[], byte[]>(topic, 0, null,
+                                           jbb("2049", "b", "y", "10", "21.0", "1.0"),
+                                           SAMPLE_HEADERS)
+    );
+    insertData();
+
+    final KafkaIndexTask task = createTask(
+        null,
+        new KafkaIndexTaskIOConfig(
+            0,
+            "sequence0",
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 4L)),
+            kafkaServer.consumerProperties(),
+            KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
+            true,
+            null,
+            null,
+            new TestKafkaFormatWithMalformedDataDetection(INPUT_FORMAT),
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
+            null
+        )
+    );
+
+    final ListenableFuture<TaskStatus> future = runTask(task);
+
+    // Wait for task to exit
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(0, 4)).unparseable(2).totalProcessed(2));
+
+    // Check published metadata
+    assertEqualsExceptVersion(
+        ImmutableList.of(
+            // 2 rows at last in druid
+            sdd("2049/P1D", 0, ImmutableList.of("a", "b"))
+        ),
+        publishedDescriptors()
+    );
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 4L))),
+        newDataSchemaMetadata()
+    );
+
+    IngestionStatsAndErrors reportData = getTaskReportData();
+
+    // Verify ingestion state and error message
+    Assertions.assertEquals(IngestionState.COMPLETED, reportData.getIngestionState());
+    Assertions.assertNull(reportData.getErrorMsg());
+
+    // Verify unparseable data
+    ParseExceptionReport parseExceptionReport =
+        ParseExceptionReport.forPhase(reportData, RowIngestionMeters.BUILD_SEGMENTS);
+
+    List<String> expectedMessages = Arrays.asList(
+        "Unable to parse malformed data during iterator construction",
+        "Unable to parse malformed data during iterator construction"
+    );
+    Assertions.assertEquals(expectedMessages, parseExceptionReport.getErrorMessages());
+  }
+
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
+  public void testNoParseExceptionsTaskSucceeds() throws Exception
+  {
+    reportParseExceptions = false;
+    maxParseExceptions = 0;
+    maxSavedParseExceptions = 0;
+
+    // Prepare records and insert data
+    records = Arrays.asList(
+        new ProducerRecord<byte[], byte[]>(topic, 0, null,
+                                           jbb("2049", "a", "y", "10", "20.0", "1.0"),
+                                           SAMPLE_HEADERS),
+        new ProducerRecord<byte[], byte[]>(topic, 0, null,
+                                           jbb("2049", "b", "y", "10", "20.0", "1.0"),
+                                           SAMPLE_HEADERS)
+    );
+    insertData();
+
+    final KafkaIndexTask task = createTask(
+        null,
+        new KafkaIndexTaskIOConfig(
+            0,
+            "sequence0",
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L)),
+            kafkaServer.consumerProperties(),
+            KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
+            true,
+            null,
+            null,
+            new TestKafkaFormatWithMalformedDataDetection(INPUT_FORMAT),
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
+            null
+        )
+    );
+
+    final ListenableFuture<TaskStatus> future = runTask(task);
+
+    // Wait for task to exit
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(0, 2)).unparseable(0).totalProcessed(2));
+
+    // Check published metadata
+    assertEqualsExceptVersion(
+        ImmutableList.of(
+            // 2 rows at last in druid
+            sdd("2049/P1D", 0, ImmutableList.of("a", "b"))
+        ),
+        publishedDescriptors()
+    );
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L))),
+        newDataSchemaMetadata()
+    );
+
+    // Verify there is no unparseable data in the report since we've no parse exceptions and no saved parse exceptions
+    ParseExceptionReport parseExceptionReport =
+        ParseExceptionReport.forPhase(getTaskReportData(), RowIngestionMeters.BUILD_SEGMENTS);
+
+    Assertions.assertEquals(ImmutableList.of(), parseExceptionReport.getErrorMessages());
+  }
+
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
+  public void testParseExceptionsBeyondThresholdTaskFails() throws Exception
+  {
+    reportParseExceptions = false;
+    maxParseExceptions = 1;
+    maxSavedParseExceptions = 0;
+
+    // Prepare records and insert data
+    records = Arrays.asList(
+        new ProducerRecord<byte[], byte[]>(topic, 0, null,
+                                           jbb("2049", "a", "y", "10", "20.0", "1.0"),
+                                           SAMPLE_HEADERS),
+        new ProducerRecord<byte[], byte[]>(topic, 0, null,
+                                           jbb("200", TestKafkaFormatWithMalformedDataDetection.MALFORMED_KEY, "y1", "10", "20.0", "1.0"),
+                                           SAMPLE_HEADERS),
+        new ProducerRecord<byte[], byte[]>(topic, 0, null,
+                                           jbb("2009", TestKafkaFormatWithMalformedDataDetection.MALFORMED_KEY, "y2", "10", "20.0", "1.0"),
+                                           SAMPLE_HEADERS),
+        new ProducerRecord<byte[], byte[]>(topic, 0, null,
+                                           jbb("2049", "b", "y", "10", "21.0", "1.0"),
+                                           SAMPLE_HEADERS),
+        new ProducerRecord<byte[], byte[]>(topic, 0, null,
+                                           jbb("200", TestKafkaFormatWithMalformedDataDetection.MALFORMED_KEY, "y3", "10", "20.0", "1.0"),
+                                           SAMPLE_HEADERS),
+        new ProducerRecord<byte[], byte[]>(topic, 0, null,
+                                           jbb("2049", "c", "y", "10", "21.0", "1.0"),
+                                           SAMPLE_HEADERS)
+    );
+    insertData();
+
+    final KafkaIndexTask task = createTask(
+        null,
+        new KafkaIndexTaskIOConfig(
+            0,
+            "sequence0",
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 6L)),
+            kafkaServer.consumerProperties(),
+            KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
+            true,
+            null,
+            null,
+            new TestKafkaFormatWithMalformedDataDetection(INPUT_FORMAT),
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
+            null
+        )
+    );
+
+    final ListenableFuture<TaskStatus> future = runTask(task);
+
+    // Wait for task to exit. Should fail and trip up with the first two bad messages in the stream
+    Assertions.assertEquals(TaskState.FAILED, future.get().getStatusCode());
+    verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(0, 3)).unparseable(2).totalProcessed(1));
+
+    // Check there's no published metadata since the task failed
+    Assertions.assertEquals(ImmutableList.of(), publishedDescriptors());
+    Assertions.assertNull(newDataSchemaMetadata());
+
+    // Verify ingestion state and error message
+    final IngestionStatsAndErrors reportData = getTaskReportData();
+    Assertions.assertEquals(IngestionState.BUILD_SEGMENTS, reportData.getIngestionState());
+    Assertions.assertNotNull(reportData.getErrorMsg());
+
+    // Verify there is no unparseable data in the report since we've 0 saved parse exceptions
+    ParseExceptionReport parseExceptionReport =
+        ParseExceptionReport.forPhase(reportData, RowIngestionMeters.BUILD_SEGMENTS);
+
+    Assertions.assertEquals(ImmutableList.of(), parseExceptionReport.getErrorMessages());
+  }
+
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
+  public void testCompletionReportPartitionStats() throws Exception
+  {
+    insertData();
+
+    final KafkaIndexTask task = createTask(
+        null,
+        new KafkaIndexTaskIOConfig(
+            0,
+            "sequence0",
+            new SeekableStreamStartSequenceNumbers<>(
+                topic,
+                ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L),
+                ImmutableSet.of()
+            ),
+            new SeekableStreamEndSequenceNumbers<>(
+                topic,
+                ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 10L)
+            ),
+            kafkaServer.consumerProperties(),
+            KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
+            true,
+            null,
+            null,
+            INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
+            null
+        )
+    );
+
+    final ListenableFuture<TaskStatus> future = runTask(task);
+    TaskStatus status = future.get();
+
+    Assertions.assertEquals(TaskState.SUCCESS, status.getStatusCode());
+    IngestionStatsAndErrors reportData = getTaskReportData();
+
+    // Verify ingestion state and error message
+    Assertions.assertEquals(IngestionState.COMPLETED, reportData.getIngestionState());
+    Assertions.assertNull(reportData.getErrorMsg());
+
+    // Verify report metrics
+    Assertions.assertEquals(reportData.getRecordsProcessed().size(), 1);
+    Assertions.assertEquals(reportData.getRecordsProcessed().values().iterator().next(), (Long) 6L);
+  }
+
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
+  public void testCompletionReportMultiplePartitionStats() throws Exception
+  {
+    insertData();
+
+    final KafkaIndexTask task = createTask(
+        null,
+        new KafkaIndexTaskIOConfig(
+            0,
+            "sequence0",
+            new SeekableStreamStartSequenceNumbers<>(
+                topic,
+                ImmutableMap.of(
+                    new KafkaTopicPartition(false, topic, 0),
+                    0L,
+                    new KafkaTopicPartition(false, topic, 1),
+                    0L
+                ),
+                ImmutableSet.of()
+            ),
+            new SeekableStreamEndSequenceNumbers<>(
+                topic,
+                ImmutableMap.of(
+                    new KafkaTopicPartition(false, topic, 0),
+                    10L,
+                    new KafkaTopicPartition(false, topic, 1),
+                    2L
+                )
+            ),
+            kafkaServer.consumerProperties(),
+            KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
+            true,
+            null,
+            null,
+            INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes(),
+            null
+        )
+    );
+
+    final ListenableFuture<TaskStatus> future = runTask(task);
+    TaskStatus status = future.get();
+
+    Assertions.assertEquals(TaskState.SUCCESS, status.getStatusCode());
+    IngestionStatsAndErrors reportData = getTaskReportData();
+
+    // Verify ingestion state and error message
+    Assertions.assertEquals(IngestionState.COMPLETED, reportData.getIngestionState());
+    Assertions.assertNull(reportData.getErrorMsg());
+
+    // Verify report metrics
+    Assertions.assertEquals(reportData.getRecordsProcessed().size(), 2);
+    Assertions.assertTrue(reportData.getRecordsProcessed().values().containsAll(ImmutableSet.of(6L, 2L)));
+  }
+
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
+  public void testTaskWithTransformSpecDoesNotCauseCliPeonCyclicDependency()
+      throws IOException, ExecutionException, InterruptedException
+  {
+    insertData();
+
+    final KafkaIndexTask task = createTask(
+        "index_kafka_test_id1",
+        DATA_SCHEMA.withTransformSpec(
+            new TransformSpec(
+                new SelectorDimFilter("dim1", "b", null),
+                ImmutableList.of(
+                    new ExpressionTransform("dim1t", "concat(dim1,dim1)", ExprMacroTable.nil())
+                )
+            )
+        ),
+        new KafkaIndexTaskIOConfig(
+            0,
+            "sequence0",
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
+            kafkaServer.consumerProperties(),
+            KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
+            true,
+            null,
+            null,
+            INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes()
+        )
+    );
+
+    final File file = new File(temporaryFolder.getRoot(), "task.json");
+
+    FileUtils.write(file, OBJECT_MAPPER.writeValueAsString(task), StandardCharsets.UTF_8);
+
+    final CliPeon peon = new CliPeon();
+    peon.taskAndStatusFile = ImmutableList.of(file.getParent(), "1");
+
+    final Properties properties = new Properties();
+    peon.configure(properties);
+    final Injector baseInjector = GuiceInjectors.makeStartupInjector();
+    peon.configure(properties, baseInjector);
+    final Injector peonInjector = peon.makeInjector(Set.of(NodeRole.PEON));
+
+    final LoadSpecHolder loadSpecHolder = peonInjector.getInstance(LoadSpecHolder.class);
+    Assertions.assertTrue(loadSpecHolder instanceof PeonLoadSpecHolder);
+    Assertions.assertEquals(LookupLoadingSpec.ALL, loadSpecHolder.getLookupLoadingSpec());
+    Assertions.assertEquals(BroadcastDatasourceLoadingSpec.ALL, loadSpecHolder.getBroadcastDatasourceLoadingSpec());
+
+    final TaskHolder taskHolder = peonInjector.getInstance(TaskHolder.class);
+    Assertions.assertTrue(taskHolder instanceof PeonTaskHolder);
+    Assertions.assertEquals("index_kafka_test_id1", taskHolder.getTaskId());
+    Assertions.assertEquals("test_ds", taskHolder.getDataSource());
+
+    final ListenableFuture<TaskStatus> future = runTask(task);
+
+    // Wait for task to exit
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    verifyTaskMetrics(task, RowMeters.with().bytes(getTotalSizeOfRecords(0, 5)).thrownAwayByReason(InputRowFilterResult.CUSTOM_FILTER, 4).totalProcessed(1));
+
+    // Check published metadata
+    final List<SegmentDescriptor> publishedDescriptors = publishedDescriptors();
+    assertEqualsExceptVersion(ImmutableList.of(sdd("2009/P1D", 0)), publishedDescriptors);
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L))),
+        newDataSchemaMetadata()
+    );
+
+    // Check segments in deep storage
+    Assertions.assertEquals(ImmutableList.of("b"), readSegmentColumn("dim1", publishedDescriptors.get(0)));
+    Assertions.assertEquals(ImmutableList.of("bb"), readSegmentColumn("dim1t", publishedDescriptors.get(0)));
+
+    emitter.verifyValue("ingest/segments/count", 1);
+
+    final SegmentGenerationMetrics observedSegmentGenerationMetrics = task.getRunner().getSegmentGenerationMetrics();
+    Assertions.assertTrue(observedSegmentGenerationMetrics.isProcessingDone());
+    Assertions.assertEquals(1, observedSegmentGenerationMetrics.rowOutput());
+    Assertions.assertEquals(1, observedSegmentGenerationMetrics.handOffCount());
+    verifyPersistAndMergeTimeMetricsArePositive(observedSegmentGenerationMetrics);
+  }
+
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
+  public void testKafkaTaskContainsAllTaskDimensions()
+      throws IOException, ExecutionException, InterruptedException
+  {
+    insertData();
+
+    final KafkaIndexTask task = createTask(
+        "index_kafka_test_id1",
+        new KafkaIndexTaskIOConfig(
+            0,
+            "sequence0",
+            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 2L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L)),
+            kafkaServer.consumerProperties(),
+            KafkaSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
+            true,
+            null,
+            null,
+            INPUT_FORMAT,
+            null,
+            Duration.standardHours(2).getStandardMinutes()
+        )
+    );
+
+    final Injector peonInjector = makePeonInjectorWithStubEmitter(task);
+    Emitter peonEmitter = peonInjector.getInstance(Emitter.class);
+    Assertions.assertTrue(peonEmitter instanceof StubServiceEmitter);
+    emitter = (StubServiceEmitter) peonEmitter;
+    emitter.start();
+    makeToolboxFactory();
+
+    final ListenableFuture<TaskStatus> future = runTask(task);
+
+    // Wait for task to exit
+    Assertions.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
+    Assertions.assertTrue(emitter.getNumEmittedEvents() > 0);
+
+    // Check published metadata & segments in deep storage
+    final List<SegmentDescriptor> publishedDescriptors = publishedDescriptors();
+    Assertions.assertEquals(
+        new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of(new KafkaTopicPartition(false, topic, 0), 5L))),
+        newDataSchemaMetadata()
+    );
+    Assertions.assertEquals(ImmutableList.of("c"), readSegmentColumn("dim1", publishedDescriptors.get(0)));
+
+    Assertions.assertTrue(emitter.getNumEmittedEvents() > 0);
+    for (Event event : emitter.getEvents()) {
+      if (event instanceof ServiceMetricEvent) {
+        EventMap observedEvent = event.toMap();
+        // Do not verify emission of "id" dimension as that is deprecated in favor of "taskId"
+        Assertions.assertEquals("test_ds", observedEvent.get("dataSource"));
+        Assertions.assertEquals("index_kafka_test_id1", observedEvent.get("taskId"));
+        Assertions.assertEquals("index_kafka", observedEvent.get("taskType"));
+        Assertions.assertEquals("index_kafka_test_ds", observedEvent.get("groupId"));
+      }
+    }
   }
 
   public static class TestKafkaInputFormat implements InputFormat
@@ -3012,5 +3782,116 @@ public class KafkaIndexTaskTest extends SeekableStreamIndexTaskTestBase
     {
       return baseInputFormat;
     }
+
   }
+
+  /**
+   * This test class is a kafka input format that throws a {@link ParseException} when it encounters a malformed value
+   * in its input as part of the iterator construction. This should be used only for testing purposes.
+   */
+  public static class TestKafkaFormatWithMalformedDataDetection implements InputFormat
+  {
+    public static final String MALFORMED_KEY = "malformed";
+    final InputFormat baseInputFormat;
+
+    @JsonCreator
+    public TestKafkaFormatWithMalformedDataDetection(@JsonProperty("baseInputFormat") InputFormat baseInputFormat)
+    {
+      this.baseInputFormat = baseInputFormat;
+    }
+
+    @Override
+    public boolean isSplittable()
+    {
+      return false;
+    }
+
+    @Override
+    public InputEntityReader createReader(InputRowSchema inputRowSchema, InputEntity source, File temporaryDirectory)
+    {
+      final InputEntityReader delegate = baseInputFormat.createReader(inputRowSchema, source, temporaryDirectory);
+      final SettableByteEntity<KafkaRecordEntity> settableByteEntity = (SettableByteEntity<KafkaRecordEntity>) source;
+
+      return new InputEntityReader()
+      {
+        @Override
+        public CloseableIterator<InputRow> read() throws IOException
+        {
+          KafkaRecordEntity recordEntity = settableByteEntity.getEntity();
+          return delegate.read().map(
+              r -> {
+
+                MapBasedInputRow row = (MapBasedInputRow) r;
+                final Map<String, Object> event = new HashMap<>(row.getEvent());
+
+                if (event.containsValue(MALFORMED_KEY)) {
+                  // Then throw an exception
+                  throw new ParseException(null, "Unable to parse malformed data during iterator construction");
+                }
+                event.put("kafka.offset", recordEntity.getRecord().offset());
+                event.put("kafka.topic", recordEntity.getRecord().topic());
+                event.put(
+                    "kafka.header.encoding",
+                    new String(
+                        recordEntity.getRecord().headers().lastHeader("encoding").value(),
+                        StandardCharsets.UTF_8
+                    )
+                );
+
+                return new MapBasedInputRow(row.getTimestamp(), row.getDimensions(), event);
+              }
+          );
+        }
+
+        @Override
+        public CloseableIterator<InputRowListPlusRawValues> sample() throws IOException
+        {
+          return delegate.sample();
+        }
+      };
+    }
+
+    @JsonProperty
+    public InputFormat getBaseInputFormat()
+    {
+      return baseInputFormat;
+    }
+
+  }
+
+  private Injector makePeonInjectorWithStubEmitter(Task task) throws IOException
+  {
+    final File taskFile = new File(temporaryFolder.getRoot(), "task.json");
+    FileUtils.write(taskFile, OBJECT_MAPPER.writeValueAsString(task), StandardCharsets.UTF_8);
+
+    final Properties properties = new Properties();
+    properties.setProperty("druid.emitter", "stub");
+
+    final Injector baseInjector = Guice.createInjector(
+        new JacksonModule(),
+        new LifecycleModule(),
+        binder -> {
+          binder.bind(Validator.class).toInstance(Validation.buildDefaultValidatorFactory().getValidator());
+          binder.bindScope(LazySingleton.class, Scopes.SINGLETON);
+          binder.bind(Properties.class).toInstance(properties);
+        }
+    );
+
+    final CliPeon peon = new CliPeon()
+    {
+      @Override
+      protected List<? extends com.google.inject.Module> getModules()
+      {
+        final List<com.google.inject.Module> modules = new ArrayList<>(super.getModules());
+        modules.add(new StubServiceEmitterModule());
+        return modules;
+      }
+    };
+
+    peon.taskAndStatusFile = ImmutableList.of(taskFile.getParent(), "1");
+    peon.configure(properties);
+    peon.configure(properties, baseInjector);
+    return peon.makeInjector(Set.of(NodeRole.PEON));
+  }
+
 }

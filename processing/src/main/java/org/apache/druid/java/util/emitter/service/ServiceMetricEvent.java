@@ -20,11 +20,11 @@
 package org.apache.druid.java.util.emitter.service;
 
 import com.fasterxml.jackson.annotation.JsonValue;
-import com.google.common.base.Predicate;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Maps;
 import org.apache.druid.guice.annotations.PublicApi;
 import org.apache.druid.java.util.common.DateTimes;
+import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.emitter.core.Event;
 import org.apache.druid.java.util.emitter.core.EventMap;
@@ -35,7 +35,7 @@ import java.util.Map;
 import java.util.TreeMap;
 
 /**
- *
+ * Immutable metric event emitted by a Druid {@link ServiceEmitter}.
  */
 @PublicApi
 public class ServiceMetricEvent implements Event
@@ -47,15 +47,18 @@ public class ServiceMetricEvent implements Event
 
   private final DateTime createdTime;
   private final ImmutableMap<String, String> serviceDims;
-  private final Map<String, Object> userDims;
+  private final ImmutableMap<String, Object> userDims;
   private final String feed;
   private final String metric;
   private final Number value;
 
+  /**
+   * Creates an immutable metric event.
+   */
   private ServiceMetricEvent(
       DateTime createdTime,
       ImmutableMap<String, String> serviceDims,
-      Map<String, Object> userDims,
+      ImmutableMap<String, Object> userDims,
       String feed,
       String metric,
       Number value
@@ -82,17 +85,22 @@ public class ServiceMetricEvent implements Event
 
   public String getService()
   {
-    return serviceDims.get("service");
+    return serviceDims.get(SERVICE);
   }
 
   public String getHost()
   {
-    return serviceDims.get("host");
+    return serviceDims.get(HOST);
+  }
+
+  public Map<String, String> getServiceDims()
+  {
+    return serviceDims;
   }
 
   public Map<String, Object> getUserDims()
   {
-    return ImmutableMap.copyOf(userDims);
+    return userDims;
   }
 
   public String getMetric()
@@ -111,31 +119,26 @@ public class ServiceMetricEvent implements Event
   {
     return EventMap
         .builder()
-        .put("feed", getFeed())
-        .put("timestamp", createdTime.toString())
+        .put(FEED, getFeed())
+        .put(TIMESTAMP, createdTime.toString())
+        .put(METRIC, metric)
+        .put(VALUE, value)
         .putAll(serviceDims)
-        .put("metric", metric)
-        .put("value", value)
-        .putAll(
-            Maps.filterEntries(
-                userDims,
-                new Predicate<Map.Entry<String, Object>>()
-                {
-                  @Override
-                  public boolean apply(Map.Entry<String, Object> input)
-                  {
-                    return input.getKey() != null;
-                  }
-                }
-            )
-        )
+        .putAll(userDims)
         .build();
   }
 
-  public static class Builder
+  /**
+   * Builder for a {@link ServiceMetricEvent}. This builder can be used for
+   * building only one event.
+   */
+  public static class Builder extends ServiceEventBuilder<ServiceMetricEvent>
   {
     private final Map<String, Object> userDims = new TreeMap<>();
     private String feed = "metrics";
+    private String metric;
+    private Number value;
+    private DateTime createdTime;
 
     public Builder setFeed(String feed)
     {
@@ -145,20 +148,38 @@ public class ServiceMetricEvent implements Event
 
     public Builder setDimension(String dim, String[] values)
     {
+      if (dim == null) {
+        throw new IAE("Dimension name cannot be null");
+      }
+
       userDims.put(dim, Arrays.asList(values));
       return this;
     }
 
+    /**
+     * Adds a dimension to be emitted with this metric event, only if the given
+     * value is not null.
+     *
+     * @throws IAE if the dimension name is null.
+     */
     public Builder setDimensionIfNotNull(String dim, Object value)
     {
-      if (value != null) {
-        userDims.put(dim, value);
-      }
-      return this;
+      return value == null ? this : setDimension(dim, value);
     }
 
+    /**
+     * Adds a dimension to be emitted with this metric event.
+     *
+     * @throws IAE if the dimension name or the given value is null.
+     */
     public Builder setDimension(String dim, Object value)
     {
+      if (dim == null) {
+        throw new IAE("Dimension name cannot be null");
+      } else if (value == null) {
+        throw new IAE("Value of dimension[%s] cannot be null", dim);
+      }
+
       userDims.put(dim, value);
       return this;
     }
@@ -168,19 +189,18 @@ public class ServiceMetricEvent implements Event
       return userDims.get(dim);
     }
 
-    public ServiceEventBuilder<ServiceMetricEvent> build(
-        final String metric,
-        final Number value
-    )
+    /**
+     * Removes a previously set dimension, if present, and returns this builder. Useful when a single
+     * builder is reused to emit multiple metrics and a dimension set for one metric must not leak into
+     * the others. Removing an absent dimension is a no-op.
+     */
+    public Builder removeDimension(String dim)
     {
-      return build(null, metric, value);
+      userDims.remove(dim);
+      return this;
     }
 
-    public ServiceEventBuilder<ServiceMetricEvent> build(
-        final DateTime createdTime,
-        final String metric,
-        final Number value
-    )
+    public Builder setMetric(String metric, Number value)
     {
       if (Double.isNaN(value.doubleValue())) {
         throw new ISE("Value of NaN is not allowed!");
@@ -189,21 +209,31 @@ public class ServiceMetricEvent implements Event
         throw new ISE("Value of Infinite is not allowed!");
       }
 
-      return new ServiceEventBuilder<ServiceMetricEvent>()
-      {
-        @Override
-        public ServiceMetricEvent build(ImmutableMap<String, String> serviceDimensions)
-        {
-          return new ServiceMetricEvent(
-              createdTime,
-              serviceDimensions,
-              userDims,
-              feed,
-              metric,
-              value
-          );
-        }
-      };
+      this.metric = metric;
+      this.value = value;
+      return this;
+    }
+
+    public Builder setCreatedTime(DateTime createdTime)
+    {
+      this.createdTime = createdTime;
+      return this;
+    }
+
+    @Override
+    public ServiceMetricEvent build(ImmutableMap<String, String> serviceDimensions)
+    {
+      Preconditions.checkNotNull(metric, "Metric is not set");
+      Preconditions.checkNotNull(value, "Value is not set");
+
+      return new ServiceMetricEvent(
+          createdTime,
+          serviceDimensions,
+          ImmutableMap.copyOf(userDims),
+          feed,
+          metric,
+          value
+      );
     }
   }
 }

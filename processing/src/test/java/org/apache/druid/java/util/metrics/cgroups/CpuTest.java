@@ -20,11 +20,11 @@
 package org.apache.druid.java.util.metrics.cgroups;
 
 import org.apache.druid.java.util.common.FileUtils;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
+import org.apache.druid.testing.TemporaryFolderExtension;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.File;
 import java.io.IOException;
@@ -32,15 +32,15 @@ import java.io.IOException;
 
 public class CpuTest
 {
-  @Rule
-  public TemporaryFolder temporaryFolder = new TemporaryFolder();
+  @RegisterExtension
+  public final TemporaryFolderExtension temporaryFolder = TemporaryFolderExtension.testCaseScoped();
   private CgroupDiscoverer discoverer;
 
-  @Before
+  @BeforeEach
   public void setUp() throws IOException
   {
-    File cgroupDir = temporaryFolder.newFolder();
-    File procDir = temporaryFolder.newFolder();
+    File cgroupDir = temporaryFolder.newFolder("cgroupDir");
+    File procDir = temporaryFolder.newFolder("procDir");
     discoverer = new ProcCgroupDiscoverer(procDir.toPath());
     TestUtils.setUpCgroups(procDir, cgroupDir);
     final File cpuDir = new File(
@@ -52,27 +52,32 @@ public class CpuTest
     TestUtils.copyOrReplaceResource("/cpu.shares", new File(cpuDir, "cpu.shares"));
     TestUtils.copyOrReplaceResource("/cpu.cfs_quota_us", new File(cpuDir, "cpu.cfs_quota_us"));
     TestUtils.copyOrReplaceResource("/cpu.cfs_period_us", new File(cpuDir, "cpu.cfs_period_us"));
+    TestUtils.copyOrReplaceResource("/cpuacct.usage", new File(cpuDir, "cpuacct.usage"));
+    TestUtils.copyOrReplaceResource("/cpuacct.stat", new File(cpuDir, "cpuacct.stat"));
   }
 
   @Test
   public void testWontCrash()
   {
-    final Cpu cpu = new Cpu(cgroup -> {
-      throw new RuntimeException("Should still continue");
-    });
-    final Cpu.CpuAllocationMetric metric = cpu.snapshot();
-    Assert.assertEquals(-1L, metric.getShares());
-    Assert.assertEquals(0, metric.getQuotaUs());
-    Assert.assertEquals(0, metric.getPeriodUs());
+    final Cpu cpu = new Cpu(TestUtils.exceptionThrowingDiscoverer());
+    final Cpu.CpuMetrics metric = cpu.snapshot();
+    Assertions.assertEquals(-1L, metric.getShares());
+    Assertions.assertEquals(0, metric.getQuotaUs());
+    Assertions.assertEquals(0, metric.getPeriodUs());
+    Assertions.assertEquals(-1L, metric.getSystemJiffies());
+    Assertions.assertEquals(-1L, metric.getUserJiffies());
   }
 
   @Test
   public void testSimpleLoad()
   {
     final Cpu cpu = new Cpu(discoverer);
-    final Cpu.CpuAllocationMetric snapshot = cpu.snapshot();
-    Assert.assertEquals(1024, snapshot.getShares());
-    Assert.assertEquals(300000, snapshot.getQuotaUs());
-    Assert.assertEquals(100000, snapshot.getPeriodUs());
+    final Cpu.CpuMetrics snapshot = cpu.snapshot();
+    Assertions.assertEquals(1024, snapshot.getShares());
+    Assertions.assertEquals(300000, snapshot.getQuotaUs());
+    Assertions.assertEquals(100000, snapshot.getPeriodUs());
+    Assertions.assertEquals(143871L, snapshot.getSystemJiffies());
+    Assertions.assertEquals(251183L, snapshot.getUserJiffies());
+    Assertions.assertEquals(395054L, snapshot.getTotalJiffies());
   }
 }

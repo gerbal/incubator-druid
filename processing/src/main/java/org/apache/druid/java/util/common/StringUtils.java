@@ -20,19 +20,18 @@
 package org.apache.druid.java.util.common;
 
 import com.google.common.base.Strings;
-import it.unimi.dsi.fastutil.bytes.ByteArrayList;
+import io.netty.util.SuppressForbidden;
 import org.apache.commons.io.IOUtils;
+import org.apache.commons.text.StringEscapeUtils;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
 import java.net.URLEncoder;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
-import java.nio.charset.Charset;
 import java.nio.charset.CharsetEncoder;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
@@ -42,15 +41,11 @@ import java.util.IllegalFormatException;
 import java.util.Locale;
 
 /**
- * As of OpenJDK / Oracle JDK 8, the JVM is optimized around String charset variable instead of Charset passing, that
- * is exploited in {@link #toUtf8(String)} and {@link #fromUtf8(byte[])}.
+ * Utilities for working with strings, including UTF-8 encoding and decoding.
  */
 public class StringUtils
 {
   public static final byte[] EMPTY_BYTES = new byte[0];
-  @Deprecated // Charset parameters to String are currently slower than the charset's string name
-  public static final Charset UTF8_CHARSET = StandardCharsets.UTF_8;
-  public static final String UTF8_STRING = StandardCharsets.UTF_8.toString();
   private static final Base64.Encoder BASE64_ENCODER = Base64.getEncoder();
   private static final Base64.Decoder BASE64_DECODER = Base64.getDecoder();
 
@@ -230,13 +225,7 @@ public class StringUtils
 
   public static String fromUtf8(final byte[] bytes, int offset, int length)
   {
-    try {
-      return new String(bytes, offset, length, UTF8_STRING);
-    }
-    catch (UnsupportedEncodingException e) {
-      // Should never happen
-      throw new RuntimeException(e);
-    }
+    return new String(bytes, offset, length, StandardCharsets.UTF_8);
   }
 
   /**
@@ -261,13 +250,8 @@ public class StringUtils
     return StringUtils.fromUtf8(buffer, buffer.remaining());
   }
 
-  public static String fromUtf8(final ByteArrayList buffer)
-  {
-    return StringUtils.fromUtf8(buffer.elements(), 0, buffer.size());
-  }
-
   /**
-   * If buffer is Decodes a UTF-8 string from the remaining bytes of a buffer.
+   * If buffer is not null, decodes a UTF-8 string from the remaining bytes of a buffer.
    * Advances the position of the buffer by {@link ByteBuffer#remaining()}.
    *
    * If the value is null, this method returns null. If the buffer will never be null, use {@link #fromUtf8(ByteBuffer)}
@@ -283,19 +267,27 @@ public class StringUtils
   }
 
   /**
+   * If {@param bytes} is not null, decodes a UTF-8 string from the bytes.
+   *
+   * If {@param bytes} is null, this method returns null.
+   */
+  @Nullable
+  public static String fromUtf8Nullable(@Nullable final byte[] bytes)
+  {
+    if (bytes == null) {
+      return null;
+    }
+    return StringUtils.fromUtf8(bytes);
+  }
+
+  /**
    * Converts a string to a UTF-8 byte array.
    *
    * @throws NullPointerException if "string" is null
    */
   public static byte[] toUtf8(final String string)
   {
-    try {
-      return string.getBytes(UTF8_STRING);
-    }
-    catch (UnsupportedEncodingException e) {
-      // Should never happen
-      throw new RuntimeException(e);
-    }
+    return string.getBytes(StandardCharsets.UTF_8);
   }
 
   /**
@@ -427,12 +419,7 @@ public class StringUtils
       return null;
     }
 
-    try {
-      return StringUtils.replace(URLEncoder.encode(s, "UTF-8"), "+", "%20");
-    }
-    catch (UnsupportedEncodingException e) {
-      throw new RuntimeException(e);
-    }
+    return StringUtils.replace(URLEncoder.encode(s, StandardCharsets.UTF_8), "+", "%20");
   }
 
   @Nullable
@@ -442,12 +429,7 @@ public class StringUtils
       return null;
     }
 
-    try {
-      return URLDecoder.decode(s, "UTF-8");
-    }
-    catch (UnsupportedEncodingException e) {
-      throw new RuntimeException(e);
-    }
+    return URLDecoder.decode(s, StandardCharsets.UTF_8);
   }
 
   public static String maybeRemoveLeadingSlash(String s)
@@ -460,82 +442,34 @@ public class StringUtils
     return s != null && s.endsWith("/") ? s.substring(0, s.length() - 1) : s;
   }
 
+  public static String maybeAppendTrailingSlash(String s)
+  {
+    return s != null && !s.endsWith("/") ? s + "/" : s;
+  }
+
   /**
-   * Removes all occurrences of the given char from the given string. This method is an optimal version of
-   * {@link String#replace(CharSequence, CharSequence) s.replace("c", "")}.
+   * Removes all occurrences of the given char from the given string.
    */
   public static String removeChar(String s, char c)
   {
-    int pos = s.indexOf(c);
-    if (pos < 0) {
-      return s;
-    }
-    StringBuilder sb = new StringBuilder(s.length() - 1);
-    int prevPos = 0;
-    do {
-      sb.append(s, prevPos, pos);
-      prevPos = pos + 1;
-      pos = s.indexOf(c, pos + 1);
-    } while (pos > 0);
-    sb.append(s, prevPos, s.length());
-    return sb.toString();
+    return StringUtils.replace(s, String.valueOf(c), "");
   }
 
   /**
-   * Replaces all occurrences of the given char in the given string with the given replacement string. This method is an
-   * optimal version of {@link String#replace(CharSequence, CharSequence) s.replace("c", replacement)}.
+   * Replaces all occurrences of the given char in the given string with the given replacement string.
    */
   public static String replaceChar(String s, char c, String replacement)
   {
-    int pos = s.indexOf(c);
-    if (pos < 0) {
-      return s;
-    }
-    StringBuilder sb = new StringBuilder(s.length() - 1 + replacement.length());
-    int prevPos = 0;
-    do {
-      sb.append(s, prevPos, pos);
-      sb.append(replacement);
-      prevPos = pos + 1;
-      pos = s.indexOf(c, pos + 1);
-    } while (pos > 0);
-    sb.append(s, prevPos, s.length());
-    return sb.toString();
+    return StringUtils.replace(s, String.valueOf(c), replacement);
   }
 
   /**
-   * Replaces all occurrences of the given target substring in the given string with the given replacement string. This
-   * method is an optimal version of {@link String#replace(CharSequence, CharSequence) s.replace(target, replacement)}.
+   * Replaces all occurrences of the given target substring in the given string with the given replacement string.
    */
+  @SuppressForbidden(reason = "String#replace")
   public static String replace(String s, String target, String replacement)
   {
-    // String.replace() is suboptimal in JDK8, but is fixed in JDK9+. When the minimal JDK version supported by Druid is
-    // JDK9+, the implementation of this method should be replaced with simple delegation to String.replace(). However,
-    // the method should still be prohibited to use in all other places except this method body, because it's easy to
-    // suboptimally call String.replace("a", "b"), String.replace("a", ""), String.replace("a", "abc"), which have
-    // better alternatives String.replace('a', 'b'), removeChar() and replaceChar() respectively.
-    int pos = s.indexOf(target);
-    if (pos < 0) {
-      return s;
-    }
-    int sLength = s.length();
-    int targetLength = target.length();
-    // This is needed to work correctly with empty target string and mimic String.replace() behavior
-    int searchSkip = Math.max(targetLength, 1);
-    StringBuilder sb = new StringBuilder(sLength - targetLength + replacement.length());
-    int prevPos = 0;
-    do {
-      sb.append(s, prevPos, pos);
-      sb.append(replacement);
-      prevPos = pos + targetLength;
-      // Break from the loop if the target is empty
-      if (pos == sLength) {
-        break;
-      }
-      pos = s.indexOf(target, pos + searchSkip);
-    } while (pos > 0);
-    sb.append(s, prevPos, sLength);
-    return sb.toString();
+    return s.replace(target, replacement);
   }
 
   /**
@@ -824,5 +758,23 @@ public class StringUtils
     catch (IOException e) {
       throw new ISE(e, "Cannot load resource: [%s]", resource);
     }
+  }
+
+  /**
+   This method is removed from commons lang3.
+   https://commons.apache.org/proper/commons-lang/article3_0.html
+   */
+  public static String escapeSql(String str)
+  {
+    return str == null ? null : StringUtils.replace(str, "'", "''");
+  }
+
+  /**
+   * Uses {@link StringEscapeUtils#escapeHtml4} to escape the HTML entities in
+   * the given string. This method can be used to sanitize a string for XSS.
+   */
+  public static String escapeHtml(String value)
+  {
+    return StringEscapeUtils.escapeHtml4(value);
   }
 }

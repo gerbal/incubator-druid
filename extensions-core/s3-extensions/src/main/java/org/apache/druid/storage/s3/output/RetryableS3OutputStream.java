@@ -19,27 +19,27 @@
 
 package org.apache.druid.storage.s3.output;
 
-import com.amazonaws.AmazonServiceException;
-import com.amazonaws.services.s3.model.AbortMultipartUploadRequest;
-import com.amazonaws.services.s3.model.CompleteMultipartUploadRequest;
-import com.amazonaws.services.s3.model.InitiateMultipartUploadRequest;
-import com.amazonaws.services.s3.model.InitiateMultipartUploadResult;
-import com.amazonaws.services.s3.model.ObjectMetadata;
-import com.amazonaws.services.s3.model.PartETag;
-import com.amazonaws.services.s3.model.UploadPartRequest;
-import com.amazonaws.services.s3.model.UploadPartResult;
-import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Stopwatch;
 import com.google.common.io.CountingOutputStream;
 import it.unimi.dsi.fastutil.io.FastBufferedOutputStream;
+import org.apache.druid.error.DruidException;
 import org.apache.druid.java.util.common.FileUtils;
-import org.apache.druid.java.util.common.IOE;
 import org.apache.druid.java.util.common.RetryUtils;
+import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.io.Closer;
 import org.apache.druid.java.util.common.logger.Logger;
+import org.apache.druid.java.util.emitter.service.ServiceMetricEvent;
 import org.apache.druid.storage.s3.S3Utils;
 import org.apache.druid.storage.s3.ServerSideEncryptingAmazonS3;
+import software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CompletedMultipartUpload;
+import software.amazon.awssdk.services.s3.model.CompletedPart;
+import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CreateMultipartUploadResponse;
+import software.amazon.awssdk.services.s3.model.UploadPartResponse;
 
+import javax.annotation.Nullable;
 import java.io.Closeable;
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -50,6 +50,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -58,12 +59,14 @@ import java.util.concurrent.TimeUnit;
  * <ol>
  * <li>When new data is written, it first creates a chunk in local disk.</li>
  * <li>New data is written to the local chunk until it is full.</li>
- * <li>When the chunk is full, it uploads the chunk to s3 using the multipart upload API.
- * Since this happens synchronously, {@link #write(byte[], int, int)} can be blocked until the upload is done.
+ * <li>When the chunk is full, a multipart upload is started if one is not already in progress, and the chunk is
+ * queued for upload as a part. {@link #write(byte[], int, int)} can be blocked while the upload queue is saturated.
  * The upload can be retried when it fails with transient errors.</li>
- * <li>Once the upload succeeds, it creates a new chunk and continue.</li>
- * <li>When the stream is closed, it uploads the last chunk and finalize the multipart upload.
- * {@link #close()} can be blocked until upload is done.</li>
+ * <li>Once the chunk is queued, it creates a new chunk and continue.</li>
+ * <li>When the stream is closed, what happens depends on whether any part was uploaded. A stream that never filled
+ * a chunk is uploaded as a single object, costing one request instead of the three a multipart upload needs;
+ * otherwise the last chunk is uploaded and the multipart upload is finalized. {@link #close()} can be blocked
+ * until upload is done.</li>
  *   </ol>
  * For compression format support, this output stream supports compression formats if they are <i>concatenatable</i>,
  * such as ZIP or GZIP.
@@ -73,16 +76,29 @@ import java.util.concurrent.TimeUnit;
  */
 public class RetryableS3OutputStream extends OutputStream
 {
+  // Metric related constants.
+  private static final String METRIC_PREFIX = "s3/upload/total/";
+  private static final String METRIC_TOTAL_UPLOAD_TIME = METRIC_PREFIX + "time";
+  private static final String METRIC_TOTAL_UPLOAD_BYTES = METRIC_PREFIX + "bytes";
+
   private static final Logger LOG = new Logger(RetryableS3OutputStream.class);
 
   private final S3OutputConfig config;
   private final ServerSideEncryptingAmazonS3 s3;
   private final String s3Key;
-  private final String uploadId;
   private final File chunkStorePath;
   private final long chunkSize;
 
-  private final List<PartETag> pushResults = new ArrayList<>();
+  /**
+   * Multipart upload ID, or null while the stream still fits in {@link #currentChunk}. A multipart upload costs a
+   * create and a complete request on top of the part uploads themselves, so it is only started once a chunk actually
+   * needs pushing; a stream that never fills a chunk is uploaded by {@link #close()} as a single putObject.
+   *
+   * @see #initiateMultipartUploadIfNeeded()
+   */
+  @Nullable
+  private String uploadId;
+
   private final byte[] singularBuffer = new byte[1];
 
   // metric
@@ -90,12 +106,6 @@ public class RetryableS3OutputStream extends OutputStream
 
   private Chunk currentChunk;
   private int nextChunkId = 1; // multipart upload requires partNumber to be in the range between 1 and 10000
-  private int numChunksPushed;
-  /**
-   * Total size of all chunks. This size is updated whenever the chunk is ready for push,
-   * not when {@link #write(byte[], int, int)} is called.
-   */
-  private long resultsSize;
 
   /**
    * A flag indicating whether there was an upload error.
@@ -104,38 +114,33 @@ public class RetryableS3OutputStream extends OutputStream
   private boolean error;
   private boolean closed;
 
+  /**
+   * Helper class for calculating maximum number of simultaneous chunks allowed on local disk.
+   */
+  private final S3UploadManager uploadManager;
+
+  /**
+   * A list of futures to allow us to wait for completion of all uploadPart() calls
+   * before hitting {@link ServerSideEncryptingAmazonS3#completeMultipartUpload}.
+   */
+  private final List<Future<UploadPartResponse>> futures = new ArrayList<>();
+
   public RetryableS3OutputStream(
       S3OutputConfig config,
       ServerSideEncryptingAmazonS3 s3,
-      String s3Key
-  ) throws IOException
-  {
-
-    this(config, s3, s3Key, true);
-  }
-
-  @VisibleForTesting
-  protected RetryableS3OutputStream(
-      S3OutputConfig config,
-      ServerSideEncryptingAmazonS3 s3,
       String s3Key,
-      boolean chunkValidation
+      S3UploadManager uploadManager
   ) throws IOException
   {
     this.config = config;
     this.s3 = s3;
     this.s3Key = s3Key;
+    this.uploadManager = uploadManager;
 
-    final InitiateMultipartUploadResult result = s3.initiateMultipartUpload(
-        new InitiateMultipartUploadRequest(config.getBucket(), s3Key)
-    );
-    this.uploadId = result.getUploadId();
-    this.chunkStorePath = new File(config.getTempDir(), uploadId + UUID.randomUUID());
+    this.chunkStorePath = new File(config.getTempDir(), UUID.randomUUID().toString());
     FileUtils.mkdirp(this.chunkStorePath);
     this.chunkSize = config.getChunkSize();
-    this.pushStopwatch = Stopwatch.createUnstarted();
-    this.pushStopwatch.reset();
-
+    this.pushStopwatch = Stopwatch.createStarted();
     this.currentChunk = new Chunk(nextChunkId, new File(chunkStorePath, String.valueOf(nextChunkId++)));
   }
 
@@ -167,7 +172,6 @@ public class RetryableS3OutputStream extends OutputStream
 
       while (remainingBytesToWrite > 0) {
         final int writtenBytes = writeToCurrentChunk(b, offsetToWrite, remainingBytesToWrite);
-
         if (currentChunk.length() >= chunkSize) {
           pushCurrentChunk();
           currentChunk = new Chunk(nextChunkId, new File(chunkStorePath, String.valueOf(nextChunkId++)));
@@ -194,65 +198,36 @@ public class RetryableS3OutputStream extends OutputStream
   {
     currentChunk.close();
     final Chunk chunk = currentChunk;
-    try {
-      if (chunk.length() > 0) {
-        resultsSize += chunk.length();
-        if (resultsSize > config.getMaxResultsSize()) {
-          throw new IOE("Exceeded max results size [%s]", config.getMaxResultsSize());
-        }
-
-        pushStopwatch.start();
-        pushResults.add(push(chunk));
-        pushStopwatch.stop();
-        numChunksPushed++;
-      }
-    }
-    finally {
-      if (!chunk.delete()) {
-        LOG.warn("Failed to delete chunk [%s]", chunk.getAbsolutePath());
-      }
-    }
-  }
-
-  private PartETag push(Chunk chunk) throws IOException
-  {
-    try {
-      return RetryUtils.retry(
-          () -> uploadPartIfPossible(uploadId, config.getBucket(), s3Key, chunk),
-          S3Utils.S3RETRY,
-          config.getMaxRetry()
+    if (chunk.length() > 0) {
+      initiateMultipartUploadIfNeeded();
+      futures.add(
+          uploadManager.queueChunkForUpload(s3, s3Key, chunk.id, chunk.file, uploadId, config)
       );
     }
-    catch (AmazonServiceException e) {
-      throw new IOException(e);
-    }
-    catch (Exception e) {
-      throw new RuntimeException(e);
-    }
   }
 
-  private PartETag uploadPartIfPossible(
-      String uploadId,
-      String bucket,
-      String key,
-      Chunk chunk
-  )
+  /**
+   * Starts the multipart upload the first time a chunk actually needs pushing. Called only from
+   * {@link #pushCurrentChunk()}, so a stream that never fills a chunk issues no create request at all.
+   */
+  private void initiateMultipartUploadIfNeeded() throws IOException
   {
-    final ObjectMetadata objectMetadata = new ObjectMetadata();
-    objectMetadata.setContentLength(resultsSize);
-    final UploadPartRequest uploadPartRequest = new UploadPartRequest()
-        .withUploadId(uploadId)
-        .withBucketName(bucket)
-        .withKey(key)
-        .withFile(chunk.file)
-        .withPartNumber(chunk.id)
-        .withPartSize(chunk.length());
-
-    if (LOG.isDebugEnabled()) {
-      LOG.debug("Pushing chunk [%s] to bucket[%s] and key[%s].", chunk, bucket, key);
+    if (uploadId != null) {
+      return;
     }
-    UploadPartResult uploadResult = s3.uploadPart(uploadPartRequest);
-    return uploadResult.getPartETag();
+    try {
+      final CreateMultipartUploadRequest.Builder requestBuilder = CreateMultipartUploadRequest.builder()
+          .bucket(config.getBucket())
+          .key(s3Key);
+      final CreateMultipartUploadResponse result = S3Utils.retryS3Operation(
+          () -> s3.createMultipartUpload(requestBuilder),
+          config.getMaxRetry()
+      );
+      uploadId = result.uploadId();
+    }
+    catch (Exception e) {
+      throw new IOException("Unable to start multipart upload", e);
+    }
   }
 
   @Override
@@ -266,48 +241,140 @@ public class RetryableS3OutputStream extends OutputStream
 
     // Closeables are closed in LIFO order
     closer.register(() -> {
-      // This should be emitted as a metric
-      LOG.info("Total push time: [%d] ms", pushStopwatch.elapsed(TimeUnit.MILLISECONDS));
-    });
+      org.apache.commons.io.FileUtils.forceDelete(chunkStorePath);
 
-    closer.register(() -> org.apache.commons.io.FileUtils.forceDelete(chunkStorePath));
+      final long totalBytesUploaded = (currentChunk.id - 1) * chunkSize + currentChunk.length();
+      final long totalUploadTimeMillis = pushStopwatch.elapsed(TimeUnit.MILLISECONDS);
+      LOG.debug(
+          "Pushed total [%d] parts containing [%d] bytes in [%d]ms for s3Key[%s], uploadId[%s].",
+          futures.size(),
+          totalBytesUploaded,
+          totalUploadTimeMillis,
+          s3Key,
+          uploadId
+      );
 
-    closer.register(() -> {
-      try {
-        if (resultsSize > 0 && isAllPushSucceeded()) {
-          RetryUtils.retry(
-              () -> s3.completeMultipartUpload(
-                  new CompleteMultipartUploadRequest(config.getBucket(), s3Key, uploadId, pushResults)
-              ),
-              S3Utils.S3RETRY,
-              config.getMaxRetry()
-          );
-        } else {
-          RetryUtils.retry(
-              () -> {
-                s3.cancelMultiPartUpload(new AbortMultipartUploadRequest(config.getBucket(), s3Key, uploadId));
-                return null;
-              },
-              S3Utils.S3RETRY,
-              config.getMaxRetry()
-          );
-        }
-      }
-      catch (Exception e) {
-        throw new IOException(e);
-      }
+      final ServiceMetricEvent.Builder builder =
+          new ServiceMetricEvent.Builder().setDimension("uploadId", uploadId == null ? "none" : uploadId);
+      uploadManager.emitMetric(builder.setMetric(METRIC_TOTAL_UPLOAD_TIME, totalUploadTimeMillis));
+      uploadManager.emitMetric(builder.setMetric(METRIC_TOTAL_UPLOAD_BYTES, totalBytesUploaded));
     });
 
     try (Closer ignored = closer) {
       if (!error) {
-        pushCurrentChunk();
+        if (uploadId == null) {
+          // Everything written fits in the first chunk, so a single putObject does the job that a create, an upload
+          // part and a complete would otherwise take.
+          putCurrentChunkAsWholeObject();
+        } else {
+          pushCurrentChunk();
+          completeMultipartUpload();
+        }
       }
     }
   }
 
-  private boolean isAllPushSucceeded()
+  /**
+   * Uploads {@link #currentChunk} as a complete object. Only valid while {@link #uploadId} is null, i.e. when no part
+   * has ever been pushed and the chunk therefore holds the entire stream.
+   */
+  private void putCurrentChunkAsWholeObject() throws IOException
   {
-    return !error && !pushResults.isEmpty() && numChunksPushed == pushResults.size();
+    currentChunk.close();
+    if (currentChunk.length() == 0) {
+      // Nothing was written, so there is no object to create.
+      return;
+    }
+    try {
+      S3Utils.retryS3Operation(
+          () -> s3.putObject(config.getBucket(), s3Key, currentChunk.file),
+          config.getMaxRetry()
+      );
+    }
+    catch (Exception e) {
+      throw new IOException(StringUtils.format("Unable to upload s3Key[%s]", s3Key), e);
+    }
+  }
+
+  /**
+   * Waits for every queued part, then either finalizes the multipart upload or aborts it. An abort discards the parts
+   * uploaded so far and leaves no object at {@link #s3Key} and finally throws a {@link DruidException} to ensure
+   * callers know an error occurred and that the object is not available for reading. The failure is an operator
+   * concern rather than a Druid defect: it means S3 rejected the parts.
+   */
+  private void completeMultipartUpload()
+  {
+    final List<CompletedPart> pushResults = new ArrayList<>();
+    Exception partUploadFailure = null;
+    for (Future<UploadPartResponse> future : futures) {
+      if (error) {
+        future.cancel(true);
+      }
+      try {
+        UploadPartResponse result = future.get(1, TimeUnit.HOURS);
+        pushResults.add(CompletedPart.builder()
+            .partNumber(pushResults.size() + 1)
+            .eTag(result.eTag())
+            .build());
+      }
+      catch (Exception e) {
+        error = true;
+        if (partUploadFailure == null) {
+          partUploadFailure = e;
+        }
+        LOG.error(e, "Error in uploading part for upload ID [%s]", uploadId);
+      }
+    }
+
+    try {
+      boolean isAllPushSucceeded = !error && !pushResults.isEmpty() && futures.size() == pushResults.size();
+      if (isAllPushSucceeded) {
+        CompleteMultipartUploadRequest completeRequest = CompleteMultipartUploadRequest.builder()
+            .bucket(config.getBucket())
+            .key(s3Key)
+            .uploadId(uploadId)
+            .multipartUpload(CompletedMultipartUpload.builder()
+                .parts(pushResults)
+                .build())
+            .build();
+        RetryUtils.retry(
+            () -> s3.completeMultipartUpload(completeRequest),
+            S3Utils.S3RETRY,
+            config.getMaxRetry()
+        );
+      } else {
+        AbortMultipartUploadRequest abortRequest = AbortMultipartUploadRequest.builder()
+            .bucket(config.getBucket())
+            .key(s3Key)
+            .uploadId(uploadId)
+            .build();
+        RetryUtils.retry(
+            () -> {
+              s3.abortMultipartUpload(abortRequest);
+              return null;
+            },
+            S3Utils.S3RETRY,
+            config.getMaxRetry()
+        );
+      }
+    }
+    catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+
+    // If an error occurred during the upload of any part, we aborted the whole upload and there is nothing to read
+    // downstream. We must throw here to indicate that the object was not written and avoid callers assuming that the
+    // object is available for reading.
+    if (error) {
+      throw DruidException.forPersona(DruidException.Persona.OPERATOR)
+                          .ofCategory(DruidException.Category.RUNTIME_FAILURE)
+                          .build(
+                              partUploadFailure,
+                              "Aborted multipart upload[%s] for s3Key[%s]; no object was written",
+                              uploadId,
+                              s3Key
+                          );
+    }
   }
 
   private static class Chunk implements Closeable
@@ -327,16 +394,6 @@ public class RetryableS3OutputStream extends OutputStream
     private long length()
     {
       return outputStream.getCount();
-    }
-
-    private boolean delete()
-    {
-      return file.delete();
-    }
-
-    private String getAbsolutePath()
-    {
-      return file.getAbsolutePath();
     }
 
     @Override

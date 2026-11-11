@@ -16,20 +16,39 @@
  * limitations under the License.
  */
 
-import React from 'react';
-
-import { shallow } from '../../utils/shallow-renderer';
+import { act, render } from '@testing-library/react';
 
 import { LoadDataView } from './load-data-view';
 
+jest.mock('../../utils/sampler', () => ({
+  ...jest.requireActual('../../utils/sampler'),
+  getProxyOverlordModules: () => Promise.resolve(['druid-kafka-indexing-service']),
+}));
+
 describe('LoadDataView', () => {
-  it('matches snapshot streaming', () => {
-    const loadDataView = shallow(<LoadDataView mode="streaming" goToIngestion={() => {}} />);
-    expect(loadDataView).toMatchSnapshot();
+  it('matches snapshot streaming', async () => {
+    const { container } = render(
+      <LoadDataView
+        mode="streaming"
+        goToView={() => {}}
+        openSupervisorSubmit={() => {}}
+        openTaskSubmit={() => {}}
+      />,
+    );
+    await act(() => Promise.resolve()); // Let the (mocked) overlord module request resolve
+    expect(container.firstChild).toMatchSnapshot();
   });
 
-  it('matches snapshot batch', () => {
-    const loadDataView = shallow(<LoadDataView mode="batch" goToIngestion={() => {}} />);
-    expect(loadDataView).toMatchSnapshot();
+  it('matches snapshot batch', async () => {
+    const { container } = render(
+      <LoadDataView
+        mode="batch"
+        goToView={() => {}}
+        openSupervisorSubmit={() => {}}
+        openTaskSubmit={() => {}}
+      />,
+    );
+    await act(() => Promise.resolve()); // Let the (mocked) overlord module request resolve
+    expect(container.firstChild).toMatchSnapshot();
   });
 });

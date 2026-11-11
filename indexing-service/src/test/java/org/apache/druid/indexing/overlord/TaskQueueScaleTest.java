@@ -33,6 +33,7 @@ import org.apache.druid.indexing.common.actions.TaskActionClient;
 import org.apache.druid.indexing.common.actions.TaskActionClientFactory;
 import org.apache.druid.indexing.common.config.TaskStorageConfig;
 import org.apache.druid.indexing.common.task.NoopTask;
+import org.apache.druid.indexing.common.task.NoopTaskContextEnricher;
 import org.apache.druid.indexing.common.task.Task;
 import org.apache.druid.indexing.overlord.autoscaling.ScalingStats;
 import org.apache.druid.indexing.overlord.config.DefaultTaskConfig;
@@ -44,17 +45,24 @@ import org.apache.druid.java.util.common.io.Closer;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.metadata.IndexerSQLMetadataStorageCoordinator;
+import org.apache.druid.metadata.SegmentsMetadataManagerConfig;
 import org.apache.druid.metadata.TaskLookup;
 import org.apache.druid.metadata.TestDerbyConnector;
+import org.apache.druid.metadata.segment.SqlSegmentMetadataTransactionFactory;
+import org.apache.druid.metadata.segment.cache.NoopSegmentMetadataCache;
 import org.apache.druid.segment.TestHelper;
+import org.apache.druid.segment.metadata.CentralizedDatasourceSchemaConfig;
+import org.apache.druid.segment.metadata.HeapMemoryIndexingStateStorage;
+import org.apache.druid.segment.metadata.SegmentSchemaManager;
+import org.apache.druid.server.coordinator.simulate.TestDruidLeaderSelector;
 import org.apache.druid.server.metrics.NoopServiceEmitter;
 import org.joda.time.Duration;
 import org.joda.time.Period;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import javax.annotation.Nullable;
 import java.util.ArrayList;
@@ -77,17 +85,19 @@ public class TaskQueueScaleTest
 
   private final int numTasks = 1000;
 
-  @Rule
-  public final TestDerbyConnector.DerbyConnectorRule derbyConnectorRule = new TestDerbyConnector.DerbyConnectorRule();
+  private final TestDerbyConnector.DerbyConnectorRule derbyConnectorRule =
+      new TestDerbyConnector.DerbyConnectorRule();
 
   private TaskQueue taskQueue;
   private TaskStorage taskStorage;
   private TestTaskRunner taskRunner;
   private Closer closer;
+  private SegmentSchemaManager segmentSchemaManager;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
+    derbyConnectorRule.before();
     EmittingLogger.registerEmitter(new NoopServiceEmitter());
 
     closer = Closer.create();
@@ -97,11 +107,23 @@ public class TaskQueueScaleTest
     taskRunner = new TestTaskRunner();
     closer.register(taskRunner::stop);
     final ObjectMapper jsonMapper = TestHelper.makeJsonMapper();
-
+    segmentSchemaManager = new SegmentSchemaManager(derbyConnectorRule.metadataTablesConfigSupplier().get(), jsonMapper, derbyConnectorRule.getConnector());
     final IndexerSQLMetadataStorageCoordinator storageCoordinator = new IndexerSQLMetadataStorageCoordinator(
+        new SqlSegmentMetadataTransactionFactory(
+            jsonMapper,
+            derbyConnectorRule.metadataTablesConfigSupplier().get(),
+            derbyConnectorRule.getConnector(),
+            new TestDruidLeaderSelector(),
+            NoopSegmentMetadataCache.instance(),
+            new SegmentsMetadataManagerConfig(null, null, null),
+            NoopServiceEmitter.instance()
+        ),
         jsonMapper,
         derbyConnectorRule.metadataTablesConfigSupplier().get(),
-        derbyConnectorRule.getConnector()
+        derbyConnectorRule.getConnector(),
+        segmentSchemaManager,
+        CentralizedDatasourceSchemaConfig.create(),
+        new HeapMemoryIndexingStateStorage()
     );
 
     final TaskActionClientFactory unsupportedTaskActionFactory =
@@ -116,44 +138,49 @@ public class TaskQueueScaleTest
 
     taskQueue = new TaskQueue(
         new TaskLockConfig(),
-        new TaskQueueConfig(null, Period.millis(1), null, null),
+        new TaskQueueConfig(null, Period.millis(1), null, null, null, null),
         new DefaultTaskConfig(),
         taskStorage,
         taskRunner,
         unsupportedTaskActionFactory, // Not used for anything serious
-        new TaskLockbox(taskStorage, storageCoordinator),
-        new NoopServiceEmitter()
+        new GlobalTaskLockbox(taskStorage, storageCoordinator),
+        new NoopServiceEmitter(),
+        jsonMapper,
+        new NoopTaskContextEnricher()
     );
 
+    storageCoordinator.start();
     taskQueue.start();
     closer.register(taskQueue::stop);
   }
 
-  @After
+  @AfterEach
   public void tearDown() throws Exception
   {
-    closer.close();
+    try {
+      closer.close();
+    }
+    finally {
+      derbyConnectorRule.after();
+    }
   }
 
-  @Test(timeout = 60_000L) // more than enough time if the task queue is efficient
+  @Timeout(60) // more than enough time if the task queue is efficient
+  @Test
   public void doMassLaunchAndExit() throws Exception
   {
-    Assert.assertEquals("no tasks should be running", 0, taskRunner.getKnownTasks().size());
-    Assert.assertEquals("no tasks should be known", 0, taskQueue.getTasks().size());
-    Assert.assertEquals("no tasks should be running", 0, taskQueue.getRunningTaskCount().size());
+    Assertions.assertEquals(0, taskRunner.getKnownTasks().size(), "no tasks should be running");
+    Assertions.assertEquals(0, taskQueue.getTasks().size(), "no tasks should be known");
+    Assertions.assertEquals(0, taskQueue.getRunningTaskCount().size(), "no tasks should be running");
 
     // Add all tasks.
     for (int i = 0; i < numTasks; i++) {
-      final TestTask testTask = new TestTask(i, 2000L /* runtime millis */);
+      final NoopTask testTask = createTestTask(2000L);
       taskQueue.add(testTask);
     }
 
-    // in theory we can get a race here, since we fetch the counts at separate times
-    Assert.assertEquals("all tasks should be known", numTasks, taskQueue.getTasks().size());
-    long runningTasks = taskQueue.getRunningTaskCount().values().stream().mapToLong(Long::longValue).sum();
-    long pendingTasks = taskQueue.getPendingTaskCount().values().stream().mapToLong(Long::longValue).sum();
-    long waitingTasks = taskQueue.getWaitingTaskCount().values().stream().mapToLong(Long::longValue).sum();
-    Assert.assertEquals("all tasks should be known", numTasks, (runningTasks + pendingTasks + waitingTasks));
+    // The running, pending, and waiting counters are separate snapshots and cannot be summed while tasks transition.
+    Assertions.assertEquals(numTasks, taskQueue.getTasks().size(), "all tasks should be known");
 
     // Wait for all tasks to finish.
     final TaskLookup.CompleteTaskLookup completeTaskLookup =
@@ -163,27 +190,33 @@ public class TaskQueueScaleTest
       Thread.sleep(100);
     }
 
-    Thread.sleep(100);
+    // Completion is persisted before cleanup finishes. The test timeout bounds this wait.
+    while (!taskStorage.getActiveTasks().isEmpty()
+           || taskQueue.getRunningTaskCount().values().stream().anyMatch(count -> count != 0)
+           || taskQueue.getPendingTaskCount().values().stream().anyMatch(count -> count != 0)
+           || taskQueue.getWaitingTaskCount().values().stream().anyMatch(count -> count != 0)) {
+      Thread.sleep(100);
+    }
 
-    Assert.assertEquals("no tasks should be active", 0, taskStorage.getActiveTasks().size());
-    runningTasks = taskQueue.getRunningTaskCount().values().stream().mapToLong(Long::longValue).sum();
-    pendingTasks = taskQueue.getPendingTaskCount().values().stream().mapToLong(Long::longValue).sum();
-    waitingTasks = taskQueue.getWaitingTaskCount().values().stream().mapToLong(Long::longValue).sum();
-    Assert.assertEquals("no tasks should be running", 0, runningTasks);
-    Assert.assertEquals("no tasks should be pending", 0, pendingTasks);
-    Assert.assertEquals("no tasks should be waiting", 0, waitingTasks);
+    Assertions.assertEquals(0, taskStorage.getActiveTasks().size(), "no tasks should be active");
+    final long runningTasks = taskQueue.getRunningTaskCount().values().stream().mapToLong(Long::longValue).sum();
+    final long pendingTasks = taskQueue.getPendingTaskCount().values().stream().mapToLong(Long::longValue).sum();
+    final long waitingTasks = taskQueue.getWaitingTaskCount().values().stream().mapToLong(Long::longValue).sum();
+    Assertions.assertEquals(0, runningTasks, "no tasks should be running");
+    Assertions.assertEquals(0, pendingTasks, "no tasks should be pending");
+    Assertions.assertEquals(0, waitingTasks, "no tasks should be waiting");
   }
 
-  @Test(timeout = 60_000L) // more than enough time if the task queue is efficient
+  @Timeout(60) // more than enough time if the task queue is efficient
+  @Test
   public void doMassLaunchAndShutdown() throws Exception
   {
-    Assert.assertEquals("no tasks should be running", 0, taskRunner.getKnownTasks().size());
+    Assertions.assertEquals(0, taskRunner.getKnownTasks().size(), "no tasks should be running");
 
     // Add all tasks.
     final List<String> taskIds = new ArrayList<>();
     for (int i = 0; i < numTasks; i++) {
-      final TestTask testTask = new TestTask(
-          i,
+      final NoopTask testTask = createTestTask(
           Duration.standardHours(1).getMillis() /* very long runtime millis, so we can do a shutdown */
       );
       taskQueue.add(testTask);
@@ -194,7 +227,7 @@ public class TaskQueueScaleTest
     while (taskStorage.getActiveTasks().size() < numTasks) {
       Thread.sleep(100);
     }
-    Assert.assertEquals("all tasks should be running", numTasks, taskStorage.getActiveTasks().size());
+    Assertions.assertEquals(numTasks, taskStorage.getActiveTasks().size(), "all tasks should be running");
 
     // Shut down all tasks.
     for (final String taskId : taskIds) {
@@ -206,36 +239,18 @@ public class TaskQueueScaleTest
       Thread.sleep(100);
     }
 
-    Assert.assertEquals("no tasks should be running", 0, taskStorage.getActiveTasks().size());
+    Assertions.assertEquals(0, taskStorage.getActiveTasks().size(), "no tasks should be running");
 
     int completed = taskStorage.getTaskInfos(
         TaskLookup.CompleteTaskLookup.of(numTasks, Duration.standardHours(1)),
         DATASOURCE
     ).size();
-    Assert.assertEquals("all tasks should have completed", numTasks, completed);
+    Assertions.assertEquals(numTasks, completed, "all tasks should have completed");
   }
 
-  private static class TestTask extends NoopTask
+  private NoopTask createTestTask(long runtimeMillis)
   {
-    private final int number;
-    private final long runtime;
-
-    public TestTask(int number, long runtime)
-    {
-      super(null, null, DATASOURCE, 0, 0, null, null, Collections.emptyMap());
-      this.number = number;
-      this.runtime = runtime;
-    }
-
-    public int getNumber()
-    {
-      return number;
-    }
-
-    public long getRuntimeMillis()
-    {
-      return runtime;
-    }
+    return new NoopTask(null, null, DATASOURCE, runtimeMillis, 0, Collections.emptyMap());
   }
 
   private static class TestTaskRunner implements TaskRunner
@@ -268,7 +283,7 @@ public class TaskQueueScaleTest
               try {
                 synchronized (knownTasks) {
                   final TestTaskRunnerWorkItem item2 = knownTasks.get(task.getId());
-                  if (item2.getState() == RunnerTaskState.PENDING) {
+                  if (item2 != null && item2.getState() == RunnerTaskState.PENDING) {
                     knownTasks.put(task.getId(), item2.withState(RunnerTaskState.RUNNING));
                   }
                 }
@@ -279,7 +294,9 @@ public class TaskQueueScaleTest
                         final TestTaskRunnerWorkItem item2;
                         synchronized (knownTasks) {
                           item2 = knownTasks.get(task.getId());
-                          knownTasks.put(task.getId(), item2.withState(RunnerTaskState.NONE));
+                          if (item2 != null) {
+                            knownTasks.put(task.getId(), item2.withState(RunnerTaskState.NONE));
+                          }
                         }
                         if (item2 != null) {
                           item2.setResult(TaskStatus.success(task.getId()));
@@ -289,7 +306,7 @@ public class TaskQueueScaleTest
                         log.error(e, "Error in scheduled executor");
                       }
                     },
-                    ((TestTask) task).getRuntimeMillis(),
+                    ((NoopTask) task).getRunTime(),
                     TimeUnit.MILLISECONDS
                 );
               }
@@ -323,7 +340,7 @@ public class TaskQueueScaleTest
       }
       if (!existingTask.getResult().isDone()) {
         exec.schedule(() -> {
-          existingTask.setResult(TaskStatus.failure("taskId", "stopped"));
+          existingTask.setResult(TaskStatus.failure(existingTask.getTaskId(), "stopped"));
           synchronized (knownTasks) {
             knownTasks.remove(taskid);
           }
@@ -491,4 +508,3 @@ public class TaskQueueScaleTest
     }
   }
 }
-

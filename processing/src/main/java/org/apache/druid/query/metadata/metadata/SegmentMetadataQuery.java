@@ -22,7 +22,8 @@ package org.apache.druid.query.metadata.metadata;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonValue;
-import com.google.common.base.Preconditions;
+import org.apache.druid.error.DruidException;
+import org.apache.druid.error.InvalidInput;
 import org.apache.druid.java.util.common.Cacheable;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.StringUtils;
@@ -30,10 +31,12 @@ import org.apache.druid.query.BaseQuery;
 import org.apache.druid.query.DataSource;
 import org.apache.druid.query.Druids;
 import org.apache.druid.query.Query;
+import org.apache.druid.query.RestrictedDataSource;
 import org.apache.druid.query.TableDataSource;
 import org.apache.druid.query.UnionDataSource;
 import org.apache.druid.query.filter.DimFilter;
 import org.apache.druid.query.metadata.SegmentMetadataQueryConfig;
+import org.apache.druid.query.policy.NoRestrictionPolicy;
 import org.apache.druid.query.spec.MultipleIntervalSegmentSpec;
 import org.apache.druid.query.spec.QuerySegmentSpec;
 import org.joda.time.Interval;
@@ -56,7 +59,8 @@ public class SegmentMetadataQuery extends BaseQuery<SegmentAnalysis>
     MINMAX,
     TIMESTAMPSPEC,
     QUERYGRANULARITY,
-    ROLLUP;
+    ROLLUP,
+    PROJECTIONS;
 
     @JsonValue
     @Override
@@ -74,7 +78,7 @@ public class SegmentMetadataQuery extends BaseQuery<SegmentAnalysis>
     @Override
     public byte[] getCacheKey()
     {
-      return new byte[] {(byte) this.ordinal()};
+      return new byte[]{(byte) this.ordinal()};
     }
   }
 
@@ -82,7 +86,7 @@ public class SegmentMetadataQuery extends BaseQuery<SegmentAnalysis>
   private final boolean merge;
   private final boolean usingDefaultInterval;
   private final EnumSet<AnalysisType> analysisTypes;
-  private final boolean lenientAggregatorMerge;
+  private final AggregatorMergeStrategy aggregatorMergeStrategy;
 
   @JsonCreator
   public SegmentMetadataQuery(
@@ -93,10 +97,11 @@ public class SegmentMetadataQuery extends BaseQuery<SegmentAnalysis>
       @JsonProperty("context") Map<String, Object> context,
       @JsonProperty("analysisTypes") EnumSet<AnalysisType> analysisTypes,
       @JsonProperty("usingDefaultInterval") Boolean useDefaultInterval,
-      @JsonProperty("lenientAggregatorMerge") Boolean lenientAggregatorMerge
+      @Deprecated @JsonProperty("lenientAggregatorMerge") Boolean lenientAggregatorMerge,
+      @JsonProperty("aggregatorMergeStrategy") AggregatorMergeStrategy aggregatorMergeStrategy
   )
   {
-    super(dataSource, querySegmentSpec == null ? DEFAULT_SEGMENT_SPEC : querySegmentSpec, false, context);
+    super(dataSource, querySegmentSpec == null ? DEFAULT_SEGMENT_SPEC : querySegmentSpec, context);
 
     if (querySegmentSpec == null) {
       this.usingDefaultInterval = true;
@@ -106,11 +111,28 @@ public class SegmentMetadataQuery extends BaseQuery<SegmentAnalysis>
     this.toInclude = toInclude == null ? new AllColumnIncluderator() : toInclude;
     this.merge = merge == null ? false : merge;
     this.analysisTypes = analysisTypes;
-    Preconditions.checkArgument(
-        dataSource instanceof TableDataSource || dataSource instanceof UnionDataSource,
-        "SegmentMetadataQuery only supports table or union datasource"
-    );
-    this.lenientAggregatorMerge = lenientAggregatorMerge == null ? false : lenientAggregatorMerge;
+
+    validateDataSource(dataSource);
+    // We validate that there's only one parameter specified by the user. While the deprecated property is still
+    // supported in the API, we only set the new member variable either using old or new property, so we've a single source
+    // of truth for consumers of this class variable. The defaults are to preserve backwards compatibility.
+    // In a future release, 28.0+, we can remove the deprecated property lenientAggregatorMerge.
+    if (lenientAggregatorMerge != null && aggregatorMergeStrategy != null) {
+      throw InvalidInput.exception(
+          "Both lenientAggregatorMerge [%s] and aggregatorMergeStrategy [%s] parameters cannot be set. Consider using aggregatorMergeStrategy since lenientAggregatorMerge is deprecated.",
+          lenientAggregatorMerge,
+          aggregatorMergeStrategy
+      );
+    }
+    if (lenientAggregatorMerge != null) {
+      this.aggregatorMergeStrategy = lenientAggregatorMerge
+                                     ? AggregatorMergeStrategy.LENIENT
+                                     : AggregatorMergeStrategy.STRICT;
+    } else if (aggregatorMergeStrategy != null) {
+      this.aggregatorMergeStrategy = aggregatorMergeStrategy;
+    } else {
+      this.aggregatorMergeStrategy = AggregatorMergeStrategy.STRICT;
+    }
   }
 
   @JsonProperty
@@ -156,9 +178,9 @@ public class SegmentMetadataQuery extends BaseQuery<SegmentAnalysis>
   }
 
   @JsonProperty
-  public boolean isLenientAggregatorMerge()
+  public AggregatorMergeStrategy getAggregatorMergeStrategy()
   {
-    return lenientAggregatorMerge;
+    return aggregatorMergeStrategy;
   }
 
   public boolean analyzingInterval()
@@ -169,6 +191,11 @@ public class SegmentMetadataQuery extends BaseQuery<SegmentAnalysis>
   public boolean hasAggregators()
   {
     return analysisTypes.contains(AnalysisType.AGGREGATORS);
+  }
+
+  public boolean hasProjections()
+  {
+    return analysisTypes.contains(AnalysisType.PROJECTIONS);
   }
 
   public boolean hasTimestampSpec()
@@ -227,18 +254,46 @@ public class SegmentMetadataQuery extends BaseQuery<SegmentAnalysis>
     return this.getQuerySegmentSpec().getIntervals();
   }
 
+  private static void validateDataSource(DataSource dataSource)
+  {
+    if (dataSource instanceof TableDataSource) {
+      // do nothing
+    } else if (dataSource instanceof RestrictedDataSource) {
+      validateWithNoRestrictionPolicy((RestrictedDataSource) dataSource);
+    } else if (dataSource instanceof UnionDataSource) {
+      for (DataSource child : dataSource.getChildren()) {
+        validateDataSource(child);
+      }
+    } else {
+      throw InvalidInput.exception("Invalid dataSource type [%s]. "
+                                   + "SegmentMetadataQuery only supports table or union datasources.", dataSource);
+    }
+  }
+
+  private static void validateWithNoRestrictionPolicy(RestrictedDataSource restricted)
+  {
+    if (!(restricted.getPolicy() instanceof NoRestrictionPolicy)) {
+      throw DruidException.forPersona(DruidException.Persona.USER)
+                          .ofCategory(DruidException.Category.FORBIDDEN)
+                          .build(
+                              "You do not have permission to run a segmentMetadata query on table[%s].",
+                              restricted.getBase()
+                          );
+    }
+  }
+
   @Override
   public String toString()
   {
     return "SegmentMetadataQuery{" +
-        "dataSource='" + getDataSource() + '\'' +
-        ", querySegmentSpec=" + getQuerySegmentSpec() +
-        ", toInclude=" + toInclude +
-        ", merge=" + merge +
-        ", usingDefaultInterval=" + usingDefaultInterval +
-        ", analysisTypes=" + analysisTypes +
-        ", lenientAggregatorMerge=" + lenientAggregatorMerge +
-        '}';
+           "dataSource='" + getDataSource() + '\'' +
+           ", querySegmentSpec=" + getQuerySegmentSpec() +
+           ", toInclude=" + toInclude +
+           ", merge=" + merge +
+           ", usingDefaultInterval=" + usingDefaultInterval +
+           ", analysisTypes=" + analysisTypes +
+           ", aggregatorMergeStrategy=" + aggregatorMergeStrategy +
+           '}';
   }
 
   @Override
@@ -255,10 +310,10 @@ public class SegmentMetadataQuery extends BaseQuery<SegmentAnalysis>
     }
     SegmentMetadataQuery that = (SegmentMetadataQuery) o;
     return merge == that.merge &&
-        usingDefaultInterval == that.usingDefaultInterval &&
-        lenientAggregatorMerge == that.lenientAggregatorMerge &&
-        Objects.equals(toInclude, that.toInclude) &&
-        Objects.equals(analysisTypes, that.analysisTypes);
+           usingDefaultInterval == that.usingDefaultInterval &&
+           Objects.equals(toInclude, that.toInclude) &&
+           Objects.equals(analysisTypes, that.analysisTypes) &&
+           Objects.equals(aggregatorMergeStrategy, that.aggregatorMergeStrategy);
   }
 
   @Override
@@ -270,7 +325,7 @@ public class SegmentMetadataQuery extends BaseQuery<SegmentAnalysis>
         merge,
         usingDefaultInterval,
         analysisTypes,
-        lenientAggregatorMerge
+        aggregatorMergeStrategy
     );
   }
 }

@@ -28,23 +28,26 @@ import org.apache.druid.client.cache.CacheConfig;
 import org.apache.druid.client.cache.CachePopulator;
 import org.apache.druid.client.cache.CachePopulatorStats;
 import org.apache.druid.initialization.Initialization;
+import org.apache.druid.query.BrokerParallelMergeConfig;
 import org.apache.druid.query.DruidProcessingConfig;
 import org.apache.druid.utils.JvmUtils;
-import org.junit.Assert;
-import org.junit.Assume;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
-import org.mockito.junit.MockitoJUnitRunner;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.mockito.junit.jupiter.MockitoSettings;
+import org.mockito.quality.Strictness;
+
+import java.util.Properties;
 
 
-@RunWith(MockitoJUnitRunner.class)
+@ExtendWith(MockitoExtension.class)
+@MockitoSettings(strictness = Strictness.STRICT_STUBS)
 public class BrokerProcessingModuleTest
 {
-  private static final boolean INJECT_SERVER_TYPE_CONFIG = true;
-  @Mock
-  private DruidProcessingConfig druidProcessingConfig;
   private Injector injector;
   private BrokerProcessingModule target;
   @Mock
@@ -52,51 +55,44 @@ public class BrokerProcessingModuleTest
   @Mock
   private CachePopulatorStats cachePopulatorStats;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
     target = new BrokerProcessingModule();
-    injector = makeInjector(INJECT_SERVER_TYPE_CONFIG);
+    injector = makeInjector(new Properties());
   }
 
   @Test
   public void testIntermediateResultsPool()
   {
-    target.getIntermediateResultsPool(druidProcessingConfig);
+    DruidProcessingConfig druidProcessingConfig = injector.getInstance(DruidProcessingConfig.class);
+    target.getIntermediateResultsPool(druidProcessingConfig, JvmUtils.getRuntimeInfo());
   }
 
 
   @Test
   public void testMergeBufferPool()
   {
-    target.getMergeBufferPool(druidProcessingConfig);
+    DruidProcessingConfig druidProcessingConfig = injector.getInstance(DruidProcessingConfig.class);
+    target.getMergeBufferPool(druidProcessingConfig, JvmUtils.getRuntimeInfo());
   }
 
   @Test
   public void testMergeProcessingPool()
   {
-    DruidProcessingConfig config = new DruidProcessingConfig()
-    {
-      @Override
-      public String getFormatString()
-      {
-        return "processing-test-%s";
-      }
-    };
-    DruidProcessingModule module = new DruidProcessingModule();
+    BrokerParallelMergeConfig config = injector.getInstance(BrokerParallelMergeConfig.class);
+    BrokerProcessingModule module = new BrokerProcessingModule();
     module.getMergeProcessingPoolProvider(config);
-    config.getNumInitalBuffersForIntermediatePool();
   }
 
   @Test
   public void testCachePopulatorAsSingleton()
   {
     CachePopulator cachePopulator = injector.getInstance(CachePopulator.class);
-    Assert.assertNotNull(cachePopulator);
-
+    Assertions.assertNotNull(cachePopulator);
   }
 
-  @Test(expected = ProvisionException.class)
+  @Test
   public void testMemoryCheckThrowsException()
   {
     // JDK 9 and above do not support checking for direct memory size
@@ -105,45 +101,40 @@ public class BrokerProcessingModuleTest
       JvmUtils.getRuntimeInfo().getDirectMemorySizeBytes();
     }
     catch (UnsupportedOperationException e) {
-      Assume.assumeNoException(e);
+      Assumptions.assumeTrue(false, e::getMessage);
     }
 
-    BrokerProcessingModule module = new BrokerProcessingModule();
-    module.getMergeBufferPool(new DruidProcessingConfig()
-    {
-      @Override
-      public String getFormatString()
-      {
-        return "test";
-      }
+    Assertions.assertThrows(ProvisionException.class, () -> {
+      Properties props = new Properties();
+      props.setProperty("druid.processing.buffer.sizeBytes", "3GiB");
+      Injector injector1 = makeInjector(props);
 
-      @Override
-      public int intermediateComputeSizeBytes()
-      {
-        return Integer.MAX_VALUE;
-      }
+      DruidProcessingConfig processingBufferConfig = injector1.getInstance(DruidProcessingConfig.class);
+      BrokerProcessingModule module = new BrokerProcessingModule();
+      module.getMergeBufferPool(processingBufferConfig, JvmUtils.getRuntimeInfo());
     });
   }
 
-  private Injector makeInjector(boolean withServerTypeConfig)
+  private Injector makeInjector(Properties props)
   {
-    return Initialization.makeInjectorWithModules(
-        GuiceInjectors.makeStartupInjector(), (ImmutableList.of(Modules.override(
-            (binder) -> {
-              binder.bindConstant().annotatedWith(Names.named("serviceName")).to("test");
-              binder.bindConstant().annotatedWith(Names.named("servicePort")).to(0);
-              binder.bindConstant().annotatedWith(Names.named("tlsServicePort")).to(-1);
-              binder.bind(DruidProcessingConfig.class).toInstance(druidProcessingConfig);
-            },
-            target
-        ).with(
-            (binder) -> {
+
+    Injector injector = Initialization.makeInjectorWithModules(
+        GuiceInjectors.makeStartupInjector(),
+        ImmutableList.of(
+            Modules.override(
+                (binder) -> {
+                  binder.bindConstant().annotatedWith(Names.named("serviceName")).to("test");
+                  binder.bindConstant().annotatedWith(Names.named("servicePort")).to(0);
+                  binder.bindConstant().annotatedWith(Names.named("tlsServicePort")).to(-1);
+                  binder.bind(Properties.class).toInstance(props);
+                },
+                target
+            ).with((binder) -> {
               binder.bind(CachePopulatorStats.class).toInstance(cachePopulatorStats);
               binder.bind(CacheConfig.class).toInstance(cacheConfig);
-            }
+            })
         )
-        )));
+    );
+    return injector;
   }
-
 }
-

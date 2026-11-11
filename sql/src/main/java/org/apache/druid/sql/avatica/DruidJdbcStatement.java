@@ -26,6 +26,7 @@ import org.apache.druid.sql.SqlQueryPlus;
 import org.apache.druid.sql.SqlStatementFactory;
 import org.apache.druid.sql.avatica.DruidJdbcResultSet.ResultFetcherFactory;
 
+import javax.annotation.Nullable;
 import java.util.Map;
 
 /**
@@ -40,26 +41,40 @@ public class DruidJdbcStatement extends AbstractDruidJdbcStatement
 {
   private final SqlStatementFactory lifecycleFactory;
   protected final Map<String, Object> queryContext;
+  protected final Map<String, Object> defaultContext;
 
   public DruidJdbcStatement(
       final String connectionId,
       final int statementId,
       final Map<String, Object> queryContext,
+      final Map<String, Object> defaultContext,
       final SqlStatementFactory lifecycleFactory,
       final ResultFetcherFactory fetcherFactory
   )
   {
     super(connectionId, statementId, fetcherFactory);
     this.queryContext = queryContext;
+    this.defaultContext = defaultContext;
     this.lifecycleFactory = Preconditions.checkNotNull(lifecycleFactory, "lifecycleFactory");
   }
 
-  public synchronized void execute(SqlQueryPlus queryPlus, long maxRowCount)
+  /**
+   * Executes the given query. The {@code remoteAddress} is read from the calling
+   * (execute) request rather than captured when the statement was created, so that
+   * a statement reused after a reconnect or from a different remote is attributed
+   * to the actual caller of this execution.
+   * <p>
+   * {@code maxRowCount} is the total row limit requested by the client through
+   * {@code Statement.setMaxRows()}. Avatica maps "no limit" to a negative value
+   * before it reaches this method, which {@link DruidJdbcResultSet} reads as
+   * unlimited.
+   */
+  public synchronized void execute(SqlQueryPlus queryPlus, long maxRowCount, @Nullable String remoteAddress)
   {
     closeResultSet();
-    queryPlus = queryPlus.withContext(queryContext);
-    DirectStatement stmt = lifecycleFactory.directStatement(queryPlus);
-    resultSet = new DruidJdbcResultSet(this, stmt, Long.MAX_VALUE, fetcherFactory);
+    this.sqlQuery = queryPlus.withContext(defaultContext, queryContext).freshCopy();
+    DirectStatement stmt = lifecycleFactory.directStatement(this.sqlQuery, remoteAddress);
+    resultSet = new DruidJdbcResultSet(this, stmt, maxRowCount, fetcherFactory);
     try {
       resultSet.execute();
     }

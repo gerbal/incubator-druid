@@ -40,8 +40,9 @@ import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.io.Closer;
+import org.apache.druid.java.util.metrics.StubServiceEmitter;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
-import org.apache.druid.query.context.ConcurrentResponseContext;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.context.ResponseContext;
 import org.apache.druid.query.timeseries.TimeseriesResultValue;
 import org.apache.druid.query.topn.TopNQueryConfig;
@@ -49,15 +50,14 @@ import org.apache.druid.segment.QueryableIndex;
 import org.apache.druid.segment.generator.GeneratorBasicSchemas;
 import org.apache.druid.segment.generator.GeneratorSchemaInfo;
 import org.apache.druid.segment.generator.SegmentGenerator;
-import org.apache.druid.segment.join.JoinableFactoryWrapperTest;
 import org.apache.druid.server.QueryStackTests;
-import org.apache.druid.server.metrics.NoopServiceEmitter;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 import org.apache.druid.timeline.partition.NumberedShardSpec;
 import org.joda.time.Interval;
-import org.junit.After;
-import org.junit.AfterClass;
-import org.junit.Before;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -93,9 +93,7 @@ public abstract class QueryRunnerBasedOnClusteredClientTestBase
   private static final boolean USE_PARALLEL_MERGE_POOL_CONFIGURED = false;
 
   protected final ObjectMapper objectMapper = new DefaultObjectMapper();
-  protected final QueryToolChestWarehouse toolChestWarehouse;
-
-  private final QueryRunnerFactoryConglomerate conglomerate;
+  protected final QueryRunnerFactoryConglomerate conglomerate;
 
   protected TestHttpClient httpClient;
   protected SimpleServerView simpleServerView;
@@ -103,58 +101,46 @@ public abstract class QueryRunnerBasedOnClusteredClientTestBase
   protected List<DruidServer> servers;
 
   private SegmentGenerator segmentGenerator;
+  protected StubServiceEmitter emitter = new StubServiceEmitter();
 
   protected QueryRunnerBasedOnClusteredClientTestBase()
   {
     conglomerate = QueryStackTests.createQueryRunnerFactoryConglomerate(
         CLOSER,
-        USE_PARALLEL_MERGE_POOL_CONFIGURED,
-        () -> TopNQueryConfig.DEFAULT_MIN_TOPN_THRESHOLD
+        TopNQueryConfig.DEFAULT_MIN_TOPN_THRESHOLD
     );
-
-    toolChestWarehouse = new QueryToolChestWarehouse()
-    {
-      @Override
-      public <T, QueryType extends Query<T>> QueryToolChest<T, QueryType> getToolChest(final QueryType query)
-      {
-        return conglomerate.findFactory(query).getToolchest();
-      }
-    };
   }
 
-  @AfterClass
+  @AfterAll
   public static void tearDownAbstractClass() throws IOException
   {
     CLOSER.close();
   }
 
-  @Before
+  @BeforeEach
   public void setupTestBase()
   {
     segmentGenerator = new SegmentGenerator();
     httpClient = new TestHttpClient(objectMapper);
-    simpleServerView = new SimpleServerView(toolChestWarehouse, objectMapper, httpClient);
+    simpleServerView = new SimpleServerView(conglomerate, objectMapper, httpClient);
+    emitter.flush();
     cachingClusteredClient = new CachingClusteredClient(
-        toolChestWarehouse,
+        conglomerate,
         simpleServerView,
         MapCache.create(0),
         objectMapper,
         new ForegroundCachePopulator(objectMapper, new CachePopulatorStats(), 0),
         new CacheConfig(),
         new DruidHttpClientConfig(),
-        QueryStackTests.getProcessingConfig(
-            USE_PARALLEL_MERGE_POOL_CONFIGURED,
-            DruidProcessingConfig.DEFAULT_NUM_MERGE_BUFFERS
-        ),
+        QueryStackTests.getParallelMergeConfig(USE_PARALLEL_MERGE_POOL_CONFIGURED),
         ForkJoinPool.commonPool(),
         QueryStackTests.DEFAULT_NOOP_SCHEDULER,
-        JoinableFactoryWrapperTest.NOOP_JOINABLE_FACTORY_WRAPPER,
-        new NoopServiceEmitter()
+        emitter
     );
     servers = new ArrayList<>();
   }
 
-  @After
+  @AfterEach
   public void tearDownTestBase() throws IOException
   {
     segmentGenerator.close();
@@ -219,8 +205,8 @@ public abstract class QueryRunnerBasedOnClusteredClientTestBase
                  .granularity(Granularities.HOUR)
                  .aggregators(new CountAggregatorFactory("rows"))
                  .context(
-                     ImmutableMap.of(
-                         DirectDruidClient.QUERY_FAIL_TIME,
+                     QueryContext.ofMap(
+                         QueryContextParameters.QUERY_FAIL_TIME,
                          System.currentTimeMillis() + 10000
                      )
                  )
@@ -243,9 +229,7 @@ public abstract class QueryRunnerBasedOnClusteredClientTestBase
 
   protected static ResponseContext responseContext()
   {
-    final ResponseContext responseContext = ConcurrentResponseContext.createEmpty();
-    responseContext.initializeRemainingResponses();
-    return responseContext;
+    return DirectDruidClient.makeResponseContextForQuery();
   }
 
   protected static DataSegment newSegment(
@@ -254,10 +238,7 @@ public abstract class QueryRunnerBasedOnClusteredClientTestBase
       int numCorePartitions
   )
   {
-    return DataSegment.builder()
-                      .dataSource(DATASOURCE)
-                      .interval(interval)
-                      .version("1")
+    return DataSegment.builder(SegmentId.of(DATASOURCE, interval, "1", partitionId))
                       .shardSpec(new NumberedShardSpec(partitionId, numCorePartitions))
                       .size(10)
                       .build();

@@ -1,336 +1,263 @@
-// Jest Snapshot v1, https://goo.gl/fbAQLP
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
 
 exports[`ServicesView renders data 1`] = `
 <div
-  className="services-view app-view"
+  class="services-view app-view"
 >
-  <Memo(ViewControlBar)
-    label="Services"
+  <div
+    class="view-control-bar"
   >
-    <Unknown>
+    <div
+      class="control-label"
+    >
+      Services
+    </div>
+    <label
+      class="bp6-label"
+    >
       Group by
-    </Unknown>
-    <Blueprint4.ButtonGroup>
-      <Blueprint4.Button
-        active={true}
-        onClick={[Function]}
+    </label>
+    <div
+      class="bp6-button-group"
+    >
+      <button
+        class="bp6-button bp6-active"
+        type="button"
       >
-        None
-      </Blueprint4.Button>
-      <Blueprint4.Button
-        active={false}
-        onClick={[Function]}
+        <span
+          class="bp6-button-text"
+        >
+          None
+        </span>
+      </button>
+      <button
+        class="bp6-button"
+        type="button"
       >
-        Type
-      </Blueprint4.Button>
-      <Blueprint4.Button
-        active={false}
-        onClick={[Function]}
+        <span
+          class="bp6-button-text"
+        >
+          Type
+        </span>
+      </button>
+      <button
+        class="bp6-button"
+        type="button"
       >
-        Tier
-      </Blueprint4.Button>
-    </Blueprint4.ButtonGroup>
-    <Memo(RefreshButton)
-      localStorageKey="services-refresh-rate"
-      onRefresh={[Function]}
-    />
-    <Memo(MoreButton)>
-      <Blueprint4.MenuItem
-        active={false}
-        disabled={false}
-        icon="application"
-        multiline={false}
-        onClick={[Function]}
-        popoverProps={Object {}}
-        selected={false}
-        shouldDismissPopover={true}
-        text="View SQL query for table"
-      />
-    </Memo(MoreButton)>
-    <Memo(TableColumnSelector)
-      columns={
-        Array [
-          "Service",
-          "Type",
-          "Tier",
-          "Host",
-          "Port",
-          "Current size",
-          "Max size",
-          "Usage",
-          "Detail",
-          "Actions",
-        ]
-      }
-      onChange={[Function]}
-      tableColumnsHidden={Array []}
-    />
-  </Memo(ViewControlBar)>
-  <ReactTable
-    AggregatedComponent={[Function]}
-    ExpanderComponent={[Function]}
-    FilterComponent={[Function]}
-    LoadingComponent={[Function]}
-    NoDataComponent={[Function]}
-    PadRowComponent={[Function]}
-    PaginationComponent={[Function]}
-    PivotValueComponent={[Function]}
-    ResizerComponent={[Function]}
-    TableComponent={[Function]}
-    TbodyComponent={[Function]}
-    TdComponent={[Function]}
-    TfootComponent={[Function]}
-    ThComponent={[Function]}
-    TheadComponent={[Function]}
-    TrComponent={[Function]}
-    TrGroupComponent={[Function]}
-    aggregatedKey="_aggregated"
-    className=""
-    collapseOnDataChange={true}
-    collapseOnPageChange={true}
-    collapseOnSortingChange={true}
-    column={
-      Object {
-        "Aggregated": undefined,
-        "Cell": undefined,
-        "Expander": undefined,
-        "Filter": undefined,
-        "Footer": undefined,
-        "Header": undefined,
-        "Pivot": undefined,
-        "PivotValue": undefined,
-        "Placeholder": undefined,
-        "aggregate": undefined,
-        "className": "",
-        "filterAll": false,
-        "filterMethod": undefined,
-        "filterable": undefined,
-        "footerClassName": "",
-        "footerStyle": Object {},
-        "getFooterProps": [Function],
-        "getHeaderProps": [Function],
-        "getProps": [Function],
-        "headerClassName": "",
-        "headerStyle": Object {},
-        "minResizeWidth": 11,
-        "minWidth": 100,
-        "resizable": undefined,
-        "show": true,
-        "sortMethod": undefined,
-        "sortable": undefined,
-        "style": Object {},
-      }
-    }
-    columns={
-      Array [
-        Object {
-          "Aggregated": [Function],
-          "Cell": [Function],
-          "Header": "Service",
-          "accessor": "service",
-          "show": true,
-          "width": 300,
-        },
-        Object {
-          "Cell": [Function],
-          "Header": "Type",
-          "accessor": "service_type",
-          "show": true,
-          "width": 150,
-        },
-        Object {
-          "Cell": [Function],
-          "Header": "Tier",
-          "accessor": [Function],
-          "id": "tier",
-          "show": true,
-          "width": 180,
-        },
-        Object {
-          "Aggregated": [Function],
-          "Cell": [Function],
-          "Header": "Host",
-          "accessor": "host",
-          "show": true,
-          "width": 200,
-        },
-        Object {
-          "Aggregated": [Function],
-          "Cell": [Function],
-          "Header": "Port",
-          "accessor": [Function],
-          "id": "port",
-          "show": true,
-          "width": 100,
-        },
-        Object {
-          "Aggregated": [Function],
-          "Cell": [Function],
-          "Header": "Current size",
-          "accessor": "curr_size",
-          "className": "padded",
-          "filterable": false,
-          "id": "curr_size",
-          "show": true,
-          "width": 100,
-        },
-        Object {
-          "Aggregated": [Function],
-          "Cell": [Function],
-          "Header": "Max size",
-          "accessor": "max_size",
-          "className": "padded",
-          "filterable": false,
-          "id": "max_size",
-          "show": true,
-          "width": 100,
-        },
-        Object {
-          "Aggregated": [Function],
-          "Cell": [Function],
-          "Header": "Usage",
-          "accessor": [Function],
-          "className": "padded",
-          "filterable": false,
-          "id": "usage",
-          "show": true,
-          "width": 140,
-        },
-        Object {
-          "Aggregated": [Function],
-          "Cell": [Function],
-          "Header": "Detail",
-          "accessor": [Function],
-          "className": "padded",
-          "filterable": false,
-          "id": "queue",
-          "show": true,
-          "width": 400,
-        },
-        Object {
-          "Aggregated": [Function],
-          "Cell": [Function],
-          "Header": "Actions",
-          "accessor": [Function],
-          "filterable": false,
-          "id": "actions",
-          "show": true,
-          "width": 70,
-        },
-      ]
-    }
-    data={
-      Array [
-        Array [
-          Object {
-            "curr_size": 0,
-            "host": "localhost",
-            "is_leader": 0,
-            "max_size": 0,
-            "plaintext_port": 8082,
-            "service": "localhost:8082",
-            "service_type": "broker",
-            "tier": null,
-            "tls_port": -1,
-          },
-          Object {
-            "curr_size": 179744287,
-            "host": "localhost",
-            "is_leader": 0,
-            "max_size": 3000000000n,
-            "plaintext_port": 8083,
-            "segmentsToDrop": 0,
-            "segmentsToDropSize": 0,
-            "segmentsToLoad": 0,
-            "segmentsToLoadSize": 0,
-            "service": "localhost:8083",
-            "service_type": "historical",
-            "tier": "_default_tier",
-            "tls_port": -1,
-          },
-        ],
-      ]
-    }
-    defaultExpanded={Object {}}
-    defaultFilterMethod={[Function]}
-    defaultFiltered={Array []}
-    defaultPage={0}
-    defaultPageSize={50}
-    defaultResized={Array []}
-    defaultSortDesc={false}
-    defaultSortMethod={[Function]}
-    defaultSorted={Array []}
-    expanderDefaults={
-      Object {
-        "filterable": false,
-        "resizable": false,
-        "sortable": false,
-        "width": 35,
-      }
-    }
-    filterable={true}
-    filtered={Array []}
-    freezeWhenExpanded={false}
-    getLoadingProps={[Function]}
-    getNoDataProps={[Function]}
-    getPaginationProps={[Function]}
-    getProps={[Function]}
-    getResizerProps={[Function]}
-    getTableProps={[Function]}
-    getTbodyProps={[Function]}
-    getTdProps={[Function]}
-    getTfootProps={[Function]}
-    getTfootTdProps={[Function]}
-    getTfootTrProps={[Function]}
-    getTheadFilterProps={[Function]}
-    getTheadFilterThProps={[Function]}
-    getTheadFilterTrProps={[Function]}
-    getTheadGroupProps={[Function]}
-    getTheadGroupThProps={[Function]}
-    getTheadGroupTrProps={[Function]}
-    getTheadProps={[Function]}
-    getTheadThProps={[Function]}
-    getTheadTrProps={[Function]}
-    getTrGroupProps={[Function]}
-    getTrProps={[Function]}
-    groupedByPivotKey="_groupedByPivot"
-    indexKey="_index"
-    loading={false}
-    loadingText="Loading..."
-    multiSort={true}
-    nestingLevelKey="_nestingLevel"
-    nextText="Next"
-    noDataText=""
-    ofText="of"
-    onFetchData={[Function]}
-    onFilteredChange={[Function]}
-    originalKey="_original"
-    pageJumpText="jump to page"
-    pageSizeOptions={
-      Array [
-        50,
-        100,
-        200,
-      ]
-    }
-    pageText="Page"
-    pivotBy={Array []}
-    pivotDefaults={Object {}}
-    pivotIDKey="_pivotID"
-    pivotValKey="_pivotVal"
-    previousText="Previous"
-    resizable={true}
-    resolveData={[Function]}
-    rowsSelectorText="rows per page"
-    rowsText="rows"
-    showPageJump={true}
-    showPageSizeOptions={true}
-    showPagination={false}
-    showPaginationBottom={true}
-    showPaginationTop={false}
-    sortable={true}
-    style={Object {}}
-    subRowsKey="_subRows"
-  />
+        <span
+          class="bp6-button-text"
+        >
+          Tier
+        </span>
+      </button>
+    </div>
+    <div
+      class="bp6-button-group timed-button refresh-button"
+    >
+      <button
+        class="bp6-button"
+        type="button"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-refresh"
+        >
+          <svg
+            data-icon="refresh"
+          />
+        </span>
+        <span
+          class="bp6-button-text"
+        >
+          Refresh
+        </span>
+      </button>
+      <span
+        class="bp6-popover-target"
+      >
+        <button
+          aria-expanded="false"
+          aria-haspopup="menu"
+          class="bp6-button"
+          type="button"
+        >
+          <span
+            aria-hidden="true"
+            class="bp6-icon bp6-icon-caret-down"
+          >
+            <svg
+              data-icon="caret-down"
+            />
+          </span>
+        </button>
+      </span>
+    </div>
+    <span
+      class="more-button bp6-popover-target"
+    >
+      <button
+        aria-expanded="false"
+        aria-haspopup="menu"
+        class="bp6-button"
+        title="More actions"
+        type="button"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-more"
+        >
+          <svg
+            data-icon="more"
+          />
+        </span>
+      </button>
+    </span>
+    <span
+      class="table-column-selector bp6-popover-target"
+    >
+      <button
+        aria-expanded="false"
+        aria-haspopup="menu"
+        class="bp6-button"
+        type="button"
+      >
+        <span
+          class="bp6-button-text"
+        >
+          Columns 
+          <span
+            class="counter"
+          >
+            (15/15)
+          </span>
+        </span>
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-caret-down"
+        >
+          <svg
+            data-icon="caret-down"
+          />
+        </span>
+      </button>
+    </span>
+  </div>
+  <stub-console-table
+    class-name="centered-table -striped -highlight padded-header"
+    default-page-size="50"
+    filterable="true"
+    loading="false"
+    no-data-text=""
+    rows="1"
+    show-pagination="false"
+  >
+    <stub-column
+      id="service"
+      width="300"
+    >
+      Service
+    </stub-column>
+    <stub-column
+      id="service_type"
+      width="150"
+    >
+      Type
+    </stub-column>
+    <stub-column
+      id="tier"
+      width="180"
+    >
+      Tier
+    </stub-column>
+    <stub-column
+      hidden=""
+      id="tier_alias"
+      width="180"
+    >
+      Tier alias
+    </stub-column>
+    <stub-column
+      id="host"
+      width="200"
+    >
+      Host
+    </stub-column>
+    <stub-column
+      id="port"
+      width="100"
+    >
+      Port
+    </stub-column>
+    <stub-column
+      id="curr_size"
+      width="100"
+    >
+      Assigned size
+    </stub-column>
+    <stub-column
+      id="effective_size"
+      width="100"
+    >
+      Effective size
+    </stub-column>
+    <stub-column
+      id="usage"
+      width="140"
+    >
+      Usage
+    </stub-column>
+    <stub-column
+      id="start_time"
+      width="220"
+    >
+      Start time
+    </stub-column>
+    <stub-column
+      id="version"
+      width="200"
+    >
+      Version
+    </stub-column>
+    <stub-column
+      id="build_revision"
+      width="200"
+    >
+      Build
+      <br />
+      revision
+    </stub-column>
+    <stub-column
+      id="available_processors"
+      width="100"
+    >
+      Available
+      <br />
+      processors
+    </stub-column>
+    <stub-column
+      id="total_memory"
+      width="120"
+    >
+      Total memory
+    </stub-column>
+    <stub-column
+      id="labels"
+      width="200"
+    >
+      Labels
+    </stub-column>
+    <stub-column
+      id="queue"
+      width="400"
+    >
+      Detail
+    </stub-column>
+    <stub-column
+      id="actions"
+      width="70"
+    >
+      Actions
+    </stub-column>
+  </stub-console-table>
 </div>
 `;

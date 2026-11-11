@@ -21,7 +21,6 @@ package org.apache.druid.benchmark;
 
 import com.google.common.base.Preconditions;
 import org.apache.druid.benchmark.compression.EncodingSizeProfiler;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.io.smoosh.FileSmoosher;
@@ -76,10 +75,6 @@ import java.util.concurrent.TimeUnit;
 @State(Scope.Benchmark)
 public class FrontCodedIndexedBenchmark
 {
-  static {
-    NullHandling.initializeForTests();
-  }
-
   @Param({"10000", "100000"})
   public int numElements;
 
@@ -88,10 +83,10 @@ public class FrontCodedIndexedBenchmark
 
   @Param({
       "generic",
-      "front-coded-4",
-      "front-coded-16",
-      "front-coded-incremental-buckets-4",
-      "front-coded-incremental-buckets-16"
+      "front-coded-v0-4",
+      "front-coded-v0-16",
+      "front-coded-v1-4",
+      "front-coded-v1-16"
   })
   public String indexType;
 
@@ -138,7 +133,7 @@ public class FrontCodedIndexedBenchmark
     FrontCodedIndexedWriter frontCodedIndexedWriter = new FrontCodedIndexedWriter(
         new OnHeapMemorySegmentWriteOutMedium(),
         ByteOrder.nativeOrder(),
-        "front-coded-4".equals(indexType) ? 4 : 16,
+        "front-coded-v0-4".equals(indexType) ? 4 : 16,
         FrontCodedIndexed.V0
     );
     frontCodedIndexedWriter.open();
@@ -146,7 +141,7 @@ public class FrontCodedIndexedBenchmark
     FrontCodedIndexedWriter frontCodedIndexedWriterIncrementalBuckets = new FrontCodedIndexedWriter(
         new OnHeapMemorySegmentWriteOutMedium(),
         ByteOrder.nativeOrder(),
-        "front-coded-incremental-buckets-4".equals(indexType) ? 4 : 16,
+        "front-coded-v1-4".equals(indexType) ? 4 : 16,
         FrontCodedIndexed.V1
     );
     frontCodedIndexedWriterIncrementalBuckets.open();
@@ -160,17 +155,17 @@ public class FrontCodedIndexedBenchmark
       frontCodedIndexedWriterIncrementalBuckets.write(StringUtils.toUtf8Nullable(next));
     }
     smooshDirFrontCoded = FileUtils.createTempDir();
-    fileFrontCoded = File.createTempFile("frontCodedIndexedBenchmark", "meta");
+    fileFrontCoded = new File(smooshDirFrontCoded, "meta");
 
     smooshDirGeneric = FileUtils.createTempDir();
-    fileGeneric = File.createTempFile("genericIndexedBenchmark", "meta");
+    fileGeneric = new File(smooshDirGeneric, "meta");
 
     smooshDirFrontCodedIncrementalBuckets = FileUtils.createTempDir();
-    fileFrontCodedIncrementalBuckets = File.createTempFile("frontCodedIndexedBenchmarkIncrementalBuckets", "meta");
+    fileFrontCodedIncrementalBuckets = new File(smooshDirFrontCodedIncrementalBuckets, "meta");
 
     EncodingSizeProfiler.encodedSize = (int) ("generic".equals(indexType)
                                               ? genericIndexedWriter.getSerializedSize()
-                                              : indexType.startsWith("front-coded-incremental-buckets")
+                                              : indexType.startsWith("front-coded-v1")
                                                 ? frontCodedIndexedWriterIncrementalBuckets.getSerializedSize()
                                                 : frontCodedIndexedWriter.getSerializedSize());
     try (
@@ -286,7 +281,7 @@ public class FrontCodedIndexedBenchmark
     }
     if ("generic".equals(indexType)) {
       indexed = genericIndexed.singleThreaded();
-    } else if (indexType.startsWith("front-coded-incremental-buckets")) {
+    } else if (indexType.startsWith("front-coded-v1")) {
       indexed = frontCodedIndexedIncrementalBuckets;
     } else {
       indexed = frontCodedIndexed;

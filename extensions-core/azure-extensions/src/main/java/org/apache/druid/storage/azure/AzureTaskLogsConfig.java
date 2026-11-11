@@ -20,9 +20,7 @@
 package org.apache.druid.storage.azure;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotNull;
+import jakarta.validation.constraints.NotNull;
 
 /**
  * Stores the configuration for writing task logs to Azure .
@@ -37,19 +35,14 @@ public class AzureTaskLogsConfig
   @NotNull
   private String prefix = null;
 
-  @JsonProperty
-  @Min(1)
-  private int maxTries = 3;
-
   public AzureTaskLogsConfig()
   {
   }
 
-  public AzureTaskLogsConfig(String container, String prefix, int maxTries)
+  public AzureTaskLogsConfig(String container, String prefix)
   {
     this.container = container;
     this.prefix = prefix;
-    this.maxTries = maxTries;
   }
 
   public String getContainer()
@@ -60,10 +53,5 @@ public class AzureTaskLogsConfig
   public String getPrefix()
   {
     return prefix;
-  }
-
-  public int getMaxTries()
-  {
-    return maxTries;
   }
 }

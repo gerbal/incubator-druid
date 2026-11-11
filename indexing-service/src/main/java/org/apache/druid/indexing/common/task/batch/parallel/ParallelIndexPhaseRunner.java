@@ -24,10 +24,12 @@ import com.google.common.collect.Maps;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.MoreExecutors;
 import org.apache.druid.indexer.TaskState;
 import org.apache.druid.indexer.TaskStatusPlus;
 import org.apache.druid.indexing.common.TaskToolbox;
 import org.apache.druid.indexing.common.task.Task;
+import org.apache.druid.indexing.common.task.Tasks;
 import org.apache.druid.indexing.common.task.batch.parallel.TaskMonitor.MonitorEntry;
 import org.apache.druid.indexing.common.task.batch.parallel.TaskMonitor.SubTaskCompleteEvent;
 import org.apache.druid.java.util.common.ISE;
@@ -122,7 +124,8 @@ public abstract class ParallelIndexPhaseRunner<SubTaskType extends Task, SubTask
     taskMonitor = new TaskMonitor<>(
         toolbox.getOverlordClient(),
         tuningConfig.getMaxRetry(),
-        estimateTotalNumSubTasks()
+        estimateTotalNumSubTasks(),
+        getSubtaskTimeoutMillisFromContext()
     );
     TaskState state = TaskState.RUNNING;
 
@@ -242,11 +245,11 @@ public abstract class ParallelIndexPhaseRunner<SubTaskType extends Task, SubTask
       SubTaskSpec<SubTaskType> spec
   )
   {
-    LOG.info("Submit a new task for spec[%s]", spec.getId());
+    LOG.info("Submitting a new task for spec[%s]", spec.getId());
     final ListenableFuture<SubTaskCompleteEvent<SubTaskType>> future = taskMonitor.submit(spec);
     Futures.addCallback(
         future,
-        new FutureCallback<SubTaskCompleteEvent<SubTaskType>>()
+        new FutureCallback<>()
         {
           @Override
           public void onSuccess(SubTaskCompleteEvent<SubTaskType> completeEvent)
@@ -262,7 +265,8 @@ public abstract class ParallelIndexPhaseRunner<SubTaskType extends Task, SubTask
             LOG.error(t, "Error while running a task for spec[%s]", spec.getId());
             taskCompleteEvents.offer(SubTaskCompleteEvent.fail(spec, t));
           }
-        }
+        },
+        MoreExecutors.directExecutor()
     );
   }
 
@@ -469,5 +473,11 @@ public abstract class ParallelIndexPhaseRunner<SubTaskType extends Task, SubTask
   int getAndIncrementNextSpecId()
   {
     return nextSpecId++;
+  }
+
+  private long getSubtaskTimeoutMillisFromContext()
+  {
+    return ((Number) context.getOrDefault(Tasks.SUB_TASK_TIMEOUT_KEY,
+            Tasks.DEFAULT_SUB_TASK_TIMEOUT_MILLIS)).longValue();
   }
 }

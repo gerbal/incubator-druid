@@ -16,37 +16,37 @@
  * limitations under the License.
  */
 
-import { Menu, MenuDivider, MenuItem } from '@blueprintjs/core';
-import { Popover2 } from '@blueprintjs/popover2';
+import { Menu, MenuDivider, MenuItem, PopoverNext } from '@blueprintjs/core';
 import type { ReactNode } from 'react';
 import React from 'react';
-import type { Filter } from 'react-table';
 
-import type { FilterMode } from '../../react-table';
-import { addFilter, filterModeToIcon } from '../../react-table';
+import type { FilterMode, TableFilters } from '../../utils/table-filters';
+import { TableFilter } from '../../utils/table-filters';
 import { Deferred } from '../deferred/deferred';
 
 import './table-filterable-cell.scss';
 
-const FILTER_MODES: FilterMode[] = ['=', '!=', '<=', '>='];
+const FILTER_MODES: FilterMode[] = ['=', '!=', '<', '>='];
 const FILTER_MODES_NO_COMPARISONS: FilterMode[] = ['=', '!='];
 
 export interface TableFilterableCellProps {
   field: string;
   value: string;
-  filters: Filter[];
-  onFiltersChange(filters: Filter[]): void;
+  filters: TableFilters;
+  onFiltersChange(filters: TableFilters): void;
   enableComparisons?: boolean;
   children?: ReactNode;
+  displayValue?: string;
 }
 
 export const TableFilterableCell = React.memo(function TableFilterableCell(
   props: TableFilterableCellProps,
 ) {
-  const { field, value, children, filters, enableComparisons, onFiltersChange } = props;
+  const { field, value, children, filters, enableComparisons, onFiltersChange, displayValue } =
+    props;
 
   return (
-    <Popover2
+    <PopoverNext
       className="table-filterable-cell"
       content={
         <Deferred
@@ -56,17 +56,21 @@ export const TableFilterableCell = React.memo(function TableFilterableCell(
               {(enableComparisons ? FILTER_MODES : FILTER_MODES_NO_COMPARISONS).map((mode, i) => (
                 <MenuItem
                   key={i}
-                  icon={filterModeToIcon(mode)}
-                  text={value}
-                  onClick={() => onFiltersChange(addFilter(filters, field, mode, value))}
+                  icon={TableFilter.modeToIcon(mode)}
+                  text={displayValue ?? value}
+                  onClick={() =>
+                    onFiltersChange(filters.addOrUpdate(new TableFilter(field, mode, [value])))
+                  }
                 />
               ))}
             </Menu>
           )}
         />
       }
+      lazy
+      shouldReturnFocusOnClose={false}
     >
-      {children}
-    </Popover2>
+      {children ?? value}
+    </PopoverNext>
   );
 });

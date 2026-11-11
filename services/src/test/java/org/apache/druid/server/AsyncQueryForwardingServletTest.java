@@ -20,6 +20,7 @@
 package org.apache.druid.server;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.InjectableValues;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -32,6 +33,7 @@ import com.google.inject.Module;
 import com.google.inject.servlet.GuiceFilter;
 import org.apache.calcite.avatica.Meta;
 import org.apache.calcite.avatica.remote.Service;
+import org.apache.commons.io.IOUtils;
 import org.apache.druid.common.exception.AllowedRegexErrorResponseTransformStrategy;
 import org.apache.druid.common.exception.ErrorResponseTransformStrategy;
 import org.apache.druid.common.utils.SocketUtil;
@@ -50,10 +52,23 @@ import org.apache.druid.java.util.common.jackson.JacksonUtils;
 import org.apache.druid.java.util.common.lifecycle.Lifecycle;
 import org.apache.druid.java.util.metrics.StubServiceEmitter;
 import org.apache.druid.query.DefaultGenericQueryMetricsFactory;
+import org.apache.druid.query.DefaultQueryMetrics;
+import org.apache.druid.query.DruidMetrics;
 import org.apache.druid.query.Druids;
+import org.apache.druid.query.GenericQueryMetricsFactory;
 import org.apache.druid.query.MapQueryToolChestWarehouse;
 import org.apache.druid.query.Query;
+import org.apache.druid.query.QueryContext;
 import org.apache.druid.query.QueryException;
+import org.apache.druid.query.QueryMetrics;
+import org.apache.druid.query.aggregation.FilteredAggregatorFactory;
+import org.apache.druid.query.aggregation.any.StringAnyAggregatorFactory;
+import org.apache.druid.query.context.QueryContextParameters;
+import org.apache.druid.query.filter.SelectorDimFilter;
+import org.apache.druid.query.lookup.LookupExtractorFactoryContainer;
+import org.apache.druid.query.lookup.LookupExtractorFactoryContainerProvider;
+import org.apache.druid.query.lookup.LookupModule;
+import org.apache.druid.query.lookup.RegisteredLookupExtractionFn;
 import org.apache.druid.query.timeseries.TimeseriesQuery;
 import org.apache.druid.segment.TestHelper;
 import org.apache.druid.server.initialization.BaseJettyTest;
@@ -61,10 +76,13 @@ import org.apache.druid.server.initialization.ServerConfig;
 import org.apache.druid.server.initialization.jetty.JettyServerInitUtils;
 import org.apache.druid.server.initialization.jetty.JettyServerInitializer;
 import org.apache.druid.server.log.NoopRequestLogger;
+import org.apache.druid.server.log.RequestLogger;
 import org.apache.druid.server.metrics.NoopServiceEmitter;
 import org.apache.druid.server.router.QueryHostFinder;
 import org.apache.druid.server.router.RendezvousHashAvaticaConnectionBalancer;
 import org.apache.druid.server.security.AllowAllAuthorizer;
+import org.apache.druid.server.security.AuthConfig;
+import org.apache.druid.server.security.AuthenticationResult;
 import org.apache.druid.server.security.AuthenticatorMapper;
 import org.apache.druid.server.security.Authorizer;
 import org.apache.druid.server.security.AuthorizerMapper;
@@ -72,21 +90,23 @@ import org.apache.druid.sql.http.ResultFormat;
 import org.apache.druid.sql.http.SqlQuery;
 import org.easymock.EasyMock;
 import org.eclipse.jetty.client.HttpClient;
-import org.eclipse.jetty.client.HttpResponse;
-import org.eclipse.jetty.client.api.Request;
-import org.eclipse.jetty.client.api.Result;
+import org.eclipse.jetty.client.Request;
+import org.eclipse.jetty.client.Response;
+import org.eclipse.jetty.client.Result;
+import org.eclipse.jetty.ee8.servlet.DefaultServlet;
+import org.eclipse.jetty.ee8.servlet.ServletContextHandler;
+import org.eclipse.jetty.ee8.servlet.ServletHolder;
 import org.eclipse.jetty.http.HttpField;
 import org.eclipse.jetty.http.HttpFields;
+import org.eclipse.jetty.http.HttpVersion;
+import org.eclipse.jetty.io.EofException;
 import org.eclipse.jetty.server.Handler;
 import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.server.handler.HandlerList;
-import org.eclipse.jetty.servlet.DefaultServlet;
-import org.eclipse.jetty.servlet.ServletContextHandler;
-import org.eclipse.jetty.servlet.ServletHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.Timeout.ThreadMode;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
@@ -97,26 +117,37 @@ import javax.servlet.ServletOutputStream;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import javax.ws.rs.GET;
+import javax.ws.rs.Path;
+import javax.ws.rs.Produces;
+import javax.ws.rs.core.MediaType;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.Deflater;
 
 public class AsyncQueryForwardingServletTest extends BaseJettyTest
 {
+  private static final String RESPONSE_CONTEXT = "{\"missingSegments\":[]}";
+
   private static int port1;
   private static int port2;
 
   @Override
-  @Before
+  @BeforeEach
   public void setup() throws Exception
   {
     setProperties();
@@ -155,13 +186,14 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
                       @Override
                       public Authorizer getAuthorizer(String name)
                       {
-                        return new AllowAllAuthorizer();
+                        return new AllowAllAuthorizer(null);
                       }
                     }
                 );
                 Jerseys.addResource(binder, SlowResource.class);
                 Jerseys.addResource(binder, ExceptionResource.class);
                 Jerseys.addResource(binder, DefaultResource.class);
+                Jerseys.addResource(binder, ResponseContextResource.class);
                 LifecycleModule.register(binder, Server.class);
               }
             }
@@ -176,22 +208,33 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
 
     final HttpURLConnection get = (HttpURLConnection) url.openConnection();
     get.setRequestProperty("Accept-Encoding", "gzip");
-    Assert.assertEquals("gzip", get.getContentEncoding());
+    Assertions.assertEquals("gzip", get.getContentEncoding());
 
     final HttpURLConnection post = (HttpURLConnection) url.openConnection();
     post.setRequestProperty("Accept-Encoding", "gzip");
     post.setRequestMethod("POST");
-    Assert.assertEquals("gzip", post.getContentEncoding());
+    Assertions.assertEquals("gzip", post.getContentEncoding());
 
     final HttpURLConnection getNoGzip = (HttpURLConnection) url.openConnection();
-    Assert.assertNotEquals("gzip", getNoGzip.getContentEncoding());
+    Assertions.assertNotEquals("gzip", getNoGzip.getContentEncoding());
 
     final HttpURLConnection postNoGzip = (HttpURLConnection) url.openConnection();
     postNoGzip.setRequestMethod("POST");
-    Assert.assertNotEquals("gzip", postNoGzip.getContentEncoding());
+    Assertions.assertNotEquals("gzip", postNoGzip.getContentEncoding());
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  public void testProxyResponseContextHeader() throws Exception
+  {
+    final URL url = URI.create("http://localhost:" + port + "/proxy/response-context").toURL();
+    final HttpURLConnection get = (HttpURLConnection) url.openConnection();
+
+    Assertions.assertEquals(DEFAULT_RESPONSE_CONTENT, IOUtils.toString(get.getInputStream(), StandardCharsets.UTF_8));
+    Assertions.assertEquals(RESPONSE_CONTEXT, get.getHeaderField(QueryResource.HEADER_RESPONSE_CONTEXT));
+  }
+
+  @Test
+  @Timeout(value = 60, threadMode = ThreadMode.SEPARATE_THREAD)
   public void testDeleteBroadcast() throws Exception
   {
     CountDownLatch latch = new CountDownLatch(2);
@@ -202,7 +245,7 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
     final HttpURLConnection post = (HttpURLConnection) url.openConnection();
     post.setRequestMethod("DELETE");
     int code = post.getResponseCode();
-    Assert.assertEquals(200, code);
+    Assertions.assertEquals(200, code);
 
     latch.await();
   }
@@ -216,18 +259,23 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
         false,
         false,
         false,
-        ImmutableMap.of("sqlQueryId", "dummy"),
+        QueryContext.ofMap(QueryContextParameters.SQL_QUERY_ID, "dummy"),
         null
     );
     final QueryHostFinder hostFinder = EasyMock.createMock(QueryHostFinder.class);
     EasyMock.expect(hostFinder.findServerSql(
-        query.withOverridenContext(ImmutableMap.of("sqlQueryId", "dummy", "queryId", "dummy")))
+        query.withOverridenContext(QueryContext.ofMap(
+            QueryContextParameters.SQL_QUERY_ID,
+            "dummy",
+            QueryContextParameters.QUERY_ID,
+            "dummy"
+        )))
     ).andReturn(new TestServer("http", "1.2.3.4", 9999)).once();
     EasyMock.replay(hostFinder);
 
     Properties properties = new Properties();
     properties.setProperty("druid.router.sql.enable", "true");
-    verifyServletCallsForQuery(query, true, false, hostFinder, properties);
+    verifyServletCallsForQuery(query, true, false, hostFinder, properties, false);
   }
 
   @Test
@@ -237,14 +285,14 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
                                         .dataSource("foo")
                                         .intervals("2000/P1D")
                                         .granularity(Granularities.ALL)
-                                        .context(ImmutableMap.of("queryId", "dummy"))
+                                        .context(QueryContext.ofMap(QueryContextParameters.QUERY_ID, "dummy"))
                                         .build();
 
     final QueryHostFinder hostFinder = EasyMock.createMock(QueryHostFinder.class);
     EasyMock.expect(hostFinder.pickServer(query)).andReturn(new TestServer("http", "1.2.3.4", 9999)).once();
     EasyMock.replay(hostFinder);
 
-    verifyServletCallsForQuery(query, false, false, hostFinder, new Properties());
+    verifyServletCallsForQuery(query, false, false, hostFinder, new Properties(), false);
   }
 
   @Test
@@ -258,258 +306,513 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
             .once();
     EasyMock.replay(hostFinder);
 
-    verifyServletCallsForQuery(jdbcRequest, false, true, hostFinder, new Properties());
+    verifyServletCallsForQuery(jdbcRequest, false, true, hostFinder, new Properties(), false);
   }
 
   @Test
   public void testHandleExceptionWithFilterDisabled() throws Exception
   {
     String errorMessage = "test exception message";
-    ObjectMapper mockMapper = Mockito.mock(ObjectMapper.class);
-    HttpServletResponse response = Mockito.mock(HttpServletResponse.class);
-    ServletOutputStream outputStream = Mockito.mock(ServletOutputStream.class);
-    Mockito.when(response.getOutputStream()).thenReturn(outputStream);
-    final AsyncQueryForwardingServlet servlet = new AsyncQueryForwardingServlet(
-        new MapQueryToolChestWarehouse(ImmutableMap.of()),
-        mockMapper,
-        TestHelper.makeSmileMapper(),
-        null,
-        null,
-        null,
-        new NoopServiceEmitter(),
-        new NoopRequestLogger(),
-        new DefaultGenericQueryMetricsFactory(),
-        new AuthenticatorMapper(ImmutableMap.of()),
-        new Properties(),
-        new ServerConfig()
+    ServerConfig serverConfig = new ServerConfig();
+    ArgumentCaptor<Exception> captor = captureExceptionHandledByServlet(
+        serverConfig,
+        (servlet, request, response, mapper)
+            -> servlet.handleException(response, mapper, new IllegalStateException(errorMessage))
     );
-    Exception testException = new IllegalStateException(errorMessage);
-    servlet.handleException(response, mockMapper, testException);
-    ArgumentCaptor<Exception> captor = ArgumentCaptor.forClass(Exception.class);
-    Mockito.verify(mockMapper).writeValue(ArgumentMatchers.eq(outputStream), captor.capture());
-    Assert.assertTrue(captor.getValue() instanceof QueryException);
-    Assert.assertEquals("Unknown exception", ((QueryException) captor.getValue()).getErrorCode());
-    Assert.assertEquals(errorMessage, captor.getValue().getMessage());
-    Assert.assertEquals(IllegalStateException.class.getName(), ((QueryException) captor.getValue()).getErrorClass());
+    Assertions.assertTrue(captor.getValue() instanceof QueryException);
+    Assertions.assertEquals("Unknown exception", ((QueryException) captor.getValue()).getErrorCode());
+    Assertions.assertEquals(errorMessage, captor.getValue().getMessage());
+    Assertions.assertEquals(IllegalStateException.class.getName(), ((QueryException) captor.getValue()).getErrorClass());
   }
 
   @Test
   public void testHandleExceptionWithFilterEnabled() throws Exception
   {
     String errorMessage = "test exception message";
-    ObjectMapper mockMapper = Mockito.mock(ObjectMapper.class);
-    HttpServletResponse response = Mockito.mock(HttpServletResponse.class);
-    ServletOutputStream outputStream = Mockito.mock(ServletOutputStream.class);
-    Mockito.when(response.getOutputStream()).thenReturn(outputStream);
-    final AsyncQueryForwardingServlet servlet = new AsyncQueryForwardingServlet(
-        new MapQueryToolChestWarehouse(ImmutableMap.of()),
-        mockMapper,
-        TestHelper.makeSmileMapper(),
-        null,
-        null,
-        null,
-        new NoopServiceEmitter(),
-        new NoopRequestLogger(),
-        new DefaultGenericQueryMetricsFactory(),
-        new AuthenticatorMapper(ImmutableMap.of()),
-        new Properties(),
-        new ServerConfig()
-        {
-          @Override
-          public boolean isShowDetailedJettyErrors()
-          {
-            return true;
-          }
+    ServerConfig serverConfig = new ServerConfig() 
+    {
+      @Override
+      public boolean isShowDetailedJettyErrors()
+      {
+        return true;
+      }
 
-          @Override
-          public ErrorResponseTransformStrategy getErrorResponseTransformStrategy()
-          {
-            return new AllowedRegexErrorResponseTransformStrategy(ImmutableList.of());
-          }
-        }
+      @Override
+      public ErrorResponseTransformStrategy getErrorResponseTransformStrategy()
+      {
+        return new AllowedRegexErrorResponseTransformStrategy(ImmutableList.of());
+      }
+    };
+    ArgumentCaptor<Exception> captor = captureExceptionHandledByServlet(
+        serverConfig,
+        (servlet, request, response, mapper)
+            -> servlet.handleException(response, mapper, new IllegalStateException(errorMessage))
     );
-    Exception testException = new IllegalStateException(errorMessage);
-    servlet.handleException(response, mockMapper, testException);
-    ArgumentCaptor<Exception> captor = ArgumentCaptor.forClass(Exception.class);
-    Mockito.verify(mockMapper).writeValue(ArgumentMatchers.eq(outputStream), captor.capture());
-    Assert.assertTrue(captor.getValue() instanceof QueryException);
-    Assert.assertEquals("Unknown exception", ((QueryException) captor.getValue()).getErrorCode());
-    Assert.assertNull(captor.getValue().getMessage());
-    Assert.assertNull(((QueryException) captor.getValue()).getErrorClass());
-    Assert.assertNull(((QueryException) captor.getValue()).getHost());
+    Assertions.assertTrue(captor.getValue() instanceof QueryException);
+    Assertions.assertEquals("Unknown exception", ((QueryException) captor.getValue()).getErrorCode());
+    Assertions.assertNull(captor.getValue().getMessage());
+    Assertions.assertNull(((QueryException) captor.getValue()).getErrorClass());
+    Assertions.assertNull(((QueryException) captor.getValue()).getHost());
   }
 
   @Test
   public void testHandleExceptionWithFilterEnabledButMessageMatchAllowedRegex() throws Exception
   {
     String errorMessage = "test exception message";
-    ObjectMapper mockMapper = Mockito.mock(ObjectMapper.class);
-    HttpServletResponse response = Mockito.mock(HttpServletResponse.class);
-    ServletOutputStream outputStream = Mockito.mock(ServletOutputStream.class);
-    Mockito.when(response.getOutputStream()).thenReturn(outputStream);
-    final AsyncQueryForwardingServlet servlet = new AsyncQueryForwardingServlet(
-        new MapQueryToolChestWarehouse(ImmutableMap.of()),
-        mockMapper,
-        TestHelper.makeSmileMapper(),
-        null,
-        null,
-        null,
-        new NoopServiceEmitter(),
-        new NoopRequestLogger(),
-        new DefaultGenericQueryMetricsFactory(),
-        new AuthenticatorMapper(ImmutableMap.of()),
-        new Properties(),
-        new ServerConfig()
-        {
-          @Override
-          public boolean isShowDetailedJettyErrors()
-          {
-            return true;
-          }
+    ServerConfig serverConfig = new ServerConfig()
+    {
+      @Override
+      public boolean isShowDetailedJettyErrors()
+      {
+        return true;
+      }
 
-          @Override
-          public ErrorResponseTransformStrategy getErrorResponseTransformStrategy()
-          {
-            return new AllowedRegexErrorResponseTransformStrategy(ImmutableList.of("test .*"));
-          }
-        }
+      @Override
+      public ErrorResponseTransformStrategy getErrorResponseTransformStrategy()
+      {
+        return new AllowedRegexErrorResponseTransformStrategy(ImmutableList.of("test .*"));
+      }
+    };
+    ArgumentCaptor<Exception> captor = captureExceptionHandledByServlet(
+        serverConfig,
+        (servlet, request, response, mapper)
+            -> servlet.handleException(response, mapper, new IllegalStateException(errorMessage))
     );
-    Exception testException = new IllegalStateException(errorMessage);
-    servlet.handleException(response, mockMapper, testException);
-    ArgumentCaptor<Exception> captor = ArgumentCaptor.forClass(Exception.class);
-    Mockito.verify(mockMapper).writeValue(ArgumentMatchers.eq(outputStream), captor.capture());
-    Assert.assertTrue(captor.getValue() instanceof QueryException);
-    Assert.assertEquals("Unknown exception", ((QueryException) captor.getValue()).getErrorCode());
-    Assert.assertEquals(errorMessage, captor.getValue().getMessage());
-    Assert.assertNull(((QueryException) captor.getValue()).getErrorClass());
-    Assert.assertNull(((QueryException) captor.getValue()).getHost());
+    Assertions.assertTrue(captor.getValue() instanceof QueryException);
+    Assertions.assertEquals("Unknown exception", ((QueryException) captor.getValue()).getErrorCode());
+    Assertions.assertEquals(errorMessage, captor.getValue().getMessage());
+    Assertions.assertNull(((QueryException) captor.getValue()).getErrorClass());
+    Assertions.assertNull(((QueryException) captor.getValue()).getHost());
   }
 
   @Test
   public void testHandleQueryParseExceptionWithFilterDisabled() throws Exception
   {
     String errorMessage = "test exception message";
-    ObjectMapper mockMapper = Mockito.mock(ObjectMapper.class);
-    HttpServletRequest request = Mockito.mock(HttpServletRequest.class);
-    HttpServletResponse response = Mockito.mock(HttpServletResponse.class);
-    ServletOutputStream outputStream = Mockito.mock(ServletOutputStream.class);
-    Mockito.when(response.getOutputStream()).thenReturn(outputStream);
-    final AsyncQueryForwardingServlet servlet = new AsyncQueryForwardingServlet(
-        new MapQueryToolChestWarehouse(ImmutableMap.of()),
-        mockMapper,
-        TestHelper.makeSmileMapper(),
-        null,
-        null,
-        null,
-        new NoopServiceEmitter(),
-        new NoopRequestLogger(),
-        new DefaultGenericQueryMetricsFactory(),
-        new AuthenticatorMapper(ImmutableMap.of()),
-        new Properties(),
-        new ServerConfig()
+    ServerConfig serverConfig = new ServerConfig();
+    ArgumentCaptor<Exception> captor = captureExceptionHandledByServlet(
+        serverConfig,
+        (servlet, request, response, mapper)
+            -> servlet.handleQueryParseException(request, response, mapper, new IOException(errorMessage), false)
     );
-    IOException testException = new IOException(errorMessage);
-    servlet.handleQueryParseException(request, response, mockMapper, testException, false);
-    ArgumentCaptor<Exception> captor = ArgumentCaptor.forClass(Exception.class);
-    Mockito.verify(mockMapper).writeValue(ArgumentMatchers.eq(outputStream), captor.capture());
-    Assert.assertTrue(captor.getValue() instanceof QueryException);
-    Assert.assertEquals("Unknown exception", ((QueryException) captor.getValue()).getErrorCode());
-    Assert.assertEquals(errorMessage, captor.getValue().getMessage());
-    Assert.assertEquals(IOException.class.getName(), ((QueryException) captor.getValue()).getErrorClass());
+    Assertions.assertTrue(captor.getValue() instanceof QueryException);
+    Assertions.assertEquals("Unknown exception", ((QueryException) captor.getValue()).getErrorCode());
+    Assertions.assertEquals(errorMessage, captor.getValue().getMessage());
+    Assertions.assertEquals(IOException.class.getName(), ((QueryException) captor.getValue()).getErrorClass());
   }
 
   @Test
   public void testHandleQueryParseExceptionWithFilterEnabled() throws Exception
   {
     String errorMessage = "test exception message";
-    ObjectMapper mockMapper = Mockito.mock(ObjectMapper.class);
-    HttpServletRequest request = Mockito.mock(HttpServletRequest.class);
-    HttpServletResponse response = Mockito.mock(HttpServletResponse.class);
-    ServletOutputStream outputStream = Mockito.mock(ServletOutputStream.class);
-    Mockito.when(response.getOutputStream()).thenReturn(outputStream);
-    final AsyncQueryForwardingServlet servlet = new AsyncQueryForwardingServlet(
-        new MapQueryToolChestWarehouse(ImmutableMap.of()),
-        mockMapper,
-        TestHelper.makeSmileMapper(),
-        null,
-        null,
-        null,
-        new NoopServiceEmitter(),
-        new NoopRequestLogger(),
-        new DefaultGenericQueryMetricsFactory(),
-        new AuthenticatorMapper(ImmutableMap.of()),
-        new Properties(),
-        new ServerConfig()
-        {
-          @Override
-          public boolean isShowDetailedJettyErrors()
-          {
-            return true;
-          }
+    ServerConfig serverConfig = new ServerConfig() {
+      @Override
+      public boolean isShowDetailedJettyErrors()
+      {
+        return true;
+      }
 
-          @Override
-          public ErrorResponseTransformStrategy getErrorResponseTransformStrategy()
-          {
-            return new AllowedRegexErrorResponseTransformStrategy(ImmutableList.of());
-          }
-        }
+      @Override
+      public ErrorResponseTransformStrategy getErrorResponseTransformStrategy()
+      {
+        return new AllowedRegexErrorResponseTransformStrategy(ImmutableList.of());
+      }
+    };
+    ArgumentCaptor<Exception> captor = captureExceptionHandledByServlet(
+        serverConfig,
+        (servlet, request, response, mapper)
+            -> servlet.handleQueryParseException(request, response, mapper, new IOException(errorMessage), false)
     );
-    IOException testException = new IOException(errorMessage);
-    servlet.handleQueryParseException(request, response, mockMapper, testException, false);
-    ArgumentCaptor<Exception> captor = ArgumentCaptor.forClass(Exception.class);
-    Mockito.verify(mockMapper).writeValue(ArgumentMatchers.eq(outputStream), captor.capture());
-    Assert.assertTrue(captor.getValue() instanceof QueryException);
-    Assert.assertEquals("Unknown exception", ((QueryException) captor.getValue()).getErrorCode());
-    Assert.assertNull(captor.getValue().getMessage());
-    Assert.assertNull(((QueryException) captor.getValue()).getErrorClass());
-    Assert.assertNull(((QueryException) captor.getValue()).getHost());
+    Assertions.assertTrue(captor.getValue() instanceof QueryException);
+    Assertions.assertEquals("Unknown exception", ((QueryException) captor.getValue()).getErrorCode());
+    Assertions.assertNull(captor.getValue().getMessage());
+    Assertions.assertNull(((QueryException) captor.getValue()).getErrorClass());
+    Assertions.assertNull(((QueryException) captor.getValue()).getHost());
   }
 
   @Test
   public void testHandleQueryParseExceptionWithFilterEnabledButMessageMatchAllowedRegex() throws Exception
   {
     String errorMessage = "test exception message";
-    ObjectMapper mockMapper = Mockito.mock(ObjectMapper.class);
-    HttpServletRequest request = Mockito.mock(HttpServletRequest.class);
-    HttpServletResponse response = Mockito.mock(HttpServletResponse.class);
-    ServletOutputStream outputStream = Mockito.mock(ServletOutputStream.class);
-    Mockito.when(response.getOutputStream()).thenReturn(outputStream);
+    ServerConfig serverConfig = new ServerConfig()
+    {
+      @Override
+      public boolean isShowDetailedJettyErrors()
+      {
+        return true;
+      }
+
+      @Override
+      public ErrorResponseTransformStrategy getErrorResponseTransformStrategy()
+      {
+        return new AllowedRegexErrorResponseTransformStrategy(ImmutableList.of("test .*"));
+      }
+    };
+    ArgumentCaptor<Exception> captor = captureExceptionHandledByServlet(
+        serverConfig,
+        (servlet, request, response, mapper)
+            -> servlet.handleQueryParseException(request, response, mapper, new IOException(errorMessage), false)
+    );
+    Assertions.assertTrue(captor.getValue() instanceof QueryException);
+    Assertions.assertEquals("Unknown exception", ((QueryException) captor.getValue()).getErrorCode());
+    Assertions.assertEquals(errorMessage, captor.getValue().getMessage());
+    Assertions.assertNull(((QueryException) captor.getValue()).getErrorClass());
+    Assertions.assertNull(((QueryException) captor.getValue()).getHost());
+  }
+
+  @Test
+  public void testNativeQueryProxyFailure() throws Exception
+  {
+    final TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
+                                        .dataSource("foo")
+                                        .intervals("2000/P1D")
+                                        .granularity(Granularities.ALL)
+                                        .context(QueryContext.ofMap(QueryContextParameters.QUERY_ID, "dummy"))
+                                        .build();
+
+    final QueryHostFinder hostFinder = EasyMock.createMock(QueryHostFinder.class);
+    EasyMock.expect(hostFinder.pickServer(query)).andReturn(new TestServer("http", "1.2.3.4", 9999)).once();
+    EasyMock.replay(hostFinder);
+
+    verifyServletCallsForQuery(query, false, false, hostFinder, new Properties(), true);
+  }
+
+  @Test
+  public void testSqlQueryProxyFailure() throws Exception
+  {
+    final SqlQuery query = new SqlQuery(
+        "SELECT * FROM foo",
+        ResultFormat.ARRAY,
+        false,
+        false,
+        false,
+        QueryContext.ofMap(QueryContextParameters.SQL_QUERY_ID, "dummy"),
+        null
+    );
+    final QueryHostFinder hostFinder = EasyMock.createMock(QueryHostFinder.class);
+    EasyMock.expect(hostFinder.findServerSql(
+        query.withOverridenContext(QueryContext.ofMap(
+            QueryContextParameters.SQL_QUERY_ID,
+            "dummy",
+            QueryContextParameters.QUERY_ID,
+            "dummy"
+        )))
+    ).andReturn(new TestServer("http", "1.2.3.4", 9999)).once();
+    EasyMock.replay(hostFinder);
+
+    Properties properties = new Properties();
+    properties.setProperty("druid.router.sql.enable", "true");
+    verifyServletCallsForQuery(query, true, false, hostFinder, properties, true);
+  }
+
+  /**
+   * A {@link GenericQueryMetricsFactory} that overrides no-op dimensions (e.g. identity) so tests can assert on them.
+   */
+  private static GenericQueryMetricsFactory makeRouterTestOverrideEmittingFactory()
+  {
+    return new GenericQueryMetricsFactory()
+    {
+      private DefaultQueryMetrics makeOverridingMetrics()
+      {
+        return new DefaultQueryMetrics()
+        {
+          @Override
+          public void identity(String identity)
+          {
+            setDimension("identity", identity);
+          }
+        };
+      }
+
+      @Override
+      public QueryMetrics<Query<?>> makeMetrics(Query<?> query)
+      {
+        DefaultQueryMetrics metrics = makeOverridingMetrics();
+        metrics.query(query);
+        return metrics;
+      }
+
+      @Override
+      public QueryMetrics<Query<?>> makeMetrics()
+      {
+        return makeOverridingMetrics();
+      }
+    };
+  }
+
+  @Test
+  public void testMetricsEmittedWithErrorStatusCodeButNoResultException() throws IOException
+  {
+    final TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
+                                        .dataSource("foo")
+                                        .intervals("2000/P1D")
+                                        .granularity(Granularities.ALL)
+                                        .context(QueryContext.ofMap(QueryContextParameters.QUERY_ID, "test-query-504"))
+                                        .build();
+
+    final HttpServletRequest requestMock = Mockito.mock(HttpServletRequest.class);
+    Mockito.when(requestMock.getAttribute("org.apache.druid.proxy.avaticaQuery")).thenReturn(null);
+    Mockito.when(requestMock.getAttribute("org.apache.druid.proxy.query")).thenReturn(query);
+    Mockito.when(requestMock.getAttribute("org.apache.druid.proxy.sqlQuery")).thenReturn(null);
+    Mockito.when(requestMock.getRemoteAddr()).thenReturn("127.0.0.1");
+    Mockito.when(requestMock.getAttribute(AuthConfig.DRUID_AUTHENTICATION_RESULT))
+           .thenReturn(new AuthenticationResult("testUser", "basic", "basic", null));
+
+    final Request proxyRequestMock = Mockito.mock(Request.class);
+    final Response responseMock = Mockito.mock(Response.class);
+    Mockito.when(responseMock.getStatus()).thenReturn(504); // Gateway Timeout
+    Mockito.when(responseMock.getHeaders()).thenReturn(HttpFields.build());
+    Mockito.when(responseMock.getRequest()).thenReturn(proxyRequestMock);
+
+    final Result result = new Result(proxyRequestMock, responseMock)
+    {
+      @Override
+      public Throwable getFailure()
+      {
+        return null; // No exception thrown
+      }
+    };
+
+    final StubServiceEmitter stubServiceEmitter = StubServiceEmitter.createStarted();
+    final RequestLogger requestLogger = Mockito.mock(RequestLogger.class);
     final AsyncQueryForwardingServlet servlet = new AsyncQueryForwardingServlet(
         new MapQueryToolChestWarehouse(ImmutableMap.of()),
-        mockMapper,
+        TestHelper.makeJsonMapper(),
         TestHelper.makeSmileMapper(),
         null,
         null,
         null,
-        new NoopServiceEmitter(),
-        new NoopRequestLogger(),
-        new DefaultGenericQueryMetricsFactory(),
+        stubServiceEmitter,
+        requestLogger,
+        makeRouterTestOverrideEmittingFactory(),
         new AuthenticatorMapper(ImmutableMap.of()),
         new Properties(),
         new ServerConfig()
-        {
-          @Override
-          public boolean isShowDetailedJettyErrors()
-          {
-            return true;
-          }
-
-          @Override
-          public ErrorResponseTransformStrategy getErrorResponseTransformStrategy()
-          {
-            return new AllowedRegexErrorResponseTransformStrategy(ImmutableList.of("test .*"));
-          }
-        }
     );
-    IOException testException = new IOException(errorMessage);
-    servlet.handleQueryParseException(request, response, mockMapper, testException, false);
-    ArgumentCaptor<Exception> captor = ArgumentCaptor.forClass(Exception.class);
-    Mockito.verify(mockMapper).writeValue(ArgumentMatchers.eq(outputStream), captor.capture());
-    Assert.assertTrue(captor.getValue() instanceof QueryException);
-    Assert.assertEquals("Unknown exception", ((QueryException) captor.getValue()).getErrorCode());
-    Assert.assertEquals(errorMessage, captor.getValue().getMessage());
-    Assert.assertNull(((QueryException) captor.getValue()).getErrorClass());
-    Assert.assertNull(((QueryException) captor.getValue()).getHost());
+
+    try {
+      servlet.newProxyResponseListener(requestMock, null).onComplete(result);
+    }
+    catch (NullPointerException ignored) {
+    }
+
+    stubServiceEmitter.verifyEmitted("query/time", 1);
+    Assertions.assertEquals("test-query-504", stubServiceEmitter.getEvents().get(0).toMap().get("id"));
+    Assertions.assertEquals(
+        504,
+        stubServiceEmitter.getMetricEvents("query/time").get(0).toMap().get(DruidMetrics.STATUS_CODE)
+    );
+    assertNativeQueryStatusCodeMatchesMetric(requestLogger, getEmittedStatusCode(stubServiceEmitter));
+    Assertions.assertEquals("false", stubServiceEmitter.getMetricEvents("query/time").get(0).toMap().get("success"));
+    Assertions.assertEquals("testUser", stubServiceEmitter.getMetricEvents("query/time").get(0).toMap().get("identity"));
+  }
+
+  @Test
+  public void testOnCompleteWithClosedException()
+  {
+    final TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
+                                        .dataSource("foo")
+                                        .intervals("2000/P1D")
+                                        .granularity(Granularities.ALL)
+                                        .context(QueryContext.ofMap(QueryContextParameters.QUERY_ID, "closed-test"))
+                                        .build();
+
+    final HttpServletRequest requestMock = Mockito.mock(HttpServletRequest.class);
+    Mockito.when(requestMock.getAttribute("org.apache.druid.proxy.avaticaQuery")).thenReturn(null);
+    Mockito.when(requestMock.getAttribute("org.apache.druid.proxy.query")).thenReturn(query);
+    Mockito.when(requestMock.getAttribute("org.apache.druid.proxy.sqlQuery")).thenReturn(null);
+    Mockito.when(requestMock.getRemoteAddr()).thenReturn("127.0.0.1");
+    Mockito.when(requestMock.getAttribute(AuthConfig.DRUID_AUTHENTICATION_RESULT))
+           .thenReturn(new AuthenticationResult("testUser", "basic", "basic", null));
+
+    final Request proxyRequestMock = Mockito.mock(Request.class);
+    final Response responseMock = Mockito.mock(Response.class);
+    Mockito.when(responseMock.getStatus()).thenReturn(200); // Status OK
+    Mockito.when(responseMock.getHeaders()).thenReturn(HttpFields.build());
+    Mockito.when(responseMock.getRequest()).thenReturn(proxyRequestMock);
+
+    // Result where connection is closed prematurely
+    final Result result = new Result(proxyRequestMock, responseMock)
+    {
+      @Override
+      public boolean isSucceeded()
+      {
+        return false;
+      }
+
+      @Override
+      public Throwable getFailure()
+      {
+        return new EofException("Stream closed");
+      }
+    };
+
+    final StubServiceEmitter stubServiceEmitter = StubServiceEmitter.createStarted();
+    final AsyncQueryForwardingServlet servlet = new AsyncQueryForwardingServlet(
+        new MapQueryToolChestWarehouse(ImmutableMap.of()),
+        TestHelper.makeJsonMapper(),
+        TestHelper.makeSmileMapper(),
+        null,
+        null,
+        null,
+        stubServiceEmitter,
+        NoopRequestLogger.instance(),
+        makeRouterTestOverrideEmittingFactory(),
+        new AuthenticatorMapper(ImmutableMap.of()),
+        new Properties(),
+        new ServerConfig()
+    );
+
+    try {
+      servlet.newProxyResponseListener(requestMock, null).onComplete(result);
+    }
+    catch (NullPointerException ignored) {
+    }
+
+    stubServiceEmitter.verifyEmitted("query/time", 1);
+    Assertions.assertEquals("closed-test", stubServiceEmitter.getEvents().get(0).toMap().get("id"));
+    Assertions.assertEquals(
+        500,
+        stubServiceEmitter.getMetricEvents("query/time").get(0).toMap().get(DruidMetrics.STATUS_CODE)
+    );
+    Assertions.assertEquals("false", stubServiceEmitter.getMetricEvents("query/time").get(0).toMap().get("success"));
+    Assertions.assertEquals("testUser", stubServiceEmitter.getMetricEvents("query/time").get(0).toMap().get("identity"));
+  }
+
+  @Test
+  public void testOnFailureWithExceptionAndUnassignedStatusCode() throws IOException
+  {
+    final TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
+                                        .dataSource("foo")
+                                        .intervals("2000/P1D")
+                                        .granularity(Granularities.ALL)
+                                        .context(QueryContext.ofMap(QueryContextParameters.QUERY_ID, "zero-status-test"))
+                                        .build();
+
+    final HttpServletRequest requestMock = Mockito.mock(HttpServletRequest.class);
+    Mockito.when(requestMock.getAttribute("org.apache.druid.proxy.avaticaQuery")).thenReturn(null);
+    Mockito.when(requestMock.getAttribute("org.apache.druid.proxy.query")).thenReturn(query);
+    Mockito.when(requestMock.getAttribute("org.apache.druid.proxy.sqlQuery")).thenReturn(null);
+    Mockito.when(requestMock.getRemoteAddr()).thenReturn("127.0.0.1");
+    Mockito.when(requestMock.getAttribute(AuthConfig.DRUID_AUTHENTICATION_RESULT))
+           .thenReturn(new AuthenticationResult("testUser", "basic", "basic", null));
+
+    final Response responseMock = Mockito.mock(Response.class);
+    Mockito.when(responseMock.getStatus()).thenReturn(0); // Test unassigned http status code case from server
+    Mockito.when(responseMock.getHeaders()).thenReturn(HttpFields.build());
+
+    final StubServiceEmitter stubServiceEmitter = StubServiceEmitter.createStarted();
+    final RequestLogger requestLogger = Mockito.mock(RequestLogger.class);
+    final AsyncQueryForwardingServlet servlet = new AsyncQueryForwardingServlet(
+        new MapQueryToolChestWarehouse(ImmutableMap.of()),
+        TestHelper.makeJsonMapper(),
+        TestHelper.makeSmileMapper(),
+        null,
+        null,
+        null,
+        stubServiceEmitter,
+        requestLogger,
+        makeRouterTestOverrideEmittingFactory(),
+        new AuthenticatorMapper(ImmutableMap.of()),
+        new Properties(),
+        new ServerConfig()
+    );
+
+    try {
+      servlet.newProxyResponseListener(requestMock, null)
+             .onFailure(responseMock, new IOException("Connection reset by peer"));
+    }
+    catch (NullPointerException ignored) {
+    }
+
+    stubServiceEmitter.verifyEmitted("query/time", 1);
+    Assertions.assertEquals("zero-status-test", stubServiceEmitter.getEvents().get(0).toMap().get("id"));
+    Assertions.assertEquals(
+        500, // Should default to 500 when status is 0
+        stubServiceEmitter.getMetricEvents("query/time").get(0).toMap().get(DruidMetrics.STATUS_CODE)
+    );
+    assertNativeQueryStatusCodeMatchesMetric(requestLogger, getEmittedStatusCode(stubServiceEmitter));
+    Assertions.assertEquals("false", stubServiceEmitter.getMetricEvents("query/time").get(0).toMap().get("success"));
+    Assertions.assertEquals("testUser", stubServiceEmitter.getMetricEvents("query/time").get(0).toMap().get("identity"));
+  }
+
+
+  @Test
+  public void testNoParseExceptionOnGroupByWithFilteredAggregationOnLookups() throws Exception
+  {
+    class TestLookupReferenceManager implements LookupExtractorFactoryContainerProvider
+    {
+      @Override
+      public Set<String> getAllLookupNames()
+      {
+        return null;
+      }
+
+      @Override
+      public Optional<LookupExtractorFactoryContainer> get(String lookupName)
+      {
+        return Optional.empty();
+      }
+
+      @Override
+      public String getCanonicalLookupName(String lookupName)
+      {
+        return lookupName;
+      }
+    }
+
+    final TimeseriesQuery query =
+        Druids.newTimeseriesQueryBuilder()
+              .dataSource("foo")
+              .intervals("2000/P1D")
+              .aggregators(
+                  Collections.singletonList(
+                      new FilteredAggregatorFactory(
+                          new StringAnyAggregatorFactory("stringAny", "col", 1024, true),
+                          new SelectorDimFilter(
+                              "test",
+                              "1",
+                              new RegisteredLookupExtractionFn(
+                                  new TestLookupReferenceManager(),
+                                  "somelookup",
+                                  false,
+                                  null,
+                                  null,
+                                  false
+                              )
+                          ),
+                          "agg"
+                      )))
+              .granularity(Granularities.ALL)
+              .context(QueryContext.ofMap(QueryContextParameters.QUERY_ID, "dummy"))
+              .build();
+
+    final QueryHostFinder hostFinder = EasyMock.createMock(QueryHostFinder.class);
+    EasyMock.expect(hostFinder.pickServer(query)).andReturn(new TestServer("http", "1.2.3.4", 9999)).once();
+    EasyMock.replay(hostFinder);
+
+    final ObjectMapper jsonMapper =
+        TestHelper.makeJsonMapper()
+                  .registerModules(new LookupModule().getJacksonModules())
+                  .setInjectableValues(
+                      new InjectableValues.Std().addValue(
+                          LookupExtractorFactoryContainerProvider.class,
+                          new TestLookupReferenceManager()
+                      )
+                  );
+    verifyServletCallsForQuery(query, false, false, hostFinder, new Properties(), false, jsonMapper);
+  }
+
+  private void verifyServletCallsForQuery(
+      Object query,
+      boolean isNativeSql,
+      boolean isJDBCSql,
+      QueryHostFinder hostFinder,
+      Properties properties,
+      boolean isFailure
+  ) throws Exception
+  {
+    verifyServletCallsForQuery(query, isNativeSql, isJDBCSql, hostFinder, properties, isFailure, TestHelper.makeJsonMapper());
   }
 
   /**
@@ -520,10 +823,11 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
       boolean isNativeSql,
       boolean isJDBCSql,
       QueryHostFinder hostFinder,
-      Properties properties
+      Properties properties,
+      boolean isFailure,
+      ObjectMapper jsonMapper
   ) throws Exception
   {
-    final ObjectMapper jsonMapper = TestHelper.makeJsonMapper();
     final ByteArrayInputStream inputStream = new ByteArrayInputStream(jsonMapper.writeValueAsBytes(query));
     final ServletInputStream servletInputStream = new ServletInputStream()
     {
@@ -558,7 +862,7 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
       }
     };
     final HttpServletRequest requestMock = EasyMock.createMock(HttpServletRequest.class);
-    EasyMock.expect(requestMock.getContentType()).andReturn("application/json").times(2);
+    EasyMock.expect(requestMock.getContentType()).andReturn("application/json").anyTimes();
     requestMock.setAttribute("org.apache.druid.proxy.objectMapper", jsonMapper);
     EasyMock.expectLastCall();
     EasyMock.expect(requestMock.getRequestURI())
@@ -566,7 +870,12 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
     EasyMock.expect(requestMock.getMethod()).andReturn("POST");
     if (isNativeSql) {
       SqlQuery sqlQuery = (SqlQuery) query;
-      query = sqlQuery.withOverridenContext(ImmutableMap.of("sqlQueryId", "dummy", "queryId", "dummy"));
+      query = sqlQuery.withOverridenContext(QueryContext.ofMap(
+          QueryContextParameters.SQL_QUERY_ID,
+          "dummy",
+          QueryContextParameters.QUERY_ID,
+          "dummy"
+      ));
     }
     requestMock.setAttribute(
         "org.apache.druid.proxy." + (isNativeSql ? "sqlQuery" : (isJDBCSql ? "avaticaQuery" : "query")),
@@ -587,28 +896,68 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
     EasyMock.expectLastCall();
     requestMock.setAttribute("org.apache.druid.proxy.to.host.scheme", "http");
     EasyMock.expectLastCall();
+    EasyMock.expect(requestMock.getAttribute(AuthConfig.DRUID_AUTHENTICATION_RESULT)).andReturn(new AuthenticationResult("userA", "basic", "basic", null));
+    if (isFailure) {
+      EasyMock.expect(requestMock.getRemoteAddr()).andReturn("0.0.0.0:0");
+    }
+
     EasyMock.replay(requestMock);
 
     final AtomicLong didService = new AtomicLong();
     final Request proxyRequestMock = Mockito.spy(Request.class);
-    final Result result = new Result(
-        proxyRequestMock,
-        new HttpResponse(proxyRequestMock, ImmutableList.of())
-        {
-          @Override
-          public HttpFields getHeaders()
-          {
-            HttpFields httpFields = new HttpFields();
-            if (isJDBCSql) {
-              httpFields.add(new HttpField("X-Druid-SQL-Query-Id", "jdbcDummy"));
-            } else if (isNativeSql) {
-              httpFields.add(new HttpField("X-Druid-SQL-Query-Id", "dummy"));
-            }
-            return httpFields;
-          }
+    Response response = new Response()
+    {
+      @Override
+      public Request getRequest()
+      {
+        return null;
+      }
+
+      @Override
+      public HttpVersion getVersion()
+      {
+        return null;
+      }
+
+      @Override
+      public int getStatus()
+      {
+        return isFailure ? 500 : 200;
+      }
+
+      @Override
+      public String getReason()
+      {
+        return "";
+      }
+
+      @Override
+      public HttpFields getHeaders()
+      {
+        HttpFields.Mutable httpFields = HttpFields.build();
+        if (isJDBCSql) {
+          httpFields.add(new HttpField("X-Druid-SQL-Query-Id", "jdbcDummy"));
+        } else if (isNativeSql) {
+          httpFields.add(new HttpField("X-Druid-SQL-Query-Id", "dummy"));
         }
-    );
-    final StubServiceEmitter stubServiceEmitter = new StubServiceEmitter("", "");
+        return httpFields;
+      }
+
+      @Override
+      public HttpFields getTrailers()
+      {
+        return null;
+      }
+
+      @Override
+      public CompletableFuture<Boolean> abort(Throwable throwable)
+      {
+        return null;
+      }
+    };
+    final Result result = new Result(proxyRequestMock, response);
+    final StubServiceEmitter stubServiceEmitter = StubServiceEmitter.createStarted();
+    final RequestLogger requestLogger = Mockito.mock(RequestLogger.class);
     final AsyncQueryForwardingServlet servlet = new AsyncQueryForwardingServlet(
         new MapQueryToolChestWarehouse(ImmutableMap.of()),
         jsonMapper,
@@ -617,7 +966,7 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
         null,
         null,
         stubServiceEmitter,
-        new NoopRequestLogger(),
+        requestLogger,
         new DefaultGenericQueryMetricsFactory(),
         new AuthenticatorMapper(ImmutableMap.of()),
         properties,
@@ -640,25 +989,81 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
     // partial state of the servlet. Hence, only catching the exact exception to avoid possible errors.
     // Further, the metric assertions are also done to ensure that the metrics have emitted.
     try {
-      servlet.newProxyResponseListener(requestMock, null).onComplete(result);
+      if (isFailure) {
+        servlet.newProxyResponseListener(requestMock, null).onFailure(response, new Throwable("Proxy failed"));
+      } else {
+        servlet.newProxyResponseListener(requestMock, null).onComplete(result);
+      }
     }
     catch (NullPointerException ignored) {
     }
-    Assert.assertEquals("query/time", stubServiceEmitter.getEvents().get(0).toMap().get("metric"));
+    stubServiceEmitter.verifyEmitted("query/time", 1);
     if (!isJDBCSql) {
-      Assert.assertEquals("dummy", stubServiceEmitter.getEvents().get(0).toMap().get("id"));
+      Assertions.assertEquals("dummy", stubServiceEmitter.getEvents().get(0).toMap().get("id"));
+    }
+    if (isFailure) {
+      Assertions.assertEquals(
+          500,
+          stubServiceEmitter.getMetricEvents("query/time").get(0).toMap().get(DruidMetrics.STATUS_CODE)
+      );
+    } else {
+      Assertions.assertEquals(
+          200,
+          stubServiceEmitter.getMetricEvents("query/time").get(0).toMap().get(DruidMetrics.STATUS_CODE)
+      );
+    }
+    if (!isJDBCSql) {
+      assertStatusCodeMatchesMetric(requestLogger, isNativeSql, getEmittedStatusCode(stubServiceEmitter));
     }
 
     // This test is mostly about verifying that the servlet calls the right methods the right number of times.
     EasyMock.verify(hostFinder, requestMock);
-    Assert.assertEquals(1, didService.get());
+    Assertions.assertEquals(1, didService.get());
+  }
+
+  private static int getEmittedStatusCode(StubServiceEmitter stubServiceEmitter)
+  {
+    return (int) stubServiceEmitter.getMetricEvents("query/time").get(0).toMap().get(DruidMetrics.STATUS_CODE);
+  }
+
+  private static void assertStatusCodeMatchesMetric(
+      RequestLogger requestLogger,
+      boolean isSqlQuery,
+      int metricStatusCode
+  ) throws IOException
+  {
+    if (isSqlQuery) {
+      final ArgumentCaptor<RequestLogLine> requestLogLineCaptor = ArgumentCaptor.forClass(RequestLogLine.class);
+      Mockito.verify(requestLogger).logSqlQuery(requestLogLineCaptor.capture());
+      assertStatusCode(requestLogLineCaptor.getValue(), metricStatusCode);
+    } else {
+      assertNativeQueryStatusCodeMatchesMetric(requestLogger, metricStatusCode);
+    }
+  }
+
+  private static void assertNativeQueryStatusCodeMatchesMetric(
+      RequestLogger requestLogger,
+      int metricStatusCode
+  ) throws IOException
+  {
+    final ArgumentCaptor<RequestLogLine> requestLogLineCaptor = ArgumentCaptor.forClass(RequestLogLine.class);
+    Mockito.verify(requestLogger).logNativeQuery(requestLogLineCaptor.capture());
+    assertStatusCode(requestLogLineCaptor.getValue(), metricStatusCode);
+  }
+
+  private static void assertStatusCode(RequestLogLine requestLogLine, int metricStatusCode)
+  {
+    Assertions.assertEquals(
+        metricStatusCode,
+        requestLogLine.getQueryStats().getStats().get(DruidMetrics.STATUS_CODE)
+    );
   }
 
   private static Server makeTestDeleteServer(int port, final CountDownLatch latch)
   {
     Server server = new Server(port);
-    ServletHandler handler = new ServletHandler();
-    handler.addServletWithMapping(new ServletHolder(new HttpServlet()
+    ServletContextHandler servletContextHandler = new ServletContextHandler();
+    servletContextHandler.addServlet(new ServletHolder(new HttpServlet()
     {
       @Override
       protected void doDelete(HttpServletRequest req, HttpServletResponse resp)
@@ -668,8 +1073,21 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
       }
     }), "/default/*");
 
-    server.setHandler(handler);
+    server.setHandler(servletContextHandler);
     return server;
+  }
+
+  @Path("/response-context")
+  public static class ResponseContextResource
+  {
+    @GET
+    @Produces(MediaType.APPLICATION_JSON)
+    public javax.ws.rs.core.Response get()
+    {
+      return javax.ws.rs.core.Response.ok(DEFAULT_RESPONSE_CONTENT)
+                                      .header(QueryResource.HEADER_RESPONSE_CONTEXT, RESPONSE_CONTEXT)
+                                      .build();
+    }
   }
 
   public static class ProxyJettyServerInit implements JettyServerInitializer
@@ -723,8 +1141,8 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
               hostFinder,
               injector.getProvider(HttpClient.class),
               injector.getInstance(DruidHttpClientConfig.class),
-              new NoopServiceEmitter(),
-              new NoopRequestLogger(),
+              NoopServiceEmitter.instance(),
+              NoopRequestLogger.instance(),
               new DefaultGenericQueryMetricsFactory(),
               new AuthenticatorMapper(ImmutableMap.of()),
               new Properties(),
@@ -749,16 +1167,15 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
       root.addFilter(GuiceFilter.class, "/slow/*", null);
       root.addFilter(GuiceFilter.class, "/default/*", null);
       root.addFilter(GuiceFilter.class, "/exception/*", null);
+      root.addFilter(GuiceFilter.class, "/response-context/*", null);
 
-      final HandlerList handlerList = new HandlerList();
+      final Handler.Sequence handlerList = new Handler.Sequence();
       handlerList.setHandlers(
-          new Handler[]{
-              JettyServerInitUtils.wrapWithDefaultGzipHandler(
-                  root,
-                  ServerConfig.DEFAULT_GZIP_INFLATE_BUFFER_SIZE,
-                  Deflater.DEFAULT_COMPRESSION
-              )
-          }
+          JettyServerInitUtils.wrapWithDefaultGzipHandler(
+              root,
+              ServerConfig.DEFAULT_GZIP_INFLATE_BUFFER_SIZE,
+              Deflater.DEFAULT_COMPRESSION
+          )
       );
       server.setHandler(handlerList);
     }
@@ -769,14 +1186,14 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
   {
 
     // test params
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "http://localhost:1234/some/path?param=1",
         AsyncQueryForwardingServlet.makeURI("http", "localhost:1234", "/some/path", "param=1")
     );
 
     // HttpServletRequest.getQueryString returns encoded form
     // use ascii representation in case URI is using non-ascii characters
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "http://[2a00:1450:4007:805::1007]:1234/some/path?param=1&param2=%E2%82%AC",
         AsyncQueryForwardingServlet.makeURI(
             "http",
@@ -787,14 +1204,14 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
     );
 
     // test null query
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "http://localhost/",
         AsyncQueryForwardingServlet.makeURI("http", "localhost", "/", null)
     );
 
     // Test reWrite Encoded interval with timezone info
     // decoded parameters 1900-01-01T00:00:00.000+01.00 -> 1900-01-01T00:00:00.000+01:00
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "http://localhost:1234/some/path?intervals=1900-01-01T00%3A00%3A00.000%2B01%3A00%2F3000-01-01T00%3A00%3A00.000%2B01%3A00",
         AsyncQueryForwardingServlet.makeURI(
             "http",
@@ -837,10 +1254,10 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
 
     for (Service.Request request : jsonRequests) {
       final String json = mapper.writeValueAsString(request);
-      Assert.assertEquals(
-          StringUtils.format("Failed %s", json),
+      Assertions.assertEquals(
           connectionId,
-          AsyncQueryForwardingServlet.getAvaticaConnectionId(asMap(json, mapper))
+          AsyncQueryForwardingServlet.getAvaticaConnectionId(asMap(json, mapper)),
+          StringUtils.format("Failed %s", json)
       );
     }
   }
@@ -876,10 +1293,10 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
 
 
     for (Service.Request request : avaticaRequests) {
-      Assert.assertEquals(
-          "failed",
+      Assertions.assertEquals(
           connectionId,
-          AsyncQueryForwardingServlet.getAvaticaProtobufConnectionId(request)
+          AsyncQueryForwardingServlet.getAvaticaProtobufConnectionId(request),
+          "failed"
       );
     }
   }
@@ -926,5 +1343,37 @@ public class AsyncQueryForwardingServletTest extends BaseJettyTest
     {
       return port;
     }
+  }
+  interface ServletTestAction
+  {
+    void execute(AsyncQueryForwardingServlet servlet, HttpServletRequest request, HttpServletResponse response, ObjectMapper mapper) throws Exception;
+  }
+
+  private ArgumentCaptor<Exception> captureExceptionHandledByServlet(ServerConfig serverConfig, ServletTestAction action) throws Exception
+  {
+    ObjectMapper mockMapper = Mockito.mock(ObjectMapper.class);
+    HttpServletResponse response = Mockito.mock(HttpServletResponse.class);
+    ServletOutputStream outputStream = Mockito.mock(ServletOutputStream.class);
+    Mockito.when(response.getOutputStream()).thenReturn(outputStream);
+    final AsyncQueryForwardingServlet servlet = new AsyncQueryForwardingServlet(
+            new MapQueryToolChestWarehouse(ImmutableMap.of()),
+            mockMapper,
+            TestHelper.makeSmileMapper(),
+            null,
+            null,
+            null,
+            NoopServiceEmitter.instance(),
+            NoopRequestLogger.instance(),
+            new DefaultGenericQueryMetricsFactory(),
+            new AuthenticatorMapper(ImmutableMap.of()),
+            new Properties(),
+            serverConfig
+    );
+    HttpServletRequest request = Mockito.mock(HttpServletRequest.class);
+    Mockito.when(request.getAttribute(AuthConfig.DRUID_AUTHENTICATION_RESULT)).thenReturn(new AuthenticationResult("userA", "basic", "basic", null));
+    action.execute(servlet, request, response, mockMapper);
+    ArgumentCaptor<Exception> captor = ArgumentCaptor.forClass(Exception.class);
+    Mockito.verify(mockMapper).writeValue(ArgumentMatchers.eq(outputStream), captor.capture());
+    return captor;
   }
 }

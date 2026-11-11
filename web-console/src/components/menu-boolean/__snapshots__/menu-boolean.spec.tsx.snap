@@ -1,0 +1,130 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`MenuBoolean matches snapshot false 1`] = `
+<li
+  class="bp6-submenu"
+  role="none"
+>
+  <span
+    class="bp6-popover-target"
+    role="menuitem"
+    tabindex="0"
+  >
+    <a
+      aria-haspopup="menu"
+      class="bp6-menu-item menu-tristate"
+      label="false"
+      role="none"
+      tabindex="-1"
+    >
+      <div
+        class="bp6-text-overflow-ellipsis bp6-fill"
+      >
+        hello
+      </div>
+      <span
+        class="bp6-menu-item-label"
+      >
+        false
+      </span>
+      <span
+        class="bp6-icon bp6-icon-caret-right bp6-submenu-icon"
+      >
+        <svg
+          data-icon="caret-right"
+        />
+      </span>
+    </a>
+  </span>
+  <div
+    aria-live="polite"
+    class="bp6-overlay bp6-overlay-inline"
+  />
+</li>
+`;
+
+exports[`MenuBoolean matches snapshot no undefined 1`] = `
+<li
+  class="bp6-submenu"
+  role="none"
+>
+  <span
+    class="bp6-popover-target"
+    role="menuitem"
+    tabindex="0"
+  >
+    <a
+      aria-haspopup="menu"
+      class="bp6-menu-item menu-tristate"
+      label="false"
+      role="none"
+      tabindex="-1"
+    >
+      <div
+        class="bp6-text-overflow-ellipsis bp6-fill"
+      >
+        hello
+      </div>
+      <span
+        class="bp6-menu-item-label"
+      >
+        false
+      </span>
+      <span
+        class="bp6-icon bp6-icon-caret-right bp6-submenu-icon"
+      >
+        <svg
+          data-icon="caret-right"
+        />
+      </span>
+    </a>
+  </span>
+  <div
+    aria-live="polite"
+    class="bp6-overlay bp6-overlay-inline"
+  />
+</li>
+`;
+
+exports[`MenuBoolean matches snapshot undefined 1`] = `
+<li
+  class="bp6-submenu"
+  role="none"
+>
+  <span
+    class="bp6-popover-target"
+    role="menuitem"
+    tabindex="0"
+  >
+    <a
+      aria-haspopup="menu"
+      class="bp6-menu-item menu-tristate"
+      label="Auto (true)"
+      role="none"
+      tabindex="-1"
+    >
+      <div
+        class="bp6-text-overflow-ellipsis bp6-fill"
+      >
+        hello
+      </div>
+      <span
+        class="bp6-menu-item-label"
+      >
+        Auto (true)
+      </span>
+      <span
+        class="bp6-icon bp6-icon-caret-right bp6-submenu-icon"
+      >
+        <svg
+          data-icon="caret-right"
+        />
+      </span>
+    </a>
+  </span>
+  <div
+    aria-live="polite"
+    class="bp6-overlay bp6-overlay-inline"
+  />
+</li>
+`;

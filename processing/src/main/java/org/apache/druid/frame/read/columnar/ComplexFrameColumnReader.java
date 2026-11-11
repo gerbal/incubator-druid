@@ -27,6 +27,9 @@ import org.apache.druid.frame.write.columnar.FrameColumnWriters;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.query.monomorphicprocessing.RuntimeShapeInspector;
+import org.apache.druid.query.rowsandcols.column.Column;
+import org.apache.druid.query.rowsandcols.column.ColumnAccessorBasedColumn;
+import org.apache.druid.query.rowsandcols.column.accessor.ObjectColumnAccessorBase;
 import org.apache.druid.segment.ColumnValueSelector;
 import org.apache.druid.segment.ObjectColumnSelector;
 import org.apache.druid.segment.column.ColumnCapabilitiesImpl;
@@ -36,7 +39,9 @@ import org.apache.druid.segment.data.ReadableOffset;
 import org.apache.druid.segment.serde.ComplexMetricSerde;
 import org.apache.druid.segment.serde.ComplexMetrics;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.util.Comparator;
 
 public class ComplexFrameColumnReader implements FrameColumnReader
 {
@@ -48,7 +53,27 @@ public class ComplexFrameColumnReader implements FrameColumnReader
   }
 
   @Override
+  public Column readRACColumn(Frame frame)
+  {
+    return new ColumnAccessorBasedColumn(makeComplexFrameColumn(frame));
+  }
+
+  @Override
   public ColumnPlus readColumn(final Frame frame)
+  {
+    final ComplexFrameColumn frameCol = makeComplexFrameColumn(frame);
+
+    return new ColumnPlus(
+        frameCol,
+        new ColumnCapabilitiesImpl()
+            .setType(frameCol.getType())
+            .setHasMultipleValues(false),
+        frame.numRows()
+    );
+  }
+
+  @Nonnull
+  private ComplexFrameColumn makeComplexFrameColumn(Frame frame)
   {
     final Memory memory = frame.region(columnNumber);
     validate(memory, frame.numRows());
@@ -68,17 +93,12 @@ public class ComplexFrameColumnReader implements FrameColumnReader
     final long startOfOffsetSection = Byte.BYTES + Integer.BYTES + typeNameLength;
     final long startOfDataSection = startOfOffsetSection + (long) frame.numRows() * Integer.BYTES;
 
-    return new ColumnPlus(
-        new ComplexFrameColumn(
-            frame,
-            serde,
-            memory,
-            startOfOffsetSection,
-            startOfDataSection
-        ),
-        new ColumnCapabilitiesImpl().setType(ColumnType.ofComplex(typeName))
-                                    .setHasMultipleValues(false),
-        frame.numRows()
+    return new ComplexFrameColumn(
+        frame,
+        serde,
+        memory,
+        startOfOffsetSection,
+        startOfDataSection
     );
   }
 
@@ -100,10 +120,11 @@ public class ComplexFrameColumnReader implements FrameColumnReader
     }
   }
 
-  private static class ComplexFrameColumn implements ComplexColumn
+  private static class ComplexFrameColumn extends ObjectColumnAccessorBase implements ComplexColumn
   {
     private final Frame frame;
     private final ComplexMetricSerde serde;
+    private final Class<?> clazz;
     private final Memory memory;
     private final long startOfOffsetSection;
     private final long startOfDataSection;
@@ -118,6 +139,8 @@ public class ComplexFrameColumnReader implements FrameColumnReader
     {
       this.frame = frame;
       this.serde = serde;
+      //noinspection deprecation
+      this.clazz = serde.getObjectStrategy().getClazz();
       this.memory = memory;
       this.startOfOffsetSection = startOfOffsetSection;
       this.startOfDataSection = startOfDataSection;
@@ -126,7 +149,7 @@ public class ComplexFrameColumnReader implements FrameColumnReader
     @Override
     public ColumnValueSelector<?> makeColumnValueSelector(final ReadableOffset offset)
     {
-      return new ObjectColumnSelector<Object>()
+      return new ObjectColumnSelector<>()
       {
         @Nullable
         @Override
@@ -138,7 +161,7 @@ public class ComplexFrameColumnReader implements FrameColumnReader
         @Override
         public Class<?> classOfObject()
         {
-          return serde.getExtractor().extractedClass();
+          return clazz;
         }
 
         @Override
@@ -162,6 +185,7 @@ public class ComplexFrameColumnReader implements FrameColumnReader
     }
 
     @Override
+    @Nullable
     public Object getRowValue(int rowNum)
     {
       // Need bounds checking, since getObjectForPhysicalRow doesn't do it.
@@ -182,6 +206,30 @@ public class ComplexFrameColumnReader implements FrameColumnReader
     public void close()
     {
       // Do nothing.
+    }
+
+    @Override
+    public ColumnType getType()
+    {
+      return ColumnType.ofComplex(serde.getTypeName());
+    }
+
+    @Override
+    public int numRows()
+    {
+      return getLength();
+    }
+
+    @Override
+    protected Object getVal(int rowNum)
+    {
+      return getRowValue(rowNum);
+    }
+
+    @Override
+    protected Comparator<Object> getComparator()
+    {
+      return serde.getTypeStrategy();
     }
 
     @Nullable

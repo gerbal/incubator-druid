@@ -24,6 +24,7 @@ import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.MoreExecutors;
 import com.google.inject.Inject;
 import org.apache.druid.indexer.TaskStatus;
 import org.apache.druid.indexing.common.actions.TaskActionClientFactory;
@@ -108,7 +109,7 @@ public class ExecutorLifecycle
     // pod twice, no need to lock.
     if (taskExecutorConfig.isParentStreamDefined()) {
       // Avoid running the same task twice on the same machine by locking the task base directory.
-      final File taskLockFile = Preconditions.checkNotNull(taskExecutorConfig.getLockFile(), "lockfile is null");
+      final File taskLockFile = taskConfig.getTaskLockFile(task.getId());
       try {
         synchronized (this) {
           if (taskLockChannel == null && taskLockFileLock == null) {
@@ -119,24 +120,12 @@ public class ExecutorLifecycle
             );
 
             log.info("Attempting to lock file[%s].", taskLockFile);
-            final long startLocking = System.currentTimeMillis();
-            final long timeout = DateTimes.utc(startLocking).plus(taskConfig.getDirectoryLockTimeout()).getMillis();
-            while (taskLockFileLock == null && System.currentTimeMillis() < timeout) {
-              taskLockFileLock = taskLockChannel.tryLock();
-              if (taskLockFileLock == null) {
-                Thread.sleep(100);
-              }
-            }
-
-            if (taskLockFileLock == null) {
-              throw new ISE("Could not acquire lock file[%s] within %,dms.", taskLockFile, timeout - startLocking);
-            } else {
-              log.info("Acquired lock file[%s] in %,dms.", taskLockFile, System.currentTimeMillis() - startLocking);
-            }
           } else {
             throw new ISE("Already started!");
           }
         }
+
+        acquireTaskFileLock(taskLockChannel, taskLockFile);
       }
       catch (IOException e) {
         throw new RuntimeException(e);
@@ -156,7 +145,7 @@ public class ExecutorLifecycle
             }
 
             // Kind of gross, but best way to kill the JVM as far as I know
-            log.info("Triggering JVM shutdown.");
+            log.info("Triggering JVM shutdown. Check overlord logs to see why the task is being shut down.");
             System.exit(2);
           }
       );
@@ -175,7 +164,7 @@ public class ExecutorLifecycle
 
     statusFuture = Futures.transform(
         taskRunner.run(task),
-        new Function<TaskStatus, TaskStatus>()
+        new Function<>()
         {
           @Override
           public TaskStatus apply(TaskStatus taskStatus)
@@ -198,8 +187,36 @@ public class ExecutorLifecycle
               throw new RuntimeException(e);
             }
           }
-        }
+        },
+        MoreExecutors.directExecutor()
     );
+  }
+
+  FileLock acquireTaskFileLock(FileChannel lockChannel, File taskLockFile)
+      throws IOException, InterruptedException
+  {
+    final long startLocking = System.currentTimeMillis();
+    final long timeout = DateTimes.utc(startLocking).plus(taskConfig.getDirectoryLockTimeout()).getMillis();
+    FileLock acquiredLock = null;
+    while (acquiredLock == null && System.currentTimeMillis() < timeout) {
+      synchronized (this) {
+        acquiredLock = lockChannel.tryLock();
+        if (acquiredLock != null) {
+          taskLockFileLock = acquiredLock;
+        }
+      }
+
+      if (acquiredLock == null) {
+        Thread.sleep(100);
+      }
+    }
+
+    if (acquiredLock == null) {
+      throw new ISE("Could not acquire lock file[%s] within %,dms.", taskLockFile, timeout - startLocking);
+    } else {
+      log.info("Acquired lock file[%s] in %,dms.", taskLockFile, System.currentTimeMillis() - startLocking);
+      return acquiredLock;
+    }
   }
 
   public void join()

@@ -23,14 +23,11 @@ import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.server.security.AuthConfig;
 import org.apache.druid.server.security.AuthenticationResult;
 import org.pac4j.core.config.Config;
-import org.pac4j.core.context.J2EContext;
-import org.pac4j.core.context.session.SessionStore;
-import org.pac4j.core.engine.CallbackLogic;
 import org.pac4j.core.engine.DefaultCallbackLogic;
 import org.pac4j.core.engine.DefaultSecurityLogic;
-import org.pac4j.core.engine.SecurityLogic;
-import org.pac4j.core.http.adapter.HttpActionAdapter;
-import org.pac4j.core.profile.CommonProfile;
+import org.pac4j.core.exception.http.HttpAction;
+import org.pac4j.jee.context.JEEContext;
+import org.pac4j.jee.http.adapter.JEEHttpActionAdapter;
 
 import javax.servlet.Filter;
 import javax.servlet.FilterChain;
@@ -41,32 +38,30 @@ import javax.servlet.ServletResponse;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import java.io.IOException;
-import java.util.Collection;
 
 public class Pac4jFilter implements Filter
 {
   private static final Logger LOGGER = new Logger(Pac4jFilter.class);
 
-  private static final HttpActionAdapter<String, J2EContext> NOOP_HTTP_ACTION_ADAPTER = (int code, J2EContext ctx) -> null;
-
   private final Config pac4jConfig;
-  private final SecurityLogic<String, J2EContext> securityLogic;
-  private final CallbackLogic<String, J2EContext> callbackLogic;
-  private final SessionStore<J2EContext> sessionStore;
-
+  private final Pac4jSessionStore sessionStore;
+  private final String callbackPath;
   private final String name;
   private final String authorizerName;
 
-  public Pac4jFilter(String name, String authorizerName, Config pac4jConfig, String cookiePassphrase)
+  public Pac4jFilter(
+          String name,
+          String authorizerName,
+          Config pac4jConfig,
+          String callbackPath,
+          String cookiePassphrase
+  )
   {
     this.pac4jConfig = pac4jConfig;
-    this.securityLogic = new DefaultSecurityLogic<>();
-    this.callbackLogic = new DefaultCallbackLogic<>();
-
+    this.callbackPath = callbackPath;
     this.name = name;
     this.authorizerName = authorizerName;
-
-    this.sessionStore = new Pac4jSessionStore<>(cookiePassphrase);
+    this.sessionStore = new Pac4jSessionStore(cookiePassphrase);
   }
 
   @Override
@@ -74,10 +69,9 @@ public class Pac4jFilter implements Filter
   {
   }
 
-
   @Override
   public void doFilter(ServletRequest servletRequest, ServletResponse servletResponse, FilterChain filterChain)
-      throws IOException, ServletException
+          throws IOException, ServletException
   {
     // If there's already an auth result, then we have authenticated already, skip this or else caller
     // could get HTTP redirect even if one of the druid authenticators in chain has successfully authenticated.
@@ -86,36 +80,59 @@ public class Pac4jFilter implements Filter
       return;
     }
 
-    HttpServletRequest httpServletRequest = (HttpServletRequest) servletRequest;
-    HttpServletResponse httpServletResponse = (HttpServletResponse) servletResponse;
-    J2EContext context = new J2EContext(httpServletRequest, httpServletResponse, sessionStore);
+    HttpServletRequest request = (HttpServletRequest) servletRequest;
+    HttpServletResponse response = (HttpServletResponse) servletResponse;
+    JEEContext context = new JEEContext(request, response);
 
-    if (Pac4jCallbackResource.SELF_URL.equals(httpServletRequest.getRequestURI())) {
+    if (request.getRequestURI().equals(callbackPath)) {
+      DefaultCallbackLogic callbackLogic = new DefaultCallbackLogic();
+      String originalUrl = (String) request.getSession().getAttribute("pac4j.originalUrl");
+      String redirectUrl = originalUrl != null ? originalUrl : "/";
+
       callbackLogic.perform(
-          context,
-          pac4jConfig,
-          NOOP_HTTP_ACTION_ADAPTER,
-          "/",
-          true, false, false, null);
+              context,
+              sessionStore,
+              pac4jConfig,
+              JEEHttpActionAdapter.INSTANCE,
+              redirectUrl,                      // Redirect to original URL or root
+              null,
+              null
+      );
     } else {
-      String uid = securityLogic.perform(
-          context,
-          pac4jConfig,
-          (J2EContext ctx, Collection<CommonProfile> profiles, Object... parameters) -> {
-            if (profiles.isEmpty()) {
-              LOGGER.warn("No profiles found after OIDC auth.");
+      DefaultSecurityLogic securityLogic = new DefaultSecurityLogic();
+      try {
+        securityLogic.perform(
+            context,
+            sessionStore,
+            pac4jConfig,
+            (ctx, session, profiles, parameters) -> {
+              try {
+                // Extract user ID from pac4j profiles and create AuthenticationResult
+                if (profiles != null && !profiles.isEmpty()) {
+                  String uid = profiles.iterator().next().getId();
+                  if (uid != null) {
+                    AuthenticationResult authenticationResult = new AuthenticationResult(uid, authorizerName, name, null);
+                    servletRequest.setAttribute(AuthConfig.DRUID_AUTHENTICATION_RESULT, authenticationResult);
+                    filterChain.doFilter(servletRequest, servletResponse);
+                  }
+                } else {
+                  LOGGER.warn("No profiles found after OIDC auth.");
+                  // Don't continue the filter chain - let pac4j handle the authentication failure
+                }
+              }
+              catch (IOException | ServletException e) {
+                throw new RuntimeException(e);
+              }
               return null;
-            } else {
-              return profiles.iterator().next().getId();
-            }
-          },
-          NOOP_HTTP_ACTION_ADAPTER,
-          null, null, null, null);
-
-      if (uid != null) {
-        AuthenticationResult authenticationResult = new AuthenticationResult(uid, authorizerName, name, null);
-        servletRequest.setAttribute(AuthConfig.DRUID_AUTHENTICATION_RESULT, authenticationResult);
-        filterChain.doFilter(servletRequest, servletResponse);
+            },
+            JEEHttpActionAdapter.INSTANCE,
+            null,
+            "none",  // Use "none" instead of authorizerName to avoid CSRF issues
+            null
+        );
+      }
+      catch (HttpAction e) {
+        JEEHttpActionAdapter.INSTANCE.adapt(e, context);
       }
     }
   }

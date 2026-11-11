@@ -22,9 +22,10 @@ package org.apache.druid.indexing.overlord.hrtr;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.jaxrs.smile.SmileMediaTypes;
+import io.netty.handler.codec.http.HttpHeaders;
+import io.netty.handler.codec.http.HttpMethod;
 import org.apache.druid.indexer.TaskStatus;
 import org.apache.druid.indexing.common.task.Task;
-import org.apache.druid.indexing.common.task.batch.parallel.ParallelIndexSupervisorTask;
 import org.apache.druid.indexing.overlord.ImmutableWorkerInfo;
 import org.apache.druid.indexing.overlord.TaskRunnerUtils;
 import org.apache.druid.indexing.overlord.config.HttpRemoteTaskRunnerConfig;
@@ -41,25 +42,20 @@ import org.apache.druid.java.util.http.client.response.StatusResponseHandler;
 import org.apache.druid.java.util.http.client.response.StatusResponseHolder;
 import org.apache.druid.server.coordination.ChangeRequestHttpSyncer;
 import org.apache.druid.server.coordination.ChangeRequestsSnapshot;
-import org.jboss.netty.handler.codec.http.HttpHeaders;
-import org.jboss.netty.handler.codec.http.HttpMethod;
 import org.joda.time.DateTime;
 
 import java.net.URL;
 import java.util.ArrayList;
-import java.util.HashSet;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
 
 /**
  */
@@ -67,18 +63,22 @@ public class WorkerHolder
 {
   private static final EmittingLogger log = new EmittingLogger(WorkerHolder.class);
 
-  public static final TypeReference<ChangeRequestsSnapshot<WorkerHistoryItem>> WORKER_SYNC_RESP_TYPE_REF = new TypeReference<ChangeRequestsSnapshot<WorkerHistoryItem>>()
-  {
-  };
+  public static final TypeReference<ChangeRequestsSnapshot<WorkerHistoryItem>> WORKER_SYNC_RESP_TYPE_REF = new TypeReference<>() {};
 
 
-  private final Worker worker;
-  private Worker disabledWorker;
+  /**
+   * Pre-built views with isDisabled() set to false/true respectively. {@link #getWorker()} selects between them based on {@link #disabled}.
+   */
+  private final Worker enabledWorker;
+  private final Worker disabledWorker;
 
   protected final AtomicBoolean disabled;
+  private final AtomicBoolean syncedAtleastOnce = new AtomicBoolean(false);
 
   // Known list of tasks running/completed on this worker.
   protected final AtomicReference<Map<String, TaskAnnouncement>> tasksSnapshotRef;
+
+  private final AtomicReference<ImmutableWorkerInfo> announcementsViewRef = new AtomicReference<>();
 
   private final AtomicReference<DateTime> lastCompletedTaskTime = new AtomicReference<>(DateTimes.nowUtc());
   private final AtomicReference<DateTime> blacklistedUntil = new AtomicReference<>();
@@ -106,15 +106,16 @@ public class WorkerHolder
     this.httpClient = httpClient;
     this.config = config;
     this.listener = listener;
-    this.worker = worker;
-    //worker holder is created disabled and gets enabled after first sync success.
+    this.enabledWorker = workerWithDisabledState(worker, false);
+    this.disabledWorker = workerWithDisabledState(worker, true);
+    // WorkerHolder starts disabled and gets enabled after first successful sync.
     this.disabled = new AtomicBoolean(true);
 
     this.syncer = new ChangeRequestHttpSyncer<>(
         smileMapper,
         httpClient,
         workersSyncExec,
-        TaskRunnerUtils.makeWorkerURL(worker, "/"),
+        TaskRunnerUtils.makeWorkerURL(enabledWorker, "/"),
         "/druid-internal/v1/worker",
         WORKER_SYNC_RESP_TYPE_REF,
         config.getSyncRequestTimeout().toStandardDuration().getMillis(),
@@ -127,47 +128,12 @@ public class WorkerHolder
       knownAnnouncements.forEach(e -> announcements.put(e.getTaskId(), e));
     }
     tasksSnapshotRef = new AtomicReference<>(announcements);
+    refreshAnnouncementsView();
   }
 
   public Worker getWorker()
   {
-    return worker;
-  }
-
-  private Map<String, TaskAnnouncement> getRunningTasks()
-  {
-    return tasksSnapshotRef.get().entrySet().stream().filter(
-        e -> e.getValue().getTaskStatus().isRunnable()
-    ).collect(Collectors.toMap(e -> e.getKey(), e -> e.getValue()));
-  }
-
-  private int getCurrCapacityUsed()
-  {
-    int currCapacity = 0;
-    for (TaskAnnouncement taskAnnouncement : getRunningTasks().values()) {
-      currCapacity += taskAnnouncement.getTaskResource().getRequiredCapacity();
-    }
-    return currCapacity;
-  }
-
-  private int getCurrParallelIndexCapcityUsed()
-  {
-    int currParallelIndexCapacityUsed = 0;
-    for (TaskAnnouncement taskAnnouncement : getRunningTasks().values()) {
-      if (taskAnnouncement.getTaskType().equals(ParallelIndexSupervisorTask.TYPE)) {
-        currParallelIndexCapacityUsed += taskAnnouncement.getTaskResource().getRequiredCapacity();
-      }
-    }
-    return currParallelIndexCapacityUsed;
-  }
-
-  private Set<String> getAvailabilityGroups()
-  {
-    Set<String> retVal = new HashSet<>();
-    for (TaskAnnouncement taskAnnouncement : getRunningTasks().values()) {
-      retVal.add(taskAnnouncement.getTaskResource().getAvailabilityGroup());
-    }
-    return retVal;
+    return disabled.get() ? disabledWorker : enabledWorker;
   }
 
   public DateTime getBlacklistedUntil()
@@ -187,29 +153,49 @@ public class WorkerHolder
 
   public ImmutableWorkerInfo toImmutable()
   {
-    Worker w = worker;
-    if (disabled.get()) {
-      if (disabledWorker == null) {
-        disabledWorker = new Worker(
-            worker.getScheme(),
-            worker.getHost(),
-            worker.getIp(),
-            worker.getCapacity(),
-            "",
-            worker.getCategory()
-        );
-      }
-      w = disabledWorker;
-    }
-
+    final ImmutableWorkerInfo announcementsView = announcementsViewRef.get();
     return new ImmutableWorkerInfo(
-        w,
-        getCurrCapacityUsed(),
-        getCurrParallelIndexCapcityUsed(),
-        getAvailabilityGroups(),
-        getRunningTasks().keySet(),
+        getWorker(),
+        announcementsView.getCurrCapacityUsed(),
+        announcementsView.getCurrParallelIndexCapacityUsed(),
+        announcementsView.getCurrCapacityUsedByTaskType(),
+        announcementsView.getAvailabilityGroups(),
+        announcementsView.getRunningTasks(),
         lastCompletedTaskTime.get(),
         blacklistedUntil.get()
+    );
+  }
+
+  /**
+   * Adds or updates an announcement in {@link #tasksSnapshotRef} and refreshes the capacity view so the two stay
+   * in sync. {@link #deltaSync} does not use this because it applies a batch of changes and refreshes once at the
+   * end; it is here for callers that mutate a single announcement outside the sync callbacks.
+   */
+  protected void addOrUpdateAnnouncement(TaskAnnouncement announcement)
+  {
+    tasksSnapshotRef.get().put(announcement.getTaskId(), announcement);
+    refreshAnnouncementsView();
+  }
+
+  protected void refreshAnnouncementsView()
+  {
+    final ImmutableWorkerInfo view = ImmutableWorkerInfo.fromWorkerAnnouncements(
+        enabledWorker,
+        tasksSnapshotRef.get(),
+        lastCompletedTaskTime.get(),
+        blacklistedUntil.get()
+    );
+    announcementsViewRef.set(
+        new ImmutableWorkerInfo(
+            view.getWorker(),
+            view.getCurrCapacityUsed(),
+            view.getCurrParallelIndexCapacityUsed(),
+            Collections.unmodifiableMap(view.getCurrCapacityUsedByTaskType()),
+            view.getAvailabilityGroups(),
+            view.getRunningTasks(),
+            view.getLastCompletedTaskTime(),
+            view.getBlacklistedUntil()
+        )
     );
   }
 
@@ -234,12 +220,12 @@ public class WorkerHolder
       log.info(
           "Received task[%s] assignment on worker[%s] when worker is disabled.",
           task.getId(),
-          worker.getHost()
+          enabledWorker.getHost()
       );
       return false;
     }
 
-    URL url = TaskRunnerUtils.makeWorkerURL(worker, "/druid-internal/v1/worker/assignTask");
+    URL url = TaskRunnerUtils.makeWorkerURL(enabledWorker, "/druid-internal/v1/worker/assignTask");
     int numTries = config.getAssignRequestMaxRetries();
 
     try {
@@ -254,14 +240,14 @@ public class WorkerHolder
                   config.getAssignRequestHttpTimeout().toStandardDuration()
               ).get();
 
-              if (response.getStatus().getCode() == 200) {
+              if (response.getStatus().code() == 200) {
                 return true;
               } else {
                 throw new RE(
                     "Failed to assign task[%s] to worker[%s]. Response Code[%s] and Message[%s]. Retrying...",
                     task.getId(),
-                    worker.getHost(),
-                    response.getStatus().getCode(),
+                    enabledWorker.getHost(),
+                    response.getStatus().code(),
                     response.getContent()
                 );
               }
@@ -271,7 +257,7 @@ public class WorkerHolder
                   ex,
                   "Request to assign task[%s] to worker[%s] failed. Retrying...",
                   task.getId(),
-                  worker.getHost()
+                  enabledWorker.getHost()
               );
             }
           },
@@ -280,14 +266,14 @@ public class WorkerHolder
       );
     }
     catch (Exception ex) {
-      log.info("Not sure whether task[%s] was successfully assigned to worker[%s].", task.getId(), worker.getHost());
+      log.info("Not sure whether task[%s] was successfully assigned to worker[%s].", task.getId(), enabledWorker.getHost());
       return true;
     }
   }
 
   public void shutdownTask(String taskId)
   {
-    final URL url = TaskRunnerUtils.makeWorkerURL(worker, "/druid/worker/v1/task/%s/shutdown", taskId);
+    final URL url = TaskRunnerUtils.makeWorkerURL(enabledWorker, "/druid/worker/v1/task/%s/shutdown", taskId);
 
     try {
       RetryUtils.retry(
@@ -299,20 +285,20 @@ public class WorkerHolder
                   config.getShutdownRequestHttpTimeout().toStandardDuration()
               ).get();
 
-              if (response.getStatus().getCode() == 200) {
+              if (response.getStatus().code() == 200) {
                 log.info(
                     "Sent shutdown message to worker: %s, status %s, response: %s",
-                    worker.getHost(),
+                    enabledWorker.getHost(),
                     response.getStatus(),
                     response.getContent()
                 );
                 return null;
               } else {
-                throw new RE("Attempt to shutdown task[%s] on worker[%s] failed.", taskId, worker.getHost());
+                throw new RE("Attempt to shutdown task[%s] on worker[%s] failed.", taskId, enabledWorker.getHost());
               }
             }
             catch (ExecutionException e) {
-              throw new RE(e, "Error in handling post to [%s] for task [%s]", worker.getHost(), taskId);
+              throw new RE(e, "Error in handling post to [%s] for task [%s]", enabledWorker.getHost(), taskId);
             }
           },
           e -> !(e instanceof InterruptedException),
@@ -324,7 +310,7 @@ public class WorkerHolder
         Thread.currentThread().interrupt();
       }
 
-      log.error("Failed to shutdown task[%s] on worker[%s] failed.", taskId, worker.getHost());
+      log.error("Failed to shutdown task[%s] on worker[%s] failed.", taskId, enabledWorker.getHost());
     }
   }
 
@@ -340,20 +326,23 @@ public class WorkerHolder
 
   public void waitForInitialization() throws InterruptedException
   {
-    if (!syncer.awaitInitialization(3 * syncer.getServerHttpTimeout(), TimeUnit.MILLISECONDS)) {
-      throw new RE("Failed to sync with worker[%s].", worker.getHost());
+    if (!syncer.awaitInitialization()) {
+      throw new RE("Failed to sync with worker[%s].", enabledWorker.getHost());
     }
   }
 
+  /**
+   * Whether this worker has been synced successfully atleast once.
+   */
   public boolean isInitialized()
   {
-    try {
-      return syncer.awaitInitialization(1, TimeUnit.MILLISECONDS);
-    }
-    catch (InterruptedException ignored) {
-      Thread.currentThread().interrupt();
-      return false;
-    }
+    // Do not use syncer.isInitialized() as it becomes true only after the first
+    // fullSync() or deltaSync() callback has completed. But the callback itself
+    // wakes up the HttpRemoteTaskRunner.pendingTaskExecutionLoop() which checks
+    // if this WorkerHolder is initialized before assigning tasks to it.
+    // If not initialized, execution loop goes to sleep for 1 minute thus delaying
+    // task assignment.
+    return syncedAtleastOnce.get();
   }
 
   public boolean isEnabled()
@@ -368,7 +357,7 @@ public class WorkerHolder
 
   public ChangeRequestHttpSyncer.Listener<WorkerHistoryItem> createSyncListener()
   {
-    return new ChangeRequestHttpSyncer.Listener<WorkerHistoryItem>()
+    return new ChangeRequestHttpSyncer.Listener<>()
     {
       @Override
       public void fullSync(List<WorkerHistoryItem> changes)
@@ -389,7 +378,7 @@ public class WorkerHolder
             log.makeAlert(
                 "Got unknown sync update[%s] from worker[%s]. Ignored.",
                 change.getClass().getName(),
-                worker.getHost()
+                enabledWorker.getHost()
             ).emit();
           }
         }
@@ -401,7 +390,7 @@ public class WorkerHolder
                 "task[%s] in state[%s] suddenly disappeared on worker[%s]. failing it.",
                 announcement.getTaskId(),
                 announcement.getStatus(),
-                worker.getHost()
+                enabledWorker.getHost()
             );
             delta.add(
                 TaskAnnouncement.create(
@@ -421,6 +410,7 @@ public class WorkerHolder
         }
 
         tasksSnapshotRef.set(newSnapshot);
+        refreshAnnouncementsView();
 
         notifyListener(delta, isWorkerDisabled);
       }
@@ -444,7 +434,7 @@ public class WorkerHolder
                   "task[%s] in state[%s] suddenly disappeared on worker[%s]. failing it.",
                   announcement.getTaskId(),
                   announcement.getStatus(),
-                  worker.getHost()
+                  enabledWorker.getHost()
               );
               delta.add(
                   TaskAnnouncement.create(
@@ -467,10 +457,12 @@ public class WorkerHolder
             log.makeAlert(
                 "Got unknown sync update[%s] from worker[%s]. Ignored.",
                 change.getClass().getName(),
-                worker.getHost()
+                enabledWorker.getHost()
             ).emit();
           }
         }
+
+        refreshAnnouncementsView();
 
         notifyListener(delta, isWorkerDisabled);
       }
@@ -486,21 +478,33 @@ public class WorkerHolder
                 ex,
                 "Unknown exception while updating task[%s] state from worker[%s].",
                 announcement.getTaskId(),
-                worker.getHost()
+                enabledWorker.getHost()
             );
           }
         }
 
+        syncedAtleastOnce.set(true);
         if (isWorkerDisabled != disabled.get()) {
           disabled.set(isWorkerDisabled);
-          log.info("Worker[%s] disabled set to [%s].", worker.getHost(), isWorkerDisabled);
+          log.info("Worker[%s] disabled set to [%s].", enabledWorker.getHost(), isWorkerDisabled);
+          listener.stateChanged(!isWorkerDisabled, WorkerHolder.this);
         }
       }
     };
   }
 
+  private static Worker workerWithDisabledState(Worker w, boolean disabled)
+  {
+    if (w.isDisabled() == disabled) {
+      return w;
+    }
+    return new Worker(w.getScheme(), w.getHost(), w.getIp(), w.getCapacity(), w.getVersion(), w.getCategory(), disabled);
+  }
+
   public interface Listener
   {
     void taskAddedOrUpdated(TaskAnnouncement announcement, WorkerHolder workerHolder);
+
+    void stateChanged(boolean enabled, WorkerHolder workerHolder);
   }
 }

@@ -21,24 +21,23 @@ package org.apache.druid.client.cache;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fiftyonred.mock_jedis.MockJedisCluster;
+import com.github.fppt.jedismock.RedisServer;
+import com.github.fppt.jedismock.server.ServiceOptions;
 import com.google.common.collect.Lists;
 import com.google.common.primitives.Ints;
+import org.apache.druid.client.CacheUtil;
 import org.apache.druid.java.util.common.StringUtils;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import redis.clients.jedis.HostAndPort;
-import redis.clients.jedis.JedisPoolConfig;
+import redis.clients.jedis.JedisCluster;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import java.io.IOException;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
 
-public class RedisClusterCacheTest
+public class RedisClusterCacheTest extends CacheTestBase<RedisClusterCache>
 {
   private static final byte[] HI = StringUtils.toUtf8("hiiiiiiiiiiiiiiiiiii");
   private static final byte[] HO = StringUtils.toUtf8("hooooooooooooooooooo");
@@ -58,67 +57,49 @@ public class RedisClusterCacheTest
     }
   };
 
-  private RedisClusterCache cache;
-  private AtomicLong mgetCount = new AtomicLong();
+  private RedisServer server;
 
-  @Before
-  public void setUp()
+  @BeforeEach
+  public void initializeCache() throws IOException
   {
-    JedisPoolConfig poolConfig = new JedisPoolConfig();
-    poolConfig.setMaxTotal(cacheConfig.getMaxTotalConnections());
-    poolConfig.setMaxIdle(cacheConfig.getMaxIdleConnections());
-    poolConfig.setMinIdle(cacheConfig.getMinIdleConnections());
-
-    // orginal MockJedisCluster does not provide full support for all public get/set interfaces
-    // some methods must be overriden for test cases
-    cache = new RedisClusterCache(new MockJedisCluster(Collections.singleton(new HostAndPort("localhost", 6379)))
-    {
-      final ConcurrentHashMap<String, byte[]> cacheStorage = new ConcurrentHashMap<>();
-
-      @Override
-      public String setex(final byte[] key, final int seconds, final byte[] value)
-      {
-        cacheStorage.put(StringUtils.encodeBase64String(key), value);
-        return null;
-      }
-
-      @Override
-      public byte[] get(final byte[] key)
-      {
-        return cacheStorage.get(StringUtils.encodeBase64String(key));
-      }
-
-      @Override
-      public List<byte[]> mget(final byte[]... keys)
-      {
-        mgetCount.incrementAndGet();
-        List<byte[]> ret = new ArrayList<>();
-        for (byte[] key : keys) {
-          String k = StringUtils.encodeBase64String(key);
-          byte[] value = cacheStorage.get(k);
-          ret.add(value);
-        }
-        return ret;
-      }
-    }, cacheConfig);
+    ServiceOptions options = ServiceOptions.defaultOptions().withClusterModeEnabled();
+    server = RedisServer.newRedisServer().setOptions(options).start();
+    HostAndPort hostAndPort = new HostAndPort(server.getHost(), server.getBindPort());
+    JedisCluster cluster = new JedisCluster(hostAndPort);
+    cache = new RedisClusterCache(cluster, cacheConfig);
   }
 
+  @AfterEach
+  public void closeCache() throws IOException
+  {
+    server.stop();
+  }
+
+  @Override
+  @Test
+  public void testKeyContainingNegativeBytes()
+  {
+    byte[] value = new byte[] {1, 0, -10, -55, 111};
+    Cache.NamedKey key = CacheUtil.computeResultLevelCacheKey(new byte[] {1, 0, -10, 0});
+    cache.put(key, value);
+    Assertions.assertArrayEquals(value, cache.get(key));
+  }
 
   @Test
   public void testConfig() throws JsonProcessingException
   {
     ObjectMapper mapper = new ObjectMapper();
     RedisCacheConfig fromJson = mapper.readValue("{\"expiration\": 1000}", RedisCacheConfig.class);
-    Assert.assertEquals(1, fromJson.getExpiration().getSeconds());
+    Assertions.assertEquals(1, fromJson.getExpiration().getSeconds());
 
     fromJson = mapper.readValue("{\"expiration\": \"PT1H\"}", RedisCacheConfig.class);
-    Assert.assertEquals(3600, fromJson.getExpiration().getSeconds());
+    Assertions.assertEquals(3600, fromJson.getExpiration().getSeconds());
   }
 
   @Test
   public void testCache()
   {
-    Assert.assertNull(cache.get(new Cache.NamedKey("the", HI)));
+    Assertions.assertNull(cache.get(new Cache.NamedKey("the", HI)));
 
     Cache.NamedKey key1 = new Cache.NamedKey("the", HI);
     Cache.NamedKey key2 = new Cache.NamedKey("the", HO);
@@ -129,13 +110,11 @@ public class RedisClusterCacheTest
     cache.put(key1, new byte[]{1, 2, 3, 4});
     cache.put(key2, new byte[]{2, 3, 4, 5});
     cache.put(key3, new byte[]{3, 4, 5, 6});
-    Assert.assertEquals(0x01020304, Ints.fromByteArray(cache.get(key1)));
-    Assert.assertEquals(0x02030405, Ints.fromByteArray(cache.get(key2)));
-    Assert.assertEquals(0x03040506, Ints.fromByteArray(cache.get(key3)));
-    Assert.assertEquals(0x03040506, Ints.fromByteArray(cache.get(key3)));
-    Assert.assertNull(cache.get(notExist));
-
-    this.mgetCount.set(0);
+    Assertions.assertEquals(0x01020304, Ints.fromByteArray(cache.get(key1)));
+    Assertions.assertEquals(0x02030405, Ints.fromByteArray(cache.get(key2)));
+    Assertions.assertEquals(0x03040506, Ints.fromByteArray(cache.get(key3)));
+    Assertions.assertEquals(0x03040506, Ints.fromByteArray(cache.get(key3)));
+    Assertions.assertNull(cache.get(notExist));
 
     //test multi get
     Map<Cache.NamedKey, byte[]> result = cache.getBulk(
@@ -147,11 +126,9 @@ public class RedisClusterCacheTest
         )
     );
 
-    // these 4 keys are distributed among different nodes, so there should be 4 times call of MGET
-    Assert.assertEquals(mgetCount.get(), 4);
-    Assert.assertEquals(result.size(), 3);
-    Assert.assertEquals(0x01020304, Ints.fromByteArray(result.get(key1)));
-    Assert.assertEquals(0x02030405, Ints.fromByteArray(result.get(key2)));
-    Assert.assertEquals(0x03040506, Ints.fromByteArray(result.get(key3)));
+    Assertions.assertEquals(3, result.size());
+    Assertions.assertEquals(0x01020304, Ints.fromByteArray(result.get(key1)));
+    Assertions.assertEquals(0x02030405, Ints.fromByteArray(result.get(key2)));
+    Assertions.assertEquals(0x03040506, Ints.fromByteArray(result.get(key3)));
   }
 }

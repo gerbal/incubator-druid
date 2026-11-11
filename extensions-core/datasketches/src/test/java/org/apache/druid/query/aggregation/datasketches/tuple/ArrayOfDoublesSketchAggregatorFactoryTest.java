@@ -36,8 +36,8 @@ import org.apache.druid.query.timeseries.TimeseriesQuery;
 import org.apache.druid.query.timeseries.TimeseriesQueryQueryToolChest;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.RowSignature;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 public class ArrayOfDoublesSketchAggregatorFactoryTest
 {
@@ -56,14 +56,16 @@ public class ArrayOfDoublesSketchAggregatorFactoryTest
     sketch2.update("b", new double[] {1});
     sketch2.update("c", new double[] {1});
 
-    TestObjectColumnSelector<ArrayOfDoublesSketch> selector = new TestObjectColumnSelector<ArrayOfDoublesSketch>(new ArrayOfDoublesSketch[] {sketch1, sketch2});
+    TestObjectColumnSelector<ArrayOfDoublesSketch> selector = new TestObjectColumnSelector<>(
+        new ArrayOfDoublesSketch[]{sketch1, sketch2}
+    );
 
     combiner.reset(selector);
-    Assert.assertEquals(1, combiner.getObject().getEstimate(), 0);
+    Assertions.assertEquals(1, combiner.getObject().getEstimate(), 0);
 
     selector.increment();
     combiner.fold(selector);
-    Assert.assertEquals(3, combiner.getObject().getEstimate(), 0);
+    Assertions.assertEquals(3, combiner.getObject().getEstimate(), 0);
   }
 
   @Test
@@ -99,7 +101,7 @@ public class ArrayOfDoublesSketchAggregatorFactoryTest
               )
               .build();
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         RowSignature.builder()
                     .addTimeColumn()
                     .add("count", ColumnType.LONG)
@@ -115,7 +117,24 @@ public class ArrayOfDoublesSketchAggregatorFactoryTest
   public void testWithName()
   {
     AggregatorFactory factory = new ArrayOfDoublesSketchAggregatorFactory("name", "", null, null, null);
-    Assert.assertEquals(factory, factory.withName("name"));
-    Assert.assertEquals("newTest", factory.withName("newTest").getName());
+    Assertions.assertEquals(factory, factory.withName("name"));
+    Assertions.assertEquals("newTest", factory.withName("newTest").getName());
+  }
+
+  @Test
+  public void testCanSubstitute()
+  {
+    AggregatorFactory sketch = new ArrayOfDoublesSketchAggregatorFactory("sketch", "x", null, null, null);
+    AggregatorFactory sketch2 = new ArrayOfDoublesSketchAggregatorFactory("sketch2", "x", null, null, null);
+    AggregatorFactory other = new ArrayOfDoublesSketchAggregatorFactory("other", "x", 8192, null, null);
+    AggregatorFactory incompatible = new ArrayOfDoublesSketchAggregatorFactory("incompatible", "x", 2048, null, null);
+    AggregatorFactory incompatible2 = new ArrayOfDoublesSketchAggregatorFactory("sketch", "y", null, null, null);
+    Assertions.assertNotNull(sketch.substituteCombiningFactory(other));
+    Assertions.assertNotNull(sketch.substituteCombiningFactory(sketch2));
+    Assertions.assertNull(sketch.substituteCombiningFactory(incompatible));
+    Assertions.assertNotNull(sketch.substituteCombiningFactory(sketch));
+    Assertions.assertNull(other.substituteCombiningFactory(sketch));
+    Assertions.assertNull(sketch.substituteCombiningFactory(incompatible2));
+    Assertions.assertNull(other.substituteCombiningFactory(incompatible2));
   }
 }

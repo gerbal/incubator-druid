@@ -16,13 +16,24 @@
  * limitations under the License.
  */
 
-import { Button, Classes, Dialog, Intent, TextArea } from '@blueprintjs/core';
+import {
+  Button,
+  ButtonGroup,
+  Classes,
+  Dialog,
+  FormGroup,
+  Intent,
+  TextArea,
+} from '@blueprintjs/core';
 import { IconNames } from '@blueprintjs/icons';
 import classNames from 'classnames';
-import copy from 'copy-to-clipboard';
-import React from 'react';
+import * as JSONBig from 'json-bigint-native';
+import React, { useMemo, useState } from 'react';
 
+import { CodeEditor } from '../../components';
+import { hjson } from '../../editor-languages/hjson';
 import { AppToaster } from '../../singletons';
+import { copyToClipboard } from '../../utils';
 
 import './show-value-dialog.scss';
 
@@ -35,9 +46,18 @@ export interface ShowValueDialogProps {
 
 export const ShowValueDialog = React.memo(function ShowValueDialog(props: ShowValueDialogProps) {
   const { title, onClose, str, size } = props;
+  const [tab, setTab] = useState<'formatted' | 'raw'>('formatted');
+
+  const parsed = useMemo(() => {
+    try {
+      return JSONBig.parse(str);
+    } catch {}
+  }, [str]);
+
+  const hasParsed = typeof parsed !== 'undefined';
 
   function handleCopy() {
-    copy(str, { format: 'text/plain' });
+    copyToClipboard(str);
     AppToaster.show({
       message: 'Value copied to clipboard',
       intent: Intent.SUCCESS,
@@ -51,10 +71,35 @@ export const ShowValueDialog = React.memo(function ShowValueDialog(props: ShowVa
       onClose={onClose}
       title={title || 'Full value'}
     >
-      <TextArea value={str} spellCheck={false} />
-      <div className={Classes.DIALOG_FOOTER_ACTIONS}>
-        <Button icon={IconNames.DUPLICATE} text="Copy" onClick={handleCopy} />
-        <Button text="Close" intent={Intent.PRIMARY} onClick={onClose} />
+      <div className={Classes.DIALOG_BODY}>
+        {hasParsed && (
+          <FormGroup>
+            <ButtonGroup fill>
+              <Button
+                text="Formatted"
+                active={tab === 'formatted'}
+                onClick={() => setTab('formatted')}
+              />
+              <Button text="Raw" active={tab === 'raw'} onClick={() => setTab('raw')} />
+            </ButtonGroup>
+          </FormGroup>
+        )}
+        {hasParsed && tab === 'formatted' && (
+          <CodeEditor
+            language={hjson()}
+            className="query-string"
+            readOnly
+            showLineNumbers
+            value={JSONBig.stringify(parsed, undefined, 2)}
+          />
+        )}
+        {(!hasParsed || tab === 'raw') && <TextArea value={str} spellCheck={false} />}
+      </div>
+      <div className={Classes.DIALOG_FOOTER}>
+        <div className={Classes.DIALOG_FOOTER_ACTIONS}>
+          <Button icon={IconNames.DUPLICATE} text="Copy" onClick={handleCopy} />
+          <Button text="Close" intent={Intent.PRIMARY} onClick={onClose} />
+        </div>
       </div>
     </Dialog>
   );

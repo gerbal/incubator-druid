@@ -25,9 +25,10 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import org.apache.druid.java.util.common.jackson.JacksonUtils;
 import org.apache.druid.segment.TestHelper;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
+import java.util.Comparator;
 import java.util.Map;
 
 public class SeekableStreamStartSequenceNumbersTest
@@ -50,10 +51,10 @@ public class SeekableStreamStartSequenceNumbersTest
     // Check round-trip.
     final SeekableStreamStartSequenceNumbers<Integer, Long> partitions2 = OBJECT_MAPPER.readValue(
         serializedString,
-        new TypeReference<SeekableStreamStartSequenceNumbers<Integer, Long>>() {}
+        new TypeReference<>() {}
     );
 
-    Assert.assertEquals("Round trip", partitions, partitions2);
+    Assertions.assertEquals(partitions, partitions2, "Round trip");
 
     // Check backwards compatibility.
     final Map<String, Object> asMap = OBJECT_MAPPER.readValue(
@@ -61,17 +62,57 @@ public class SeekableStreamStartSequenceNumbersTest
         JacksonUtils.TYPE_REFERENCE_MAP_STRING_OBJECT
     );
 
-    Assert.assertEquals(stream, asMap.get("stream"));
-    Assert.assertEquals(stream, asMap.get("topic"));
+    Assertions.assertEquals(stream, asMap.get("stream"));
+    Assertions.assertEquals(stream, asMap.get("topic"));
 
     // Jackson will deserialize the maps as string -> int maps, not int -> long.
-    Assert.assertEquals(
+    Assertions.assertEquals(
         offsetMap,
         OBJECT_MAPPER.convertValue(asMap.get("partitionSequenceNumberMap"), new TypeReference<Map<Integer, Long>>() {})
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         offsetMap,
         OBJECT_MAPPER.convertValue(asMap.get("partitionOffsetMap"), new TypeReference<Map<Integer, Long>>() {})
     );
+  }
+
+  @Test
+  public void testCompareToWithTrueResult()
+  {
+    final String stream = "theStream";
+    final Map<Integer, Long> offsetMap1 = ImmutableMap.of(1, 5L, 2, 6L);
+    final SeekableStreamStartSequenceNumbers<Integer, Long> partitions1 = new SeekableStreamStartSequenceNumbers<>(
+        stream,
+        offsetMap1,
+        ImmutableSet.of(6)
+    );
+
+    final Map<Integer, Long> offsetMap2 = ImmutableMap.of(1, 4L, 2, 4L);
+    final SeekableStreamStartSequenceNumbers<Integer, Long> partitions2 = new SeekableStreamStartSequenceNumbers<>(
+        stream,
+        offsetMap2,
+        ImmutableSet.of(6)
+    );
+    Assertions.assertEquals(1, partitions1.compareTo(partitions2, Comparator.naturalOrder()));
+  }
+
+  @Test
+  public void testCompareToWithFalseResult()
+  {
+    final String stream = "theStream";
+    final Map<Integer, Long> offsetMap1 = ImmutableMap.of(1, 3L, 2, 2L);
+    final SeekableStreamStartSequenceNumbers<Integer, Long> partitions1 = new SeekableStreamStartSequenceNumbers<>(
+        stream,
+        offsetMap1,
+        ImmutableSet.of(6)
+    );
+
+    final Map<Integer, Long> offsetMap2 = ImmutableMap.of(1, 4L, 2, 4L);
+    final SeekableStreamStartSequenceNumbers<Integer, Long> partitions2 = new SeekableStreamStartSequenceNumbers<>(
+        stream,
+        offsetMap2,
+        ImmutableSet.of(6)
+    );
+    Assertions.assertEquals(0, partitions1.compareTo(partitions2, Comparator.naturalOrder()));
   }
 }

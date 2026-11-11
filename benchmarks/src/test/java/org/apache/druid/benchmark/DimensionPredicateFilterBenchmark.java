@@ -20,25 +20,25 @@
 package org.apache.druid.benchmark;
 
 import com.google.common.base.Preconditions;
-import com.google.common.base.Predicate;
 import com.google.common.collect.FluentIterable;
 import org.apache.druid.collections.bitmap.BitmapFactory;
 import org.apache.druid.collections.bitmap.ImmutableBitmap;
 import org.apache.druid.collections.bitmap.MutableBitmap;
 import org.apache.druid.collections.bitmap.RoaringBitmapFactory;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.query.filter.ColumnIndexSelector;
 import org.apache.druid.query.filter.DruidDoublePredicate;
 import org.apache.druid.query.filter.DruidFloatPredicate;
 import org.apache.druid.query.filter.DruidLongPredicate;
+import org.apache.druid.query.filter.DruidObjectPredicate;
 import org.apache.druid.query.filter.DruidPredicateFactory;
+import org.apache.druid.query.filter.DruidPredicateMatch;
 import org.apache.druid.segment.data.BitmapSerdeFactory;
 import org.apache.druid.segment.data.GenericIndexed;
 import org.apache.druid.segment.data.RoaringBitmapSerdeFactory;
 import org.apache.druid.segment.filter.DimensionPredicateFilter;
 import org.apache.druid.segment.filter.Filters;
-import org.apache.druid.segment.serde.DictionaryEncodedStringIndexSupplier;
+import org.apache.druid.segment.serde.StringUtf8ColumnIndexSupplier;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -62,10 +62,6 @@ import java.util.concurrent.TimeUnit;
 @Measurement(iterations = 10)
 public class DimensionPredicateFilterBenchmark
 {
-  static {
-    NullHandling.initializeForTests();
-  }
-
   private static final int START_INT = 1_000_000_000;
 
   private static final DimensionPredicateFilter IS_EVEN = new DimensionPredicateFilter(
@@ -73,37 +69,32 @@ public class DimensionPredicateFilterBenchmark
       new DruidPredicateFactory()
       {
         @Override
-        public Predicate<String> makeStringPredicate()
+        public DruidObjectPredicate<String> makeStringPredicate()
         {
-          return new Predicate<String>()
-          {
-            @Override
-            public boolean apply(String input)
-            {
-              if (input == null) {
-                return false;
-              }
-              return Integer.parseInt(input) % 2 == 0;
+          return (DruidObjectPredicate<String>) input -> {
+            if (input == null) {
+              return DruidPredicateMatch.UNKNOWN;
             }
+            return DruidPredicateMatch.of(Integer.parseInt(input) % 2 == 0);
           };
         }
 
         @Override
         public DruidLongPredicate makeLongPredicate()
         {
-          return DruidLongPredicate.ALWAYS_FALSE;
+          return DruidLongPredicate.ALWAYS_FALSE_WITH_NULL_UNKNOWN;
         }
 
         @Override
         public DruidFloatPredicate makeFloatPredicate()
         {
-          return DruidFloatPredicate.ALWAYS_FALSE;
+          return DruidFloatPredicate.ALWAYS_FALSE_WITH_NULL_UNKNOWN;
         }
 
         @Override
         public DruidDoublePredicate makeDoublePredicate()
         {
-          return DruidDoublePredicate.ALWAYS_FALSE;
+          return DruidDoublePredicate.ALWAYS_FALSE_WITH_NULL_UNKNOWN;
         }
       },
       null
@@ -122,11 +113,6 @@ public class DimensionPredicateFilterBenchmark
     final BitmapFactory bitmapFactory = new RoaringBitmapFactory();
     final BitmapSerdeFactory serdeFactory = RoaringBitmapSerdeFactory.getInstance();
     final List<Integer> ints = generateInts();
-    final GenericIndexed<String> dictionary = GenericIndexed.fromIterable(
-        FluentIterable.from(ints)
-                      .transform(Object::toString),
-        GenericIndexed.STRING_STRATEGY
-    );
     final GenericIndexed<ByteBuffer> dictionaryUtf8 = GenericIndexed.fromIterable(
         FluentIterable.from(ints)
                       .transform(i -> ByteBuffer.wrap(StringUtils.toUtf8(String.valueOf(i)))),
@@ -145,7 +131,7 @@ public class DimensionPredicateFilterBenchmark
     );
     selector = new MockColumnIndexSelector(
         bitmapFactory,
-        new DictionaryEncodedStringIndexSupplier(bitmapFactory, dictionary, dictionaryUtf8, bitmaps, null)
+        new StringUtf8ColumnIndexSupplier<>(bitmapFactory, dictionaryUtf8::singleThreaded, bitmaps, null)
     );
   }
 

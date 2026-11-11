@@ -21,8 +21,8 @@ package org.apache.druid.indexing.overlord.supervisor;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.druid.jackson.DefaultObjectMapper;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 
@@ -43,14 +43,34 @@ public class SupervisorStatusTest
                                                      .build();
     final String serialized = mapper.writeValueAsString(supervisorStatus);
     final SupervisorStatus deserialized = mapper.readValue(serialized, SupervisorStatus.class);
-    Assert.assertEquals(supervisorStatus, deserialized);
+    Assertions.assertEquals(supervisorStatus, deserialized);
+  }
+
+  @Test
+  public void testGetDataSourceFallsBackToIdWhenNull() throws IOException
+  {
+    // Simulate an old Overlord response that does not include the "dataSource" field
+    String json = "{"
+                  + "\"id\":\"wikipedia\","
+                  + "\"state\":\"RUNNING\","
+                  + "\"detailedState\":\"RUNNING\","
+                  + "\"healthy\":true,"
+                  + "\"type\":\"kafka\","
+                  + "\"source\":\"wikipedia\","
+                  + "\"suspended\":false"
+                  + "}";
+    final ObjectMapper mapper = new ObjectMapper();
+    final SupervisorStatus deserialized = mapper.readValue(json, SupervisorStatus.class);
+    Assertions.assertEquals("wikipedia", deserialized.getId());
+    Assertions.assertEquals("wikipedia", deserialized.getDataSource());
   }
 
   @Test
   public void testJsonAttr() throws IOException
   {
     String json = "{"
-                  + "\"id\":\"wikipedia\","
+                  + "\"id\":\"wikipedia_supervisor\","
+                  + "\"dataSource\":\"wikipedia\","
                   + "\"state\":\"UNHEALTHY_SUPERVISOR\","
                   + "\"detailedState\":\"UNHEALTHY_SUPERVISOR\","
                   + "\"healthy\":false,"
@@ -60,10 +80,11 @@ public class SupervisorStatusTest
                   + "}";
     final ObjectMapper mapper = new ObjectMapper();
     final SupervisorStatus deserialized = mapper.readValue(json, SupervisorStatus.class);
-    Assert.assertNotNull(deserialized);
-    Assert.assertEquals("wikipedia", deserialized.getId());
+    Assertions.assertNotNull(deserialized);
+    Assertions.assertEquals("wikipedia_supervisor", deserialized.getId());
+    Assertions.assertEquals("wikipedia", deserialized.getDataSource());
     final String serialized = mapper.writeValueAsString(deserialized);
-    Assert.assertTrue(serialized.contains("\"source\""));
-    Assert.assertEquals(json, serialized);
+    Assertions.assertTrue(serialized.contains("\"source\""));
+    Assertions.assertEquals(json, serialized);
   }
 }

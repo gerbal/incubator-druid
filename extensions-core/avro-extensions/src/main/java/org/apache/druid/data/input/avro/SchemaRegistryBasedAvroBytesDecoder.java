@@ -24,6 +24,8 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Supplier;
+import com.google.common.base.Suppliers;
 import io.confluent.kafka.schemaregistry.ParsedSchema;
 import io.confluent.kafka.schemaregistry.avro.AvroSchema;
 import io.confluent.kafka.schemaregistry.client.CachedSchemaRegistryClient;
@@ -47,7 +49,7 @@ import java.util.Objects;
 
 public class SchemaRegistryBasedAvroBytesDecoder implements AvroBytesDecoder
 {
-  private final SchemaRegistryClient registry;
+  private final Supplier<SchemaRegistryClient> registry;
   private final String url;
   private final int capacity;
   private final List<String> urls;
@@ -72,11 +74,14 @@ public class SchemaRegistryBasedAvroBytesDecoder implements AvroBytesDecoder
     this.config = config;
     this.headers = headers;
     this.jsonMapper = jsonMapper;
-    if (url != null && !url.isEmpty()) {
-      this.registry = new CachedSchemaRegistryClient(this.url, this.capacity, DynamicConfigProviderUtils.extraConfigAndSetObjectMap(config, DRUID_DYNAMIC_CONFIG_PROVIDER_KEY, this.jsonMapper), DynamicConfigProviderUtils.extraConfigAndSetStringMap(headers, DRUID_DYNAMIC_CONFIG_PROVIDER_KEY, this.jsonMapper));
-    } else {
-      this.registry = new CachedSchemaRegistryClient(this.urls, this.capacity, DynamicConfigProviderUtils.extraConfigAndSetObjectMap(config, DRUID_DYNAMIC_CONFIG_PROVIDER_KEY, this.jsonMapper), DynamicConfigProviderUtils.extraConfigAndSetStringMap(headers, DRUID_DYNAMIC_CONFIG_PROVIDER_KEY, this.jsonMapper));
-    }
+    // Client is created lazily: its constructor reads keystores and other resources named in the config.
+    this.registry = Suppliers.memoize(() -> {
+      if (url != null && !url.isEmpty()) {
+        return new CachedSchemaRegistryClient(this.url, this.capacity, DynamicConfigProviderUtils.extraConfigAndSetObjectMap(config, DRUID_DYNAMIC_CONFIG_PROVIDER_KEY, this.jsonMapper), DynamicConfigProviderUtils.extraConfigAndSetStringMap(headers, DRUID_DYNAMIC_CONFIG_PROVIDER_KEY, this.jsonMapper));
+      } else {
+        return new CachedSchemaRegistryClient(this.urls, this.capacity, DynamicConfigProviderUtils.extraConfigAndSetObjectMap(config, DRUID_DYNAMIC_CONFIG_PROVIDER_KEY, this.jsonMapper), DynamicConfigProviderUtils.extraConfigAndSetStringMap(headers, DRUID_DYNAMIC_CONFIG_PROVIDER_KEY, this.jsonMapper));
+      }
+    });
   }
 
   @JsonProperty
@@ -118,7 +123,7 @@ public class SchemaRegistryBasedAvroBytesDecoder implements AvroBytesDecoder
     this.urls = null;
     this.config = null;
     this.headers = null;
-    this.registry = registry;
+    this.registry = () -> registry;
     this.jsonMapper = new ObjectMapper();
   }
 
@@ -136,21 +141,47 @@ public class SchemaRegistryBasedAvroBytesDecoder implements AvroBytesDecoder
     Schema schema;
 
     try {
-      ParsedSchema parsedSchema = registry.getSchemaById(id);
+      ParsedSchema parsedSchema = registry.get().getSchemaById(id);
       schema = parsedSchema instanceof AvroSchema ? ((AvroSchema) parsedSchema).rawSchema() : null;
     }
-    catch (IOException | RestClientException ex) {
-      throw new ParseException(null, ex, "Failed to fetch Avro schema from registry: %s", id);
+    catch (IOException ex1) {
+      throw new ParseException(
+          null,
+          ex1,
+          "Failed to fetch Avro schema id[%s] from registry. Check if the schema exists in the registry. Otherwise it"
+          + " could mean that there is malformed data in the stream or data that doesn't conform to the schema"
+          + " specified.",
+          id
+      );
+    }
+    catch (RestClientException ex2) {
+      if (ex2.getErrorCode() == 401) {
+        throw new ParseException(
+            null,
+            ex2,
+            "Failed to authenticate to schema registry for Avro schema id[%s]. Please check your credentials.",
+            id
+        );
+      }
+      // For all other errors, just include the code and message received from the library.
+      throw new ParseException(
+          null,
+          ex2,
+          "Failed to fetch Avro schema id[%s] from registry. Error code[%s] and message[%s].",
+          id,
+          ex2.getErrorCode(),
+          ex2.getMessage()
+      );
     }
     if (schema == null) {
-      throw new ParseException(null, "No Avro schema in registry: %s", id);
+      throw new ParseException(null, "No Avro schema id[%s] in registry", id);
     }
     DatumReader<GenericRecord> reader = new GenericDatumReader<>(schema);
     try {
       return reader.read(null, DecoderFactory.get().binaryDecoder(bytes.array(), offset, length, null));
     }
     catch (Exception e) {
-      throw new ParseException(null, e, "Failed to decode Avro message for schema: %s", id);
+      throw new ParseException(null, e, "Failed to decode Avro message for schema id[%s]", id);
     }
   }
 

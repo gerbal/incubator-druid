@@ -1,0 +1,112 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.druid.segment.indexing;
+
+import org.apache.druid.data.input.impl.AggregateProjectionSpec;
+import org.apache.druid.data.input.impl.BaseTableProjectionSpec;
+import org.apache.druid.data.input.impl.DimensionsSpec;
+import org.apache.druid.data.input.impl.TimestampSpec;
+import org.apache.druid.indexer.granularity.GranularitySpec;
+import org.apache.druid.indexer.granularity.SegmentGranularitySpec;
+import org.apache.druid.query.aggregation.AggregatorFactory;
+import org.apache.druid.segment.transform.TransformSpec;
+
+import javax.annotation.Nullable;
+import java.util.List;
+import java.util.Set;
+
+/**
+ * Class representing the combined DataSchema of a set of segments, currently used only by Compaction.
+ */
+public class CombinedDataSchema extends DataSchema
+{
+  /**
+   * Builds a base-table-mode schema for compaction. The legacy dimensions/metrics/granularity fields are left empty.
+   */
+  public static CombinedDataSchema forBaseTable(
+      String dataSource,
+      @Nullable TimestampSpec timestampSpec,
+      @Nullable SegmentGranularitySpec segmentGranularitySpec,
+      @Nullable TransformSpec transformSpec,
+      @Nullable List<AggregateProjectionSpec> projections,
+      BaseTableProjectionSpec baseTable,
+      @Nullable Set<String> multiValuedDimensions
+  )
+  {
+    return new CombinedDataSchema(
+        dataSource,
+        timestampSpec,
+        segmentGranularitySpec,
+        transformSpec,
+        projections,
+        baseTable,
+        multiValuedDimensions
+    );
+  }
+
+  private final Set<String> multiValuedDimensions;
+
+  public CombinedDataSchema(
+      String dataSource,
+      @Nullable TimestampSpec timestampSpec,
+      @Nullable DimensionsSpec dimensionsSpec,
+      AggregatorFactory[] aggregators,
+      GranularitySpec granularitySpec,
+      TransformSpec transformSpec,
+      @Nullable List<AggregateProjectionSpec> projections,
+      @Nullable Set<String> multiValuedDimensions
+  )
+  {
+    super(
+        dataSource,
+        timestampSpec,
+        dimensionsSpec,
+        aggregators,
+        granularitySpec,
+        null,
+        transformSpec,
+        projections,
+        null,
+        null
+    );
+    this.multiValuedDimensions = multiValuedDimensions;
+  }
+
+  private CombinedDataSchema(
+      String dataSource,
+      @Nullable TimestampSpec timestampSpec,
+      @Nullable SegmentGranularitySpec segmentGranularitySpec,
+      @Nullable TransformSpec transformSpec,
+      @Nullable List<AggregateProjectionSpec> projections,
+      BaseTableProjectionSpec baseTable,
+      @Nullable Set<String> multiValuedDimensions
+  )
+  {
+    super(dataSource, timestampSpec, null, null, null, segmentGranularitySpec, transformSpec, projections, baseTable, null);
+    this.multiValuedDimensions = multiValuedDimensions;
+  }
+
+  @Nullable
+  public Set<String> getMultiValuedDimensions()
+  {
+    return multiValuedDimensions;
+  }
+
+}

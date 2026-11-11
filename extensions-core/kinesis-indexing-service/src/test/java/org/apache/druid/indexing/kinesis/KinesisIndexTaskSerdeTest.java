@@ -24,6 +24,7 @@ import com.google.inject.Injector;
 import com.google.inject.Module;
 import com.google.inject.name.Names;
 import org.apache.druid.common.aws.AWSCredentialsConfig;
+import org.apache.druid.data.input.impl.TimestampSpec;
 import org.apache.druid.guice.GuiceInjectors;
 import org.apache.druid.indexing.common.stats.DropwizardRowIngestionMetersFactory;
 import org.apache.druid.indexing.common.task.TestAppenderatorsManager;
@@ -33,21 +34,31 @@ import org.apache.druid.initialization.DruidModule;
 import org.apache.druid.initialization.Initialization;
 import org.apache.druid.segment.incremental.RowIngestionMetersFactory;
 import org.apache.druid.segment.indexing.DataSchema;
+import org.apache.druid.segment.realtime.ChatHandlerProvider;
 import org.apache.druid.segment.realtime.appenderator.AppenderatorsManager;
-import org.apache.druid.segment.realtime.firehose.ChatHandlerProvider;
-import org.apache.druid.segment.realtime.firehose.NoopChatHandlerProvider;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.contrib.java.lang.system.ProvideSystemProperty;
+import org.apache.druid.server.security.Action;
+import org.apache.druid.server.security.Resource;
+import org.apache.druid.server.security.ResourceAction;
+import org.apache.druid.server.security.ResourceType;
+import org.joda.time.Duration;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
 public class KinesisIndexTaskSerdeTest
 {
-  private static final DataSchema DATA_SCHEMA = new DataSchema("dataSource", null, null, null, null, null, null, null);
+  private static final DataSchema DATA_SCHEMA =
+      DataSchema.builder().withDataSource("dataSource").withTimestamp(TimestampSpec.DEFAULT).build();
   private static final KinesisIndexTaskTuningConfig TUNING_CONFIG = new KinesisIndexTaskTuningConfig(
+      null,
+      null,
+      null,
       null,
       null,
       null,
@@ -87,24 +98,42 @@ public class KinesisIndexTaskSerdeTest
       null,
       null,
       null,
-      null,
-      false
+      Duration.standardHours(2).getStandardMinutes()
   );
   private static final String ACCESS_KEY = "test-access-key";
   private static final String SECRET_KEY = "test-secret-key";
   private static final String FILE_SESSION_CREDENTIALS = "test-file-session-credentials";
 
-  @Rule
-  public ProvideSystemProperty properties = new ProvideSystemProperty(
-      KinesisIndexingServiceModule.PROPERTY_BASE + ".accessKey",
-      ACCESS_KEY
-  ).and(
-      KinesisIndexingServiceModule.PROPERTY_BASE + ".secretKey",
-      SECRET_KEY
-  ).and(
-      KinesisIndexingServiceModule.PROPERTY_BASE + ".fileSessionCredentials",
-      FILE_SESSION_CREDENTIALS
-  );
+  private final Map<String, String> previousSystemProperties = new HashMap<>();
+
+  @BeforeEach
+  public void setUpSystemProperties()
+  {
+    setSystemProperty(KinesisIndexingServiceModule.PROPERTY_BASE + ".accessKey", ACCESS_KEY);
+    setSystemProperty(KinesisIndexingServiceModule.PROPERTY_BASE + ".secretKey", SECRET_KEY);
+    setSystemProperty(
+        KinesisIndexingServiceModule.PROPERTY_BASE + ".fileSessionCredentials",
+        FILE_SESSION_CREDENTIALS
+    );
+  }
+
+  @AfterEach
+  public void restoreSystemProperties()
+  {
+    previousSystemProperties.forEach((key, value) -> {
+      if (value == null) {
+        System.clearProperty(key);
+      } else {
+        System.setProperty(key, value);
+      }
+    });
+  }
+
+  private void setSystemProperty(String key, String value)
+  {
+    previousSystemProperties.put(key, System.getProperty(key));
+    System.setProperty(key, value);
+  }
 
   @Test
   public void injectsProperAwsCredentialsConfig() throws Exception
@@ -112,11 +141,13 @@ public class KinesisIndexTaskSerdeTest
     KinesisIndexTask target = new KinesisIndexTask(
         "id",
         null,
+        null,
         DATA_SCHEMA,
         TUNING_CONFIG,
         IO_CONFIG,
         null,
         false,
+        null,
         null
     );
     ObjectMapper objectMapper = createObjectMapper();
@@ -124,9 +155,18 @@ public class KinesisIndexTaskSerdeTest
     KinesisIndexTask deserialized = objectMapper.readValue(serialized, KinesisIndexTask.class);
 
     AWSCredentialsConfig awsCredentialsConfig = deserialized.getAwsCredentialsConfig();
-    Assert.assertEquals(ACCESS_KEY, awsCredentialsConfig.getAccessKey().getPassword());
-    Assert.assertEquals(SECRET_KEY, awsCredentialsConfig.getSecretKey().getPassword());
-    Assert.assertEquals(FILE_SESSION_CREDENTIALS, awsCredentialsConfig.getFileSessionCredentials());
+    Assertions.assertEquals(ACCESS_KEY, awsCredentialsConfig.getAccessKey().getPassword());
+    Assertions.assertEquals(SECRET_KEY, awsCredentialsConfig.getSecretKey().getPassword());
+    Assertions.assertEquals(FILE_SESSION_CREDENTIALS, awsCredentialsConfig.getFileSessionCredentials());
+    Assertions.assertNotNull(target.getPeonProcessingModuleConfig());
+    Assertions.assertEquals(
+        Collections.singleton(
+            new ResourceAction(new Resource(
+                KinesisIndexingServiceModule.SCHEME,
+                ResourceType.EXTERNAL
+            ), Action.READ)),
+        target.getInputSourceResources()
+    );
   }
 
   private static ObjectMapper createObjectMapper()
@@ -140,7 +180,7 @@ public class KinesisIndexTaskSerdeTest
               binder.bindConstant().annotatedWith(Names.named("serviceName")).to("test");
               binder.bindConstant().annotatedWith(Names.named("servicePort")).to(8000);
               binder.bindConstant().annotatedWith(Names.named("tlsServicePort")).to(9000);
-              binder.bind(ChatHandlerProvider.class).toInstance(new NoopChatHandlerProvider());
+              binder.bind(ChatHandlerProvider.class).toInstance(new ChatHandlerProvider());
               binder.bind(RowIngestionMetersFactory.class).toInstance(new DropwizardRowIngestionMetersFactory());
               binder.bind(AppenderatorsManager.class).toInstance(new TestAppenderatorsManager());
             }

@@ -26,13 +26,11 @@ import org.apache.druid.java.util.common.parsers.CloseableIterator;
 import org.apache.druid.query.aggregation.AggregatorAdapters;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 
-import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
 import java.util.AbstractList;
 import java.util.Collections;
 import java.util.List;
 import java.util.NoSuchElementException;
-import java.util.function.ToIntFunction;
 
 public class BufferHashGrouper<KeyType> extends AbstractBufferHashGrouper<KeyType>
 {
@@ -51,7 +49,6 @@ public class BufferHashGrouper<KeyType> extends AbstractBufferHashGrouper<KeyTyp
   // to get a comparator that uses the ordering defined by the OrderByColumnSpec of a query.
   private final boolean useDefaultSorting;
 
-  @Nullable
   private ByteBufferIntList offsetList;
 
   public BufferHashGrouper(
@@ -129,12 +126,6 @@ public class BufferHashGrouper<KeyType> extends AbstractBufferHashGrouper<KeyTyp
   }
 
   @Override
-  public ToIntFunction<KeyType> hashFunction()
-  {
-    return Groupers::hashObject;
-  }
-
-  @Override
   public void newBucketHook(int bucketOffset)
   {
     // Nothing needed.
@@ -158,6 +149,19 @@ public class BufferHashGrouper<KeyType> extends AbstractBufferHashGrouper<KeyTyp
     offsetList.reset();
     hashTable.reset();
     keySerde.reset();
+    aggregators.reset();
+  }
+
+  @Override
+  public long getMaxMergeBufferUsedBytes()
+  {
+    if (!initialized) {
+      return 0L;
+    }
+
+    long hashTableUsage = hashTable.getMaxMergeBufferUsedBytes();
+    long offSetListUsage = offsetList.getMaxMergeBufferUsedBytes();
+    return hashTableUsage + offSetListUsage;
   }
 
   @Override
@@ -171,7 +175,7 @@ public class BufferHashGrouper<KeyType> extends AbstractBufferHashGrouper<KeyTyp
 
     if (sorted) {
       @SuppressWarnings("MismatchedQueryAndUpdateOfCollection")
-      final List<Integer> wrappedOffsets = new AbstractList<Integer>()
+      final List<Integer> wrappedOffsets = new AbstractList<>()
       {
         @Override
         public Integer get(int index)
@@ -218,7 +222,7 @@ public class BufferHashGrouper<KeyType> extends AbstractBufferHashGrouper<KeyTyp
           }
       );
 
-      return new CloseableIterator<Entry<KeyType>>()
+      return new CloseableIterator<>()
       {
         final ReusableEntry<KeyType> reusableEntry = ReusableEntry.create(keySerde, aggregators.size());
 
@@ -254,7 +258,7 @@ public class BufferHashGrouper<KeyType> extends AbstractBufferHashGrouper<KeyTyp
       };
     } else {
       // Unsorted iterator
-      return new CloseableIterator<Entry<KeyType>>()
+      return new CloseableIterator<>()
       {
         final ReusableEntry<KeyType> reusableEntry = ReusableEntry.create(keySerde, aggregators.size());
 

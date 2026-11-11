@@ -19,15 +19,20 @@
 
 package org.apache.druid.concurrent;
 
+import com.google.common.util.concurrent.ListeningExecutorService;
+import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.common.logger.Logger;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
+import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class ExecsTest
@@ -106,21 +111,51 @@ public class ExecsTest
     // it could be doing nothing for any reason). But waiting a short period of time and checking that it hasn't done
     // anything should hopefully be sufficient.
     Thread.sleep(500);
-    Assert.assertEquals(capacity + 1, producedCount.get());
+    Assertions.assertEquals(capacity + 1, producedCount.get());
     // let the tasks run
     taskStartSignal.countDown();
     // wait until all tasks complete
     taskCompletedSignal.await();
     // verify all tasks consumed
-    Assert.assertEquals(nTasks, consumedCount.get());
+    Assertions.assertEquals(nTasks, consumedCount.get());
     // cleanup
     blockingExecutor.shutdown();
     producer.shutdown();
   }
 
   @Test
+  public void testTaskAddedToShutdownExecutorThrowsException() throws Exception
+  {
+    // The implementation of Execs.newBlockingSingleThreaded() rejectedExecutionHandler should not add tasks when it's in shutDown state
+    // When a SynchronousQueue is used in executor and a task is put in it in ShutDown state, it will forever stuck in WAITING state
+    // as executor will not take() the task to schedule it.
+    final ListeningExecutorService intermediateTempExecutor = MoreExecutors.listeningDecorator(
+        Execs.newBlockingSingleThreaded("[TASK_ID]-appenderator-abandon", 0)
+    );
+    Callable<Void> task = () -> {
+      try {
+        Thread.sleep(500); // Simulate long-running task
+      }
+      catch (InterruptedException e) {
+        Thread.currentThread().interrupt(); // Restore interrupted status
+      }
+      return null;
+    };
+
+    // Submit multiple tasks together
+    Assertions.assertNotNull(intermediateTempExecutor.submit(task));
+    Assertions.assertNotNull(intermediateTempExecutor.submit(task));
+
+    intermediateTempExecutor.shutdownNow();
+    // Submit task after shutDown / shutDownNow should not be added in queue
+    Assertions.assertThrows(RejectedExecutionException.class, () -> intermediateTempExecutor.submit(task));
+    Assertions.assertTrue(intermediateTempExecutor.awaitTermination(10, TimeUnit.SECONDS));
+    Assertions.assertTrue(intermediateTempExecutor.isShutdown());
+  }
+
+  @Test
   public void testDirectExecutorFactory()
   {
-    Assert.assertNotNull(Execs.directExecutor());
+    Assertions.assertNotNull(Execs.directExecutor());
   }
 }

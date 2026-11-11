@@ -23,16 +23,16 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonSetter;
 import com.google.common.base.Preconditions;
-import org.apache.druid.common.config.NullHandling;
 
 import javax.annotation.Nullable;
 
 /**
  *
  */
+@SuppressWarnings("Immutable")
 public class ColumnCapabilitiesImpl implements ColumnCapabilities
 {
-  private static final CoercionLogic ALL_FALSE = new CoercionLogic()
+  public static final CoercionLogic ALL_FALSE = new CoercionLogic()
   {
     @Override
     public boolean dictionaryEncoded()
@@ -79,7 +79,6 @@ public class ColumnCapabilitiesImpl implements ColumnCapabilities
       capabilities.dictionaryValuesSorted = other.areDictionaryValuesSorted();
       capabilities.dictionaryValuesUnique = other.areDictionaryValuesUnique();
       capabilities.hasNulls = other.hasNulls();
-      capabilities.filterable = other.isFilterable();
     }
     return capabilities;
   }
@@ -125,9 +124,6 @@ public class ColumnCapabilitiesImpl implements ColumnCapabilities
                                                                  .setDictionaryValuesSorted(false)
                                                                  .setDictionaryValuesUnique(false)
                                                                  .setHasSpatialIndexes(false);
-    if (NullHandling.replaceWithDefault()) {
-      builder.setHasNulls(false);
-    }
     return builder;
   }
 
@@ -178,8 +174,6 @@ public class ColumnCapabilitiesImpl implements ColumnCapabilities
   private Capable dictionaryValuesSorted = Capable.UNKNOWN;
   @JsonIgnore
   private Capable dictionaryValuesUnique = Capable.UNKNOWN;
-  @JsonIgnore
-  private boolean filterable;
   @JsonIgnore
   private Capable hasNulls = Capable.UNKNOWN;
 
@@ -293,7 +287,12 @@ public class ColumnCapabilitiesImpl implements ColumnCapabilities
 
   public ColumnCapabilitiesImpl setHasMultipleValues(boolean hasMultipleValues)
   {
-    this.hasMultipleValues = Capable.of(hasMultipleValues);
+    return setHasMultipleValues(Capable.of(hasMultipleValues));
+  }
+
+  public ColumnCapabilitiesImpl setHasMultipleValues(Capable hasMultipleValues)
+  {
+    this.hasMultipleValues = hasMultipleValues;
     return this;
   }
 
@@ -312,18 +311,6 @@ public class ColumnCapabilitiesImpl implements ColumnCapabilities
   public ColumnCapabilitiesImpl setHasNulls(Capable hasNulls)
   {
     this.hasNulls = hasNulls;
-    return this;
-  }
-
-  @Override
-  public boolean isFilterable()
-  {
-    return (type != null && (isPrimitive() || isArray())) || filterable;
-  }
-
-  public ColumnCapabilitiesImpl setFilterable(boolean filterable)
-  {
-    this.filterable = filterable;
     return this;
   }
 }

@@ -22,8 +22,8 @@ package org.apache.druid.query.scan;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
 import org.apache.druid.jackson.DefaultObjectMapper;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 public class ScanQueryConfigTest
 {
@@ -33,12 +33,10 @@ public class ScanQueryConfigTest
       .<String, String>builder()
       .put("maxSegmentPartitionsOrderedInMemory", "1")
       .put("maxRowsQueuedForOrdering", "1")
-      .put("legacy", "true")
       .build();
 
   private final ImmutableMap<String, String> CONFIG_MAP2 = ImmutableMap
       .<String, String>builder()
-      .put("legacy", "false")
       .put("maxSegmentPartitionsOrderedInMemory", "42")
       .build();
 
@@ -50,18 +48,15 @@ public class ScanQueryConfigTest
   public void testSerde()
   {
     final ScanQueryConfig config = MAPPER.convertValue(CONFIG_MAP, ScanQueryConfig.class);
-    Assert.assertEquals(1, config.getMaxRowsQueuedForOrdering());
-    Assert.assertEquals(1, config.getMaxSegmentPartitionsOrderedInMemory());
-    Assert.assertTrue(config.isLegacy());
+    Assertions.assertEquals(1, config.getMaxRowsQueuedForOrdering());
+    Assertions.assertEquals(1, config.getMaxSegmentPartitionsOrderedInMemory());
 
     final ScanQueryConfig config2 = MAPPER.convertValue(CONFIG_MAP2, ScanQueryConfig.class);
-    Assert.assertEquals(100000, config2.getMaxRowsQueuedForOrdering());
-    Assert.assertEquals(42, config2.getMaxSegmentPartitionsOrderedInMemory());
-    Assert.assertFalse(config2.isLegacy());
+    Assertions.assertEquals(100000, config2.getMaxRowsQueuedForOrdering());
+    Assertions.assertEquals(42, config2.getMaxSegmentPartitionsOrderedInMemory());
 
     final ScanQueryConfig config3 = MAPPER.convertValue(CONFIG_MAP_EMPTY, ScanQueryConfig.class);
-    Assert.assertEquals(100000, config3.getMaxRowsQueuedForOrdering());
-    Assert.assertEquals(50, config3.getMaxSegmentPartitionsOrderedInMemory());
-    Assert.assertFalse(config3.isLegacy());
+    Assertions.assertEquals(100000, config3.getMaxRowsQueuedForOrdering());
+    Assertions.assertEquals(50, config3.getMaxSegmentPartitionsOrderedInMemory());
   }
 }

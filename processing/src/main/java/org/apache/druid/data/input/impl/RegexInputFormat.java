@@ -19,6 +19,7 @@
 
 package org.apache.druid.data.input.impl;
 
+import com.fasterxml.jackson.annotation.JacksonInject;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonInclude;
@@ -29,11 +30,14 @@ import org.apache.druid.data.input.InputEntity;
 import org.apache.druid.data.input.InputEntityReader;
 import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.data.input.InputRowSchema;
+import org.apache.druid.regex.RegexConfig;
+import org.apache.druid.regex.RegexPattern;
+import org.apache.druid.regex.RegexPatternFactory;
+import org.apache.druid.utils.CompressionUtils;
 
 import javax.annotation.Nullable;
 import java.io.File;
 import java.util.List;
-import java.util.regex.Pattern;
 
 public class RegexInputFormat implements InputFormat
 {
@@ -43,10 +47,11 @@ public class RegexInputFormat implements InputFormat
   private final String listDelimiter;
   private final List<String> columns;
   @JsonIgnore
-  private final Supplier<Pattern> compiledPatternSupplier;
+  private final Supplier<RegexPattern> compiledPatternSupplier;
 
   @JsonCreator
   public RegexInputFormat(
+      @JacksonInject RegexConfig regexConfig,
       @JsonProperty("pattern") String pattern,
       @JsonProperty("listDelimiter") @Nullable String listDelimiter,
       @JsonProperty("columns") @Nullable List<String> columns
@@ -55,7 +60,7 @@ public class RegexInputFormat implements InputFormat
     this.pattern = pattern;
     this.listDelimiter = listDelimiter;
     this.columns = columns;
-    this.compiledPatternSupplier = Suppliers.memoize(() -> Pattern.compile(pattern));
+    this.compiledPatternSupplier = Suppliers.memoize(() -> RegexPatternFactory.compile(regexConfig.getEngine(), pattern));
   }
 
   @JsonProperty
@@ -90,5 +95,11 @@ public class RegexInputFormat implements InputFormat
   public InputEntityReader createReader(InputRowSchema inputRowSchema, InputEntity source, File temporaryDirectory)
   {
     return new RegexReader(inputRowSchema, source, pattern, compiledPatternSupplier.get(), listDelimiter, columns);
+  }
+
+  @Override
+  public long getWeightedSize(String path, long size)
+  {
+    return size * CompressionUtils.estimatedCompressionFactor(CompressionUtils.Format.fromFileName(path));
   }
 }

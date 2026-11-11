@@ -20,45 +20,38 @@
 package org.apache.druid.frame.field;
 
 import org.apache.datasketches.memory.WritableMemory;
+import org.apache.druid.frame.FrameType;
 import org.apache.druid.segment.BaseFloatColumnValueSelector;
 
 /**
  * Wraps a {@link BaseFloatColumnValueSelector} and writes field values.
  *
- * See {@link FloatFieldReader} for format details.
+ * @see NumericFieldWriter for the details of the byte-format that it writes as
  */
-public class FloatFieldWriter implements FieldWriter
+public class FloatFieldWriter extends NumericFieldWriter
 {
-  public static final int SIZE = Float.BYTES + Byte.BYTES;
-
-  // Different from the values in NullHandling, since we want to be able to sort as bytes, and we want
-  // nulls to come before non-nulls.
-  public static final byte NULL_BYTE = 0x00;
-  public static final byte NOT_NULL_BYTE = 0x01;
-
   private final BaseFloatColumnValueSelector selector;
+  private final FrameType frameType;
 
-  public FloatFieldWriter(final BaseFloatColumnValueSelector selector)
+  public static FloatFieldWriter forPrimitive(final BaseFloatColumnValueSelector selector, final FrameType frameType)
   {
-    this.selector = selector;
+    return new FloatFieldWriter(selector, false, frameType);
   }
 
-  @Override
-  public long writeTo(final WritableMemory memory, final long position, final long maxSize)
+  public static FloatFieldWriter forArray(final BaseFloatColumnValueSelector selector, final FrameType frameType)
   {
-    if (maxSize < SIZE) {
-      return -1;
-    }
+    return new FloatFieldWriter(selector, true, frameType);
+  }
 
-    if (selector.isNull()) {
-      memory.putByte(position, NULL_BYTE);
-      memory.putInt(position + Byte.BYTES, transform(0));
-    } else {
-      memory.putByte(position, NOT_NULL_BYTE);
-      memory.putInt(position + Byte.BYTES, transform(selector.getFloat()));
-    }
-
-    return SIZE;
+  private FloatFieldWriter(
+      final BaseFloatColumnValueSelector selector,
+      final boolean forArray,
+      final FrameType frameType
+  )
+  {
+    super(selector, forArray);
+    this.selector = selector;
+    this.frameType = frameType;
   }
 
   @Override
@@ -67,23 +60,26 @@ public class FloatFieldWriter implements FieldWriter
     // Nothing to close.
   }
 
-  /**
-   * Transforms a float into a form where it can be compared as unsigned bytes without decoding.
-   */
-  public static int transform(final float n)
+  @Override
+  public int getNumericSizeBytes()
   {
-    final int bits = Float.floatToIntBits(n);
-    final int mask = ((bits & Integer.MIN_VALUE) >> 8) | Integer.MIN_VALUE;
-    return Integer.reverseBytes(bits ^ mask);
+    return Float.BYTES;
   }
 
-  /**
-   * Inverse of {@link #transform}.
-   */
-  public static float detransform(final int bits)
+  @Override
+  public void writeSelectorToMemory(WritableMemory memory, long position)
   {
-    final int reversedBits = Integer.reverseBytes(bits);
-    final int mask = (((reversedBits ^ Integer.MIN_VALUE) & Integer.MIN_VALUE) >> 8) | Integer.MIN_VALUE;
-    return Float.intBitsToFloat(reversedBits ^ mask);
+    writeToMemory(memory, position, selector.getFloat());
+  }
+
+  @Override
+  public void writeNullToMemory(WritableMemory memory, long position)
+  {
+    writeToMemory(memory, position, 0);
+  }
+
+  private void writeToMemory(WritableMemory memory, long position, float value)
+  {
+    memory.putInt(position, TransformUtils.transformFromFloat(value, frameType));
   }
 }

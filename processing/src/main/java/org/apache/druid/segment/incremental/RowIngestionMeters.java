@@ -26,8 +26,8 @@ import java.util.Map;
 
 /**
  * A collection of meters for row ingestion stats, with support for moving average calculations.
- * This can eventually replace FireDepartmentMetrics, but moving averages for other stats collected by
- * FireDepartmentMetrics are not currently supported, so we continue to use FireDepartmentMetrics alongside
+ * This can eventually replace SegmentGenerationMetrics, but moving averages for other stats collected by
+ * SegmentGenerationMetrics are not currently supported, so we continue to use SegmentGenerationMetrics alongside
  * RowIngestionMeters to avoid unnecessary overhead from maintaining these moving averages.
  */
 @ExtensionPoint
@@ -37,10 +37,21 @@ public interface RowIngestionMeters extends InputStats
   String DETERMINE_PARTITIONS = "determinePartitions";
 
   String PROCESSED = "processed";
-  String PROCESSED_BYTES = "processedBytes";
   String PROCESSED_WITH_ERROR = "processedWithError";
   String UNPARSEABLE = "unparseable";
   String THROWN_AWAY = "thrownAway";
+  String THROWN_AWAY_BY_REASON = "thrownAwayByReason";
+  String FILTERED = "filtered";
+
+  /**
+   * Number of bytes read by an ingestion task.
+   *
+   * Note: processedBytes is a misleading name; this generally measures size when data is initially read or fetched,
+   * not when it is processed by the ingest task. It's measuring a stage somewhat earlier in the pipeline. In other
+   * words, "processed" and "processedBytes" do not use the same definition of "process". A better name might be
+   * "bytesRead" or "inputBytes", although if we change it, we must consider compatibility with existing readers.
+   */
+  String PROCESSED_BYTES = "processedBytes";
 
   long getProcessed();
   void incrementProcessed();
@@ -64,7 +75,38 @@ public interface RowIngestionMeters extends InputStats
   void incrementUnparseable();
 
   long getThrownAway();
-  void incrementThrownAway();
+
+  /**
+   * Increments the thrown away counter for the specified {@link InputRowFilterResult} reason.
+   */
+  void incrementThrownAway(InputRowFilterResult reason);
+
+  /**
+   * Returns the count of thrown away events for each reason.
+   * Keyed by {@link InputRowFilterResult#getReason()}.
+   */
+  Map<String, Long> getThrownAwayByReason();
+
+  /**
+   * Number of records dropped by pre-ingestion filtering (for example, Kafka header-based filtering) before parsing.
+   * These are tracked separately from {@link #getThrownAway()}, which counts rows dropped after parsing.
+   *
+   * <p>Provided as a default method so that pre-existing external {@link RowIngestionMeters} implementations remain
+   * source- and binary-compatible with this {@link ExtensionPoint}.
+   */
+  default long getFiltered()
+  {
+    return 0;
+  }
+
+  /**
+   * Increments the counter of records dropped by pre-ingestion filtering. See {@link #getFiltered()}.
+   *
+   * <p>Provided as a no-op default method to preserve backwards compatibility for external implementations.
+   */
+  default void incrementFiltered()
+  {
+  }
 
   RowIngestionMetersTotals getTotals();
 

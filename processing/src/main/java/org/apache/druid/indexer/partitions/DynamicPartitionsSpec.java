@@ -21,6 +21,7 @@ package org.apache.druid.indexer.partitions;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.druid.error.InvalidInput;
 
 import javax.annotation.Nullable;
 import java.util.Objects;
@@ -34,6 +35,10 @@ public class DynamicPartitionsSpec implements PartitionsSpec
    * Default maxTotalRows for most task types except compaction task.
    */
   public static final long DEFAULT_MAX_TOTAL_ROWS = 20_000_000;
+  // Using MAX_VALUE as the default for setting maxTotalRows for compaction to respect the computed maxRowsPerSegment.
+  // If this is set to something too small, compactionTask can generate small segments
+  // which need to be compacted again, which in turn making auto compaction stuck in the same interval.
+  public static final long DEFAULT_COMPACTION_MAX_TOTAL_ROWS = Long.MAX_VALUE;
   static final String NAME = "dynamic";
 
   private final int maxRowsPerSegment;
@@ -46,6 +51,15 @@ public class DynamicPartitionsSpec implements PartitionsSpec
       @JsonProperty("maxTotalRows") @Nullable Long maxTotalRows
   )
   {
+
+    if (!PartitionsSpec.isEffectivelyNull(maxRowsPerSegment) && maxRowsPerSegment <= 0) {
+      throw InvalidInput.exception("maxRowsPerSegment must be greater than 0");
+    }
+
+    if (!PartitionsSpec.isEffectivelyNull(maxTotalRows) && maxTotalRows <= 0) {
+      throw InvalidInput.exception("maxTotalRows must be greater than 0");
+    }
+
     this.maxRowsPerSegment = PartitionsSpec.isEffectivelyNull(maxRowsPerSegment)
                              ? DEFAULT_MAX_ROWS_PER_SEGMENT
                              : maxRowsPerSegment;
@@ -82,7 +96,7 @@ public class DynamicPartitionsSpec implements PartitionsSpec
   }
 
   @Override
-  public boolean needsDeterminePartitions(boolean useForHadoopTask)
+  public boolean needsDeterminePartitions()
   {
     return false;
   }

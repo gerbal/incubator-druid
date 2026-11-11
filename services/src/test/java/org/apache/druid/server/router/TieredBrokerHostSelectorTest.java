@@ -19,7 +19,6 @@
 
 package org.apache.druid.server.router;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Function;
 import com.google.common.base.Supplier;
 import com.google.common.collect.ImmutableList;
@@ -33,12 +32,12 @@ import org.apache.druid.discovery.DiscoveryDruidNode;
 import org.apache.druid.discovery.DruidNodeDiscovery;
 import org.apache.druid.discovery.DruidNodeDiscoveryProvider;
 import org.apache.druid.discovery.NodeRole;
-import org.apache.druid.guice.annotations.Json;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.Pair;
 import org.apache.druid.query.Druids;
-import org.apache.druid.query.QueryContexts;
+import org.apache.druid.query.QueryContext;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.spec.MultipleIntervalSegmentSpec;
 import org.apache.druid.query.timeseries.TimeseriesQuery;
 import org.apache.druid.server.DruidNode;
@@ -46,10 +45,10 @@ import org.apache.druid.server.coordinator.rules.IntervalLoadRule;
 import org.apache.druid.server.coordinator.rules.Rule;
 import org.apache.druid.sql.http.SqlQuery;
 import org.easymock.EasyMock;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import javax.annotation.Nullable;
 import java.util.Arrays;
@@ -71,13 +70,13 @@ public class TieredBrokerHostSelectorTest
   private DiscoveryDruidNode node2;
   private DiscoveryDruidNode node3;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
     druidNodeDiscoveryProvider = EasyMock.createStrictMock(DruidNodeDiscoveryProvider.class);
 
     node1 = new DiscoveryDruidNode(
-        new DruidNode("hotBroker", "hotHost", false, 8080, null, true, false),
+        new DruidNode("hotBroker", "hotHost", false, 8080, null, null, true, false, null, 9080),
         NodeRole.BROKER,
         ImmutableMap.of()
     );
@@ -116,13 +115,13 @@ public class TieredBrokerHostSelectorTest
     EasyMock.replay(druidNodeDiscoveryProvider);
 
     brokerSelector = new TieredBrokerHostSelector(
-        new TestRuleManager(null, null),
+        new TestRuleManager(null),
         new TieredBrokerConfig()
         {
           @Override
           public LinkedHashMap<String, String> getTierToBrokerMap()
           {
-            return new LinkedHashMap<String, String>(
+            return new LinkedHashMap<>(
                 ImmutableMap.of(
                     "hot", "hotBroker",
                     "medium", "mediumBroker",
@@ -148,7 +147,7 @@ public class TieredBrokerHostSelectorTest
     brokerSelector.start();
   }
 
-  @After
+  @AfterEach
   public void tearDown()
   {
     brokerSelector.stop();
@@ -168,16 +167,16 @@ public class TieredBrokerHostSelectorTest
                                   .build();
 
     Pair<String, Server> p = brokerSelector.select(query);
-    Assert.assertEquals("coldBroker", p.lhs);
-    Assert.assertEquals("coldHost1:8080", p.rhs.getHost());
+    Assertions.assertEquals("coldBroker", p.lhs);
+    Assertions.assertEquals("coldHost1:8080", p.rhs.getHost());
 
     p = brokerSelector.select(query);
-    Assert.assertEquals("coldBroker", p.lhs);
-    Assert.assertEquals("coldHost2:8080", p.rhs.getHost());
+    Assertions.assertEquals("coldBroker", p.lhs);
+    Assertions.assertEquals("coldHost2:8080", p.rhs.getHost());
 
     p = brokerSelector.select(query);
-    Assert.assertEquals("coldBroker", p.lhs);
-    Assert.assertEquals("coldHost1:8080", p.rhs.getHost());
+    Assertions.assertEquals("coldBroker", p.lhs);
+    Assertions.assertEquals("coldHost1:8080", p.rhs.getHost());
   }
 
 
@@ -193,8 +192,9 @@ public class TieredBrokerHostSelectorTest
               .build()
     );
 
-    Assert.assertEquals("hotBroker", p.lhs);
-    Assert.assertEquals("hotHost:8080", p.rhs.getHost());
+    Assertions.assertEquals("hotBroker", p.lhs);
+    Assertions.assertEquals("hotHost:9080", p.rhs.getHost());
+    Assertions.assertEquals(9080, p.rhs.getPort());
   }
 
   @Test
@@ -209,7 +209,7 @@ public class TieredBrokerHostSelectorTest
               .build()
     ).lhs;
 
-    Assert.assertEquals("hotBroker", brokerName);
+    Assertions.assertEquals("hotBroker", brokerName);
   }
 
   @Test
@@ -230,7 +230,7 @@ public class TieredBrokerHostSelectorTest
               ).build()
     ).lhs;
 
-    Assert.assertEquals("coldBroker", brokerName);
+    Assertions.assertEquals("coldBroker", brokerName);
   }
 
   @Test
@@ -251,7 +251,7 @@ public class TieredBrokerHostSelectorTest
               ).build()
     ).lhs;
 
-    Assert.assertEquals("coldBroker", brokerName);
+    Assertions.assertEquals("coldBroker", brokerName);
   }
 
   @Test
@@ -274,7 +274,7 @@ public class TieredBrokerHostSelectorTest
               .build()
     ).lhs;
 
-    Assert.assertEquals("hotBroker", brokerName);
+    Assertions.assertEquals("hotBroker", brokerName);
   }
 
   @Test
@@ -297,7 +297,7 @@ public class TieredBrokerHostSelectorTest
               .build()
     ).lhs;
 
-    Assert.assertEquals("hotBroker", brokerName);
+    Assertions.assertEquals("hotBroker", brokerName);
   }
 
   @Test
@@ -313,23 +313,23 @@ public class TieredBrokerHostSelectorTest
                   )
               );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         brokerSelector.getDefaultServiceName(),
         brokerSelector.select(queryBuilder.build()).lhs
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "hotBroker",
         brokerSelector.select(
             queryBuilder
-                .context(ImmutableMap.of(QueryContexts.BROKER_SERVICE_NAME, "hotBroker"))
+                .context(QueryContext.ofMap(QueryContextParameters.BROKER_SERVICE, "hotBroker"))
                 .build()
         ).lhs
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "coldBroker",
         brokerSelector.select(
             queryBuilder
-                .context(ImmutableMap.of(QueryContexts.BROKER_SERVICE_NAME, "coldBroker"))
+                .context(QueryContext.ofMap(QueryContextParameters.BROKER_SERVICE, "coldBroker"))
                 .build()
         ).lhs
     );
@@ -338,25 +338,25 @@ public class TieredBrokerHostSelectorTest
   @Test
   public void testSelectForSql()
   {
-    Assert.assertEquals(
+    Assertions.assertEquals(
         brokerSelector.getDefaultServiceName(),
         brokerSelector.selectForSql(
             createSqlQueryWithContext(null)
         ).lhs
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "hotBroker",
         brokerSelector.selectForSql(
             createSqlQueryWithContext(
-                ImmutableMap.of(QueryContexts.BROKER_SERVICE_NAME, "hotBroker")
+                QueryContext.ofMap(QueryContextParameters.BROKER_SERVICE, "hotBroker")
             )
         ).lhs
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "coldBroker",
         brokerSelector.selectForSql(
             createSqlQueryWithContext(
-                ImmutableMap.of(QueryContexts.BROKER_SERVICE_NAME, "coldBroker")
+                QueryContext.ofMap(QueryContextParameters.BROKER_SERVICE, "coldBroker")
             )
         ).lhs
     );
@@ -365,11 +365,11 @@ public class TieredBrokerHostSelectorTest
   @Test
   public void testGetAllBrokers()
   {
-    Assert.assertEquals(
+    Assertions.assertEquals(
         ImmutableMap.of(
             "mediumBroker", ImmutableList.of(),
             "coldBroker", ImmutableList.of("coldHost1:8080", "coldHost2:8080"),
-            "hotBroker", ImmutableList.of("hotHost:8080")
+            "hotBroker", ImmutableList.of("hotHost:9080")
         ),
         Maps.transformValues(
             brokerSelector.getAllBrokers(),
@@ -401,11 +401,10 @@ public class TieredBrokerHostSelectorTest
   private static class TestRuleManager extends CoordinatorRuleManager
   {
     public TestRuleManager(
-        @Json ObjectMapper jsonMapper,
         Supplier<TieredBrokerConfig> config
     )
     {
-      super(jsonMapper, config, null);
+      super(config, null);
     }
 
     @Override
@@ -418,11 +417,12 @@ public class TieredBrokerHostSelectorTest
     public List<Rule> getRulesWithDefault(String dataSource)
     {
       return Arrays.asList(
-          new IntervalLoadRule(Intervals.of("2013/2014"), ImmutableMap.of("hot", 1)),
-          new IntervalLoadRule(Intervals.of("2012/2013"), ImmutableMap.of("medium", 1)),
+          new IntervalLoadRule(Intervals.of("2013/2014"), ImmutableMap.of("hot", 1), null),
+          new IntervalLoadRule(Intervals.of("2012/2013"), ImmutableMap.of("medium", 1), null),
           new IntervalLoadRule(
               Intervals.of("2011/2012"),
-              ImmutableMap.of(DruidServer.DEFAULT_TIER, 1)
+              ImmutableMap.of(DruidServer.DEFAULT_TIER, 1),
+              null
           )
       );
     }

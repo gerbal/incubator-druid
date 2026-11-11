@@ -21,11 +21,10 @@ package org.apache.druid.query.operator;
 
 import org.apache.druid.query.rowsandcols.RowsAndColumns;
 import org.apache.druid.query.rowsandcols.semantic.ClusteredGroupPartitioner;
-import org.apache.druid.query.rowsandcols.semantic.DefaultClusteredGroupPartitioner;
 
-import java.io.Closeable;
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * This naive partitioning operator assumes that it's child operator always gives it RowsAndColumns objects that are
@@ -36,52 +35,50 @@ import java.util.List;
  * Additionally, this assumes that data has been pre-sorted according to the partitioning columns.  If it is
  * given data that has not been pre-sorted, an exception is expected to be thrown.
  */
-public class NaivePartitioningOperator implements Operator
+public class NaivePartitioningOperator extends AbstractPartitioningOperator
 {
-  private final List<String> partitionColumns;
-  private final Operator child;
-
-  private Iterator<RowsAndColumns> partitionsIter;
-
   public NaivePartitioningOperator(
       List<String> partitionColumns,
       Operator child
   )
   {
-    this.partitionColumns = partitionColumns;
-    this.child = child;
+    super(partitionColumns, child);
   }
 
   @Override
-  public Closeable goOrContinue(Closeable continuation, Receiver receiver)
+  protected HandleContinuationResult handleContinuation(Receiver receiver, Continuation cont)
   {
-    return child.goOrContinue(
-        continuation,
-        new Receiver()
-        {
-          @Override
-          public Signal push(RowsAndColumns rac)
-          {
-            ClusteredGroupPartitioner groupPartitioner = rac.as(ClusteredGroupPartitioner.class);
-            if (groupPartitioner == null) {
-              groupPartitioner = new DefaultClusteredGroupPartitioner(rac);
-            }
+    while (cont.iter.hasNext()) {
+      final Signal signal = receiver.push(cont.iter.next());
+      if (signal != Signal.GO) {
+        return handleNonGoCases(signal, cont.iter, receiver, cont);
+      }
+    }
+    return HandleContinuationResult.CONTINUE_PROCESSING;
+  }
 
-            partitionsIter = groupPartitioner.partitionOnBoundaries(partitionColumns).iterator();
+  private static class NaiveReceiver extends AbstractReceiver
+  {
+    public NaiveReceiver(
+        Receiver delegate,
+        AtomicReference<Iterator<RowsAndColumns>> iterHolder,
+        List<String> partitionColumns
+    )
+    {
+      super(delegate, iterHolder, partitionColumns);
+    }
 
-            Signal keepItGoing = Signal.GO;
-            while (keepItGoing == Signal.GO && partitionsIter.hasNext()) {
-              keepItGoing = receiver.push(partitionsIter.next());
-            }
-            return keepItGoing;
-          }
+    @Override
+    protected Iterator<RowsAndColumns> getIteratorForRAC(RowsAndColumns rac)
+    {
+      final ClusteredGroupPartitioner groupPartitioner = ClusteredGroupPartitioner.fromRAC(rac);
+      return groupPartitioner.partitionOnBoundaries(partitionColumns).iterator();
+    }
+  }
 
-          @Override
-          public void completed()
-          {
-            receiver.completed();
-          }
-        }
-    );
+  @Override
+  protected Receiver createReceiver(Receiver delegate, AtomicReference<Iterator<RowsAndColumns>> iterHolder)
+  {
+    return new NaiveReceiver(delegate, iterHolder, partitionColumns);
   }
 }

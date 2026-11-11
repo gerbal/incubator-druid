@@ -26,10 +26,12 @@ import com.google.common.collect.Lists;
 import com.google.inject.Inject;
 import com.google.inject.Injector;
 import com.google.inject.Key;
-import com.google.inject.servlet.GuiceFilter;
+import org.apache.druid.guice.annotations.Global;
 import org.apache.druid.guice.annotations.Json;
 import org.apache.druid.java.util.common.logger.Logger;
+import org.apache.druid.server.QuerySchedulerProvider;
 import org.apache.druid.server.initialization.ServerConfig;
+import org.apache.druid.server.initialization.jetty.JettyBindings;
 import org.apache.druid.server.initialization.jetty.JettyServerInitUtils;
 import org.apache.druid.server.initialization.jetty.JettyServerInitializer;
 import org.apache.druid.server.initialization.jetty.LimitRequestsFilter;
@@ -37,15 +39,15 @@ import org.apache.druid.server.security.AuthConfig;
 import org.apache.druid.server.security.AuthenticationUtils;
 import org.apache.druid.server.security.Authenticator;
 import org.apache.druid.server.security.AuthenticatorMapper;
+import org.eclipse.jetty.ee8.servlet.DefaultServlet;
+import org.eclipse.jetty.ee8.servlet.FilterHolder;
+import org.eclipse.jetty.ee8.servlet.ServletContextHandler;
+import org.eclipse.jetty.ee8.servlet.ServletHolder;
 import org.eclipse.jetty.server.Handler;
 import org.eclipse.jetty.server.Server;
-import org.eclipse.jetty.server.handler.HandlerList;
 import org.eclipse.jetty.server.handler.StatisticsHandler;
-import org.eclipse.jetty.servlet.DefaultServlet;
-import org.eclipse.jetty.servlet.FilterHolder;
-import org.eclipse.jetty.servlet.ServletContextHandler;
-import org.eclipse.jetty.servlet.ServletHolder;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 
@@ -57,6 +59,7 @@ public class QueryJettyServerInitializer implements JettyServerInitializer
   private static final Logger log = new Logger(QueryJettyServerInitializer.class);
   private static List<String> UNSECURED_PATHS = Lists.newArrayList(
       "/status/health",
+      "/status/ready",
       "/druid/historical/v1/readiness",
       "/druid/broker/v1/readiness"
   );
@@ -67,12 +70,20 @@ public class QueryJettyServerInitializer implements JettyServerInitializer
 
   private final AuthConfig authConfig;
 
+  private final QuerySchedulerProvider querySchedulerConfig;
+
   @Inject
-  public QueryJettyServerInitializer(Set<Handler> extensionHandlers, ServerConfig serverConfig, AuthConfig authConfig)
+  public QueryJettyServerInitializer(
+      Set<Handler> extensionHandlers,
+      ServerConfig serverConfig,
+      AuthConfig authConfig,
+      @Global QuerySchedulerProvider querySchedulerConfig
+  )
   {
     this.extensionHandlers = ImmutableList.copyOf(extensionHandlers);
     this.serverConfig = serverConfig;
     this.authConfig = authConfig;
+    this.querySchedulerConfig = querySchedulerConfig;
   }
 
   @Override
@@ -93,6 +104,21 @@ public class QueryJettyServerInitializer implements JettyServerInitializer
       root.addFilter(new FilterHolder(new LimitRequestsFilter(serverConfig.getNumThreads() - 1)),
                      "/*", null
       );
+    }
+
+    if (querySchedulerConfig.getNumThreads() > 0
+        && querySchedulerConfig.getNumThreads() < serverConfig.getNumThreads()
+        && serverConfig.isEnableQueryRequestsQueuing()) {
+      // Add QoS filter for query requests, so they don't take up more than querySchedulerConfig#numThreads.
+      // While this will also pick up some extra endpoints other than Query, the primary objective is to protect
+      // health check endpoints from being starved by query requests.
+      log.info("Enabling QoS Filter on query requests with limit [%d].", querySchedulerConfig.getNumThreads());
+      JettyBindings.QosFilterHolder filterHolder = new JettyBindings.QosFilterHolder(
+          new String[]{"/druid/v2/*"},
+          querySchedulerConfig.getNumThreads(),
+          serverConfig.getMaxQueryTimeout()
+      );
+      JettyServerInitUtils.addFilters(root, Collections.singleton(filterHolder));
     }
 
     final ObjectMapper jsonMapper = injector.getInstance(Key.get(ObjectMapper.class, Json.class));
@@ -120,15 +146,12 @@ public class QueryJettyServerInitializer implements JettyServerInitializer
         jsonMapper
     );
 
-    root.addFilter(GuiceFilter.class, "/*", null);
+    final FilterHolder guiceFilterHolder = JettyServerInitUtils.getGuiceFilterHolder(injector);
+    root.addFilter(guiceFilterHolder, "/*", null);
 
-    final HandlerList handlerList = new HandlerList();
-    // Do not change the order of the handlers that have already been added
-    for (Handler handler : server.getHandlers()) {
-      handlerList.addHandler(handler);
-    }
-
-    handlerList.addHandler(JettyServerInitUtils.getJettyRequestLogHandler());
+    final Handler.Sequence handlerList = new Handler.Sequence(
+        server.getHandlers()
+    );
 
     // Add all extension handlers
     for (Handler handler : extensionHandlers) {

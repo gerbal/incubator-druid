@@ -16,14 +16,14 @@
  * limitations under the License.
  */
 
-import { IconNames } from '@blueprintjs/icons';
 import React from 'react';
 
 import { PluralPairIfNeeded } from '../../../components';
+import { getConsoleViewIcon } from '../../../druid-models';
 import type { Capabilities } from '../../../helpers';
 import { useQueryManager } from '../../../hooks';
 import { Api } from '../../../singletons';
-import { lookupBy, queryDruidSql } from '../../../utils';
+import { getApiArray, lookupBy, queryDruidSql } from '../../../utils';
 import { HomeViewCard } from '../home-view-card/home-view-card';
 
 export interface ServiceCounts {
@@ -43,30 +43,43 @@ export interface ServicesCardProps {
 
 export const ServicesCard = React.memo(function ServicesCard(props: ServicesCardProps) {
   const [serviceCountState] = useQueryManager<Capabilities, ServiceCounts>({
-    processQuery: async capabilities => {
+    processQuery: async (capabilities, signal) => {
       if (capabilities.hasSql()) {
-        const serviceCountsFromQuery: {
+        const serviceCountsFromQuery = await queryDruidSql<{
           service_type: string;
           count: number;
-        }[] = await queryDruidSql({
-          query: `SELECT server_type AS "service_type", COUNT(*) as "count" FROM sys.servers GROUP BY 1`,
-        });
+        }>(
+          {
+            query: `SELECT server_type AS "service_type", COUNT(*) as "count" FROM sys.servers GROUP BY 1`,
+            context: { engine: 'native' },
+          },
+          signal,
+        );
         return lookupBy(
           serviceCountsFromQuery,
           x => x.service_type,
           x => x.count,
         );
       } else if (capabilities.hasCoordinatorAccess()) {
-        const services = (await Api.instance.get('/druid/coordinator/v1/servers?simple')).data;
-
-        const middleManager = capabilities.hasOverlordAccess()
-          ? (await Api.instance.get('/druid/indexer/v1/workers')).data
-          : [];
+        // /druid/coordinator/v1/cluster is discovery-backed and reports every node role
+        // (the same source sys.servers uses), so the fallback matches the SQL branch.
+        // /druid/coordinator/v1/servers?simple is segment-inventory-backed and only sees
+        // historical, indexer-executor (peon), and any broker that holds broadcast segments,
+        // so it is only used here to surface the peon count, which the cluster endpoint
+        // does not return.
+        const clusterResp = await Api.instance.get('/druid/coordinator/v1/cluster', { signal });
+        const cluster: Record<string, unknown[]> = clusterResp.data || {};
+        const segmentServers = await getApiArray('/druid/coordinator/v1/servers?simple', signal);
 
         return {
-          historical: services.filter((s: any) => s.type === 'historical').length,
-          middle_manager: middleManager.length,
-          peon: services.filter((s: any) => s.type === 'indexer-executor').length,
+          coordinator: (cluster.coordinator || []).length,
+          overlord: (cluster.overlord || []).length,
+          router: (cluster.router || []).length,
+          broker: (cluster.broker || []).length,
+          historical: (cluster.historical || []).length,
+          middle_manager: (cluster.middleManager || []).length,
+          indexer: (cluster.indexer || []).length,
+          peon: segmentServers.filter((s: any) => s.type === 'indexer-executor').length,
         };
       } else {
         throw new Error(`must have SQL or coordinator access`);
@@ -80,7 +93,7 @@ export const ServicesCard = React.memo(function ServicesCard(props: ServicesCard
     <HomeViewCard
       className="services-card"
       href="#services"
-      icon={IconNames.DATABASE}
+      icon={getConsoleViewIcon('services')}
       title="Services"
       loading={serviceCountState.loading}
       error={serviceCountState.error}

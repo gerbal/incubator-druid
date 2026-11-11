@@ -23,23 +23,22 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Optional;
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryContext;
-import org.apache.druid.query.QueryContexts;
 import org.apache.druid.sql.http.SqlQuery;
 
 import javax.annotation.Nullable;
 
 /**
  * Implementation of {@link TieredBrokerSelectorStrategy} which uses the parameter
- * {@link QueryContexts#BROKER_SERVICE_NAME} in the Query context to select the
+ * {@link org.apache.druid.query.context.QueryContextParameters#BROKER_SERVICE} in the Query context to select the
  * Broker Service.
  * <p>
  * If the {@link #defaultManualBrokerService} is set to a valid Broker Service Name,
  * then all queries that do not specify a valid value for
- * {@link QueryContexts#BROKER_SERVICE_NAME} would be directed to the
+ * {@link org.apache.druid.query.context.QueryContextParameters#BROKER_SERVICE} would be directed to the
  * {@code #defaultManualBrokerService}. Note that the {@code defaultManualBrokerService}
  * can be different from the {@link TieredBrokerConfig#getDefaultBrokerServiceName()}.
  */

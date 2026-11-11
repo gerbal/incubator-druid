@@ -28,9 +28,13 @@ import org.apache.druid.data.input.impl.HttpInputSource;
 import org.apache.druid.data.input.impl.InlineInputSource;
 import org.apache.druid.data.input.impl.LocalInputSource;
 import org.apache.druid.guice.annotations.UnstableApi;
+import org.apache.druid.java.util.common.UOE;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.io.File;
+import java.util.List;
+import java.util.Set;
 
 /**
  * InputSource abstracts the storage system where input data is stored. It creates an {@link InputSourceReader}
@@ -76,6 +80,15 @@ public interface InputSource
   boolean needsFormat();
 
   /**
+   * If this input source is representable as a set of files, return pointers to those files.
+   */
+  @Nullable
+  default List<InputFilePointer> asFilePointers()
+  {
+    return null;
+  }
+
+  /**
    * Creates an {@link InputSourceReader}.
    *
    * @param inputRowSchema     for {@link InputRow}
@@ -87,4 +100,16 @@ public interface InputSource
       @Nullable InputFormat inputFormat,
       File temporaryDirectory
   );
+
+  /**
+   * The types of input sources uses. A set is returned here, as some InputSource implementation allow for
+   * combining of multiple input sources.
+   * @return The types of input sources uses
+   */
+  @JsonIgnore
+  @Nonnull
+  default Set<String> getTypes()
+  {
+    throw new UOE("This inputSource does not support input source based security");
+  }
 }

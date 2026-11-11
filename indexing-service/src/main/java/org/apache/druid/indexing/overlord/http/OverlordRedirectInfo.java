@@ -22,8 +22,9 @@ package org.apache.druid.indexing.overlord.http;
 import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableSet;
 import com.google.inject.Inject;
-import org.apache.druid.indexing.overlord.TaskMaster;
+import org.apache.druid.indexing.overlord.DruidOverlord;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.common.URIs;
 import org.apache.druid.server.http.RedirectInfo;
 
 import java.net.URL;
@@ -38,25 +39,25 @@ public class OverlordRedirectInfo implements RedirectInfo
       "/druid/indexer/v1/isLeader"
   );
 
-  private final TaskMaster taskMaster;
+  private final DruidOverlord overlord;
 
   @Inject
-  public OverlordRedirectInfo(TaskMaster taskMaster)
+  public OverlordRedirectInfo(DruidOverlord overlord)
   {
-    this.taskMaster = taskMaster;
+    this.overlord = overlord;
   }
 
   @Override
   public boolean doLocal(String requestURI)
   {
-    return (requestURI != null && LOCAL_PATHS.contains(requestURI)) || taskMaster.isLeader();
+    return (requestURI != null && LOCAL_PATHS.contains(requestURI)) || overlord.isLeader();
   }
 
   @Override
   public URL getRedirectURL(String queryString, String requestURI)
   {
     try {
-      final Optional<String> redirectLocation = taskMaster.getRedirectLocation();
+      final Optional<String> redirectLocation = overlord.getRedirectLocation();
       if (!redirectLocation.isPresent()) {
         return null;
       }
@@ -66,7 +67,7 @@ public class OverlordRedirectInfo implements RedirectInfo
         location = StringUtils.format("%s?%s", location, queryString);
       }
 
-      return new URL(location);
+      return URIs.toURL(location);
     }
     catch (Exception e) {
       throw new RuntimeException(e);

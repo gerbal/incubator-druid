@@ -32,17 +32,20 @@ sidebar_label: "JSON functions"
 
 Druid supports nested columns, which provide optimized storage and indexes for nested data structures. See [Nested columns](./nested-columns.md) for more information.
 
-You can use the following JSON functions to extract, transform, and create `COMPLEX<json>` values.
+You can use the following JSON functions to extract, transform, and create `COMPLEX<json>` objects.
+
 
 | Function | Notes |
 | --- | --- |
 |`JSON_KEYS(expr, path)`| Returns an array of field names from `expr` at the specified `path`.|
-|`JSON_OBJECT(KEY expr1 VALUE expr2[, KEY expr3 VALUE expr4, ...])` | Constructs a new `COMPLEX<json>` object. The `KEY` expressions must evaluate to string types. The `VALUE` expressions can be composed of any input type, including other `COMPLEX<json>` values. `JSON_OBJECT` can accept colon-separated key-value pairs. The following syntax is equivalent: `JSON_OBJECT(expr1:expr2[, expr3:expr4, ...])`.|
-|`JSON_PATHS(expr)`| Returns an array of all paths which refer to literal values in `expr` in JSONPath format. |
+|`JSON_MERGE(expr1, expr2[, expr3 ...])`| Merges two or more JSON `STRING` or `COMPLEX<json>` values into one, preserving the rightmost value when there are key overlaps. Returns `NULL` if any argument is `NULL`. Always returns a `COMPLEX<json>` object.|
+|`JSON_OBJECT(KEY expr1 VALUE expr2[, KEY expr3 VALUE expr4, ...])` | Constructs a new `COMPLEX<json>` object from one or more expressions. The `KEY` expressions must evaluate to string types. The `VALUE` expressions can be composed of any input type, including other `COMPLEX<json>` objects. The function can accept colon-separated key-value pairs. The following syntax is equivalent: `JSON_OBJECT(expr1:expr2[, expr3:expr4, ...])`.|
+|`JSON_PATHS(expr)`| Returns an array of all paths which refer to primitive values in `expr` in JSONPath format. |
 |`JSON_QUERY(expr, path)`| Extracts a `COMPLEX<json>` value from `expr`, at the specified `path`. |
-|`JSON_VALUE(expr, path [RETURNING sqlType])`| Extracts a literal value from `expr` at the specified `path`. If you specify `RETURNING` and an SQL type name (such as `VARCHAR`, `BIGINT`, `DOUBLE`, etc) the function plans the query using the suggested type. Otherwise, it attempts to infer the type based on the context. If it can't infer the type, it defaults to `VARCHAR`.|
-|`PARSE_JSON(expr)`|Parses `expr` into a `COMPLEX<json>` object. This operator deserializes JSON values when processing them, translating stringified JSON into a nested structure. If the input is not a `VARCHAR` or it is invalid JSON, this function will result in an error.|
-|`TRY_PARSE_JSON(expr)`|Parses `expr` into a `COMPLEX<json>` object. This operator deserializes JSON values when processing them, translating stringified JSON into a nested structure. If the input is not a `VARCHAR` or it is invalid JSON, this function will result in a `NULL` value.|
+|`JSON_QUERY_ARRAY(expr, path)`| Extracts an `ARRAY<COMPLEX<json>>` value from `expr` at the specified `path`. If the value isn't an `ARRAY`, the function translates it into a single element `ARRAY` containing the value at `path`. Mainly used to extract arrays of objects to use as inputs to other [array functions](./sql-array-functions.md).|
+|`JSON_VALUE(expr, path [RETURNING sqlType])`| Extracts a primitive value from `expr` at the specified `path`. If you include `RETURNING` and specify a SQL type (such as `VARCHAR`, `BIGINT`, `DOUBLE`) the function plans the query using the suggested type. If `RETURNING` isn't included, the function attempts to infer the type based on the context. If the function can't infer the type, it defaults to `VARCHAR`. Primitive arrays can also be returned, but only if `RETURNING` is specified as an `ARRAY` type, e.g. `RETURNING VARCHAR ARRAY`.|
+|`PARSE_JSON(expr)`|Parses `expr` into a `COMPLEX<json>` object. This function deserializes JSON values when processing them, translating stringified JSON into a nested structure. If the input is invalid JSON or not a `VARCHAR`, it returns an error.|
+|`TRY_PARSE_JSON(expr)`|Parses `expr` into a `COMPLEX<json>` object. This operator deserializes JSON values when processing them, translating stringified JSON into a nested structure. If the input is invalid JSON or not a `VARCHAR`, it returns a `NULL` value.|
 |`TO_JSON_STRING(expr)`|Serializes `expr` into a JSON string.|
 
 ### JSONPath syntax
@@ -70,3 +73,20 @@ Consider the following example input JSON:
   `$['y']` -> `[1, 2, 3]`
 - For a key that contains an array, to return an item in the array:<br />
   `$.y[1]` -> `2`
+
+### Colon path syntax
+
+You can write `expr:path` as shorthand for `JSON_VALUE(expr, '$.path')`. The path after the colon uses the same elements as JSONPath, without the leading `$`:
+
+|Shorthand|Equivalent|
+| --- | --- |
+|`expr:x`| `JSON_VALUE(expr, '$.x')` |
+|`expr:x.y`| `JSON_VALUE(expr, '$.x.y')` |
+|`expr:['x']`| `JSON_VALUE(expr, '$[''x'']')` |
+|`expr:x[1]`| `JSON_VALUE(expr, '$.x[1]')` |
+
+Use bracket notation or a double-quoted identifier, such as `expr:"array"`, for field names that are reserved keywords or contain special characters.
+
+To specify a return type, cast the result, such as `expr:x::BIGINT` or `CAST(expr:x AS BIGINT)`.
+
+When a select item is a colon path ending in a field name, such as `expr:x.y`, the output column is named after the last field (`y`), unless the select list contains `*` or if the name would duplicate another output column's name.

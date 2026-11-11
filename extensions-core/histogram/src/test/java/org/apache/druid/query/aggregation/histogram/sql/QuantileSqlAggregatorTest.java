@@ -19,15 +19,13 @@
 
 package org.apache.druid.query.aggregation.histogram.sql;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
-import com.google.inject.Injector;
-import org.apache.druid.common.config.NullHandling;
-import org.apache.druid.guice.DruidInjectorBuilder;
+import org.apache.druid.initialization.DruidModule;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.math.expr.ExprMacroTable;
 import org.apache.druid.query.Druids;
 import org.apache.druid.query.QueryDataSource;
-import org.apache.druid.query.QueryRunnerFactoryConglomerate;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
 import org.apache.druid.query.aggregation.DoubleSumAggregatorFactory;
 import org.apache.druid.query.aggregation.FilteredAggregatorFactory;
@@ -35,86 +33,91 @@ import org.apache.druid.query.aggregation.histogram.ApproximateHistogramAggregat
 import org.apache.druid.query.aggregation.histogram.ApproximateHistogramDruidModule;
 import org.apache.druid.query.aggregation.histogram.ApproximateHistogramFoldingAggregatorFactory;
 import org.apache.druid.query.aggregation.histogram.QuantilePostAggregator;
+import org.apache.druid.query.aggregation.histogram.sql.QuantileSqlAggregatorTest.QuantileComponentSupplier;
 import org.apache.druid.query.aggregation.post.ArithmeticPostAggregator;
 import org.apache.druid.query.aggregation.post.FieldAccessPostAggregator;
 import org.apache.druid.query.dimension.DefaultDimensionSpec;
 import org.apache.druid.query.expression.TestExprMacroTable;
-import org.apache.druid.query.filter.NotDimFilter;
-import org.apache.druid.query.filter.SelectorDimFilter;
 import org.apache.druid.query.groupby.GroupByQuery;
-import org.apache.druid.query.ordering.StringComparators;
 import org.apache.druid.query.spec.MultipleIntervalSegmentSpec;
 import org.apache.druid.segment.IndexBuilder;
 import org.apache.druid.segment.QueryableIndex;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.incremental.IncrementalIndexSchema;
-import org.apache.druid.segment.join.JoinableFactoryWrapper;
 import org.apache.druid.segment.virtual.ExpressionVirtualColumn;
 import org.apache.druid.segment.writeout.OffHeapMemorySegmentWriteOutMediumFactory;
+import org.apache.druid.server.SpecificSegmentsQuerySegmentWalker;
 import org.apache.druid.sql.calcite.BaseCalciteQueryTest;
+import org.apache.druid.sql.calcite.SqlTestFrameworkConfig;
+import org.apache.druid.sql.calcite.TempDirProducer;
 import org.apache.druid.sql.calcite.filtration.Filtration;
 import org.apache.druid.sql.calcite.util.CalciteTests;
-import org.apache.druid.sql.calcite.util.SpecificSegmentsQuerySegmentWalker;
+import org.apache.druid.sql.calcite.util.DruidModuleCollection;
+import org.apache.druid.sql.calcite.util.SqlTestFramework.StandardComponentSupplier;
 import org.apache.druid.sql.calcite.util.TestDataBuilder;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 import org.apache.druid.timeline.partition.LinearShardSpec;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
 import java.util.List;
 
+@SqlTestFrameworkConfig.ComponentSupplier(QuantileComponentSupplier.class)
 public class QuantileSqlAggregatorTest extends BaseCalciteQueryTest
 {
-  @Override
-  public void configureGuice(DruidInjectorBuilder builder)
+  protected static class QuantileComponentSupplier extends StandardComponentSupplier
   {
-    super.configureGuice(builder);
-    builder.addModule(new ApproximateHistogramDruidModule());
-  }
+    public QuantileComponentSupplier(TempDirProducer tempFolderProducer)
+    {
+      super(tempFolderProducer);
+    }
 
-  @Override
-  public SpecificSegmentsQuerySegmentWalker createQuerySegmentWalker(
-      final QueryRunnerFactoryConglomerate conglomerate,
-      final JoinableFactoryWrapper joinableFactory,
-      final Injector injector
-  ) throws IOException
-  {
-    ApproximateHistogramDruidModule.registerSerde();
+    @Override
+    public DruidModule getCoreModule()
+    {
+      return DruidModuleCollection.of(super.getCoreModule(), new ApproximateHistogramDruidModule());
+    }
 
-    final QueryableIndex index = IndexBuilder.create(CalciteTests.getJsonMapper())
-                                             .tmpDir(temporaryFolder.newFolder())
-                                             .segmentWriteOutMediumFactory(OffHeapMemorySegmentWriteOutMediumFactory.instance())
-                                             .schema(
-                                                 new IncrementalIndexSchema.Builder()
-                                                     .withMetrics(
-                                                         new CountAggregatorFactory("cnt"),
-                                                         new DoubleSumAggregatorFactory("m1", "m1"),
-                                                         new ApproximateHistogramAggregatorFactory(
-                                                             "hist_m1",
-                                                             "m1",
-                                                             null,
-                                                             null,
-                                                             null,
-                                                             null,
-                                                             false
-                                                         )
-                                                     )
-                                                     .withRollup(false)
-                                                     .build()
-                                             )
-                                             .rows(TestDataBuilder.ROWS1)
-                                             .buildMMappedIndex();
+    @Override
+    public SpecificSegmentsQuerySegmentWalker addSegmentsToWalker(
+        SpecificSegmentsQuerySegmentWalker walker,
+        ObjectMapper jsonMapper
+    )
+    {
+      ApproximateHistogramDruidModule.registerSerde();
 
-    return new SpecificSegmentsQuerySegmentWalker(conglomerate).add(
-        DataSegment.builder()
-                   .dataSource(CalciteTests.DATASOURCE1)
-                   .interval(index.getDataInterval())
-                   .version("1")
-                   .shardSpec(new LinearShardSpec(0))
-                   .size(0)
-                   .build(),
-        index
-    );
+      final QueryableIndex index = IndexBuilder.create(jsonMapper)
+                                               .tmpDir(tempDirProducer.newTempFolder())
+                                               .segmentWriteOutMediumFactory(OffHeapMemorySegmentWriteOutMediumFactory.instance())
+                                               .schema(
+                                                   new IncrementalIndexSchema.Builder()
+                                                       .withMetrics(
+                                                           new CountAggregatorFactory("cnt"),
+                                                           new DoubleSumAggregatorFactory("m1", "m1"),
+                                                           new ApproximateHistogramAggregatorFactory(
+                                                               "hist_m1",
+                                                               "m1",
+                                                               null,
+                                                               null,
+                                                               null,
+                                                               null,
+                                                               false
+                                                           )
+                                                       )
+                                                       .withRollup(false)
+                                                       .build()
+                                               )
+                                               .rows(TestDataBuilder.ROWS1)
+                                               .buildMMappedIndex();
+
+      return walker.add(
+          DataSegment.builder(SegmentId.of(CalciteTests.DATASOURCE1, index.getDataInterval(), "1", 0))
+                     .shardSpec(new LinearShardSpec(0))
+                     .size(0)
+                     .build(),
+          index
+      );
+    }
   }
 
   @Test
@@ -124,6 +127,7 @@ public class QuantileSqlAggregatorTest extends BaseCalciteQueryTest
         "SELECT\n"
         + "APPROX_QUANTILE(m1, 0.01),\n"
         + "APPROX_QUANTILE(m1, 0.5, 50),\n"
+        + "APPROX_QUANTILE(m1, CAST(0.5 AS DOUBLE), CAST(50 AS INTEGER)),\n"
         + "APPROX_QUANTILE(m1, 0.98, 200),\n"
         + "APPROX_QUANTILE(m1, 0.99),\n"
         + "APPROX_QUANTILE(m1 * 2, 0.97),\n"
@@ -147,28 +151,29 @@ public class QuantileSqlAggregatorTest extends BaseCalciteQueryTest
                   )
                   .aggregators(ImmutableList.of(
                       new ApproximateHistogramAggregatorFactory("a0:agg", "m1", null, null, null, null, false),
-                      new ApproximateHistogramAggregatorFactory("a2:agg", "m1", 200, null, null, null, false),
-                      new ApproximateHistogramAggregatorFactory("a4:agg", "v0", null, null, null, null, false),
-                      new FilteredAggregatorFactory(
-                          new ApproximateHistogramAggregatorFactory("a5:agg", "m1", null, null, null, null, false),
-                          new SelectorDimFilter("dim1", "abc", null)
-                      ),
+                      new ApproximateHistogramAggregatorFactory("a3:agg", "m1", 200, null, null, null, false),
+                      new ApproximateHistogramAggregatorFactory("a5:agg", "v0", null, null, null, null, false),
                       new FilteredAggregatorFactory(
                           new ApproximateHistogramAggregatorFactory("a6:agg", "m1", null, null, null, null, false),
-                          new NotDimFilter(new SelectorDimFilter("dim1", "abc", null))
+                          equality("dim1", "abc", ColumnType.STRING)
                       ),
-                      new ApproximateHistogramAggregatorFactory("a8:agg", "cnt", null, null, null, null, false)
+                      new FilteredAggregatorFactory(
+                          new ApproximateHistogramAggregatorFactory("a7:agg", "m1", null, null, null, null, false),
+                          not(equality("dim1", "abc", ColumnType.STRING))
+                      ),
+                      new ApproximateHistogramAggregatorFactory("a9:agg", "cnt", null, null, null, null, false)
                   ))
                   .postAggregators(
                       new QuantilePostAggregator("a0", "a0:agg", 0.01f),
                       new QuantilePostAggregator("a1", "a0:agg", 0.50f),
-                      new QuantilePostAggregator("a2", "a2:agg", 0.98f),
-                      new QuantilePostAggregator("a3", "a0:agg", 0.99f),
-                      new QuantilePostAggregator("a4", "a4:agg", 0.97f),
-                      new QuantilePostAggregator("a5", "a5:agg", 0.99f),
-                      new QuantilePostAggregator("a6", "a6:agg", 0.999f),
-                      new QuantilePostAggregator("a7", "a5:agg", 0.999f),
-                      new QuantilePostAggregator("a8", "a8:agg", 0.50f)
+                      new QuantilePostAggregator("a2", "a0:agg", 0.50f),
+                      new QuantilePostAggregator("a3", "a3:agg", 0.98f),
+                      new QuantilePostAggregator("a4", "a0:agg", 0.99f),
+                      new QuantilePostAggregator("a5", "a5:agg", 0.97f),
+                      new QuantilePostAggregator("a6", "a6:agg", 0.99f),
+                      new QuantilePostAggregator("a7", "a7:agg", 0.999f),
+                      new QuantilePostAggregator("a8", "a6:agg", 0.999f),
+                      new QuantilePostAggregator("a9", "a9:agg", 0.50f)
                   )
                   .context(QUERY_CONTEXT_DEFAULT)
                   .build()
@@ -176,6 +181,7 @@ public class QuantileSqlAggregatorTest extends BaseCalciteQueryTest
         ImmutableList.of(
             new Object[]{
                 1.0,
+                3.0,
                 3.0,
                 5.880000114440918,
                 5.940000057220459,
@@ -208,15 +214,47 @@ public class QuantileSqlAggregatorTest extends BaseCalciteQueryTest
                   .intervals(new MultipleIntervalSegmentSpec(ImmutableList.of(Filtration.eternity())))
                   .granularity(Granularities.ALL)
                   .aggregators(ImmutableList.of(
-                      new ApproximateHistogramFoldingAggregatorFactory("a0:agg", "hist_m1", null, null, null, null, false),
-                      new ApproximateHistogramFoldingAggregatorFactory("a2:agg", "hist_m1", 200, null, null, null, false),
-                      new FilteredAggregatorFactory(
-                          new ApproximateHistogramFoldingAggregatorFactory("a4:agg", "hist_m1", null, null, null, null, false),
-                          new SelectorDimFilter("dim1", "abc", null)
+                      new ApproximateHistogramFoldingAggregatorFactory(
+                          "a0:agg",
+                          "hist_m1",
+                          null,
+                          null,
+                          null,
+                          null,
+                          false
+                      ),
+                      new ApproximateHistogramFoldingAggregatorFactory(
+                          "a2:agg",
+                          "hist_m1",
+                          200,
+                          null,
+                          null,
+                          null,
+                          false
                       ),
                       new FilteredAggregatorFactory(
-                          new ApproximateHistogramFoldingAggregatorFactory("a5:agg", "hist_m1", null, null, null, null, false),
-                          new NotDimFilter(new SelectorDimFilter("dim1", "abc", null))
+                          new ApproximateHistogramFoldingAggregatorFactory(
+                              "a4:agg",
+                              "hist_m1",
+                              null,
+                              null,
+                              null,
+                              null,
+                              false
+                          ),
+                          equality("dim1", "abc", ColumnType.STRING)
+                      ),
+                      new FilteredAggregatorFactory(
+                          new ApproximateHistogramFoldingAggregatorFactory(
+                              "a5:agg",
+                              "hist_m1",
+                              null,
+                              null,
+                              null,
+                              null,
+                              false
+                          ),
+                          not(equality("dim1", "abc", ColumnType.STRING))
                       )
                   ))
                   .postAggregators(
@@ -240,12 +278,7 @@ public class QuantileSqlAggregatorTest extends BaseCalciteQueryTest
   @Test
   public void testQuantileOnInnerQuery()
   {
-    final List<Object[]> expectedResults;
-    if (NullHandling.replaceWithDefault()) {
-      expectedResults = ImmutableList.of(new Object[]{7.0, 8.26386833190918});
-    } else {
-      expectedResults = ImmutableList.of(new Object[]{5.25, 6.59091854095459});
-    }
+    final List<Object[]> expectedResults = ImmutableList.of(new Object[]{5.25, 6.59091854095459});
 
     testQuery(
         "SELECT AVG(x), APPROX_QUANTILE(x, 0.98)\n"
@@ -272,7 +305,10 @@ public class QuantileSqlAggregatorTest extends BaseCalciteQueryTest
                         .setGranularity(Granularities.ALL)
                         .setAggregatorSpecs(
                             new DoubleSumAggregatorFactory("_a0:sum", "a0"),
-                            new CountAggregatorFactory("_a0:count"),
+                            new FilteredAggregatorFactory(
+                                new CountAggregatorFactory("_a0:count"),
+                                notNull("a0")
+                            ),
                             new ApproximateHistogramAggregatorFactory(
                                 "_a1:agg",
                                 "a0",
@@ -308,25 +344,14 @@ public class QuantileSqlAggregatorTest extends BaseCalciteQueryTest
   {
     cannotVectorize();
 
-    final List<Object[]> expectedResults;
-    if (NullHandling.replaceWithDefault()) {
-      expectedResults = ImmutableList.of(
-          new Object[]{"", 0.0d},
-          new Object[]{"a", 0.0d},
-          new Object[]{"b", 0.0d},
-          new Object[]{"c", 10.100000381469727d},
-          new Object[]{"d", 2.0d}
-      );
-    } else {
-      expectedResults = ImmutableList.of(
-          new Object[]{null, Double.NaN},
-          new Object[]{"", 1.0d},
-          new Object[]{"a", Double.NaN},
-          new Object[]{"b", 10.100000381469727d},
-          new Object[]{"c", 10.100000381469727d},
-          new Object[]{"d", 2.0d}
-      );
-    }
+    final List<Object[]> expectedResults = ImmutableList.of(
+        new Object[]{null, Double.NaN},
+        new Object[]{"", 1.0d},
+        new Object[]{"a", Double.NaN},
+        new Object[]{"b", 10.100000381469727d},
+        new Object[]{"c", 10.100000381469727d},
+        new Object[]{"d", 2.0d}
+    );
     testQuery(
         "SELECT dim3, APPROX_QUANTILE(CAST(dim1 as DOUBLE), 0.5) from foo group by dim3",
         ImmutableList.of(
@@ -379,12 +404,21 @@ public class QuantileSqlAggregatorTest extends BaseCalciteQueryTest
                   .dataSource(CalciteTests.DATASOURCE1)
                   .intervals(new MultipleIntervalSegmentSpec(ImmutableList.of(Filtration.eternity())))
                   .granularity(Granularities.ALL)
-                  .filters(bound("dim2", "0", "0", false, false, null, StringComparators.NUMERIC))
-                  .aggregators(ImmutableList.of(
-                      new ApproximateHistogramFoldingAggregatorFactory("a0:agg", "hist_m1", null, null, null, null, false),
-                      new ApproximateHistogramAggregatorFactory("a1:agg", "m1", null, null, null, null, false)
-
-                  ))
+                  .filters(equality("dim2", 0L, ColumnType.LONG))
+                  .aggregators(
+                      ImmutableList.of(
+                          new ApproximateHistogramFoldingAggregatorFactory(
+                              "a0:agg",
+                              "hist_m1",
+                              null,
+                              null,
+                              null,
+                              null,
+                              false
+                          ),
+                          new ApproximateHistogramAggregatorFactory("a1:agg", "m1", null, null, null, null, false)
+                      )
+                  )
                   .postAggregators(
                       new QuantilePostAggregator("a0", "a0:agg", 0.01f),
                       new QuantilePostAggregator("a1", "a1:agg", 0.01f)
@@ -411,19 +445,35 @@ public class QuantileSqlAggregatorTest extends BaseCalciteQueryTest
             GroupByQuery.builder()
                         .setDataSource(CalciteTests.DATASOURCE1)
                         .setInterval(querySegmentSpec(Filtration.eternity()))
-                        .setDimFilter(selector("dim2", "a", null))
+                        .setDimFilter(equality("dim2", "a", ColumnType.STRING))
                         .setGranularity(Granularities.ALL)
                         .setVirtualColumns(expressionVirtualColumn("v0", "'a'", ColumnType.STRING))
                         .setDimensions(new DefaultDimensionSpec("v0", "d0", ColumnType.STRING))
                         .setAggregatorSpecs(
                             aggregators(
                                 new FilteredAggregatorFactory(
-                                    new ApproximateHistogramFoldingAggregatorFactory("a0:agg", "hist_m1", null, null, null, null, false),
-                                    selector("dim1", "nonexistent", null)
+                                    new ApproximateHistogramFoldingAggregatorFactory(
+                                        "a0:agg",
+                                        "hist_m1",
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        false
+                                    ),
+                                    equality("dim1", "nonexistent", ColumnType.STRING)
                                 ),
                                 new FilteredAggregatorFactory(
-                                    new ApproximateHistogramAggregatorFactory("a1:agg", "m1", null, null, null, null, false),
-                                    selector("dim1", "nonexistent", null)
+                                    new ApproximateHistogramAggregatorFactory(
+                                        "a1:agg",
+                                        "m1",
+                                        null,
+                                        null,
+                                        null,
+                                        null,
+                                        false
+                                    ),
+                                    equality("dim1", "nonexistent", ColumnType.STRING)
                                 )
                             )
                         )
@@ -440,5 +490,174 @@ public class QuantileSqlAggregatorTest extends BaseCalciteQueryTest
             new Object[]{"a", Double.NaN, Double.NaN}
         )
     );
+  }
+
+  @Test
+  public void testQuantileWithNonNumericStringLiteral()
+  {
+    // verify invalid queries return 400 (user error)
+    testQueryThrows(
+        "SELECT APPROX_QUANTILE('m1', 0.99) FROM foo",
+        invalidSqlContains(
+            "Function [APPROX_QUANTILE] argument [column] must be numeric, got string literal ['m1']."
+            + " If you meant to refer to a column, use double quotes."
+        )
+    );
+  }
+
+  @Test
+  public void testQuantileOnNumericStringLiteral()
+  {
+    // string literals that can be parsed as numbers are accepted
+    testQuery(
+        "SELECT APPROX_QUANTILE('1.5', 0.5) FROM foo",
+        ImmutableList.of(
+            Druids.newTimeseriesQueryBuilder()
+                  .dataSource(CalciteTests.DATASOURCE1)
+                  .intervals(new MultipleIntervalSegmentSpec(ImmutableList.of(Filtration.eternity())))
+                  .granularity(Granularities.ALL)
+                  .virtualColumns(
+                      new ExpressionVirtualColumn(
+                          "v0",
+                          "1.5",
+                          ColumnType.FLOAT,
+                          TestExprMacroTable.INSTANCE
+                      )
+                  )
+                  .aggregators(ImmutableList.of(
+                      new ApproximateHistogramAggregatorFactory("a0:agg", "v0", null, null, null, null, false)
+                  ))
+                  .postAggregators(
+                      new QuantilePostAggregator("a0", "a0:agg", 0.5f)
+                  )
+                  .context(QUERY_CONTEXT_DEFAULT)
+                  .build()
+        ),
+        ImmutableList.of(
+            new Object[]{1.5}
+        )
+    );
+  }
+
+  @Test
+  public void testQuantileOnTimeColumn()
+  {
+    // timestamps are used as numbers of milliseconds
+    testQuery(
+        "SELECT APPROX_QUANTILE(__time, 0.5) FROM foo",
+        ImmutableList.of(
+            Druids.newTimeseriesQueryBuilder()
+                  .dataSource(CalciteTests.DATASOURCE1)
+                  .intervals(new MultipleIntervalSegmentSpec(ImmutableList.of(Filtration.eternity())))
+                  .granularity(Granularities.ALL)
+                  .aggregators(ImmutableList.of(
+                      new ApproximateHistogramAggregatorFactory("a0:agg", "__time", null, null, null, null, false)
+                  ))
+                  .postAggregators(
+                      new QuantilePostAggregator("a0", "a0:agg", 0.5f)
+                  )
+                  .context(QUERY_CONTEXT_DEFAULT)
+                  .build()
+        ),
+        ImmutableList.of(
+            new Object[]{946857574400.0}
+        )
+    );
+  }
+
+  @Test
+  public void testQuantileOnNull()
+  {
+    // NULL inputs are accepted, the same as before the first operand was type checked
+    testQuery(
+        "SELECT APPROX_QUANTILE(NULL, 0.5), APPROX_QUANTILE(CAST(NULL AS DOUBLE), 0.5) FROM foo",
+        ImmutableList.of(
+            Druids.newTimeseriesQueryBuilder()
+                  .dataSource(CalciteTests.DATASOURCE1)
+                  .intervals(new MultipleIntervalSegmentSpec(ImmutableList.of(Filtration.eternity())))
+                  .granularity(Granularities.ALL)
+                  .virtualColumns(
+                      new ExpressionVirtualColumn(
+                          "v0",
+                          "null",
+                          ColumnType.FLOAT,
+                          TestExprMacroTable.INSTANCE
+                      ),
+                      new ExpressionVirtualColumn(
+                          "v1",
+                          "null",
+                          ColumnType.FLOAT,
+                          TestExprMacroTable.INSTANCE
+                      )
+                  )
+                  .aggregators(ImmutableList.of(
+                      new ApproximateHistogramAggregatorFactory("a0:agg", "v0", null, null, null, null, false),
+                      new ApproximateHistogramAggregatorFactory("a1:agg", "v1", null, null, null, null, false)
+                  ))
+                  .postAggregators(
+                      new QuantilePostAggregator("a0", "a0:agg", 0.5f),
+                      new QuantilePostAggregator("a1", "a1:agg", 0.5f)
+                  )
+                  .context(QUERY_CONTEXT_DEFAULT)
+                  .build()
+        ),
+        ImmutableList.of(
+            new Object[]{Double.NaN, Double.NaN}
+        )
+    );
+  }
+
+  @Test
+  public void testQuantileWithNonNumericInputTypes()
+  {
+    // verify invalid queries return 400 (user error)
+    testQueryThrows(
+        "SELECT APPROX_QUANTILE(m1 > 1, 0.99) FROM foo",
+        invalidSqlContains("Cannot apply 'APPROX_QUANTILE'")
+    );
+    testQueryThrows(
+        "SELECT APPROX_QUANTILE(ARRAY[1.0, 2.0], 0.99) FROM foo",
+        invalidSqlContains("Cannot apply 'APPROX_QUANTILE'")
+    );
+    testQueryThrows(
+        "SELECT APPROX_QUANTILE(PARSE_JSON('1'), 0.99) FROM foo",
+        invalidSqlContains("Cannot apply 'APPROX_QUANTILE'")
+    );
+  }
+
+  @Test
+  public void testQuantileOnStringColumnWithConstantFilter()
+  {
+    // dim1 is known to be 'abc' at planning time, but it is a column, so it must not be rejected like a string literal
+    testBuilder()
+        .sql("SELECT APPROX_QUANTILE(dim1, 0.5) FROM foo WHERE dim1 = 'abc'")
+        .expectedQueries(
+            ImmutableList.of(
+                Druids.newTimeseriesQueryBuilder()
+                      .dataSource(CalciteTests.DATASOURCE1)
+                      .intervals(new MultipleIntervalSegmentSpec(ImmutableList.of(Filtration.eternity())))
+                      .granularity(Granularities.ALL)
+                      .virtualColumns(
+                          new ExpressionVirtualColumn("v0", "null", ColumnType.FLOAT, ExprMacroTable.nil())
+                      )
+                      .filters(equality("dim1", "abc", ColumnType.STRING))
+                      .aggregators(
+                          new ApproximateHistogramAggregatorFactory(
+                              "a0:agg",
+                              "v0",
+                              50,
+                              7,
+                              Float.NEGATIVE_INFINITY,
+                              Float.POSITIVE_INFINITY,
+                              false
+                          )
+                      )
+                      .postAggregators(new QuantilePostAggregator("a0", "a0:agg", 0.5f))
+                      .context(QUERY_CONTEXT_DEFAULT)
+                      .build()
+            )
+        )
+        .expectedResults(ImmutableList.of(new Object[]{Double.NaN}))
+        .run();
   }
 }

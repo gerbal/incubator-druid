@@ -22,21 +22,14 @@ package org.apache.druid.indexing.common.task;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.jsontype.NamedType;
 import nl.jqno.equalsverifier.EqualsVerifier;
-import org.apache.druid.indexer.partitions.DynamicPartitionsSpec;
 import org.apache.druid.indexing.common.task.batch.parallel.ParallelIndexTuningConfig;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.segment.IndexSpec;
-import org.apache.druid.segment.data.CompressionFactory.LongEncodingStrategy;
 import org.apache.druid.segment.data.CompressionStrategy;
-import org.apache.druid.segment.data.RoaringBitmapSerdeFactory;
 import org.apache.druid.segment.indexing.TuningConfig;
-import org.apache.druid.segment.writeout.OffHeapMemorySegmentWriteOutMediumFactory;
-import org.joda.time.Duration;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 
@@ -44,10 +37,7 @@ public class CompactionTuningConfigTest
 {
   private final ObjectMapper mapper = new DefaultObjectMapper();
 
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
-
-  @Before
+  @BeforeEach
   public void setup()
   {
     mapper.registerSubtypes(new NamedType(CompactionTask.CompactionTuningConfig.class, "compcation"));
@@ -56,146 +46,53 @@ public class CompactionTuningConfigTest
   @Test
   public void testSerdeDefault() throws IOException
   {
-    final CompactionTask.CompactionTuningConfig tuningConfig = CompactionTask.CompactionTuningConfig.defaultConfig();
+    final CompactionTask.CompactionTuningConfig tuningConfig =
+        CompactionTask.CompactionTuningConfig.defaultConfig();
     final byte[] json = mapper.writeValueAsBytes(tuningConfig);
-    final ParallelIndexTuningConfig fromJson = (CompactionTask.CompactionTuningConfig) mapper.readValue(json, TuningConfig.class);
-    Assert.assertEquals(fromJson, tuningConfig);
+    final ParallelIndexTuningConfig fromJson =
+        (CompactionTask.CompactionTuningConfig) mapper.readValue(json, TuningConfig.class);
+    Assertions.assertEquals(fromJson, tuningConfig);
   }
 
   @Test
-  public void testSerdeWithNonZeroAwaitSegmentAvailabilityTimeoutMillis()
+  public void testConfigWithNonZeroAwaitSegmentAvailabilityTimeoutThrowsException()
   {
-    expectedException.expect(IllegalArgumentException.class);
-    expectedException.expectMessage("awaitSegmentAvailabilityTimeoutMillis is not supported for Compcation Task");
-    final CompactionTask.CompactionTuningConfig tuningConfig = new CompactionTask.CompactionTuningConfig(
-        null,
-        null,
-        null,
-        10,
-        1000L,
-        null,
-        null,
-        null,
-        null,
-        new DynamicPartitionsSpec(100, 100L),
-        new IndexSpec(
-            RoaringBitmapSerdeFactory.getInstance(),
-            CompressionStrategy.UNCOMPRESSED,
-            CompressionStrategy.LZF,
-            LongEncodingStrategy.LONGS
-        ),
-        new IndexSpec(),
-        1,
-        false,
-        true,
-        10000L,
-        OffHeapMemorySegmentWriteOutMediumFactory.instance(),
-        null,
-        250,
-        100,
-        20L,
-        new Duration(3600),
-        128,
-        null,
-        null,
-        false,
-        null,
-        null,
-        null,
-        5L
+    final Exception e = Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () -> TuningConfigBuilder.forCompactionTask()
+                                 .withAwaitSegmentAvailabilityTimeoutMillis(5L)
+                                 .build()
     );
+    Assertions.assertEquals("awaitSegmentAvailabilityTimeoutMillis is not supported for Compcation Task", e.getMessage());
   }
 
   @Test
-  public void testSerdeWithZeroAwaitSegmentAvailabilityTimeoutMillis()
+  public void testConfigWithZeroAwaitSegmentAvailabilityTimeoutMillis()
   {
-    final CompactionTask.CompactionTuningConfig tuningConfig = new CompactionTask.CompactionTuningConfig(
-        null,
-        null,
-        null,
-        10,
-        1000L,
-        null,
-        null,
-        null,
-        null,
-        new DynamicPartitionsSpec(100, 100L),
-        new IndexSpec(
-            RoaringBitmapSerdeFactory.getInstance(),
-            CompressionStrategy.UNCOMPRESSED,
-            CompressionStrategy.LZF,
-            LongEncodingStrategy.LONGS
-        ),
-        new IndexSpec(),
-        1,
-        false,
-        true,
-        10000L,
-        OffHeapMemorySegmentWriteOutMediumFactory.instance(),
-        null,
-        250,
-        100,
-        20L,
-        new Duration(3600),
-        128,
-        null,
-        null,
-        false,
-        null,
-        null,
-        null,
-        0L
-    );
-    Assert.assertEquals(0L, tuningConfig.getAwaitSegmentAvailabilityTimeoutMillis());
+    final CompactionTask.CompactionTuningConfig tuningConfig = TuningConfigBuilder
+        .forCompactionTask()
+        .withAwaitSegmentAvailabilityTimeoutMillis(0L)
+        .build();
+    Assertions.assertEquals(0L, tuningConfig.getAwaitSegmentAvailabilityTimeoutMillis());
   }
 
   @Test
-  public void testSerdeWithNullAwaitSegmentAvailabilityTimeoutMillis()
+  public void testDefaultAwaitSegmentAvailabilityTimeoutMillis()
   {
-    final CompactionTask.CompactionTuningConfig tuningConfig = new CompactionTask.CompactionTuningConfig(
-        null,
-        null,
-        null,
-        10,
-        1000L,
-        null,
-        null,
-        null,
-        null,
-        new DynamicPartitionsSpec(100, 100L),
-        new IndexSpec(
-            RoaringBitmapSerdeFactory.getInstance(),
-            CompressionStrategy.UNCOMPRESSED,
-            CompressionStrategy.LZF,
-            LongEncodingStrategy.LONGS
-        ),
-        new IndexSpec(),
-        1,
-        false,
-        true,
-        10000L,
-        OffHeapMemorySegmentWriteOutMediumFactory.instance(),
-        null,
-        250,
-        100,
-        20L,
-        new Duration(3600),
-        128,
-        null,
-        null,
-        false,
-        null,
-        null,
-        null,
-        null
-    );
-    Assert.assertEquals(0L, tuningConfig.getAwaitSegmentAvailabilityTimeoutMillis());
+    final CompactionTask.CompactionTuningConfig tuningConfig =
+        TuningConfigBuilder.forCompactionTask().build();
+    Assertions.assertEquals(0L, tuningConfig.getAwaitSegmentAvailabilityTimeoutMillis());
   }
 
   @Test
   public void testEqualsAndHashCode()
   {
     EqualsVerifier.forClass(CompactionTask.CompactionTuningConfig.class)
+                  .withPrefabValues(
+                      IndexSpec.class,
+                      IndexSpec.getDefault(),
+                      IndexSpec.builder().withDimensionCompression(CompressionStrategy.ZSTD).build()
+                  )
                   .usingGetClass()
                   .verify();
   }

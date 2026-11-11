@@ -35,11 +35,12 @@ Druid uses the following resource types:
 
 * DATASOURCE &ndash; Each Druid table (i.e., `tables` in the `druid` schema in SQL) is a resource.
 * CONFIG &ndash; Configuration resources exposed by the cluster components. 
-* EXTERNAL &ndash; External data read through the [EXTERN function](../multi-stage-query/concepts.md#extern) in SQL.
+* EXTERNAL &ndash; External data read through the [EXTERN function](../multi-stage-query/concepts.md#read-external-data-with-extern) in SQL.
+* LOOKUP &ndash; Lookup configuration, status, and introspection endpoints when `druid.auth.enableLookupAuthorization` is true.
 * STATE &ndash; Cluster-wide state resources.
 * SYSTEM_TABLE &ndash; when the Broker property `druid.sql.planner.authorizeSystemTablesDirectly` is true, then Druid uses this resource type to authorize the system tables in the `sys` schema in SQL.
 
-For specific resources associated with the resource types, see [Defining permissions](#defining-permissions) and the corresponding endpoint descriptions in [API reference](./api-reference.md).
+For specific resources associated with the resource types, see [Defining permissions](#defining-permissions) and the corresponding endpoint descriptions in [API reference](../api-reference/api-reference.md).
 
 ### Actions
 
@@ -81,6 +82,24 @@ This section describes the resource names available for each resource type.
 ### `DATASOURCE`
 Resource names for this type are datasource names. Specifying a datasource permission allows the administrator to grant users access to specific datasources.
 
+:::info
+Any authenticated user can read the contents of any [lookup](../querying/lookups.md). Avoid storing sensitive data in lookups.
+:::
+
+### `LOOKUP`
+
+When `druid.auth.enableLookupAuthorization` is true, lookup endpoints authorize against `LOOKUP` resources named `tier/lookup`. The tier comes from the URL, bulk request body, coordinator lookup state or the serving node. `READ` covers GET requests, including lookup configuration, status, node status and introspection. `WRITE` covers POST, PUT and DELETE requests.
+
+In resource names, `%` and `/` in each tier or lookup name are encoded as `%25` and `%2F` before the parts are joined. For example, lookup `x/y` in tier `a` uses `LOOKUP:a/x%2Fy`, while lookup `y` in tier `a/x` uses `LOOKUP:a%2Fx/y`.
+
+The setting is false by default, so existing lookup endpoints continue to use `CONFIG:CONFIG` until it is enabled. Before enabling it with Druid basic security, add `LOOKUP` `READ` and `WRITE` on `.*` to the existing permissions for the `admin` and `druid_system` roles. Existing roles are not updated automatically when the resource type is added.
+
+This setting applies to lookup HTTP endpoints. It does not currently change lookup use in SQL or native queries, i.e., query execution does not check `LOOKUP` permissions.
+
+Bulk GET responses omit lookups for which the caller lacks `READ` authorization. To list an empty tier, grant `READ` on `LOOKUP:<tier>`.
+
+Bulk writes check `WRITE` on every affected lookup before making changes. Deleting an empty tier checks `WRITE` on `LOOKUP:<tier>`. An empty coordinator-wide write, such as `POST /druid/coordinator/v1/lookups/config` with `{}`, checks `WRITE` on `LOOKUP:LOOKUP`.
+
 ### `CONFIG`
 There are two possible resource names for the "CONFIG" resource type, "CONFIG" and "security". Granting a user access to CONFIG resources allows them to access the following endpoints.
 
@@ -105,7 +124,7 @@ There are two possible resource names for the "CONFIG" resource type, "CONFIG" a
 
 The EXTERNAL resource type only accepts the resource name "EXTERNAL".
 Granting a user access to EXTERNAL resources allows them to run queries that include
-the [EXTERN function](../multi-stage-query/concepts.md#extern) in SQL
+the [EXTERN function](../multi-stage-query/concepts.md#read-external-data-with-extern) in SQL
 to read external data.
 
 ### `STATE`
@@ -141,7 +160,7 @@ There is only one possible resource name for the "STATE" config resource type, "
 Resource names for this type are system schema table names in the `sys` schema in SQL, for example `sys.segments` and `sys.server_segments`. Druid only enforces authorization for `SYSTEM_TABLE` resources when the Broker property `druid.sql.planner.authorizeSystemTablesDirectly` is true.
 ### HTTP methods
 
-For information on what HTTP methods are supported on a particular request endpoint, refer to [API reference](./api-reference.md).
+For information on what HTTP methods are supported on a particular request endpoint, refer to [API reference](../api-reference/api-reference.md).
 
 `GET` requests require READ permissions, while `POST` and `DELETE` requests require WRITE permissions.
 
@@ -149,7 +168,7 @@ For information on what HTTP methods are supported on a particular request endpo
 
 Queries on Druid datasources require DATASOURCE READ permissions for the specified datasource.
 
-Queries to access external data through the [EXTERN function](../multi-stage-query/concepts.md#extern) require EXTERNAL READ permissions.
+Queries to access external data through the [EXTERN function](../multi-stage-query/concepts.md#read-external-data-with-extern) require EXTERNAL READ permissions.
 
 Queries on [INFORMATION_SCHEMA tables](../querying/sql-metadata-tables.md#information-schema) return information about datasources that the caller has DATASOURCE READ access to. Other
 datasources are omitted.
@@ -160,6 +179,7 @@ Queries on the [system schema tables](../querying/sql-metadata-tables.md#system-
 - `server_segments`: The user requires STATE READ permissions. Druid filters segments according to DATASOURCE READ permissions.
 - `tasks`: Druid filters tasks according to DATASOURCE READ permissions.
 - `supervisors`: Druid filters supervisors according to DATASOURCE READ permissions.
+- `query_context_parameters`: No additional permissions are required. The `effective_value` and `effective_source` columns require CONFIG READ permissions; without them, they show null and `UNAUTHORIZED`.
 
 When the Broker property `druid.sql.planner.authorizeSystemTablesDirectly` is true, users also require  `SYSTEM_TABLE` authorization on a system schema table to query it.
 

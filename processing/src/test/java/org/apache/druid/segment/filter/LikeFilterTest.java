@@ -23,59 +23,73 @@ import com.google.common.base.Function;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import nl.jqno.equalsverifier.EqualsVerifier;
-import org.apache.druid.common.config.NullHandling;
+import org.apache.druid.data.input.ColumnsFilter;
 import org.apache.druid.data.input.InputRow;
+import org.apache.druid.data.input.InputRowSchema;
 import org.apache.druid.data.input.impl.DimensionsSpec;
-import org.apache.druid.data.input.impl.InputRowParser;
-import org.apache.druid.data.input.impl.MapInputRowParser;
-import org.apache.druid.data.input.impl.TimeAndDimsParseSpec;
 import org.apache.druid.data.input.impl.TimestampSpec;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.Pair;
+import org.apache.druid.query.extraction.MapLookupExtractor;
 import org.apache.druid.query.extraction.SubstringDimExtractionFn;
 import org.apache.druid.query.filter.Filter;
 import org.apache.druid.query.filter.LikeDimFilter;
+import org.apache.druid.query.filter.NotDimFilter;
+import org.apache.druid.query.lookup.LookupExtractionFn;
+import org.apache.druid.segment.CursorFactory;
 import org.apache.druid.segment.IndexBuilder;
-import org.apache.druid.segment.StorageAdapter;
-import org.junit.AfterClass;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.apache.druid.segment.column.ColumnType;
+import org.apache.druid.segment.column.RowSignature;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.Closeable;
 import java.util.List;
-import java.util.Map;
+import java.util.stream.Stream;
 
-@RunWith(Parameterized.class)
+@ParameterizedClass
+@MethodSource("constructors")
 public class LikeFilterTest extends BaseFilterTest
 {
   private static final String TIMESTAMP_COLUMN = "timestamp";
 
-  private static final InputRowParser<Map<String, Object>> PARSER = new MapInputRowParser(
-      new TimeAndDimsParseSpec(
-          new TimestampSpec(TIMESTAMP_COLUMN, "iso", DateTimes.of("2000")),
-          DimensionsSpec.EMPTY
-      )
+  private static final InputRowSchema SCHEMA = new InputRowSchema(
+      new TimestampSpec(TIMESTAMP_COLUMN, "iso", DateTimes.of("2000")),
+      DimensionsSpec.builder()
+                    .setDimensions(DimensionsSpec.getDefaultSchemas(List.of("dim0", "dim1", "dim2")))
+                    .build(),
+      ColumnsFilter.all()
   );
+  private static final RowSignature ROW_SIGNATURE = RowSignature.builder()
+                                                                .add("dim0", ColumnType.STRING)
+                                                                .add("dim1", ColumnType.STRING)
+                                                                .add("dim2", ColumnType.STRING)
+                                                                .build();
 
   private static final List<InputRow> ROWS = ImmutableList.of(
-      PARSER.parseBatch(ImmutableMap.of("dim0", "0", "dim1", "")).get(0),
-      PARSER.parseBatch(ImmutableMap.of("dim0", "1", "dim1", "foo")).get(0),
-      PARSER.parseBatch(ImmutableMap.of("dim0", "2", "dim1", "foobar")).get(0),
-      PARSER.parseBatch(ImmutableMap.of("dim0", "3", "dim1", "bar")).get(0),
-      PARSER.parseBatch(ImmutableMap.of("dim0", "4", "dim1", "foobarbaz")).get(0),
-      PARSER.parseBatch(ImmutableMap.of("dim0", "5", "dim1", "foo%bar")).get(0),
-      PARSER.parseBatch(ImmutableMap.of("dim0", "6", "dim1", "new\nline")).get(0)
+      makeSchemaRow(SCHEMA, ROW_SIGNATURE, "0", "", ""),
+      makeSchemaRow(SCHEMA, ROW_SIGNATURE, "1", "foo", "aaa"),
+      makeSchemaRow(SCHEMA, ROW_SIGNATURE, "2", "foobar", "aab"),
+      makeSchemaRow(SCHEMA, ROW_SIGNATURE, "3", "bar", null),
+      makeSchemaRow(SCHEMA, ROW_SIGNATURE, "4", "foobarbaz", "abb"),
+      makeSchemaRow(SCHEMA, ROW_SIGNATURE, "5", "foo%bar", "bbb"),
+      makeSchemaRow(SCHEMA, ROW_SIGNATURE, "6", "new\nline", "bbz")
   );
+
+  public static Stream<Object[]> constructors()
+  {
+    return BaseFilterTest.makeConstructors().stream();
+  }
+
 
   public LikeFilterTest(
       String testName,
       IndexBuilder indexBuilder,
-      Function<IndexBuilder, Pair<StorageAdapter, Closeable>> finisher,
+      Function<IndexBuilder, Pair<CursorFactory, Closeable>> finisher,
       boolean cnf,
       boolean optimize
   )
@@ -83,10 +97,7 @@ public class LikeFilterTest extends BaseFilterTest
     super(testName, ROWS, indexBuilder, finisher, cnf, optimize);
   }
 
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
-
-  @AfterClass
+  @AfterAll
   public static void tearDown() throws Exception
   {
     BaseFilterTest.tearDown(LikeFilterTest.class.getName());
@@ -98,6 +109,19 @@ public class LikeFilterTest extends BaseFilterTest
     assertFilterMatches(
         new LikeDimFilter("dim1", "bar", null, null),
         ImmutableList.of("3")
+    );
+    assertFilterMatches(
+        NotDimFilter.of(new LikeDimFilter("dim1", "bar", null, null)),
+        ImmutableList.of("0", "1", "2", "4", "5", "6")
+    );
+
+    assertFilterMatches(
+        new LikeDimFilter("dim2", "bbb", null, null),
+        ImmutableList.of("5")
+    );
+    assertFilterMatches(
+        NotDimFilter.of(new LikeDimFilter("dim2", "bbb", null, null)),
+        ImmutableList.of("0", "1", "2", "4", "6")
     );
   }
 
@@ -117,6 +141,19 @@ public class LikeFilterTest extends BaseFilterTest
         new LikeDimFilter("dim1", "bar", null, new SubstringDimExtractionFn(3, 3)),
         ImmutableList.of("2", "4")
     );
+    assertFilterMatches(
+        NotDimFilter.of(new LikeDimFilter("dim1", "bar", null, new SubstringDimExtractionFn(3, 3))),
+        ImmutableList.of("5", "6")
+    );
+
+    assertFilterMatches(
+        new LikeDimFilter("dim2", "bbb", null, new SubstringDimExtractionFn(0, 3)),
+        ImmutableList.of("5")
+    );
+    assertFilterMatches(
+        NotDimFilter.of(new LikeDimFilter("dim2", "bbb", null, new SubstringDimExtractionFn(0, 3))),
+        ImmutableList.of("1", "2", "4", "6")
+    );
   }
 
   @Test
@@ -125,6 +162,19 @@ public class LikeFilterTest extends BaseFilterTest
     assertFilterMatches(
         new LikeDimFilter("dim1", "foo%", null, null),
         ImmutableList.of("1", "2", "4", "5")
+    );
+    assertFilterMatches(
+        NotDimFilter.of(new LikeDimFilter("dim1", "foo%", null, null)),
+        ImmutableList.of("0", "3", "6")
+    );
+
+    assertFilterMatches(
+        new LikeDimFilter("dim2", "aa%", null, null),
+        ImmutableList.of("1", "2")
+    );
+    assertFilterMatches(
+        NotDimFilter.of(new LikeDimFilter("dim2", "aa%", null, null)),
+        ImmutableList.of("0", "4", "5", "6")
     );
   }
 
@@ -144,6 +194,19 @@ public class LikeFilterTest extends BaseFilterTest
         new LikeDimFilter("dim1", "a%", null, new SubstringDimExtractionFn(1, null)),
         ImmutableList.of("3")
     );
+    assertFilterMatches(
+        NotDimFilter.of(new LikeDimFilter("dim1", "a%", null, new SubstringDimExtractionFn(1, null))),
+        ImmutableList.of("1", "2", "4", "5", "6")
+    );
+
+    assertFilterMatches(
+        new LikeDimFilter("dim2", "a%", null, new SubstringDimExtractionFn(1, null)),
+        ImmutableList.of("1", "2")
+    );
+    assertFilterMatches(
+        NotDimFilter.of(new LikeDimFilter("dim2", "a%", null, new SubstringDimExtractionFn(1, null))),
+        ImmutableList.of("4", "5", "6")
+    );
   }
 
   @Test
@@ -152,6 +215,19 @@ public class LikeFilterTest extends BaseFilterTest
     assertFilterMatches(
         new LikeDimFilter("dim1", "%oba%", null, null),
         ImmutableList.of("2", "4")
+    );
+    assertFilterMatches(
+        NotDimFilter.of(new LikeDimFilter("dim1", "%oba%", null, null)),
+        ImmutableList.of("0", "1", "3", "5", "6")
+    );
+
+    assertFilterMatches(
+        new LikeDimFilter("dim2", "%b%", null, null),
+        ImmutableList.of("2", "4", "5", "6")
+    );
+    assertFilterMatches(
+        NotDimFilter.of(new LikeDimFilter("dim2", "%b%", null, null)),
+        ImmutableList.of("0", "1")
     );
   }
 
@@ -167,17 +243,31 @@ public class LikeFilterTest extends BaseFilterTest
   @Test
   public void testMatchEmptyStringWithExtractionFn()
   {
-    if (NullHandling.replaceWithDefault()) {
-      assertFilterMatches(
-          new LikeDimFilter("dim1", "", null, new SubstringDimExtractionFn(100, 1)),
-          ImmutableList.of("0", "1", "2", "3", "4", "5", "6")
-      );
-    } else {
-      assertFilterMatches(
-          new LikeDimFilter("dim1", "", null, new SubstringDimExtractionFn(100, 1)),
-          ImmutableList.of()
-      );
-    }
+    assertFilterMatches(
+        new LikeDimFilter("dim1", "", null, new SubstringDimExtractionFn(100, 1)),
+        ImmutableList.of()
+    );
+  }
+
+  @Test
+  public void testNonNullableExtractionFnMissingColumn()
+  {
+    final LookupExtractionFn extractionFn = new LookupExtractionFn(
+        new MapLookupExtractor(ImmutableMap.of("foo", "bar"), false),
+        false,
+        "replaced",
+        false,
+        false
+    );
+    final LikeDimFilter filter = new LikeDimFilter("fake", "__DOESNT_EXIST__%", null, extractionFn);
+    assertFilterMatches(
+        filter,
+        ImmutableList.of()
+    );
+    assertFilterMatches(
+        NotDimFilter.of(filter),
+        ImmutableList.of("0", "1", "2", "3", "4", "5", "6")
+    );
   }
 
   @Test
@@ -195,6 +285,20 @@ public class LikeFilterTest extends BaseFilterTest
     assertFilterMatches(
         new LikeDimFilter("dim1", "%", "@", null),
         ImmutableList.of("0", "1", "2", "3", "4", "5", "6")
+    );
+    assertFilterMatches(
+        NotDimFilter.of(new LikeDimFilter("dim1", "%", "@", null)),
+        ImmutableList.of()
+    );
+
+    // doesnt match null tho in sql compatible mode
+    assertFilterMatches(
+        new LikeDimFilter("dim2", "%", "@", null),
+        ImmutableList.of("0", "1", "2", "4", "5", "6")
+    );
+    assertFilterMatches(
+        NotDimFilter.of(new LikeDimFilter("dim2", "%", "@", null)),
+        ImmutableList.of()
     );
   }
 
@@ -295,15 +399,14 @@ public class LikeFilterTest extends BaseFilterTest
     Filter filter = new LikeDimFilter("dim0", "e%", null, new SubstringDimExtractionFn(1, 100)).toFilter();
     Filter filter2 = new LikeDimFilter("dim1", "e%", null, new SubstringDimExtractionFn(1, 100)).toFilter();
 
-    Assert.assertTrue(filter.supportsRequiredColumnRewrite());
-    Assert.assertTrue(filter2.supportsRequiredColumnRewrite());
+    Assertions.assertTrue(filter.supportsRequiredColumnRewrite());
+    Assertions.assertTrue(filter2.supportsRequiredColumnRewrite());
 
     Filter rewrittenFilter = filter.rewriteRequiredColumns(ImmutableMap.of("dim0", "dim1"));
-    Assert.assertEquals(filter2, rewrittenFilter);
+    Assertions.assertEquals(filter2, rewrittenFilter);
 
-    expectedException.expect(IAE.class);
-    expectedException.expectMessage("Received a non-applicable rewrite: {invalidName=dim1}, filter's dimension: dim0");
-    filter.rewriteRequiredColumns(ImmutableMap.of("invalidName", "dim1"));
+    Throwable t = Assertions.assertThrows(IAE.class, () -> filter.rewriteRequiredColumns(ImmutableMap.of("invalidName", "dim1")));
+    Assertions.assertEquals("Received a non-applicable rewrite: {invalidName=dim1}, filter's dimension: dim0", t.getMessage());
   }
 
   @Test

@@ -25,13 +25,14 @@ import org.apache.druid.data.input.MapBasedInputRow;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.io.Closer;
+import org.apache.druid.query.FluentQueryRunner;
+import org.apache.druid.query.QueryPlus;
 import org.apache.druid.query.QueryRunnerTestHelper;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
 import org.apache.druid.query.dimension.DefaultDimensionSpec;
 import org.apache.druid.query.groupby.GroupByQuery;
 import org.apache.druid.query.groupby.GroupByQueryConfig;
 import org.apache.druid.query.groupby.GroupByQueryRunnerFactory;
-import org.apache.druid.query.groupby.GroupByQueryRunnerTest;
 import org.apache.druid.query.groupby.GroupByQueryRunnerTestHelper;
 import org.apache.druid.query.groupby.ResultRow;
 import org.apache.druid.query.groupby.TestGroupByBuffers;
@@ -44,10 +45,10 @@ import org.apache.druid.segment.incremental.IncrementalIndex;
 import org.apache.druid.segment.incremental.IncrementalIndexSchema;
 import org.apache.druid.segment.incremental.OnheapIncrementalIndex;
 import org.apache.druid.testing.InitializedNullHandlingTest;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.Arrays;
@@ -59,19 +60,20 @@ public class DistinctCountGroupByQueryTest extends InitializedNullHandlingTest
   private GroupByQueryRunnerFactory factory;
   private Closer resourceCloser;
 
-  @Before
+  @BeforeEach
   public void setup()
   {
     final GroupByQueryConfig config = new GroupByQueryConfig();
-    config.setMaxIntermediateRows(10000);
     this.resourceCloser = Closer.create();
-    this.factory = GroupByQueryRunnerTest.makeQueryRunnerFactory(
+    final TestGroupByBuffers buffers = this.resourceCloser.register(TestGroupByBuffers.createDefault());
+    this.factory = GroupByQueryRunnerTestHelper.makeQueryRunnerFactory(
+        TestHelper.makeJsonMapper(),
         config,
-        this.resourceCloser.register(TestGroupByBuffers.createDefault())
+        buffers
     );
   }
 
-  @After
+  @AfterEach
   public void teardown() throws IOException
   {
     resourceCloser.close();
@@ -87,7 +89,6 @@ public class DistinctCountGroupByQueryTest extends InitializedNullHandlingTest
                 .withMetrics(new CountAggregatorFactory("cnt"))
                 .build()
         )
-        .setConcurrentEventAdd(true)
         .setMaxRowCount(1000)
         .build();
 
@@ -134,11 +135,13 @@ public class DistinctCountGroupByQueryTest extends InitializedNullHandlingTest
         .build();
     final Segment incrementalIndexSegment = new IncrementalIndexSegment(index, null);
 
-    Iterable<ResultRow> results = GroupByQueryRunnerTestHelper.runQuery(
-        factory,
-        factory.createRunner(incrementalIndexSegment),
-        query
-    );
+    Iterable<ResultRow> results = FluentQueryRunner
+        .create(factory.createRunner(incrementalIndexSegment), factory.getToolchest())
+        .applyPreMergeDecoration()
+        .mergeResults(true)
+        .applyPostMergeDecoration()
+        .run(QueryPlus.wrap(GroupByQueryRunnerTestHelper.populateResourceId(query)))
+        .toList();
 
     List<ResultRow> expectedResults = Arrays.asList(
         GroupByQueryRunnerTestHelper.createExpectedRow(
@@ -167,7 +170,7 @@ public class DistinctCountGroupByQueryTest extends InitializedNullHandlingTest
         "visitor_id",
         null
     );
-    Assert.assertEquals(aggregatorFactory, aggregatorFactory.withName("distinct"));
-    Assert.assertEquals("newTest", aggregatorFactory.withName("newTest").getName());
+    Assertions.assertEquals(aggregatorFactory, aggregatorFactory.withName("distinct"));
+    Assertions.assertEquals("newTest", aggregatorFactory.withName("newTest").getName());
   }
 }

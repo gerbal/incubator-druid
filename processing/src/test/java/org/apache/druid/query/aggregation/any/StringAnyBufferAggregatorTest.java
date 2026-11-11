@@ -19,15 +19,22 @@
 
 package org.apache.druid.query.aggregation.any;
 
+import com.google.common.collect.Lists;
 import org.apache.druid.query.aggregation.BufferAggregator;
 import org.apache.druid.query.aggregation.TestObjectColumnSelector;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
+import java.util.Arrays;
+import java.util.List;
 
 public class StringAnyBufferAggregatorTest
 {
+  StringAnyAggregatorFactory factory = new StringAnyAggregatorFactory(
+      "billy", "billy", 1024, true
+  );
+
   private void aggregateBuffer(
       TestObjectColumnSelector valueSelector,
       BufferAggregator agg,
@@ -44,17 +51,14 @@ public class StringAnyBufferAggregatorTest
   {
 
     final String[] strings = {"AAAA", "BBBB", "CCCC", "DDDD", "EEEE"};
-    Integer maxStringBytes = 1024;
+    int maxStringBytes = 1024;
 
     TestObjectColumnSelector<String> objectColumnSelector = new TestObjectColumnSelector<>(strings);
 
-    StringAnyAggregatorFactory factory = new StringAnyAggregatorFactory(
-        "billy", "billy", maxStringBytes
-    );
-
     StringAnyBufferAggregator agg = new StringAnyBufferAggregator(
         objectColumnSelector,
-        maxStringBytes
+        maxStringBytes,
+        true
     );
 
     ByteBuffer buf = ByteBuffer.allocate(factory.getMaxIntermediateSize());
@@ -68,24 +72,22 @@ public class StringAnyBufferAggregatorTest
 
     String result = ((String) agg.get(buf, position));
 
-    Assert.assertEquals(strings[0], result);
+    Assertions.assertEquals(strings[0], result);
   }
 
   @Test
   public void testBufferAggregateWithFoldCheck()
   {
     final String[] strings = {"AAAA", "BBBB", "CCCC", "DDDD", "EEEE"};
-    Integer maxStringBytes = 1024;
+    int maxStringBytes = 1024;
 
     TestObjectColumnSelector<String> objectColumnSelector = new TestObjectColumnSelector<>(strings);
 
-    StringAnyAggregatorFactory factory = new StringAnyAggregatorFactory(
-        "billy", "billy", maxStringBytes
-    );
 
     StringAnyBufferAggregator agg = new StringAnyBufferAggregator(
         objectColumnSelector,
-        maxStringBytes
+        maxStringBytes,
+        true
     );
 
     ByteBuffer buf = ByteBuffer.allocate(factory.getMaxIntermediateSize());
@@ -100,7 +102,7 @@ public class StringAnyBufferAggregatorTest
     String result = ((String) agg.get(buf, position));
 
 
-    Assert.assertEquals(strings[0], result);
+    Assertions.assertEquals(strings[0], result);
   }
 
   @Test
@@ -108,17 +110,14 @@ public class StringAnyBufferAggregatorTest
   {
 
     final String[] strings = {"CCCC", "AAAA", "BBBB", null, "EEEE"};
-    Integer maxStringBytes = 1024;
+    int maxStringBytes = 1024;
 
     TestObjectColumnSelector<String> objectColumnSelector = new TestObjectColumnSelector<>(strings);
 
-    StringAnyAggregatorFactory factory = new StringAnyAggregatorFactory(
-        "billy", "billy", maxStringBytes
-    );
-
     StringAnyBufferAggregator agg = new StringAnyBufferAggregator(
         objectColumnSelector,
-        maxStringBytes
+        maxStringBytes,
+        true
     );
 
     ByteBuffer buf = ByteBuffer.allocate(factory.getMaxIntermediateSize());
@@ -132,7 +131,7 @@ public class StringAnyBufferAggregatorTest
 
     String result = ((String) agg.get(buf, position));
 
-    Assert.assertEquals(strings[0], result);
+    Assertions.assertEquals(strings[0], result);
   }
 
   @Test
@@ -140,17 +139,13 @@ public class StringAnyBufferAggregatorTest
   {
 
     final String[] strings = {null, "CCCC", "AAAA", "BBBB", "EEEE"};
-    Integer maxStringBytes = 1024;
+    int maxStringBytes = 1024;
 
     TestObjectColumnSelector<String> objectColumnSelector = new TestObjectColumnSelector<>(strings);
 
-    StringAnyAggregatorFactory factory = new StringAnyAggregatorFactory(
-        "billy", "billy", maxStringBytes
-    );
-
     StringAnyBufferAggregator agg = new StringAnyBufferAggregator(
         objectColumnSelector,
-        maxStringBytes
+        maxStringBytes, true
     );
 
     ByteBuffer buf = ByteBuffer.allocate(factory.getMaxIntermediateSize());
@@ -164,25 +159,21 @@ public class StringAnyBufferAggregatorTest
 
     String result = ((String) agg.get(buf, position));
 
-    Assert.assertNull(result);
+    Assertions.assertNull(result);
   }
 
   @Test
   public void testNonStringValue()
   {
-
     final Double[] doubles = {1.00, 2.00};
-    Integer maxStringBytes = 1024;
+    int maxStringBytes = 1024;
 
     TestObjectColumnSelector<Double> objectColumnSelector = new TestObjectColumnSelector<>(doubles);
 
-    StringAnyAggregatorFactory factory = new StringAnyAggregatorFactory(
-        "billy", "billy", maxStringBytes
-    );
-
     StringAnyBufferAggregator agg = new StringAnyBufferAggregator(
         objectColumnSelector,
-        maxStringBytes
+        maxStringBytes,
+        true
     );
 
     ByteBuffer buf = ByteBuffer.allocate(factory.getMaxIntermediateSize());
@@ -196,6 +187,79 @@ public class StringAnyBufferAggregatorTest
 
     String result = ((String) agg.get(buf, position));
 
-    Assert.assertEquals("1.0", result);
+    Assertions.assertEquals("1.0", result);
+  }
+
+  @Test
+  public void testMvds()
+  {
+    List<String> mvd = Lists.newArrayList("AAAA", "AAAAB", "AAAC");
+    final Object[] mvds = {null, "CCCC", mvd, "BBBB", "EEEE"};
+    int maxStringBytes = 1024;
+
+    TestObjectColumnSelector<Object> objectColumnSelector = new TestObjectColumnSelector<>(mvds);
+
+    StringAnyBufferAggregator agg = new StringAnyBufferAggregator(
+        objectColumnSelector,
+        maxStringBytes, true
+    );
+
+    ByteBuffer buf = ByteBuffer.allocate(factory.getMaxIntermediateSize() * 2);
+    int position = 0;
+
+    int[] positions = new int[]{0, 1, 43, 100, 189};
+    Arrays.stream(positions).forEach(i -> agg.init(buf, i));
+
+    //noinspection ForLoopReplaceableByForEach
+    for (int i = 0; i < mvds.length; i++) {
+      aggregateBuffer(objectColumnSelector, agg, buf, positions[i]);
+    }
+    String result = ((String) agg.get(buf, position));
+    Assertions.assertNull(result);
+
+    for (int i = 0; i < positions.length; i++) {
+      if (i == 2) {
+        Assertions.assertEquals(mvd.toString(), agg.get(buf, positions[2]));
+      } else {
+        Assertions.assertEquals(mvds[i], agg.get(buf, positions[i]));
+      }
+    }
+  }
+
+  @Test
+  public void testMvdsWithCustomAggregate()
+  {
+    List<String> mvd = Lists.newArrayList("AAAA", "AAAAB", "AAAC");
+    final Object[] mvds = {null, "CCCC", mvd, "BBBB", "EEEE"};
+    final int maxStringBytes = 1024;
+
+    TestObjectColumnSelector<Object> objectColumnSelector = new TestObjectColumnSelector<>(mvds);
+
+    StringAnyBufferAggregator agg = new StringAnyBufferAggregator(
+        objectColumnSelector,
+        maxStringBytes, false
+    );
+
+    ByteBuffer buf = ByteBuffer.allocate(factory.getMaxIntermediateSize() * 2);
+    int position = 0;
+
+    int[] positions = new int[]{0, 1, 43, 100, 189};
+    Arrays.stream(positions).forEach(i -> agg.init(buf, i));
+
+    //noinspection ForLoopReplaceableByForEach
+    for (int i = 0; i < mvds.length; i++) {
+      aggregateBuffer(objectColumnSelector, agg, buf, positions[i]);
+    }
+    String result = ((String) agg.get(buf, position));
+    Assertions.assertNull(result);
+
+    for (int i = 0; i < positions.length; i++) {
+      if (i == 2) {
+        // takes first in case of mvds
+        Assertions.assertEquals(mvd.get(0), agg.get(buf, positions[2]));
+      } else {
+        Assertions.assertEquals(mvds[i], agg.get(buf, positions[i]));
+      }
+    }
   }
 }

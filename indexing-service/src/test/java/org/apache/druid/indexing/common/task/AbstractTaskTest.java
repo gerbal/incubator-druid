@@ -19,20 +19,24 @@
 
 package org.apache.druid.indexing.common.task;
 
-import com.google.common.collect.ImmutableList;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.io.FileUtils;
 import org.apache.druid.indexer.TaskStatus;
-import org.apache.druid.indexing.common.TaskStorageDirTracker;
+import org.apache.druid.indexer.report.SingleFileTaskReportFileWriter;
 import org.apache.druid.indexing.common.TaskToolbox;
+import org.apache.druid.indexing.common.TestUtils;
 import org.apache.druid.indexing.common.actions.TaskActionClient;
 import org.apache.druid.indexing.common.actions.UpdateStatusAction;
 import org.apache.druid.indexing.common.config.TaskConfig;
+import org.apache.druid.java.util.emitter.service.ServiceMetricEvent;
+import org.apache.druid.query.DruidMetrics;
 import org.apache.druid.server.DruidNode;
 import org.apache.druid.tasklogs.TaskLogPusher;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
+import org.apache.druid.testing.TemporaryFolderExtension;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import org.mockito.Mockito;
 
 import javax.annotation.Nullable;
@@ -50,13 +54,36 @@ import static org.mockito.Mockito.when;
 
 public class AbstractTaskTest
 {
+  @RegisterExtension
+  public final TemporaryFolderExtension temporaryFolder = TemporaryFolderExtension.testCaseScoped();
 
-  @Rule
-  public TemporaryFolder temporaryFolder = new TemporaryFolder();
+  private ObjectMapper objectMapper;
+
+  @BeforeEach
+  public void setup()
+  {
+    objectMapper = new TestUtils().getTestObjectMapper();
+  }
+
+  private File createTempReportFile() throws Exception
+  {
+    final File reportsFile = temporaryFolder.newFile("report.json");
+    FileUtils.write(reportsFile, "", StandardCharsets.UTF_8);
+    return reportsFile;
+  }
+
+  private File createTempDir() throws Exception
+  {
+    return temporaryFolder.newFolder("task");
+  }
 
   @Test
   public void testSetupAndCleanupIsCalledWtihParameter() throws Exception
   {
+    // These tests apparently use Mockito.  Mockito is bad as we've seen it rewrite byte code and effectively cause
+    // impact to other totally unrelated tests.  Mockito needs to be completely erradicated from the codebase.  This
+    // comment is here to either cause me to do it in this commit or just for posterity so that it is clear that it
+    // should happen in the future.
     TaskToolbox toolbox = mock(TaskToolbox.class);
     when(toolbox.getAttemptId()).thenReturn("1");
 
@@ -68,18 +95,22 @@ public class AbstractTaskTest
 
     TaskConfig config = mock(TaskConfig.class);
     when(config.isEncapsulatedTask()).thenReturn(true);
+    final File folder = createTempDir();
+    when(config.getTaskDir(eq("myID"))).thenReturn(folder);
     when(toolbox.getConfig()).thenReturn(config);
-    TaskStorageDirTracker dirTracker = new TaskStorageDirTracker(
-        ImmutableList.of(temporaryFolder.newFolder().getAbsolutePath())
-    );
-    when(toolbox.getDirTracker()).thenReturn(dirTracker);
+    when(toolbox.getJsonMapper()).thenReturn(objectMapper);
 
     TaskActionClient taskActionClient = mock(TaskActionClient.class);
     when(taskActionClient.submit(any())).thenReturn(TaskConfig.class);
     when(toolbox.getTaskActionClient()).thenReturn(taskActionClient);
+    when(toolbox.getTaskReportFileWriter()).thenReturn(
+        new SingleFileTaskReportFileWriter(
+            createTempReportFile()
+        )
+    );
 
 
-    AbstractTask task = new NoopTask("myID", null, null, 1, 0, null, null, null)
+    AbstractTask task = new NoopTask("myID", null, null, 1, 0, null)
     {
       @Nullable
       @Override
@@ -87,12 +118,11 @@ public class AbstractTaskTest
       {
         // create a reports file to test the taskLogPusher pushes task reports
         String result = super.setup(toolbox);
-        File attemptDir = Paths.get(
-            dirTracker.getTaskDir("myID").getAbsolutePath(),
-            "attempt", toolbox.getAttemptId()
-        ).toFile();
+        File attemptDir = Paths.get(folder.getAbsolutePath(), "attempt", toolbox.getAttemptId()).toFile();
         File reportsDir = new File(attemptDir, "report.json");
+        File statusDir = new File(attemptDir, "status.json");
         FileUtils.write(reportsDir, "foo", StandardCharsets.UTF_8);
+        FileUtils.write(statusDir, "{}", StandardCharsets.UTF_8);
         return result;
       }
     };
@@ -101,6 +131,7 @@ public class AbstractTaskTest
     // call it 3 times, once to update location in setup, then one for status and location in cleanup
     Mockito.verify(taskActionClient, times(3)).submit(any());
     verify(pusher, times(1)).pushTaskReports(eq("myID"), any());
+    verify(pusher, times(1)).pushTaskStatus(eq("myID"), any());
   }
 
   @Test
@@ -117,17 +148,17 @@ public class AbstractTaskTest
 
     TaskConfig config = mock(TaskConfig.class);
     when(config.isEncapsulatedTask()).thenReturn(false);
-    File folder = temporaryFolder.newFolder();
+    final File folder = createTempDir();
+    when(config.getTaskDir(eq("myID"))).thenReturn(folder);
     when(toolbox.getConfig()).thenReturn(config);
-    TaskStorageDirTracker dirTracker = new TaskStorageDirTracker(ImmutableList.of(folder.getAbsolutePath()));
-    when(toolbox.getDirTracker()).thenReturn(dirTracker);
+    when(toolbox.getJsonMapper()).thenReturn(objectMapper);
 
     TaskActionClient taskActionClient = mock(TaskActionClient.class);
     when(taskActionClient.submit(any())).thenReturn(TaskConfig.class);
     when(toolbox.getTaskActionClient()).thenReturn(taskActionClient);
 
 
-    AbstractTask task = new NoopTask("myID", null, null, 1, 0, null, null, null)
+    AbstractTask task = new NoopTask("myID", null, null, 1, 0, null)
     {
       @Nullable
       @Override
@@ -162,61 +193,159 @@ public class AbstractTaskTest
 
     TaskConfig config = mock(TaskConfig.class);
     when(config.isEncapsulatedTask()).thenReturn(true);
-    File folder = temporaryFolder.newFolder();
-    TaskStorageDirTracker dirTracker = new TaskStorageDirTracker(ImmutableList.of(folder.getAbsolutePath()));
+    final File folder = createTempDir();
+    when(config.getTaskDir(eq("myID"))).thenReturn(folder);
     when(toolbox.getConfig()).thenReturn(config);
-    when(toolbox.getDirTracker()).thenReturn(dirTracker);
+    when(toolbox.getJsonMapper()).thenReturn(objectMapper);
 
     TaskActionClient taskActionClient = mock(TaskActionClient.class);
     when(taskActionClient.submit(any())).thenReturn(TaskConfig.class);
     when(toolbox.getTaskActionClient()).thenReturn(taskActionClient);
+    when(toolbox.getTaskReportFileWriter()).thenReturn(
+        new SingleFileTaskReportFileWriter(
+            createTempReportFile()
+        )
+    );
 
-    AbstractTask task = new NoopTask("myID", null, null, 1, 0, null, null, null)
+    TaskStatus taskStatus = TaskStatus.failure("myId", "failed");
+    AbstractTask task = new NoopTask("myID", null, null, 1, 0, null)
     {
       @Override
-      public TaskStatus runTask(TaskToolbox toolbox) 
+      public TaskStatus runTask(TaskToolbox toolbox)
       {
-        return TaskStatus.failure("myId", "failed");
+        return taskStatus;
       }
     };
     task.run(toolbox);
-    UpdateStatusAction action = new UpdateStatusAction("failure");
+    UpdateStatusAction action = new UpdateStatusAction("", taskStatus);
     verify(taskActionClient).submit(eq(action));
   }
+
+  @Test
+  public void testNullStackStatusGetsReportedCorrectly() throws Exception
+  {
+    TaskToolbox toolbox = mock(TaskToolbox.class);
+    when(toolbox.getAttemptId()).thenReturn("1");
+    when(toolbox.getTaskReportFileWriter()).thenReturn(
+        new SingleFileTaskReportFileWriter(
+            createTempReportFile()
+        )
+    );
+
+    DruidNode node = new DruidNode("foo", "foo", false, 1, 2, true, true);
+    when(toolbox.getTaskExecutorNode()).thenReturn(node);
+
+    TaskLogPusher pusher = mock(TaskLogPusher.class);
+    when(toolbox.getTaskLogPusher()).thenReturn(pusher);
+
+    TaskConfig config = mock(TaskConfig.class);
+    when(config.isEncapsulatedTask()).thenReturn(true);
+    final File folder = createTempDir();
+    when(config.getTaskDir(eq("myID"))).thenReturn(folder);
+    when(toolbox.getConfig()).thenReturn(config);
+    when(toolbox.getJsonMapper()).thenReturn(objectMapper);
+
+    TaskActionClient taskActionClient = mock(TaskActionClient.class);
+    when(taskActionClient.submit(any())).thenReturn(TaskConfig.class);
+    when(toolbox.getTaskActionClient()).thenReturn(taskActionClient);
+    AbstractTask task = new NoopTask("myID", null, null, 1, 0, null)
+    {
+      @Nullable
+      @Override
+      public TaskStatus runTask(TaskToolbox toolbox)
+      {
+        // Simulate the scenario where taskStatus is never set and cleanUp is called with null.
+        return null;
+      }
+    };
+    task.run(toolbox);
+    UpdateStatusAction action = new UpdateStatusAction("", TaskStatus.failure(task.getId(), "Task failed to run"));
+    verify(taskActionClient).submit(eq(action));
+  }
+
+  @Test
+  public void testSetupFailsGetsReportedCorrectly() throws Exception
+  {
+    TaskToolbox toolbox = mock(TaskToolbox.class);
+    when(toolbox.getAttemptId()).thenReturn("1");
+
+    DruidNode node = new DruidNode("foo", "foo", false, 1, 2, true, true);
+    when(toolbox.getTaskExecutorNode()).thenReturn(node);
+
+    TaskLogPusher pusher = mock(TaskLogPusher.class);
+    when(toolbox.getTaskLogPusher()).thenReturn(pusher);
+
+    TaskConfig config = mock(TaskConfig.class);
+    when(config.isEncapsulatedTask()).thenReturn(true);
+    final File folder = createTempDir();
+    when(config.getTaskDir(eq("myID"))).thenReturn(folder);
+    when(toolbox.getConfig()).thenReturn(config);
+    when(toolbox.getJsonMapper()).thenReturn(objectMapper);
+
+    TaskActionClient taskActionClient = mock(TaskActionClient.class);
+    when(taskActionClient.submit(any())).thenReturn(TaskConfig.class);
+    when(toolbox.getTaskActionClient()).thenReturn(taskActionClient);
+    AbstractTask task = new NoopTask("myID", null, null, 1, 0, null)
+    {
+      @Nullable
+      @Override
+      public String setup(TaskToolbox toolbox)
+      {
+        return "setup error";
+      }
+    };
+    task.run(toolbox);
+    UpdateStatusAction action = new UpdateStatusAction("", TaskStatus.failure(task.getId(), "setup error"));
+    verify(taskActionClient).submit(eq(action));
+  }
+
 
   @Test
   public void testBatchIOConfigAppend()
   {
     AbstractTask.IngestionMode ingestionMode = AbstractTask.IngestionMode.fromString("APPEND");
-    Assert.assertEquals(AbstractTask.IngestionMode.APPEND, ingestionMode);
+    Assertions.assertEquals(AbstractTask.IngestionMode.APPEND, ingestionMode);
   }
 
   @Test
   public void testBatchIOConfigReplace()
   {
     AbstractTask.IngestionMode ingestionMode = AbstractTask.IngestionMode.fromString("REPLACE");
-    Assert.assertEquals(AbstractTask.IngestionMode.REPLACE, ingestionMode);
+    Assertions.assertEquals(AbstractTask.IngestionMode.REPLACE, ingestionMode);
   }
 
   @Test
   public void testBatchIOConfigOverwrite()
   {
     AbstractTask.IngestionMode ingestionMode = AbstractTask.IngestionMode.fromString("REPLACE_LEGACY");
-    Assert.assertEquals(AbstractTask.IngestionMode.REPLACE_LEGACY, ingestionMode);
-  }
-
-  @Test
-  public void testBatchIOConfigHadoop()
-  {
-    AbstractTask.IngestionMode ingestionMode = AbstractTask.IngestionMode.fromString("HADOOP");
-    Assert.assertEquals(AbstractTask.IngestionMode.HADOOP, ingestionMode);
+    Assertions.assertEquals(AbstractTask.IngestionMode.REPLACE_LEGACY, ingestionMode);
   }
 
   @Test
   public void testBatchIOConfigNone()
   {
     AbstractTask.IngestionMode ingestionMode = AbstractTask.IngestionMode.fromString("NONE");
-    Assert.assertEquals(AbstractTask.IngestionMode.NONE, ingestionMode);
+    Assertions.assertEquals(AbstractTask.IngestionMode.NONE, ingestionMode);
   }
 
+  @Test
+  public void test_getMetricBuilder_hasAllTaskDimensions()
+  {
+    final AbstractTask task = NoopTask.create();
+    final ServiceMetricEvent.Builder builder = task.getMetricBuilder();
+    Assertions.assertEquals(task.getId(), builder.getDimension(DruidMetrics.TASK_ID));
+    Assertions.assertEquals(task.getGroupId(), builder.getDimension(DruidMetrics.GROUP_ID));
+    Assertions.assertEquals(task.getDataSource(), builder.getDimension(DruidMetrics.DATASOURCE));
+    Assertions.assertEquals(task.getType(), builder.getDimension(DruidMetrics.TASK_TYPE));
+  }
+
+  @Test
+  public void test_getMetricBuilder_returnsFreshInstance()
+  {
+    final AbstractTask task = NoopTask.create();
+    final ServiceMetricEvent.Builder builder1 = task.getMetricBuilder();
+    final ServiceMetricEvent.Builder builder2 = task.getMetricBuilder();
+
+    Assertions.assertNotSame(builder1, builder2);
+  }
 }

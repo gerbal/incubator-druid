@@ -33,9 +33,9 @@ public class ExpressionProcessingConfig
   // Coerce 'null', '[]', and '[null]' into '[null]' for backwards compat with 0.22 and earlier
   public static final String HOMOGENIZE_NULL_MULTIVALUE_STRING_ARRAYS =
       "druid.expressions.homogenizeNullMultiValueStringArrays";
-
-  @JsonProperty("useStrictBooleans")
-  private final boolean useStrictBooleans;
+  public static final String ALLOW_VECTORIZE_FALLBACK = "druid.expressions.allowVectorizeFallback";
+  public static final String USE_VECTOR_API = "druid.expressions.useVectorApi";
+  public static final String USE_VECTOR_MATH_API = "druid.expressions.useVectorMathApi";
 
   @JsonProperty("processArraysAsMultiValueStrings")
   private final boolean processArraysAsMultiValueStrings;
@@ -43,14 +43,24 @@ public class ExpressionProcessingConfig
   @JsonProperty("homogenizeNullMultiValueStringArrays")
   private final boolean homogenizeNullMultiValueStringArrays;
 
+  @JsonProperty("allowVectorizeFallback")
+  private final boolean allowVectorizeFallback;
+
+  @JsonProperty("useVectorApi")
+  private final boolean useVectorApi;
+
+  @JsonProperty("useVectorMathApi")
+  private final boolean useVectorMathApi;
+
   @JsonCreator
   public ExpressionProcessingConfig(
-      @JsonProperty("useStrictBooleans") @Nullable Boolean useStrictBooleans,
       @JsonProperty("processArraysAsMultiValueStrings") @Nullable Boolean processArraysAsMultiValueStrings,
-      @JsonProperty("homogenizeNullMultiValueStringArrays") @Nullable Boolean homogenizeNullMultiValueStringArrays
+      @JsonProperty("homogenizeNullMultiValueStringArrays") @Nullable Boolean homogenizeNullMultiValueStringArrays,
+      @JsonProperty("allowVectorizeFallback") @Nullable Boolean allowVectorizeFallback,
+      @JsonProperty("useVectorApi") @Nullable Boolean useVectorApi,
+      @JsonProperty("useVectorMathApi") @Nullable Boolean useVectorMathApi
   )
   {
-    this.useStrictBooleans = getWithPropertyFallbackFalse(useStrictBooleans, NULL_HANDLING_LEGACY_LOGICAL_OPS_STRING);
     this.processArraysAsMultiValueStrings = getWithPropertyFallbackFalse(
         processArraysAsMultiValueStrings,
         PROCESS_ARRAYS_AS_MULTIVALUE_STRINGS_CONFIG_STRING
@@ -59,11 +69,13 @@ public class ExpressionProcessingConfig
         homogenizeNullMultiValueStringArrays,
         HOMOGENIZE_NULL_MULTIVALUE_STRING_ARRAYS
     );
-  }
-
-  public boolean isUseStrictBooleans()
-  {
-    return useStrictBooleans;
+    this.allowVectorizeFallback = getWithPropertyFallback(
+        allowVectorizeFallback,
+        ALLOW_VECTORIZE_FALLBACK,
+        "true"
+    );
+    this.useVectorApi = getWithPropertyFallbackFalse(useVectorApi, USE_VECTOR_API);
+    this.useVectorMathApi = getWithPropertyFallback(useVectorMathApi, USE_VECTOR_MATH_API, "true");
   }
 
   public boolean processArraysAsMultiValueStrings()
@@ -76,8 +88,28 @@ public class ExpressionProcessingConfig
     return homogenizeNullMultiValueStringArrays;
   }
 
+  public boolean allowVectorizeFallback()
+  {
+    return allowVectorizeFallback;
+  }
+
+  public boolean useVectorApi()
+  {
+    return useVectorApi;
+  }
+
+  public boolean useVectorMathApi()
+  {
+    return useVectorMathApi;
+  }
+
   private static boolean getWithPropertyFallbackFalse(@Nullable Boolean value, String property)
   {
-    return value != null ? value : Boolean.valueOf(System.getProperty(property, "false"));
+    return getWithPropertyFallback(value, property, "false");
+  }
+
+  private static boolean getWithPropertyFallback(@Nullable Boolean value, String property, String fallback)
+  {
+    return value != null ? value : Boolean.valueOf(System.getProperty(property, fallback));
   }
 }

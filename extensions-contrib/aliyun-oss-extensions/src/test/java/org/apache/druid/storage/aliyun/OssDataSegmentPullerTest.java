@@ -21,24 +21,24 @@ package org.apache.druid.storage.aliyun;
 
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSException;
-import com.aliyun.oss.model.ListObjectsRequest;
 import com.aliyun.oss.model.OSSObject;
 import com.aliyun.oss.model.OSSObjectSummary;
-import com.aliyun.oss.model.ObjectListing;
+import com.aliyun.oss.model.ObjectMetadata;
 import org.apache.druid.data.input.impl.CloudObjectLocation;
 import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.segment.loading.SegmentLoadingException;
+import org.apache.druid.testing.TemporaryFolderExtension;
 import org.easymock.EasyMock;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -50,36 +50,40 @@ import java.util.zip.GZIPOutputStream;
  */
 public class OssDataSegmentPullerTest
 {
-  @Rule
-  public TemporaryFolder temporaryFolder = new TemporaryFolder();
+  @RegisterExtension
+  public final TemporaryFolderExtension temporaryFolder = TemporaryFolderExtension.testCaseScoped();
 
   @Test
   public void testSimpleGetVersion() throws IOException
   {
     String bucket = "bucket";
     String keyPrefix = "prefix/dir/0";
+    String expectedKey = keyPrefix + "/renames-0.gz";
     OSS ossClient = EasyMock.createStrictMock(OSS.class);
 
-    final OSSObjectSummary objectSummary = new OSSObjectSummary();
-    objectSummary.setBucketName(bucket);
-    objectSummary.setKey(keyPrefix + "/renames-0.gz");
-    objectSummary.setLastModified(new Date(0));
+    final ObjectMetadata objectMetadata = new ObjectMetadata();
+    objectMetadata.setLastModified(new Date(0));
 
-    final ObjectListing result = new ObjectListing();
-    result.getObjectSummaries().add(objectSummary);
-
-    EasyMock.expect(ossClient.listObjects(EasyMock.anyObject(ListObjectsRequest.class)))
-            .andReturn(result)
+    EasyMock.expect(ossClient.getObjectMetadata(bucket, expectedKey))
+            .andReturn(objectMetadata)
             .once();
     OssDataSegmentPuller puller = new OssDataSegmentPuller(ossClient);
 
     EasyMock.replay(ossClient);
 
-    String version = puller.getVersion(URI.create(StringUtils.format(OssStorageDruidModule.SCHEME + "://%s/%s", bucket, objectSummary.getKey())));
+    String version = puller.getVersion(
+        URI.create(
+            StringUtils.format(
+                OssStorageDruidModule.SCHEME + "://%s/%s",
+                bucket,
+                expectedKey
+            )
+        )
+    );
 
     EasyMock.verify(ossClient);
 
-    Assert.assertEquals(StringUtils.format("%d", new Date(0).getTime()), version);
+    Assertions.assertEquals(StringUtils.format("%d", new Date(0).getTime()), version);
   }
 
   @Test
@@ -90,9 +94,10 @@ public class OssDataSegmentPullerTest
     final OSS ossClient = EasyMock.createStrictMock(OSS.class);
     final byte[] value = bucket.getBytes(StandardCharsets.UTF_8);
 
-    final File tmpFile = temporaryFolder.newFile("gzTest.gz");
+    final File tmpFile = new File(temporaryFolder.getRoot(), "gzTest.gz");
 
-    try (OutputStream outputStream = new GZIPOutputStream(new FileOutputStream(tmpFile))) {
+    try (final FileOutputStream fileOutputStream = new FileOutputStream(tmpFile);
+         final OutputStream outputStream = new GZIPOutputStream(fileOutputStream)) {
       outputStream.write(value);
     }
 
@@ -100,42 +105,44 @@ public class OssDataSegmentPullerTest
     object0.setBucketName(bucket);
     object0.setKey(keyPrefix + "/renames-0.gz");
     object0.getObjectMetadata().setLastModified(new Date(0));
-    object0.setObjectContent(new FileInputStream(tmpFile));
 
     final OSSObjectSummary objectSummary = new OSSObjectSummary();
     objectSummary.setBucketName(bucket);
     objectSummary.setKey(keyPrefix + "/renames-0.gz");
     objectSummary.setLastModified(new Date(0));
 
-    final ObjectListing listObjectsResult = new ObjectListing();
-    listObjectsResult.getObjectSummaries().add(objectSummary);
+    final ObjectMetadata objectMetadata = new ObjectMetadata();
+    objectMetadata.setLastModified(new Date(1));
 
-    final File tmpDir = temporaryFolder.newFolder("gzTestDir");
+    final File tmpDir = temporaryFolder.newFolder();
 
-    EasyMock.expect(ossClient.doesObjectExist(EasyMock.eq(object0.getBucketName()), EasyMock.eq(object0.getKey())))
-            .andReturn(true)
-            .once();
-    EasyMock.expect(ossClient.listObjects(EasyMock.anyObject(ListObjectsRequest.class)))
-            .andReturn(listObjectsResult)
-            .once();
-    EasyMock.expect(ossClient.getObject(EasyMock.eq(object0.getBucketName()), EasyMock.eq(object0.getKey())))
-            .andReturn(object0)
-            .once();
-    OssDataSegmentPuller puller = new OssDataSegmentPuller(ossClient);
+    try (final InputStream objectContent = new FileInputStream(tmpFile)) {
+      object0.setObjectContent(objectContent);
+      EasyMock.expect(ossClient.doesObjectExist(EasyMock.eq(object0.getBucketName()), EasyMock.eq(object0.getKey())))
+              .andReturn(true)
+              .once();
+      EasyMock.expect(ossClient.getObjectMetadata(object0.getBucketName(), object0.getKey()))
+              .andReturn(objectMetadata)
+              .once();
+      EasyMock.expect(ossClient.getObject(EasyMock.eq(object0.getBucketName()), EasyMock.eq(object0.getKey())))
+              .andReturn(object0)
+              .once();
+      final OssDataSegmentPuller puller = new OssDataSegmentPuller(ossClient);
 
-    EasyMock.replay(ossClient);
-    FileUtils.FileCopyResult result = puller.getSegmentFiles(
-        new CloudObjectLocation(
-            bucket,
-            object0.getKey()
-        ), tmpDir
-    );
-    EasyMock.verify(ossClient);
+      EasyMock.replay(ossClient);
+      final FileUtils.FileCopyResult result = puller.getSegmentFiles(
+          new CloudObjectLocation(
+              bucket,
+              object0.getKey()
+          ), tmpDir
+      );
+      EasyMock.verify(ossClient);
 
-    Assert.assertEquals(value.length, result.size());
-    File expected = new File(tmpDir, "renames-0");
-    Assert.assertTrue(expected.exists());
-    Assert.assertEquals(value.length, expected.length());
+      Assertions.assertEquals(value.length, result.size());
+      final File expected = new File(tmpDir, "renames-0");
+      Assertions.assertTrue(expected.exists());
+      Assertions.assertEquals(value.length, expected.length());
+    }
   }
 
   @Test
@@ -146,9 +153,10 @@ public class OssDataSegmentPullerTest
     final OSS ossClient = EasyMock.createStrictMock(OSS.class);
     final byte[] value = bucket.getBytes(StandardCharsets.UTF_8);
 
-    final File tmpFile = temporaryFolder.newFile("gzTest.gz");
+    final File tmpFile = new File(temporaryFolder.getRoot(), "gzTest.gz");
 
-    try (OutputStream outputStream = new GZIPOutputStream(new FileOutputStream(tmpFile))) {
+    try (final FileOutputStream fileOutputStream = new FileOutputStream(tmpFile);
+         final OutputStream outputStream = new GZIPOutputStream(fileOutputStream)) {
       outputStream.write(value);
     }
 
@@ -157,49 +165,46 @@ public class OssDataSegmentPullerTest
     object0.setBucketName(bucket);
     object0.setKey(keyPrefix + "/renames-0.gz");
     object0.getObjectMetadata().setLastModified(new Date(0));
-    object0.setObjectContent(new FileInputStream(tmpFile));
 
-    final OSSObjectSummary objectSummary = new OSSObjectSummary();
-    objectSummary.setBucketName(bucket);
-    objectSummary.setKey(keyPrefix + "/renames-0.gz");
-    objectSummary.setLastModified(new Date(0));
+    final ObjectMetadata objectMetadata = new ObjectMetadata();
+    objectMetadata.setLastModified(new Date(0));
 
-    final ObjectListing listObjectsResult = new ObjectListing();
-    listObjectsResult.getObjectSummaries().add(objectSummary);
-
-    File tmpDir = temporaryFolder.newFolder("gzTestDir");
+    File tmpDir = temporaryFolder.newFolder();
 
     OSSException exception = new OSSException("OssDataSegmentPullerTest", "NoSuchKey", null, null, null, null, null);
-    EasyMock.expect(ossClient.doesObjectExist(EasyMock.eq(object0.getBucketName()), EasyMock.eq(object0.getKey())))
-            .andReturn(true)
-            .once();
-    EasyMock.expect(ossClient.listObjects(EasyMock.anyObject(ListObjectsRequest.class)))
-            .andReturn(listObjectsResult)
-            .once();
-    EasyMock.expect(ossClient.getObject(EasyMock.eq(bucket), EasyMock.eq(object0.getKey())))
-            .andThrow(exception)
-            .once();
-    EasyMock.expect(ossClient.listObjects(EasyMock.anyObject(ListObjectsRequest.class)))
-            .andReturn(listObjectsResult)
-            .once();
-    EasyMock.expect(ossClient.getObject(EasyMock.eq(bucket), EasyMock.eq(object0.getKey())))
-            .andReturn(object0)
-            .once();
-    OssDataSegmentPuller puller = new OssDataSegmentPuller(ossClient);
+    try (final InputStream objectContent = new FileInputStream(tmpFile)) {
+      object0.setObjectContent(objectContent);
+      EasyMock.expect(ossClient.doesObjectExist(EasyMock.eq(object0.getBucketName()), EasyMock.eq(object0.getKey())))
+              .andReturn(true)
+              .once();
+      EasyMock.expect(ossClient.getObjectMetadata(bucket, object0.getKey()))
+              .andReturn(objectMetadata)
+              .once();
+      EasyMock.expect(ossClient.getObject(EasyMock.eq(bucket), EasyMock.eq(object0.getKey())))
+              .andThrow(exception)
+              .once();
+      EasyMock.expect(ossClient.getObjectMetadata(bucket, object0.getKey()))
+              .andReturn(objectMetadata)
+              .once();
+      EasyMock.expect(ossClient.getObject(EasyMock.eq(bucket), EasyMock.eq(object0.getKey())))
+              .andReturn(object0)
+              .once();
+      final OssDataSegmentPuller puller = new OssDataSegmentPuller(ossClient);
 
-    EasyMock.replay(ossClient);
-    FileUtils.FileCopyResult result = puller.getSegmentFiles(
-        new CloudObjectLocation(
-            bucket,
-            object0.getKey()
-        ), tmpDir
-    );
-    EasyMock.verify(ossClient);
+      EasyMock.replay(ossClient);
+      final FileUtils.FileCopyResult result = puller.getSegmentFiles(
+          new CloudObjectLocation(
+              bucket,
+              object0.getKey()
+          ), tmpDir
+      );
+      EasyMock.verify(ossClient);
 
-    Assert.assertEquals(value.length, result.size());
-    File expected = new File(tmpDir, "renames-0");
-    Assert.assertTrue(expected.exists());
-    Assert.assertEquals(value.length, expected.length());
+      Assertions.assertEquals(value.length, result.size());
+      final File expected = new File(tmpDir, "renames-0");
+      Assertions.assertTrue(expected.exists());
+      Assertions.assertEquals(value.length, expected.length());
+    }
   }
 
 }

@@ -26,18 +26,25 @@ import com.google.inject.Injector;
 import com.google.inject.Key;
 import com.google.inject.Module;
 import com.google.inject.Provides;
+import org.apache.druid.client.indexing.IndexingService;
+import org.apache.druid.discovery.DruidLeaderSelector;
+import org.apache.druid.discovery.NodeRole;
 import org.apache.druid.guice.GuiceInjectors;
 import org.apache.druid.guice.JsonConfigProvider;
 import org.apache.druid.guice.JsonConfigurator;
 import org.apache.druid.guice.LifecycleModule;
 import org.apache.druid.guice.MetadataConfigModule;
 import org.apache.druid.guice.annotations.Json;
+import org.apache.druid.guice.annotations.Self;
+import org.apache.druid.guice.security.EscalatorModule;
+import org.apache.druid.java.util.common.concurrent.ScheduledExecutorFactory;
 import org.apache.druid.java.util.emitter.core.NoopEmitter;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Properties;
+import java.util.Set;
 
 public class MySQLMetadataStorageModuleTest
 {
@@ -62,17 +69,17 @@ public class MySQLMetadataStorageModuleTest
     properties.setProperty(propertyPrefix + ".enabledTLSProtocols", "[\"some\", \"protocols\"]");
     properties.setProperty(propertyPrefix + ".verifyServerCertificate", "true");
     provider.inject(properties, injector.getInstance(JsonConfigurator.class));
-    final MySQLConnectorSslConfig config = provider.get().get();
-    Assert.assertTrue(config.isUseSSL());
-    Assert.assertEquals("url", config.getTrustCertificateKeyStoreUrl());
-    Assert.assertEquals("type", config.getTrustCertificateKeyStoreType());
-    Assert.assertEquals("secret", config.getTrustCertificateKeyStorePassword());
-    Assert.assertEquals("url", config.getClientCertificateKeyStoreUrl());
-    Assert.assertEquals("type", config.getClientCertificateKeyStoreType());
-    Assert.assertEquals("secret", config.getClientCertificateKeyStorePassword());
-    Assert.assertEquals(ImmutableList.of("some", "ciphers"), config.getEnabledSSLCipherSuites());
-    Assert.assertEquals(ImmutableList.of("some", "protocols"), config.getEnabledTLSProtocols());
-    Assert.assertTrue(config.isVerifyServerCertificate());
+    final MySQLConnectorSslConfig config = provider.get();
+    Assertions.assertTrue(config.isUseSSL());
+    Assertions.assertEquals("url", config.getTrustCertificateKeyStoreUrl());
+    Assertions.assertEquals("type", config.getTrustCertificateKeyStoreType());
+    Assertions.assertEquals("secret", config.getTrustCertificateKeyStorePassword());
+    Assertions.assertEquals("url", config.getClientCertificateKeyStoreUrl());
+    Assertions.assertEquals("type", config.getClientCertificateKeyStoreType());
+    Assertions.assertEquals("secret", config.getClientCertificateKeyStorePassword());
+    Assertions.assertEquals(ImmutableList.of("some", "ciphers"), config.getEnabledSSLCipherSuites());
+    Assertions.assertEquals(ImmutableList.of("some", "protocols"), config.getEnabledTLSProtocols());
+    Assertions.assertTrue(config.isVerifyServerCertificate());
   }
 
   @Test
@@ -86,8 +93,8 @@ public class MySQLMetadataStorageModuleTest
     );
     final Properties properties = new Properties();
     provider.inject(properties, injector.getInstance(JsonConfigurator.class));
-    final MySQLConnectorDriverConfig config = provider.get().get();
-    Assert.assertEquals(new MySQLConnectorDriverConfig().getDriverClassName(), config.getDriverClassName());
+    final MySQLConnectorDriverConfig config = provider.get();
+    Assertions.assertEquals(new MySQLConnectorDriverConfig().getDriverClassName(), config.getDriverClassName());
   }
 
   @Test
@@ -102,8 +109,8 @@ public class MySQLMetadataStorageModuleTest
     final Properties properties = new Properties();
     properties.setProperty(propertyPrefix + ".driverClassName", "some.driver.classname");
     provider.inject(properties, injector.getInstance(JsonConfigurator.class));
-    final MySQLConnectorDriverConfig config = provider.get().get();
-    Assert.assertEquals("some.driver.classname", config.getDriverClassName());
+    final MySQLConnectorDriverConfig config = provider.get();
+    Assertions.assertEquals("some.driver.classname", config.getDriverClassName());
   }
 
   private Injector createInjector()
@@ -111,6 +118,7 @@ public class MySQLMetadataStorageModuleTest
     MySQLMetadataStorageModule module = new MySQLMetadataStorageModule();
     Injector injector = GuiceInjectors.makeStartupInjectorWithModules(
         ImmutableList.of(
+            new EscalatorModule(),
             new MetadataConfigModule(),
             new LifecycleModule(),
             module,
@@ -126,6 +134,28 @@ public class MySQLMetadataStorageModuleTest
               public ServiceEmitter getEmitter()
               {
                 return new ServiceEmitter("test", "localhost", new NoopEmitter());
+              }
+
+              @Provides
+              @IndexingService
+              public DruidLeaderSelector getLeaderSelector()
+              {
+                // A provider for DruidLeaderSelector is needed by SqlSegmentMetadataTransactionFactory
+                return null;
+              }
+
+              @Provides
+              public ScheduledExecutorFactory getExecutorFactory()
+              {
+                // Required for HeapMemorySegmentMetadataCache
+                return null;
+              }
+
+              @Self
+              @Provides
+              public Set<NodeRole> getNodeRoles()
+              {
+                return Set.of(NodeRole.OVERLORD);
               }
             }
         )

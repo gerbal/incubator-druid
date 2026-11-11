@@ -32,9 +32,9 @@ import org.apache.druid.sql.calcite.util.CalciteTestBase;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
 import org.joda.time.format.ISODateTimeFormat;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -43,7 +43,7 @@ public class SqlRowTransformerTest extends CalciteTestBase
 {
   private RelDataType rowType;
 
-  @Before
+  @BeforeEach
   public void setup()
   {
     final RelDataTypeFactory typeFactory = new SqlTypeFactoryImpl(DruidTypeSystem.INSTANCE);
@@ -84,7 +84,7 @@ public class SqlRowTransformerTest extends CalciteTestBase
         expectedRow[2],
         null
     };
-    Assert.assertArrayEquals(
+    Assertions.assertArrayEquals(
         expectedRow,
         IntStream.range(0, expectedRow.length).mapToObj(i -> transformer.transform(row, i)).toArray()
     );
@@ -112,7 +112,7 @@ public class SqlRowTransformerTest extends CalciteTestBase
         expectedRow[2],
         null
     };
-    Assert.assertArrayEquals(
+    Assertions.assertArrayEquals(
         expectedRow,
         IntStream.range(0, expectedRow.length).mapToObj(i -> transformer.transform(row, i)).toArray()
     );
@@ -126,7 +126,7 @@ public class SqlRowTransformerTest extends CalciteTestBase
         rowType
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         rowType.getFieldList().stream().map(RelDataTypeField::getName).collect(Collectors.toList()),
         transformer.getFieldList()
     );

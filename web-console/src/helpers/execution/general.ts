@@ -16,16 +16,12 @@
  * limitations under the License.
  */
 
-import type { CancelToken } from 'axios';
 import type { QueryResult } from 'druid-query-toolkit';
 
 import type { Execution } from '../../druid-models';
 import { IntermediateQueryState } from '../../utils';
 
-import {
-  updateExecutionWithDatasourceExistsIfNeeded,
-  updateExecutionWithTaskIfNeeded,
-} from './sql-task-execution';
+import { updateExecutionWithTaskIfNeeded } from './sql-task-execution';
 
 export function extractResult(
   execution: Execution | IntermediateQueryState<Execution>,
@@ -44,19 +40,18 @@ export function extractResult(
 export async function executionBackgroundStatusCheck(
   execution: Execution,
   _query: any,
-  cancelToken: CancelToken,
+  signal: AbortSignal,
 ): Promise<Execution | IntermediateQueryState<Execution>> {
   switch (execution.engine) {
     case 'sql-msq-task':
-      execution = await updateExecutionWithTaskIfNeeded(execution, cancelToken);
-      execution = await updateExecutionWithDatasourceExistsIfNeeded(execution, cancelToken);
+      execution = await updateExecutionWithTaskIfNeeded(execution, signal);
       break;
 
     default:
       throw new Error(`can not background check execution for engine ${execution.engine}`);
   }
 
-  if (!execution.isFullyComplete()) return new IntermediateQueryState(execution);
+  if (execution.isWaitingForQuery()) return new IntermediateQueryState(execution);
 
   return execution;
 }
@@ -64,7 +59,7 @@ export async function executionBackgroundStatusCheck(
 export async function executionBackgroundResultStatusCheck(
   execution: Execution,
   query: any,
-  cancelToken: CancelToken,
+  signal: AbortSignal,
 ): Promise<QueryResult | IntermediateQueryState<Execution>> {
-  return extractResult(await executionBackgroundStatusCheck(execution, query, cancelToken));
+  return extractResult(await executionBackgroundStatusCheck(execution, query, signal));
 }

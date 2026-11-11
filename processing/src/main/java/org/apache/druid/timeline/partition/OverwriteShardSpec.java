@@ -21,6 +21,7 @@ package org.apache.druid.timeline.partition;
 
 /**
  * ShardSpec for non-first-generation segments.
+ * This shardSpec is created only by overwriting tasks using segment locks.
  * This shardSpec is allocated a partitionId between {@link PartitionIds#NON_ROOT_GEN_START_PARTITION_ID} and
  * {@link PartitionIds#NON_ROOT_GEN_END_PARTITION_ID}.
  *
@@ -30,7 +31,7 @@ public interface OverwriteShardSpec extends ShardSpec
 {
   /**
    * The core partition concept is not used with segment locking. Instead, the {@link AtomicUpdateGroup} is used
-   * to atomically overshadow segments. Here, we always returns 0 so that the {@link PartitionHolder} skips checking
+   * to atomically overshadow segments. Here, we always return 0 so that the {@link PartitionHolder} skips checking
    * the completeness of the core partitions.
    */
   @Override

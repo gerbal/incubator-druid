@@ -27,16 +27,19 @@ import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.sql.calcite.expression.builtin.TimeFormatOperatorConversion;
-import org.junit.Before;
-import org.junit.Test;
+import org.apache.druid.sql.calcite.util.CalciteTestBase;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import javax.annotation.Nullable;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
 /**
  * Tests for TIME_FORMAT
  */
-public class TimeFormatOperatorConversionTest extends ExpressionTestBase
+public class TimeFormatOperatorConversionTest extends CalciteTestBase
 {
   private static final RowSignature ROW_SIGNATURE = RowSignature
       .builder()
@@ -50,7 +53,7 @@ public class TimeFormatOperatorConversionTest extends ExpressionTestBase
   private TimeFormatOperatorConversion target;
   private ExpressionTestHelper testHelper;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
     target = new TimeFormatOperatorConversion();
@@ -62,7 +65,7 @@ public class TimeFormatOperatorConversionTest extends ExpressionTestBase
   {
     testExpression(
         "2000-02-03 04:05:06",
-        "timestamp_format(\"t\",'yyyy-MM-dd HH:mm:ss','UTC')",
+        "UTC",
         "yyyy-MM-dd HH:mm:ss",
         "UTC"
     );
@@ -73,7 +76,7 @@ public class TimeFormatOperatorConversionTest extends ExpressionTestBase
   {
     testExpression(
         "2000-02-03 04:05:06",
-        "timestamp_format(\"t\",'yyyy-MM-dd HH:mm:ss','UTC')",
+        "UTC",
         "yyyy-MM-dd HH:mm:ss",
         null
     );
@@ -84,26 +87,28 @@ public class TimeFormatOperatorConversionTest extends ExpressionTestBase
   {
     testExpression(
         "2000-02-02 20:05:06",
-        "timestamp_format(\"t\",'yyyy-MM-dd HH:mm:ss','America/Los_Angeles')",
+        "America/Los_Angeles",
         "yyyy-MM-dd HH:mm:ss",
         "America/Los_Angeles"
     );
   }
 
-  @Test(expected = IAE.class)
+  @Test
   public void testConversionToUnknownTimezoneShouldThrowException()
   {
-    testExpression(
-        "2000-02-02 20:05:06",
-        "timestamp_format(\"t\",'yyyy-MM-dd HH:mm:ss','America/NO_TZ')",
-        "yyyy-MM-dd HH:mm:ss",
-        "America/NO_TZ"
-    );
+    assertThrows(IAE.class, () -> {
+      testExpression(
+          "2000-02-02 20:05:06",
+          "America/NO_TZ",
+          "yyyy-MM-dd HH:mm:ss",
+          "America/NO_TZ"
+      );
+    });
   }
 
   private void testExpression(
       String expectedResult,
-      String expectedExpression,
+      String expectedTimezone,
       String format,
       @Nullable String timezone
   )
@@ -116,10 +121,18 @@ public class TimeFormatOperatorConversionTest extends ExpressionTestBase
       exprsBuilder.add(testHelper.makeLiteral(timezone));
     }
 
-    testHelper.testExpressionString(
+    testHelper.testExpression(
         target.calciteOperator(),
         exprsBuilder.build(),
-        makeExpression(expectedExpression),
+        DruidExpression.ofFunctionCall(
+            ColumnType.STRING,
+            "timestamp_format",
+            ImmutableList.of(
+                DruidExpression.ofColumn(ColumnType.LONG, "t"),
+                DruidExpression.ofStringLiteral(format),
+                DruidExpression.ofStringLiteral(expectedTimezone)
+            )
+        ),
         expectedResult
     );
   }

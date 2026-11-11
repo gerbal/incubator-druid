@@ -17,14 +17,59 @@
  */
 
 import { max, sum } from 'd3-array';
-import hasOwnProp from 'has-own-prop';
 
-import { deleteKeys, filterMap, oneOf, zeroDivide } from '../../utils';
+import { AutoForm } from '../../components';
+import type { NumberLike } from '../../utils';
+import {
+  countBy,
+  deleteKeys,
+  filterMap,
+  groupByAsMap,
+  isNumberLike,
+  oneOf,
+  zeroDivide,
+} from '../../utils';
 import type { InputFormat } from '../input-format/input-format';
 import type { InputSource } from '../input-source/input-source';
 
-const SORT_WEIGHT = 0.5;
-const READING_INPUT_WITH_SORT_WEIGHT = 1 - SORT_WEIGHT;
+import type { GraphInfo } from './graph-info';
+import { computeNextInfo } from './graph-info';
+
+const SHUFFLE_WEIGHT = 0.5;
+const READING_INPUT_WITH_SHUFFLE_WEIGHT = 1 - SHUFFLE_WEIGHT;
+
+export type InOut = 'in' | 'out';
+
+function simpleSum(xs: NumberLike[]): number {
+  return sum(xs, x => Number(x));
+}
+
+function aggregateThings<T>(
+  things: T[],
+  aggregators: {
+    [Property in keyof T]: T[Property] | ((vs: T[Property][], ts: T[]) => T[Property]);
+  },
+): T {
+  return Object.fromEntries(
+    Object.entries(aggregators).map(([k, f]) => [
+      k,
+      typeof f === 'function'
+        ? f(
+            filterMap(things, t => (t as any)[k]),
+            things,
+          )
+        : f,
+    ]),
+  ) as any;
+}
+
+function filterToExistingKeys<T>(keys: (keyof T)[], ts: T[]): (keyof T)[] {
+  return keys.filter(k => ts.some(t => Object.hasOwn(t as any, k)));
+}
+
+function objectFromKeys<T>(keys: string[], value: T): Record<string, T> {
+  return Object.fromEntries(keys.map(k => [k, value]));
+}
 
 export type StageInput =
   | {
@@ -34,6 +79,7 @@ export type StageInput =
   | {
       type: 'table';
       dataSource: string;
+      intervals?: string[];
     }
   | {
       type: 'external';
@@ -59,9 +105,11 @@ export interface StageDefinition {
       targetSize?: number;
       partitions?: number;
       aggregate?: boolean;
+      limitHint?: number;
     };
     maxWorkerCount: number;
     shuffleCheckHasMultipleValues?: boolean;
+    maxInputBytesPerWorker?: number;
   };
   phase?: 'NEW' | 'READING_INPUT' | 'POST_READING' | 'RESULTS_READY' | 'FINISHED' | 'FAILED';
   workerCount?: number;
@@ -69,32 +117,35 @@ export interface StageDefinition {
   startTime?: string;
   duration?: number;
   sort?: boolean;
+  shuffle?: string;
+  output?: string;
 }
 
 export interface ClusterBy {
   columns: {
     columnName: string;
-    descending?: boolean;
+    order?: 'ASCENDING' | 'DESCENDING';
   }[];
   bucketByCount?: number;
 }
 
-export function formatClusterBy(
-  clusterBy: ClusterBy | undefined,
-  part: 'all' | 'partition' | 'cluster' = 'all',
-): string {
-  if (!clusterBy) return '';
+function formatClusterByColumns(columns: ClusterBy['columns']): string {
+  return columns
+    .map(part => part.columnName + (part.order === 'DESCENDING' ? ' DESC' : ''))
+    .join(', ');
+}
 
-  let { columns, bucketByCount } = clusterBy;
-  if (bucketByCount) {
-    if (part === 'partition') {
-      columns = columns.slice(0, bucketByCount);
-    } else {
-      columns = columns.slice(bucketByCount);
-    }
+export function formatClusterBy(clusterBy: ClusterBy): string {
+  const { columns, bucketByCount } = clusterBy;
+
+  if (clusterBy.bucketByCount) {
+    return [
+      `Partition by: ${formatClusterByColumns(columns.slice(0, bucketByCount))}`,
+      `Cluster by: ${formatClusterByColumns(columns.slice(bucketByCount))}`,
+    ].join('\n');
+  } else {
+    return `Cluster by: ${formatClusterByColumns(columns)}`;
   }
-
-  return columns.map(part => part.columnName + (part.descending ? ' DESC' : '')).join(', ');
 }
 
 export interface StageWorkerCounter {
@@ -104,6 +155,8 @@ export interface StageWorkerCounter {
   sortProgress?: SortProgressCounter;
   segmentGenerationProgress?: SegmentGenerationProgressCounter;
   warnings?: WarningCounter;
+  cpu?: CpusCounter;
+  storage?: StorageCounter;
 }
 
 export type ChannelCounterName = `input${number}` | 'output' | 'shuffle';
@@ -111,14 +164,14 @@ export type ChannelCounterName = `input${number}` | 'output' | 'shuffle';
 export type CounterName = keyof StageWorkerCounter;
 
 function tallyWarningCount(warningCounter: WarningCounter): number {
-  return sum(Object.values(warningCounter), v => (typeof v === 'number' ? v : 0));
+  return sum(Object.values(warningCounter), v => (isNumberLike(v) ? Number(v) : 0));
 }
 
 function sumByKey(objs: Record<string, number>[]): Record<string, number> {
   const res: Record<string, number> = {};
   for (const obj of objs) {
     for (const k in obj) {
-      if (hasOwnProp(obj, k)) {
+      if (Object.hasOwn(obj, k)) {
         res[k] = (res[k] || 0) + obj[k];
       }
     }
@@ -128,14 +181,31 @@ function sumByKey(objs: Record<string, number>[]): Record<string, number> {
 
 export interface ChannelCounter {
   type: 'channel';
-  rows?: number[];
-  bytes?: number[];
-  frames?: number[];
-  files?: number[];
-  totalFiles?: number[];
+  rows?: NumberLike[];
+  bytes?: NumberLike[];
+  frames?: NumberLike[];
+  files?: NumberLike[];
+  totalFiles?: NumberLike[];
+  loadBytes?: NumberLike[];
+  loadTime?: NumberLike[];
+  loadWait?: NumberLike[];
+  loadFiles?: NumberLike[];
+  queries?: NumberLike[];
+  totalQueries?: NumberLike[];
 }
 
-export type ChannelFields = 'rows' | 'bytes' | 'frames' | 'files' | 'totalFiles';
+export type ChannelFields =
+  | 'rows'
+  | 'bytes'
+  | 'frames'
+  | 'files'
+  | 'totalFiles'
+  | 'loadBytes'
+  | 'loadTime'
+  | 'loadWait'
+  | 'loadFiles'
+  | 'queries'
+  | 'totalQueries';
 
 export interface SortProgressCounter {
   type: 'sortProgress';
@@ -147,24 +217,139 @@ export interface SortProgressCounter {
   triviallyComplete?: boolean;
 }
 
+export interface AggregatedSortProgress {
+  totalMergingLevels: Record<string, number>;
+  levelToBatches: Record<string, Record<string, number>>;
+}
+
+export function aggregateSortProgressCounters(
+  sortProgressCounters: SortProgressCounter[],
+): AggregatedSortProgress {
+  return {
+    totalMergingLevels: countBy(
+      sortProgressCounters.filter(c => c.totalMergingLevels >= 0),
+      c => c.totalMergingLevels,
+    ),
+    levelToBatches: groupByAsMap(
+      sortProgressCounters.flatMap(c =>
+        Object.entries(c.levelToMergedBatches).map(([level, merged]) => [
+          level,
+          Math.max(merged, c.levelToTotalBatches[level as any] || 0),
+        ]),
+      ),
+      ([level]) => level,
+      entities => countBy(entities, x => x[1]),
+    ),
+  };
+}
+
 export interface SegmentGenerationProgressCounter {
   type: 'segmentGenerationProgress';
-  rowsProcessed: number;
-  rowsPersisted: number;
-  rowsMerged: number;
-  rowsPushed: number;
+  rowsProcessed: NumberLike;
+  rowsPersisted: NumberLike;
+  rowsMerged: NumberLike;
+  rowsPushed: NumberLike;
 }
 
 export type SegmentGenerationProgressFields =
-  | 'rowsProcessed'
-  | 'rowsPersisted'
-  | 'rowsMerged'
-  | 'rowsPushed';
+  'rowsProcessed' | 'rowsPersisted' | 'rowsMerged' | 'rowsPushed';
 
 export interface WarningCounter {
-  type: 'warning';
+  type: 'warnings';
   CannotParseExternalData?: number;
   // More types of warnings might be added later
+}
+
+export type CpusCounterFields =
+  | 'main'
+  | 'collectKeyStatistics'
+  | 'mergeInput'
+  | 'hashPartitionOutput'
+  | 'mixOutput'
+  | 'sortOutput';
+
+export const CPUS_COUNTER_FIELDS: CpusCounterFields[] = [
+  'main',
+  'collectKeyStatistics',
+  'mergeInput',
+  'hashPartitionOutput',
+  'mixOutput',
+  'sortOutput',
+];
+
+export function cpusCounterFieldTitle(k: CpusCounterFields) {
+  switch (k) {
+    case 'collectKeyStatistics':
+      return 'Collect key stats';
+
+    default:
+      // main
+      // mergeInput
+      // hashPartitionOutput
+      // mixOutput
+      // sortOutput
+      return AutoForm.makeLabelName(k);
+  }
+}
+
+export interface CpusCounter {
+  type: 'cpus';
+  main?: CpuCounter;
+  collectKeyStatistics?: CpuCounter;
+  mergeInput?: CpuCounter;
+  hashPartitionOutput?: CpuCounter;
+  mixOutput?: CpuCounter;
+  sortOutput?: CpuCounter;
+}
+
+export interface CpuCounter {
+  type: 'cpu';
+  cpu: NumberLike;
+  wall: NumberLike;
+}
+
+export interface StorageCounter {
+  type: 'storage';
+  localBytesMax?: NumberLike;
+  localBytesReserved: NumberLike;
+  localFilesWritten: NumberLike;
+  localBytesWritten: NumberLike;
+  durableFileCount: NumberLike;
+  durableBytesWritten: NumberLike;
+}
+
+// normalizeStorageCounter() has coerced these, so they are safe to do arithmetic on
+export interface NormalizedStorageCounter {
+  type: 'storage';
+  localBytesMax?: number;
+  localBytesReserved: number;
+  localFilesWritten: number;
+  localBytesWritten: number;
+  durableFileCount: number;
+  durableBytesWritten: number;
+}
+
+function normalizeStorageCounter(
+  s: StorageCounter | undefined,
+): NormalizedStorageCounter | undefined {
+  if (!s) return;
+  return {
+    type: 'storage',
+    localBytesMax: s.localBytesMax != null ? Number(s.localBytesMax) : undefined,
+    localBytesReserved: Number(s.localBytesReserved),
+    localFilesWritten: Number(s.localFilesWritten),
+    localBytesWritten: Number(s.localBytesWritten),
+    durableFileCount: Number(s.durableFileCount),
+    durableBytesWritten: Number(s.durableBytesWritten),
+  };
+}
+
+function sumCpuCounters(cs: CpuCounter[]): CpuCounter {
+  return aggregateThings(cs, {
+    type: 'cpu',
+    cpu: simpleSum,
+    wall: simpleSum,
+  });
 }
 
 export interface SimpleWideCounter {
@@ -173,6 +358,8 @@ export interface SimpleWideCounter {
   output?: Record<ChannelFields, number>;
   shuffle?: Record<ChannelFields, number>;
   segmentGenerationProgress?: SegmentGenerationProgressCounter;
+  cpu?: CpusCounter;
+  storage?: NormalizedStorageCounter;
 }
 
 function zeroChannelFields(): Record<ChannelFields, number> {
@@ -182,8 +369,16 @@ function zeroChannelFields(): Record<ChannelFields, number> {
     frames: 0,
     files: 0,
     totalFiles: 0,
+    loadBytes: 0,
+    loadTime: 0,
+    loadWait: 0,
+    loadFiles: 0,
+    queries: 0,
+    totalQueries: 0,
   };
 }
+
+export type Counters = Record<string, Record<string, StageWorkerCounter>>;
 
 export class Stages {
   static readonly QUERY_START_FACTOR = 0.05;
@@ -198,12 +393,9 @@ export class Stages {
   }
 
   public readonly stages: StageDefinition[];
-  private readonly counters?: Record<string, Record<string, StageWorkerCounter>>;
+  private readonly counters?: Counters;
 
-  constructor(
-    stages: StageDefinition[],
-    counters?: Record<string, Record<string, StageWorkerCounter>>,
-  ) {
+  constructor(stages: StageDefinition[], counters?: Counters) {
     this.stages = stages;
     this.counters = counters;
   }
@@ -256,13 +448,13 @@ export class Stages {
     return Stages.stageType(stage) !== 'segmentGenerator';
   }
 
-  stageHasSort(stage: StageDefinition): boolean {
+  stageHasShuffle(stage: StageDefinition): boolean {
     if (!this.stageHasOutput(stage)) return false;
-    return Boolean(stage.sort);
+    return Boolean(stage.sort) || this.hasCounterForStage(stage, 'shuffle');
   }
 
-  stageOutputCounterName(stage: StageDefinition): ChannelCounterName {
-    return this.stageHasSort(stage) ? 'shuffle' : 'output';
+  stageFinalCounterName(stage: StageDefinition): ChannelCounterName {
+    return this.stageHasShuffle(stage) ? 'shuffle' : 'output';
   }
 
   overallProgress(): number {
@@ -281,12 +473,14 @@ export class Stages {
     switch (stage.phase) {
       case 'READING_INPUT':
         return (
-          (this.stageHasSort(stage) ? READING_INPUT_WITH_SORT_WEIGHT : 1) *
+          (this.stageHasShuffle(stage) ? READING_INPUT_WITH_SHUFFLE_WEIGHT : 1) *
           this.readingInputPhaseProgress(stage)
         );
 
       case 'POST_READING':
-        return READING_INPUT_WITH_SORT_WEIGHT + SORT_WEIGHT * this.postReadingPhaseProgress(stage);
+        return (
+          READING_INPUT_WITH_SHUFFLE_WEIGHT + SHUFFLE_WEIGHT * this.postReadingPhaseProgress(stage)
+        );
 
       case 'RESULTS_READY':
       case 'FINISHED':
@@ -305,9 +499,8 @@ export class Stages {
     if (inputFileCount) {
       // If we know how many files there are base the progress on how many files were read
       return (
-        sum(input, (input, i) =>
-          input.type === 'external' ? this.getTotalCounterForStage(stage, `input${i}`, 'files') : 0,
-        ) / inputFileCount
+        sum(input, (_, i) => this.getTotalCounterForStage(stage, `input${i}`, 'files')) /
+        inputFileCount
       );
     } else {
       // Otherwise, base it on the stage input divided by the output of all non-broadcast input stages,
@@ -335,6 +528,14 @@ export class Stages {
 
   currentStageIndex(): number {
     return this.stages.findIndex(({ phase }) => oneOf(phase, 'READING_INPUT', 'POST_READING'));
+  }
+
+  hasCounter(counterName: CounterName): boolean {
+    const { counters } = this;
+    if (!counters) return false;
+    return Object.values(counters).some(counter =>
+      Object.values(counter).some(c => Boolean(c[counterName])),
+    );
   }
 
   hasCounterForStage(stage: StageDefinition, counterName: CounterName): boolean {
@@ -378,11 +579,19 @@ export class Stages {
     if (!counters) return {};
     return sumByKey(
       filterMap(this.getCountersForStage(stage), c => {
-        const warningCounter = c.warnings;
+        const warningCounter = c.warnings as Record<string, number> | undefined;
         if (!warningCounter) return;
         return deleteKeys(warningCounter, ['type']);
       }),
     );
+  }
+
+  getCpuTotalsForStage(stage: StageDefinition): CpusCounter {
+    const cpusCounters = filterMap(this.getCountersForStage(stage), c => c.cpu);
+    return aggregateThings(cpusCounters, {
+      type: 'cpus',
+      ...objectFromKeys(filterToExistingKeys(CPUS_COUNTER_FIELDS, cpusCounters), sumCpuCounters),
+    });
   }
 
   getTotalCounterForStage(
@@ -395,7 +604,7 @@ export class Stages {
     return sum(this.getCountersForStage(stage), c => {
       const counter = c[counterName];
       if (counter?.type !== 'channel') return 0;
-      return sum(counter[field] || []);
+      return simpleSum(counter[field] || []);
     });
   }
 
@@ -410,7 +619,7 @@ export class Stages {
   }
 
   getTotalOutputForStage(stage: StageDefinition, field: 'frames' | 'rows' | 'bytes'): number {
-    return this.getTotalCounterForStage(stage, this.stageOutputCounterName(stage), field);
+    return this.getTotalCounterForStage(stage, this.stageFinalCounterName(stage), field);
   }
 
   getSortProgressForStage(stage: StageDefinition): number {
@@ -418,7 +627,7 @@ export class Stages {
     if (!counters) return 0;
     return zeroDivide(
       sum(this.getCountersForStage(stage), c => {
-        const rowsToSort = c.output ? sum(c.output.rows || []) : 0;
+        const rowsToSort = c.output ? simpleSum(c.output.rows || []) : 0;
         const progressDigest = c.sortProgress?.progressDigest || 0;
         return Math.floor(rowsToSort * progressDigest);
       }),
@@ -432,7 +641,9 @@ export class Stages {
   ): number {
     const { counters } = this;
     if (!counters) return 0;
-    return sum(this.getCountersForStage(stage), c => c.segmentGenerationProgress?.[field] || 0);
+    return sum(this.getCountersForStage(stage), c =>
+      Number(c.segmentGenerationProgress?.[field] || 0),
+    );
   }
 
   getChannelCounterNamesForStage(stage: StageDefinition): ChannelCounterName[] {
@@ -440,7 +651,7 @@ export class Stages {
 
     const channelCounters = definition.input.map((_, i) => `input${i}` as ChannelCounterName);
     if (this.stageHasOutput(stage)) channelCounters.push('output');
-    if (this.stageHasSort(stage)) channelCounters.push('shuffle');
+    if (this.stageHasShuffle(stage)) channelCounters.push('shuffle');
     return channelCounters;
   }
 
@@ -459,24 +670,67 @@ export class Stages {
         const c = stageCounters[channel];
         newWideCounter[channel] = c
           ? {
-              rows: sum(c.rows || []),
-              bytes: sum(c.bytes || []),
-              frames: sum(c.frames || []),
-              files: sum(c.files || []),
-              totalFiles: sum(c.totalFiles || []),
+              rows: simpleSum(c.rows || []),
+              bytes: simpleSum(c.bytes || []),
+              frames: simpleSum(c.frames || []),
+              files: simpleSum(c.files || []),
+              totalFiles: simpleSum(c.totalFiles || []),
+              loadBytes: simpleSum(c.loadBytes || []),
+              loadTime: simpleSum(c.loadTime || []),
+              loadWait: simpleSum(c.loadWait || []),
+              loadFiles: simpleSum(c.loadFiles || []),
+              queries: simpleSum(c.queries || []),
+              totalQueries: simpleSum(c.totalQueries || []),
             }
           : zeroChannelFields();
       }
       newWideCounter.segmentGenerationProgress = stageCounters.segmentGenerationProgress;
+      newWideCounter.cpu = stageCounters.cpu;
+      newWideCounter.storage = normalizeStorageCounter(stageCounters.storage);
       return newWideCounter;
     });
   }
 
+  getInactiveWorkerCount(stage: StageDefinition): number | undefined {
+    const { counters } = this;
+    const { stageNumber } = stage;
+    const forStageCounters = counters?.[stageNumber];
+    if (!forStageCounters) return;
+
+    const channelCounters = this.getChannelCounterNamesForStage(stage);
+
+    // Calculate and return the number of workers that have zero interesting counters
+    return sum(
+      Object.values(forStageCounters).map(stageCounters => {
+        // Check if the worker has any wall time recorded
+        const { cpu } = stageCounters;
+        if (cpu) {
+          const totalWall = sum(CPUS_COUNTER_FIELDS, field => Number(cpu[field]?.wall || 0));
+          if (totalWall > 0) return 0;
+        }
+
+        // Check if the worker has any channel activity
+        return Number(
+          channelCounters.every(channel => {
+            const c = stageCounters[channel];
+            if (!c) return true;
+            return (
+              simpleSum(c.rows || []) === 0 &&
+              simpleSum(c.files || []) === 0 &&
+              simpleSum(c.bytes || []) === 0 &&
+              simpleSum(c.frames || []) === 0
+            );
+          }),
+        );
+      }),
+    );
+  }
+
   getPartitionChannelCounterNamesForStage(
     stage: StageDefinition,
-    type: 'input' | 'output',
+    inOut: InOut,
   ): ChannelCounterName[] {
-    if (type === 'input') {
+    if (inOut === 'in') {
       const { input, broadcast } = stage.definition;
       return filterMap(input, (input, i) =>
         input.type === 'stage' && !broadcast?.includes(i)
@@ -484,31 +738,28 @@ export class Stages {
           : undefined,
       );
     } else {
-      return [this.stageOutputCounterName(stage)];
+      return [this.stageFinalCounterName(stage)];
     }
   }
 
-  getByPartitionCountersForStage(
-    stage: StageDefinition,
-    type: 'input' | 'output',
-  ): SimpleWideCounter[] {
-    const counterNames = this.getPartitionChannelCounterNamesForStage(stage, type);
+  getByPartitionCountersForStage(stage: StageDefinition, inOut: InOut): SimpleWideCounter[] {
+    const counterNames = this.getPartitionChannelCounterNamesForStage(stage, inOut);
     if (!counterNames.length) return [];
 
     if (!this.hasCounterForStage(stage, counterNames[0])) return [];
     const stageCounters = this.getCountersForStage(stage);
 
-    const { partitionCount } = stage;
-    const partitionNumber =
-      type === 'output'
-        ? partitionCount
-        : max(stageCounters, stageCounter =>
-            max(counterNames, counterName => {
-              const channelCounter = stageCounter[counterName];
-              if (channelCounter?.type !== 'channel') return 0;
-              return channelCounter.rows?.length || 0;
-            }),
-          );
+    let partitionNumber = max(stageCounters, stageCounter =>
+      max(counterNames, counterName => {
+        const channelCounter = stageCounter[counterName];
+        if (channelCounter?.type !== 'channel') return 0;
+        return channelCounter.rows?.length || 0;
+      }),
+    );
+
+    if (inOut === 'out') {
+      partitionNumber = Math.max(partitionNumber || 0, stage.partitionCount || 0);
+    }
 
     if (!partitionNumber) return [];
 
@@ -530,16 +781,26 @@ export class Stages {
 
         for (let i = 0; i < n; i++) {
           const c = simpleCounters[i][counterName]!; // This must be defined as we initialized all the counters above
-          c.rows += channelCounter.rows?.[i] || 0;
-          c.bytes += channelCounter.bytes?.[i] || 0;
-          c.frames += channelCounter.frames?.[i] || 0;
-          c.files += channelCounter.files?.[i] || 0;
-          c.totalFiles += channelCounter.totalFiles?.[i] || 0;
+          c.rows += Number(channelCounter.rows?.[i] || 0);
+          c.bytes += Number(channelCounter.bytes?.[i] || 0);
+          c.frames += Number(channelCounter.frames?.[i] || 0);
+          c.files += Number(channelCounter.files?.[i] || 0);
+          c.totalFiles += Number(channelCounter.totalFiles?.[i] || 0);
+          c.loadBytes += Number(channelCounter.loadBytes?.[i] || 0);
+          c.loadTime += Number(channelCounter.loadTime?.[i] || 0);
+          c.loadWait += Number(channelCounter.loadWait?.[i] || 0);
+          c.loadFiles += Number(channelCounter.loadFiles?.[i] || 0);
         }
       }
     }
 
     return simpleCounters;
+  }
+
+  getAggregatedSortProgressForStage(stage: StageDefinition): AggregatedSortProgress | undefined {
+    const sortProgressCounters = filterMap(this.getCountersForStage(stage), c => c.sortProgress);
+    if (!sortProgressCounters.length) return;
+    return aggregateSortProgressCounters(sortProgressCounters);
   }
 
   getRateFromStage(stage: StageDefinition, field: ChannelFields): number | undefined {
@@ -570,5 +831,20 @@ export class Stages {
     }
 
     return potentiallyStuckIndex;
+  }
+
+  getGraphInfos(): GraphInfo[] {
+    const { stages } = this;
+
+    let prevInfo: GraphInfo = [];
+    const ret: GraphInfo[] = [];
+
+    for (const stage of stages) {
+      ret.push(
+        (prevInfo = computeNextInfo(stage, prevInfo, stage.stageNumber === stages.length - 1)),
+      );
+    }
+
+    return ret;
   }
 }

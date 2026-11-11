@@ -16,9 +16,8 @@
  * limitations under the License.
  */
 
-import { Position } from '@blueprintjs/core';
+import { PopoverNext } from '@blueprintjs/core';
 import { IconNames } from '@blueprintjs/icons';
-import { Popover2 } from '@blueprintjs/popover2';
 import React from 'react';
 
 import type { BasicAction } from '../../utils/basic-action';
@@ -33,20 +32,29 @@ export const ACTION_COLUMN_WIDTH = 70;
 
 export interface ActionCellProps {
   onDetail?: () => void;
-  actions?: BasicAction[];
+  disableDetail?: boolean;
+  actions: BasicAction[];
+  menuTitle: string;
 }
 
 export const ActionCell = React.memo(function ActionCell(props: ActionCellProps) {
-  const { onDetail, actions } = props;
-  const actionsMenu = actions ? basicActionsToMenu(actions) : null;
+  const { onDetail, disableDetail, actions, menuTitle } = props;
+  const actionsMenu = basicActionsToMenu(actions, menuTitle);
 
   return (
     <div className="action-cell">
-      {onDetail && <ActionIcon icon={IconNames.SEARCH_TEMPLATE} onClick={onDetail} />}
+      {onDetail && (
+        <ActionIcon icon={IconNames.SEARCH_TEMPLATE} onClick={onDetail} disabled={disableDetail} />
+      )}
       {actionsMenu && (
-        <Popover2 content={actionsMenu} position={Position.BOTTOM_RIGHT}>
+        <PopoverNext
+          content={actionsMenu}
+          placement="bottom-end"
+          lazy
+          shouldReturnFocusOnClose={false}
+        >
           <ActionIcon icon={IconNames.MORE} />
-        </Popover2>
+        </PopoverNext>
       )}
     </div>
   );

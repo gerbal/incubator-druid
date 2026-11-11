@@ -23,11 +23,13 @@ import {
   SqlPartitionedByClause,
   SqlQuery,
   SqlReplaceClause,
+  SqlTable,
   SqlWithPart,
   T,
 } from 'druid-query-toolkit';
 
 import { filterMap, oneOf } from '../../utils';
+import type { ArrayIngestMode } from '../array-ingest-mode/array-ingest-mode';
 import type { ExternalConfig } from '../external-config/external-config';
 import {
   externalConfigToInitDimensions,
@@ -38,17 +40,17 @@ import { guessDataSourceNameFromInputSource } from '../ingestion-spec/ingestion-
 
 export type IngestMode = 'insert' | 'replace';
 
-function removeMvToArray(dimension: SqlExpression): SqlExpression {
-  return dimension.walk(ex =>
-    ex instanceof SqlFunction && ex.getEffectiveFunctionName() === 'MV_TO_ARRAY'
-      ? ex.getArg(0)
-      : ex,
-  ) as SqlExpression;
+function removeTopLevelArrayToMvOrUndefined(dimension: SqlExpression): SqlExpression | undefined {
+  const ex = dimension.getUnderlyingExpression();
+  return ex instanceof SqlFunction && ex.getEffectiveFunctionName() === 'ARRAY_TO_MV'
+    ? ex.getArg(0)
+    : undefined;
 }
 
 export interface IngestQueryPattern {
   destinationTableName: string;
   mode: IngestMode;
+  arrayIngestMode: ArrayIngestMode;
   overwriteWhere?: SqlExpression;
   mainExternalName: string;
   mainExternalConfig: ExternalConfig;
@@ -57,23 +59,26 @@ export interface IngestQueryPattern {
   metrics?: readonly SqlExpression[];
   partitionedBy: string;
   clusteredBy: readonly number[];
+  forceSegmentSortByTime: boolean;
 }
 
 export function externalConfigToIngestQueryPattern(
   config: ExternalConfig,
-  isArrays: boolean[],
   timeExpression: SqlExpression | undefined,
   partitionedByHint: string | undefined,
+  arrayIngestMode: ArrayIngestMode,
 ): IngestQueryPattern {
   return {
     destinationTableName: guessDataSourceNameFromInputSource(config.inputSource) || 'data',
     mode: 'replace',
+    arrayIngestMode,
     mainExternalName: 'ext',
     mainExternalConfig: config,
     filters: [],
-    dimensions: externalConfigToInitDimensions(config, isArrays, timeExpression),
+    dimensions: externalConfigToInitDimensions(config, timeExpression, arrayIngestMode),
     partitionedBy: partitionedByHint || (timeExpression ? 'day' : 'all'),
     clusteredBy: [],
+    forceSegmentSortByTime: true,
   };
 }
 
@@ -133,7 +138,7 @@ function verifyHasOutputName(expression: SqlExpression): void {
 }
 
 export function fitIngestQueryPattern(query: SqlQuery): IngestQueryPattern {
-  if (query.explainClause) throw new Error(`Can not use EXPLAIN in the data loader flow`);
+  if (query.explain) throw new Error(`Can not use EXPLAIN in the data loader flow`);
   if (query.havingClause) throw new Error(`Can not use HAVING in the data loader flow`);
   if (query.orderByClause) throw new Error(`Can not USE ORDER BY in the data loader flow`);
   if (query.limitClause) throw new Error(`Can not use LIMIT in the data loader flow`);
@@ -146,15 +151,23 @@ export function fitIngestQueryPattern(query: SqlQuery): IngestQueryPattern {
     );
   }
 
+  const queryContext = query.getContext();
+  const arrayIngestMode = queryContext['arrayIngestMode'] ?? 'array';
+  const forceSegmentSortByTime = queryContext['forceSegmentSortByTime'] ?? true;
+
   let destinationTableName: string;
   let mode: IngestMode;
   let overwriteWhere: SqlExpression | undefined;
   if (query.insertClause) {
+    const { table } = query.insertClause;
+    if (!(table instanceof SqlTable)) throw new Error('Have to insert into a table');
     mode = 'insert';
-    destinationTableName = query.insertClause.table.getName();
+    destinationTableName = table.getName();
   } else if (query.replaceClause) {
+    const { table } = query.replaceClause;
+    if (!(table instanceof SqlTable)) throw new Error('Have to replace into a table');
     mode = 'replace';
-    destinationTableName = query.replaceClause.table.getName();
+    destinationTableName = table.getName();
     overwriteWhere = query.replaceClause.whereClause?.expression;
   } else {
     throw new Error(`Must have an INSERT or REPLACE clause`);
@@ -224,6 +237,7 @@ export function fitIngestQueryPattern(query: SqlQuery): IngestQueryPattern {
   return {
     destinationTableName,
     mode,
+    arrayIngestMode,
     overwriteWhere,
     mainExternalName,
     mainExternalConfig,
@@ -232,6 +246,7 @@ export function fitIngestQueryPattern(query: SqlQuery): IngestQueryPattern {
     metrics,
     partitionedBy,
     clusteredBy,
+    forceSegmentSortByTime,
   };
 }
 
@@ -243,6 +258,7 @@ export function ingestQueryPatternToQuery(
   const {
     destinationTableName,
     mode,
+    arrayIngestMode,
     overwriteWhere,
     mainExternalName,
     mainExternalConfig,
@@ -251,8 +267,21 @@ export function ingestQueryPatternToQuery(
     metrics,
     partitionedBy,
     clusteredBy,
+    forceSegmentSortByTime,
   } = ingestQueryPattern;
+
+  const queryContext: Record<string, any> = {
+    arrayIngestMode,
+    finalizeAggregations: false,
+    groupByEnableMultiValueUnnesting: false,
+  };
+
+  if (!forceSegmentSortByTime) {
+    queryContext.forceSegmentSortByTime = forceSegmentSortByTime;
+  }
+
   return SqlQuery.from(T(mainExternalName))
+    .changeContext(queryContext)
     .applyIf(!preview, q =>
       mode === 'insert'
         ? q.changeInsertIntoTable(destinationTableName)
@@ -262,13 +291,19 @@ export function ingestQueryPatternToQuery(
       SqlWithPart.simple(
         mainExternalName,
         sampleDataQuery ||
-          SqlQuery.create(externalConfigToTableExpression(mainExternalConfig)).applyIf(preview, q =>
-            q.changeLimitValue(10000),
+          SqlQuery.selectStarFrom(externalConfigToTableExpression(mainExternalConfig)).applyIf(
+            preview,
+            q => q.changeLimitValue(10000),
           ),
       ),
     ])
     .applyForEach(dimensions, (query, ex) =>
-      query.addSelect(preview ? removeMvToArray(ex) : ex, metrics ? { addToGroupBy: 'end' } : {}),
+      query.addSelect(
+        ex,
+        metrics
+          ? { addToGroupBy: 'end', groupByExpression: removeTopLevelArrayToMvOrUndefined(ex) }
+          : {},
+      ),
     )
     .applyForEach(metrics || [], (query, ex) => query.addSelect(ex))
     .applyIf(filters.length, query => query.changeWhereExpression(SqlExpression.and(...filters)))

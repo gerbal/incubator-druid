@@ -31,15 +31,11 @@ import org.apache.druid.segment.BaseLongColumnValueSelector;
 import org.apache.druid.segment.ColumnInspector;
 import org.apache.druid.segment.ColumnSelectorFactory;
 import org.apache.druid.segment.ColumnValueSelector;
-import org.apache.druid.segment.column.ColumnCapabilities;
 import org.apache.druid.segment.column.ColumnType;
-import org.apache.druid.segment.column.Types;
-import org.apache.druid.segment.column.ValueType;
 import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
 import org.apache.druid.segment.vector.VectorValueSelector;
 
 import javax.annotation.Nullable;
-
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
@@ -83,8 +79,8 @@ public abstract class SimpleLongAggregatorFactory extends NullableNumericAggrega
   @Override
   protected Aggregator factorize(ColumnSelectorFactory metricFactory, ColumnValueSelector selector)
   {
-    if (shouldUseStringColumnAggregatorWrapper(metricFactory)) {
-      return new StringColumnLongAggregatorWrapper(
+    if (AggregatorUtil.shouldUseObjectColumnAggregatorWrapper(fieldName, metricFactory)) {
+      return new ObjectColumnLongAggregatorWrapper(
           selector,
           SimpleLongAggregatorFactory.this::buildAggregator,
           nullValue()
@@ -100,8 +96,8 @@ public abstract class SimpleLongAggregatorFactory extends NullableNumericAggrega
       ColumnValueSelector selector
   )
   {
-    if (shouldUseStringColumnAggregatorWrapper(metricFactory)) {
-      return new StringColumnLongBufferAggregatorWrapper(
+    if (AggregatorUtil.shouldUseObjectColumnAggregatorWrapper(fieldName, metricFactory)) {
+      return new ObjectColumnLongBufferAggregatorWrapper(
           selector,
           SimpleLongAggregatorFactory.this::buildBufferAggregator,
           nullValue()
@@ -126,6 +122,19 @@ public abstract class SimpleLongAggregatorFactory extends NullableNumericAggrega
   protected VectorValueSelector vectorSelector(VectorColumnSelectorFactory columnSelectorFactory)
   {
     return AggregatorUtil.makeVectorValueSelector(columnSelectorFactory, fieldName, expression, fieldExpression);
+  }
+
+  @Override
+  protected boolean useGetObject(ColumnSelectorFactory columnSelectorFactory)
+  {
+    return AggregatorUtil.shouldUseObjectColumnAggregatorWrapper(fieldName, columnSelectorFactory);
+  }
+
+  @Override
+  @Nullable
+  protected String getInputColumn()
+  {
+    return expression == null ? fieldName : null;
   }
 
   @Override
@@ -235,15 +244,6 @@ public abstract class SimpleLongAggregatorFactory extends NullableNumericAggrega
   public boolean canVectorize(ColumnInspector columnInspector)
   {
     return AggregatorUtil.canVectorize(columnInspector, fieldName, expression, fieldExpression);
-  }
-
-  private boolean shouldUseStringColumnAggregatorWrapper(ColumnSelectorFactory columnSelectorFactory)
-  {
-    if (fieldName != null) {
-      ColumnCapabilities capabilities = columnSelectorFactory.getColumnCapabilities(fieldName);
-      return Types.is(capabilities, ValueType.STRING);
-    }
-    return false;
   }
 
   protected abstract long nullValue();

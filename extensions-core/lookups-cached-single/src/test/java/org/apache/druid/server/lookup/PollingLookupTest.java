@@ -20,25 +20,19 @@
 package org.apache.druid.server.lookup;
 
 import com.fasterxml.jackson.annotation.JsonTypeName;
-import com.google.common.base.Function;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.query.lookup.LookupExtractor;
 import org.apache.druid.server.lookup.cache.polling.OffHeapPollingCache;
 import org.apache.druid.server.lookup.cache.polling.OnHeapPollingCache;
 import org.apache.druid.server.lookup.cache.polling.PollingCacheFactory;
 import org.apache.druid.testing.InitializedNullHandlingTest;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import javax.annotation.Nullable;
 import java.util.Arrays;
@@ -46,8 +40,10 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
-@RunWith(Parameterized.class)
+import static org.junit.jupiter.api.Assertions.assertThrows;
+
 public class PollingLookupTest extends InitializedNullHandlingTest
 {
   private static final Map<String, String> FIRST_LOOKUP_MAP = ImmutableMap.of(
@@ -63,9 +59,6 @@ public class PollingLookupTest extends InitializedNullHandlingTest
   );
 
   private static final long POLL_PERIOD = 1000L;
-
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
 
   @JsonTypeName("mock")
   private static class MockDataFetcher implements DataFetcher
@@ -102,14 +95,18 @@ public class PollingLookupTest extends InitializedNullHandlingTest
     }
 
     @Override
-    @SuppressWarnings("EqualsHashCode")
+    public int hashCode()
+    {
+      return 0;
+    }
+
+    @Override
     public boolean equals(Object obj)
     {
       return obj instanceof MockDataFetcher;
     }
   }
 
-  @Parameterized.Parameters
   public static Collection<Object[]> inputData()
   {
     return Arrays.asList(new Object[][]{
@@ -118,22 +115,17 @@ public class PollingLookupTest extends InitializedNullHandlingTest
     });
   }
 
-  private final PollingCacheFactory pollingCacheFactory;
+  private PollingCacheFactory pollingCacheFactory;
   private final DataFetcher dataFetcher = new MockDataFetcher();
   private PollingLookup pollingLookup;
 
-  public PollingLookupTest(PollingCacheFactory pollingCacheFactory)
+  private void initPollingLookupTest(PollingCacheFactory pollingCacheFactory)
   {
     this.pollingCacheFactory = pollingCacheFactory;
-  }
-
-  @Before
-  public void setUp()
-  {
     pollingLookup = new PollingLookup(POLL_PERIOD, dataFetcher, pollingCacheFactory);
   }
 
-  @After
+  @AfterEach
   public void tearDown()
   {
     if (pollingLookup != null) {
@@ -142,91 +134,105 @@ public class PollingLookupTest extends InitializedNullHandlingTest
     pollingLookup = null;
   }
 
-  @Test(expected = ISE.class)
-  public void testClose()
+  @MethodSource("inputData")
+  @ParameterizedTest
+  public void testClose(PollingCacheFactory pollingCacheFactory)
   {
-    pollingLookup.close();
-    pollingLookup.apply("key");
+    initPollingLookupTest(pollingCacheFactory);
+    assertThrows(ISE.class, () -> {
+      pollingLookup.close();
+      pollingLookup.apply("key");
+    });
   }
 
-  @Test
-  public void testApply()
+  @MethodSource("inputData")
+  @ParameterizedTest
+  public void testApply(PollingCacheFactory pollingCacheFactory)
   {
+    initPollingLookupTest(pollingCacheFactory);
     assertMapLookup(FIRST_LOOKUP_MAP, pollingLookup);
   }
 
-  @Test(timeout = POLL_PERIOD * 3)
-  public void testApplyAfterDataChange() throws InterruptedException
+  @MethodSource("inputData")
+  @ParameterizedTest
+  @Timeout(value = POLL_PERIOD * 3, unit = TimeUnit.MILLISECONDS)
+  public void testApplyAfterDataChange(PollingCacheFactory pollingCacheFactory) throws InterruptedException
   {
+    initPollingLookupTest(pollingCacheFactory);
     assertMapLookup(FIRST_LOOKUP_MAP, pollingLookup);
     Thread.sleep(POLL_PERIOD * 2);
     assertMapLookup(SECOND_LOOKUP_MAP, pollingLookup);
   }
 
-  @Test
-  public void testUnapply()
+  @MethodSource("inputData")
+  @ParameterizedTest
+  public void testUnapply(PollingCacheFactory pollingCacheFactory)
   {
-    Assert.assertEquals(
-        "reverse lookup should match",
+    initPollingLookupTest(pollingCacheFactory);
+    Assertions.assertEquals(
         Sets.newHashSet("foo", "bad"),
-        Sets.newHashSet(pollingLookup.unapply("bar"))
+        Sets.newHashSet(pollingLookup.unapply("bar")),
+        "reverse lookup should match"
     );
-    Assert.assertEquals(
-        "reverse lookup should match",
+    Assertions.assertEquals(
         Sets.newHashSet("how about that"),
-        Sets.newHashSet(pollingLookup.unapply("foo"))
+        Sets.newHashSet(pollingLookup.unapply("foo")),
+        "reverse lookup should match"
     );
-    Assert.assertEquals(
-        "reverse lookup should match",
+    Assertions.assertEquals(
         Sets.newHashSet("empty string"),
-        Sets.newHashSet(pollingLookup.unapply(""))
+        Sets.newHashSet(pollingLookup.unapply("")),
+        "reverse lookup should match"
     );
-    Assert.assertEquals(
-        "reverse lookup of none existing value should be empty list",
+    Assertions.assertEquals(
         Collections.emptyList(),
-        pollingLookup.unapply("does't exist")
+        pollingLookup.unapply("does't exist"),
+        "reverse lookup of none existing value should be empty list"
     );
   }
 
-  @Test
-  public void testBulkApply()
+  @MethodSource("inputData")
+  @ParameterizedTest
+  public void testBulkApply(PollingCacheFactory pollingCacheFactory)
   {
+    initPollingLookupTest(pollingCacheFactory);
     Map<String, String> map = pollingLookup.applyAll(FIRST_LOOKUP_MAP.keySet());
-    Assert.assertEquals(FIRST_LOOKUP_MAP, Maps.transformValues(map, new Function<String, String>()
-    {
-      @Override
-      public String apply(String input)
-      {
-        //make sure to rewrite null strings as empty.
-        return NullHandling.nullToEmptyIfNeeded(input);
-      }
-    }));
+    Assertions.assertEquals(FIRST_LOOKUP_MAP, map);
   }
 
-  @Test
-  public void testGetCacheKey()
+  @MethodSource("inputData")
+  @ParameterizedTest
+  public void testGetCacheKey(PollingCacheFactory pollingCacheFactory)
   {
+    initPollingLookupTest(pollingCacheFactory);
     PollingLookup pollingLookup2 = new PollingLookup(1L, dataFetcher, pollingCacheFactory);
-    Assert.assertFalse(Arrays.equals(pollingLookup2.getCacheKey(), pollingLookup.getCacheKey()));
+    Assertions.assertFalse(Arrays.equals(pollingLookup2.getCacheKey(), pollingLookup.getCacheKey()));
   }
 
-  @Test
-  public void testCanGetKeySet()
+  @MethodSource("inputData")
+  @ParameterizedTest
+  public void testSupportsAsMap(PollingCacheFactory pollingCacheFactory)
   {
-    Assert.assertFalse(pollingLookup.canGetKeySet());
+    initPollingLookupTest(pollingCacheFactory);
+    Assertions.assertFalse(pollingLookup.supportsAsMap());
   }
 
-  @Test
-  public void testKeySet()
+  @MethodSource("inputData")
+  @ParameterizedTest
+  public void testAsMap(PollingCacheFactory pollingCacheFactory)
   {
-    expectedException.expect(UnsupportedOperationException.class);
-    pollingLookup.keySet();
+    assertThrows(UnsupportedOperationException.class, () -> {
+      initPollingLookupTest(pollingCacheFactory);
+      pollingLookup.asMap();
+    });
   }
 
-  @Test
-  public void testEstimateHeapFootprint()
+  @MethodSource("inputData")
+  @ParameterizedTest
+  public void testEstimateHeapFootprint(PollingCacheFactory pollingCacheFactory)
   {
-    Assert.assertEquals(
+    initPollingLookupTest(pollingCacheFactory);
+    Assertions.assertEquals(
         pollingCacheFactory instanceof OffHeapPollingCache.OffHeapPollingCacheProvider ? 0L : 402L,
         pollingLookup.estimateHeapFootprint()
     );
@@ -237,7 +243,7 @@ public class PollingLookupTest extends InitializedNullHandlingTest
     for (Map.Entry<String, String> entry : map.entrySet()) {
       String key = entry.getKey();
       String val = entry.getValue();
-      Assert.assertEquals("non-null check", NullHandling.emptyToNullIfNeeded(val), lookup.apply(key));
+      Assertions.assertEquals(val, lookup.apply(key), "non-null check");
     }
   }
 }

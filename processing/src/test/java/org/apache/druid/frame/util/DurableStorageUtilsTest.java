@@ -19,20 +19,119 @@
 
 package org.apache.druid.frame.util;
 
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+import java.util.Set;
 
 public class DurableStorageUtilsTest
 {
 
+  private static final String CONTROLLER_ID = "controller_id_1";
+  private static final String TASK_ID = "task_id_1";
+
+  private static final int WORKER_NUMBER = 2;
+
+  private static final int STAGE_NUMBER = 1;
+
+  private static final int PARTITION_NUMBER = 3;
+
+
   @Test
-  public void getControllerTaskIdWithPrefixFromPath()
+  public void getNextDirNameWithPrefixFromPath()
   {
-    Assert.assertEquals("", DurableStorageUtils.getControllerTaskIdWithPrefixFromPath("/123/123"));
-    Assert.assertEquals("123", DurableStorageUtils.getControllerTaskIdWithPrefixFromPath("123"));
-    Assert.assertEquals("controller_query_123",
-                        DurableStorageUtils.getControllerTaskIdWithPrefixFromPath("controller_query_123/123"));
-    Assert.assertEquals("", DurableStorageUtils.getControllerTaskIdWithPrefixFromPath(""));
-    Assert.assertNull(DurableStorageUtils.getControllerTaskIdWithPrefixFromPath(null));
+    Assertions.assertEquals("", DurableStorageUtils.getNextDirNameWithPrefixFromPath("/123/123"));
+    Assertions.assertEquals("123", DurableStorageUtils.getNextDirNameWithPrefixFromPath("123"));
+    Assertions.assertEquals(
+        "controller_query_123",
+        DurableStorageUtils.getNextDirNameWithPrefixFromPath("controller_query_123/123")
+    );
+    Assertions.assertEquals("", DurableStorageUtils.getNextDirNameWithPrefixFromPath(""));
+    Assertions.assertNull(DurableStorageUtils.getNextDirNameWithPrefixFromPath(null));
   }
+
+  @Test
+  public void isQueryResultFileActive()
+  {
+    Assertions.assertTrue(DurableStorageUtils.isQueryResultFileActive(
+        DurableStorageUtils.QUERY_RESULTS_DIR + "/controller_123/result",
+        Set.of("123")
+    ));
+    Assertions.assertFalse(DurableStorageUtils.isQueryResultFileActive(
+        DurableStorageUtils.QUERY_RESULTS_DIR + "/controller_456/result",
+        Set.of("123")
+    ));
+    Assertions.assertFalse(DurableStorageUtils.isQueryResultFileActive(
+        DurableStorageUtils.QUERY_RESULTS_DIR + "/",
+        Set.of("123")
+    ));
+    Assertions.assertFalse(DurableStorageUtils.isQueryResultFileActive(
+        null,
+        Set.of("123")
+    ));
+    Assertions.assertFalse(DurableStorageUtils.isQueryResultFileActive(
+        DurableStorageUtils.QUERY_RESULTS_DIR,
+        Set.of("123")
+    ));
+  }
+
+  @Test
+  public void sanityTest()
+  {
+
+    String baseString = "controller_" + CONTROLLER_ID + "/stage_" + STAGE_NUMBER + "/worker_" + WORKER_NUMBER + "/";
+
+    Assertions.assertEquals(
+        baseString + "__success",
+        DurableStorageUtils.getWorkerOutputSuccessFilePath(CONTROLLER_ID, STAGE_NUMBER, WORKER_NUMBER)
+    );
+    Assertions.assertEquals(
+        DurableStorageUtils.QUERY_RESULTS_DIR + "/" + baseString + "__success",
+        DurableStorageUtils.getQueryResultsSuccessFilePath(CONTROLLER_ID, STAGE_NUMBER, WORKER_NUMBER)
+    );
+
+
+    Assertions.assertEquals(
+        baseString + "taskId_" + TASK_ID,
+        DurableStorageUtils.getTaskIdOutputsFolderName(
+            CONTROLLER_ID,
+            STAGE_NUMBER,
+            WORKER_NUMBER,
+            TASK_ID
+        )
+    );
+    Assertions.assertEquals(
+        DurableStorageUtils.QUERY_RESULTS_DIR + "/" + baseString + "taskId_" + TASK_ID,
+        DurableStorageUtils.getQueryResultsForTaskIdFolderName(
+            CONTROLLER_ID,
+            STAGE_NUMBER,
+            WORKER_NUMBER,
+            TASK_ID
+        )
+    );
+
+
+    Assertions.assertEquals(
+        baseString + "taskId_" + TASK_ID + "/part_3",
+        DurableStorageUtils.getPartitionOutputsFileNameWithPathForPartition(
+            CONTROLLER_ID,
+            STAGE_NUMBER,
+            WORKER_NUMBER,
+            TASK_ID,
+            PARTITION_NUMBER
+        )
+    );
+    Assertions.assertEquals(
+        DurableStorageUtils.QUERY_RESULTS_DIR + "/" + baseString + "taskId_" + TASK_ID + "/part_3",
+        DurableStorageUtils.getQueryResultsFileNameWithPathForPartition(
+            CONTROLLER_ID,
+            STAGE_NUMBER,
+            WORKER_NUMBER,
+            TASK_ID,
+            PARTITION_NUMBER
+        )
+    );
+
+  }
+
 }

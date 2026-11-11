@@ -27,6 +27,7 @@ import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.metadata.MetadataStorageConnectorConfig;
 import org.apache.druid.metadata.MetadataStorageTablesConfig;
 import org.apache.druid.metadata.SQLMetadataConnector;
+import org.apache.druid.segment.metadata.CentralizedDatasourceSchemaConfig;
 import org.skife.jdbi.v2.Binding;
 import org.skife.jdbi.v2.ColonPrefixNamedParamStatementRewriter;
 import org.skife.jdbi.v2.DBI;
@@ -133,9 +134,13 @@ public class SQLServerConnector extends SQLMetadataConnector
   ));
 
   @Inject
-  public SQLServerConnector(Supplier<MetadataStorageConnectorConfig> config, Supplier<MetadataStorageTablesConfig> dbTables)
+  public SQLServerConnector(
+      Supplier<MetadataStorageConnectorConfig> config,
+      Supplier<MetadataStorageTablesConfig> dbTables,
+      CentralizedDatasourceSchemaConfig centralizedDatasourceSchemaConfig
+  )
   {
-    super(config, dbTables);
+    super(config, dbTables, centralizedDatasourceSchemaConfig);
 
     final BasicDataSource datasource = getDatasource();
     datasource.setDriverClassLoader(getClass().getClassLoader());
@@ -219,6 +224,13 @@ public class SQLServerConnector extends SQLMetadataConnector
     return String.format(Locale.ENGLISH, "FETCH NEXT %d ROWS ONLY", limit);
   }
 
+  @Override
+  protected String getDropIndexStatement(String indexName, String tableName)
+  {
+    // SQL Server requires the target table in a DROP INDEX statement.
+    return StringUtils.format("DROP INDEX %s ON %s", indexName, tableName);
+  }
+
   /**
    *
    * {@inheritDoc}
@@ -235,7 +247,7 @@ public class SQLServerConnector extends SQLMetadataConnector
       final byte[] value)
   {
     return getDBI().withHandle(
-        new HandleCallback<Void>()
+        new HandleCallback<>()
         {
           @Override
           public Void withHandle(Handle handle)
@@ -286,6 +298,25 @@ public class SQLServerConnector extends SQLMetadataConnector
       if (TRANSIENT_SQL_CLASS_CODES.contains(sqlClassCode)) {
         return true;
       }
+    }
+    return false;
+  }
+
+  @Override
+  public boolean isUniqueConstraintViolation(Throwable t)
+  {
+    Throwable cause = t;
+    while (cause != null) {
+      if (cause instanceof SQLException) {
+        SQLException sqlException = (SQLException) cause;
+        String sqlState = sqlException.getSQLState();
+
+        // SQL standard unique constraint violation code is 23000 for Sql Server
+        if ("23000".equals(sqlState)) {
+          return true;
+        }
+      }
+      cause = cause.getCause();
     }
     return false;
   }

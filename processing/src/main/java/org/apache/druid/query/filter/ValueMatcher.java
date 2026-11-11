@@ -27,10 +27,19 @@ import org.apache.druid.query.monomorphicprocessing.HotLoopCallee;
  * of this interface is that it is returned by the {@link Filter} "makeMatcher" method, where it is used to identify
  * selected rows for filtered cursors and filtered aggregators.
  *
- * @see org.apache.druid.query.filter.vector.VectorValueMatcher, the vectorized version
+ * @see org.apache.druid.query.filter.vector.VectorValueMatcher the vectorized version
  */
 public interface ValueMatcher extends HotLoopCallee
 {
+  /**
+   * Returns true if the current row matches the condition.
+   *
+   * @param includeUnknown mapping for Druid native two state logic system into SQL three-state logic system. If set
+   *                       to true, this method should also return true if the matching result is 'unknown', such
+   *                       as from the input being null valued..
+   *
+   * @return true if the current row matches the condition, or is unknown and {@code includeUnknown} is set to true
+   */
   @CalledFromHotLoop
-  boolean matches();
+  boolean matches(boolean includeUnknown);
 }

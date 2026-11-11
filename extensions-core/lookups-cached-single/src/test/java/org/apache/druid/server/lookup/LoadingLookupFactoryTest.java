@@ -29,8 +29,8 @@ import org.apache.druid.server.lookup.cache.loading.LoadingCache;
 import org.apache.druid.server.lookup.cache.loading.OffHeapLoadingCache;
 import org.apache.druid.server.lookup.cache.loading.OnHeapLoadingCache;
 import org.easymock.EasyMock;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.Collections;
@@ -56,8 +56,10 @@ public class LoadingLookupFactoryTest
     loadingLookup.close();
     EasyMock.expectLastCall().once();
     EasyMock.replay(loadingLookup);
-    Assert.assertTrue(loadingLookupFactory.start());
-    Assert.assertTrue(loadingLookupFactory.close());
+    Assertions.assertTrue(loadingLookupFactory.start());
+    loadingLookupFactory.awaitInitialization();
+    Assertions.assertTrue(loadingLookupFactory.isInitialized());
+    Assertions.assertTrue(loadingLookupFactory.close());
     EasyMock.verify(loadingLookup);
 
   }
@@ -65,29 +67,29 @@ public class LoadingLookupFactoryTest
   @Test
   public void testReplacesWithNull()
   {
-    Assert.assertTrue(loadingLookupFactory.replaces(null));
+    Assertions.assertTrue(loadingLookupFactory.replaces(null));
   }
 
   @Test
   public void testReplacesWithSame()
   {
-    Assert.assertFalse(loadingLookupFactory.replaces(loadingLookupFactory));
+    Assertions.assertFalse(loadingLookupFactory.replaces(loadingLookupFactory));
   }
 
   @Test
   public void testReplacesWithDifferent()
   {
-    Assert.assertTrue(loadingLookupFactory.replaces(new LoadingLookupFactory(
+    Assertions.assertTrue(loadingLookupFactory.replaces(new LoadingLookupFactory(
         EasyMock.createMock(DataFetcher.class),
         lookupCache,
         reverseLookupCache
     )));
-    Assert.assertTrue(loadingLookupFactory.replaces(new LoadingLookupFactory(
+    Assertions.assertTrue(loadingLookupFactory.replaces(new LoadingLookupFactory(
         dataFetcher,
         EasyMock.createMock(LoadingCache.class),
         reverseLookupCache
     )));
-    Assert.assertTrue(loadingLookupFactory.replaces(new LoadingLookupFactory(
+    Assertions.assertTrue(loadingLookupFactory.replaces(new LoadingLookupFactory(
         dataFetcher,
         lookupCache,
         EasyMock.createMock(LoadingCache.class)
@@ -98,7 +100,7 @@ public class LoadingLookupFactoryTest
   @Test
   public void testGet()
   {
-    Assert.assertEquals(loadingLookup, loadingLookupFactory.get());
+    Assertions.assertEquals(loadingLookup, loadingLookupFactory.get());
   }
 
   @Test
@@ -107,14 +109,14 @@ public class LoadingLookupFactoryTest
     ObjectMapper mapper = TestHelper.makeJsonMapper();
     LoadingLookupFactory loadingLookupFactory = new LoadingLookupFactory(
         new MockDataFetcher(),
-        new OnHeapLoadingCache<String, String>(
+        new OnHeapLoadingCache<>(
             0,
             100,
             100L,
             0L,
             0L
         ),
-        new OffHeapLoadingCache<String, List<String>>(
+        new OffHeapLoadingCache<>(
             100,
             100L,
             0L,
@@ -124,7 +126,7 @@ public class LoadingLookupFactoryTest
 
     mapper.registerSubtypes(MockDataFetcher.class);
     mapper.registerSubtypes(LoadingLookupFactory.class);
-    Assert.assertEquals(
+    Assertions.assertEquals(
         loadingLookupFactory,
         mapper.readerFor(LookupExtractorFactory.class)
               .readValue(mapper.writeValueAsString(loadingLookupFactory))
@@ -165,7 +167,12 @@ public class LoadingLookupFactoryTest
     }
 
     @Override
-    @SuppressWarnings("EqualsHashCode")
+    public int hashCode()
+    {
+      return 0;
+    }
+
+    @Override
     public boolean equals(Object obj)
     {
       return obj instanceof MockDataFetcher;

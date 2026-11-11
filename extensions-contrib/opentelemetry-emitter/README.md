@@ -39,7 +39,7 @@ To enable the OpenTelemetry emitter, add the extension and enable the emitter in
 
 Load the plugin:
 
-```
+```properties
 druid.extensions.loadList=[..., "opentelemetry-emitter"]
 ```
 
@@ -47,13 +47,13 @@ Then there are 2 options:
 
 * You want to use only `opentelemetry-emitter`
 
-```
+```properties
 druid.emitter=opentelemetry
 ```
 
 * You want to use `opentelemetry-emitter` with other emitters
 
-```
+```properties
 druid.emitter=composing
 druid.emitter.composing.emitters=[..., "opentelemetry"]
 ```
@@ -66,8 +66,7 @@ _*More about Druid configuration [here](https://druid.apache.org/docs/latest/con
 
 Create `docker-compose.yaml` in your working dir:
 
-```
-version: "2"
+```yaml
 services:
 
   zipkin-all-in-one:
@@ -76,30 +75,31 @@ services:
       - "9411:9411"
 
   otel-collector:
-    image: otel/opentelemetry-collector:latest
-    command: ["--config=otel-local-config.yaml", "${OTELCOL_ARGS}"]
+    image: otel/opentelemetry-collector-contrib:latest
     volumes:
-      - ${PWD}/config.yaml:/otel-local-config.yaml
+      - ${PWD}/config.yaml:/etc/otelcol-contrib/config.yaml
     ports:
       - "4317:4317"
+      - "4318:4318"
 ```
 
 Create `config.yaml` file with configuration for otel-collector:
 
-```
-version: "2"
-receivers:
+```yaml
 receivers:
   otlp:
     protocols:
       grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
 
 exporters:
   zipkin:
     endpoint: "http://zipkin-all-in-one:9411/api/v2/spans"
     format: proto
 
-  logging:
+  debug:
 
 processors:
   batch:
@@ -109,22 +109,22 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [logging, zipkin]
+      exporters: [debug, zipkin]
 ```
 
 *_How to configure otel-collector you can read [here](https://opentelemetry.io/docs/collector/configuration/)._
 
 Run otel-collector and zipkin.
 
-```
-docker-compose up
+```bash
+docker compose up
 ```
 
 ### Part 2: Run Druid
 
 Build Druid:
 
-```
+```bash
 mvn clean install -Pdist
 tar -C /tmp -xf distribution/target/apache-druid-0.21.0-bin.tar.gz
 cd /tmp/apache-druid-0.21.0
@@ -139,6 +139,10 @@ Start the quickstart with the apppropriate environment variables for opentelemet
 OTEL_SERVICE_NAME="org.apache.druid" OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4317" bin/start-micro-quickstart
 ```
 
+The exporter uses OTLP over gRPC by default. To use OTLP over HTTP instead, set `OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"` and point `OTEL_EXPORTER_OTLP_ENDPOINT` at port 4318.
+
+The emitter only exports spans. The OpenTelemetry SDK's own metrics and logs are not exported unless you set `OTEL_METRICS_EXPORTER` or `OTEL_LOGS_EXPORTER`, for example to `otlp`.
+
 *_More about opentelemetry
 autoconfiguration [here](https://github.com/open-telemetry/opentelemetry-java/tree/main/sdk-extensions/autoconfigure)_
 
@@ -148,7 +152,7 @@ Load sample data - [example](https://druid.apache.org/docs/latest/tutorials/inde
 
 Create `query.json`:
 
-```
+```json
 {
    "query":"SELECT COUNT(*) as total FROM wiki WHERE countryName IS NOT NULL",
    "context":{
@@ -159,7 +163,7 @@ Create `query.json`:
 
 Send query:
 
-```
+```bash
 curl -XPOST -H'Content-Type: application/json' http://localhost:8888/druid/v2/sql/ -d @query.json
 ```
 

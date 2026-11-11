@@ -20,14 +20,22 @@
 package org.apache.druid.indexing.seekablestream.supervisor.autoscaler;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.google.common.base.Preconditions;
+import org.apache.druid.common.config.Configs;
 import org.apache.druid.indexing.overlord.supervisor.Supervisor;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorSpec;
+import org.apache.druid.indexing.overlord.supervisor.autoscaler.AggregateFunction;
 import org.apache.druid.indexing.overlord.supervisor.autoscaler.SupervisorTaskAutoScaler;
 import org.apache.druid.indexing.seekablestream.supervisor.SeekableStreamSupervisor;
+import org.apache.druid.java.util.emitter.service.ServiceEmitter;
+import org.joda.time.Duration;
 
 import javax.annotation.Nullable;
+import java.util.Objects;
 
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public class LagBasedAutoScalerConfig implements AutoScalerConfig
 {
   private final long lagCollectionIntervalMillis;
@@ -40,10 +48,15 @@ public class LagBasedAutoScalerConfig implements AutoScalerConfig
   private final double triggerScaleInFractionThreshold;
   private int taskCountMax;
   private int taskCountMin;
+  private Integer taskCountStart;
   private final int scaleInStep;
   private final int scaleOutStep;
   private final boolean enableTaskAutoScaler;
   private final long minTriggerScaleActionFrequencyMillis;
+  private final Duration minScaleUpDelay;
+  private final Duration minScaleDownDelay;
+  private final AggregateFunction lagAggregate;
+  private final Double stopTaskCountRatio;
 
   @JsonCreator
   public LagBasedAutoScalerConfig(
@@ -56,11 +69,16 @@ public class LagBasedAutoScalerConfig implements AutoScalerConfig
           @Nullable @JsonProperty("triggerScaleOutFractionThreshold") Double triggerScaleOutFractionThreshold,
           @Nullable @JsonProperty("triggerScaleInFractionThreshold") Double triggerScaleInFractionThreshold,
           @JsonProperty("taskCountMax") Integer taskCountMax,
+          @Nullable @JsonProperty("taskCountStart") Integer taskCountStart,
           @JsonProperty("taskCountMin") Integer taskCountMin,
           @Nullable @JsonProperty("scaleInStep") Integer scaleInStep,
           @Nullable @JsonProperty("scaleOutStep") Integer scaleOutStep,
           @Nullable @JsonProperty("enableTaskAutoScaler") Boolean enableTaskAutoScaler,
-          @Nullable @JsonProperty("minTriggerScaleActionFrequencyMillis") Long minTriggerScaleActionFrequencyMillis
+          @Nullable @JsonProperty("minTriggerScaleActionFrequencyMillis") Long minTriggerScaleActionFrequencyMillis,
+          @Nullable @JsonProperty("minScaleUpDelay") Duration minScaleUpDelay,
+          @Nullable @JsonProperty("minScaleDownDelay") Duration minScaleDownDelay,
+          @Nullable @JsonProperty("lagAggregate") AggregateFunction lagAggregate,
+          @Nullable @JsonProperty("stopTaskCountRatio") Double stopTaskCountRatio
   )
   {
     this.enableTaskAutoScaler = enableTaskAutoScaler != null ? enableTaskAutoScaler : false;
@@ -72,6 +90,7 @@ public class LagBasedAutoScalerConfig implements AutoScalerConfig
     this.scaleInThreshold = scaleInThreshold != null ? scaleInThreshold : 1000000;
     this.triggerScaleOutFractionThreshold = triggerScaleOutFractionThreshold != null ? triggerScaleOutFractionThreshold : 0.3;
     this.triggerScaleInFractionThreshold = triggerScaleInFractionThreshold != null ? triggerScaleInFractionThreshold : 0.9;
+    this.lagAggregate = lagAggregate;
 
     // Only do taskCountMax and taskCountMin check when autoscaler is enabled. So that users left autoConfig empty{} will not throw any exception and autoscaler is disabled.
     // If autoscaler is disabled, no matter what configs are set, they are not used.
@@ -80,15 +99,34 @@ public class LagBasedAutoScalerConfig implements AutoScalerConfig
         throw new RuntimeException("taskCountMax or taskCountMin can't be null!");
       } else if (taskCountMax < taskCountMin) {
         throw new RuntimeException("taskCountMax can't lower than taskCountMin!");
+      } else if (taskCountStart != null && (taskCountStart > taskCountMax || taskCountStart < taskCountMin)) {
+        throw new RuntimeException("taskCountMin <= taskCountStart <= taskCountMax");
       }
       this.taskCountMax = taskCountMax;
       this.taskCountMin = taskCountMin;
+      this.taskCountStart = taskCountStart;
     }
 
     this.scaleInStep = scaleInStep != null ? scaleInStep : 1;
     this.scaleOutStep = scaleOutStep != null ? scaleOutStep : 2;
-    this.minTriggerScaleActionFrequencyMillis = minTriggerScaleActionFrequencyMillis
-        != null ? minTriggerScaleActionFrequencyMillis : 600000;
+    this.minTriggerScaleActionFrequencyMillis =
+        minTriggerScaleActionFrequencyMillis != null ? minTriggerScaleActionFrequencyMillis : 600000;
+    this.minScaleUpDelay = Configs.valueOrDefault(minScaleUpDelay, Duration.millis(this.minTriggerScaleActionFrequencyMillis));
+    this.minScaleDownDelay = Configs.valueOrDefault(minScaleDownDelay, Duration.millis(this.minTriggerScaleActionFrequencyMillis));
+
+    Preconditions.checkArgument(
+        stopTaskCountRatio == null || (stopTaskCountRatio > 0.0 && stopTaskCountRatio <= 1.0),
+        "0.0 < stopTaskCountRatio <= 1.0"
+    );
+    Preconditions.checkArgument(
+        this.minScaleUpDelay.getMillis() >= 0,
+        "minScaleUpDelay must be a duration >= 0 millis"
+    );
+    Preconditions.checkArgument(
+        this.minScaleDownDelay.getMillis() >= 0,
+        "minScaleDownDelay must be a duration >= 0 millis"
+    );
+    this.stopTaskCountRatio = stopTaskCountRatio;
   }
 
   @JsonProperty
@@ -154,9 +192,21 @@ public class LagBasedAutoScalerConfig implements AutoScalerConfig
   }
 
   @Override
-  public SupervisorTaskAutoScaler createAutoScaler(Supervisor supervisor, SupervisorSpec spec)
+  @JsonProperty
+  @Nullable
+  public Integer getTaskCountStart()
   {
-    return new LagBasedAutoScaler((SeekableStreamSupervisor) supervisor, spec.getId(), this, spec);
+    return taskCountStart;
+  }
+
+  @Override
+  public SupervisorTaskAutoScaler createAutoScaler(Supervisor supervisor, SupervisorSpec spec, ServiceEmitter emitter)
+  {
+    return new LagBasedAutoScaler(
+        (SeekableStreamSupervisor) supervisor,
+        this,
+        spec
+    );
   }
 
   @JsonProperty
@@ -178,11 +228,41 @@ public class LagBasedAutoScalerConfig implements AutoScalerConfig
     return enableTaskAutoScaler;
   }
 
+  @Deprecated
   @Override
   @JsonProperty
   public long getMinTriggerScaleActionFrequencyMillis()
   {
     return minTriggerScaleActionFrequencyMillis;
+  }
+
+  @Override
+  @JsonProperty
+  public Duration getMinScaleUpDelay()
+  {
+    return minScaleUpDelay;
+  }
+
+  @Override
+  @JsonProperty
+  public Duration getMinScaleDownDelay()
+  {
+    return minScaleDownDelay;
+  }
+
+  @JsonProperty
+  @Nullable
+  public AggregateFunction getLagAggregate()
+  {
+    return lagAggregate;
+  }
+
+  @Override
+  @JsonProperty
+  @Nullable
+  public Double getStopTaskCountRatio()
+  {
+    return stopTaskCountRatio;
   }
 
   @Override
@@ -192,9 +272,12 @@ public class LagBasedAutoScalerConfig implements AutoScalerConfig
             "enableTaskAutoScaler=" + enableTaskAutoScaler +
             ", taskCountMax=" + taskCountMax +
             ", taskCountMin=" + taskCountMin +
+            ", taskCountStart=" + taskCountStart +
             ", minTriggerScaleActionFrequencyMillis=" + minTriggerScaleActionFrequencyMillis +
+            ", minScaleUpDelay=" + minScaleUpDelay +
+            ", minScaleDownDelay=" + minScaleDownDelay +
             ", lagCollectionIntervalMillis=" + lagCollectionIntervalMillis +
-            ", lagCollectionIntervalMillis=" + lagCollectionIntervalMillis +
+            ", lagCollectionRangeMillis=" + lagCollectionRangeMillis +
             ", scaleOutThreshold=" + scaleOutThreshold +
             ", triggerScaleOutFractionThreshold=" + triggerScaleOutFractionThreshold +
             ", scaleInThreshold=" + scaleInThreshold +
@@ -203,6 +286,68 @@ public class LagBasedAutoScalerConfig implements AutoScalerConfig
             ", scaleActionPeriodMillis=" + scaleActionPeriodMillis +
             ", scaleInStep=" + scaleInStep +
             ", scaleOutStep=" + scaleOutStep +
+            ", lagAggregate=" + lagAggregate +
+            ", stopTaskCountRatio=" + stopTaskCountRatio +
             '}';
+  }
+
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+
+    LagBasedAutoScalerConfig that = (LagBasedAutoScalerConfig) o;
+
+    return lagCollectionIntervalMillis == that.lagCollectionIntervalMillis &&
+           lagCollectionRangeMillis == that.lagCollectionRangeMillis &&
+           scaleActionStartDelayMillis == that.scaleActionStartDelayMillis &&
+           scaleActionPeriodMillis == that.scaleActionPeriodMillis &&
+           scaleOutThreshold == that.scaleOutThreshold &&
+           scaleInThreshold == that.scaleInThreshold &&
+           Double.compare(that.triggerScaleOutFractionThreshold, triggerScaleOutFractionThreshold) == 0 &&
+           Double.compare(that.triggerScaleInFractionThreshold, triggerScaleInFractionThreshold) == 0 &&
+           taskCountMax == that.taskCountMax &&
+           taskCountMin == that.taskCountMin &&
+           scaleInStep == that.scaleInStep &&
+           scaleOutStep == that.scaleOutStep &&
+           enableTaskAutoScaler == that.enableTaskAutoScaler &&
+           minTriggerScaleActionFrequencyMillis == that.minTriggerScaleActionFrequencyMillis &&
+           Objects.equals(minScaleUpDelay, that.minScaleUpDelay) &&
+           Objects.equals(minScaleDownDelay, that.minScaleDownDelay) &&
+           Objects.equals(taskCountStart, that.taskCountStart) &&
+           lagAggregate == that.lagAggregate &&
+           Objects.equals(stopTaskCountRatio, that.stopTaskCountRatio);
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return Objects.hash(
+        lagCollectionIntervalMillis,
+        lagCollectionRangeMillis,
+        scaleActionStartDelayMillis,
+        scaleActionPeriodMillis,
+        scaleOutThreshold,
+        scaleInThreshold,
+        triggerScaleOutFractionThreshold,
+        triggerScaleInFractionThreshold,
+        taskCountMax,
+        taskCountMin,
+        taskCountStart,
+        scaleInStep,
+        scaleOutStep,
+        enableTaskAutoScaler,
+        minTriggerScaleActionFrequencyMillis,
+        minScaleUpDelay,
+        minScaleDownDelay,
+        lagAggregate,
+        stopTaskCountRatio
+    );
   }
 }

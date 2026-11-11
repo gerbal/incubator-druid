@@ -24,7 +24,7 @@ import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.easymock.EasyMock;
 import org.joda.time.Duration;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 
@@ -34,10 +34,10 @@ public class MonitorSchedulerTest
   @Test
   public void testMonitorAndStopOnRemove() throws IOException
   {
-    MonitorSchedulerConfig infiniteFlushDelayConfig = new MonitorSchedulerConfig()
+    DruidMonitorSchedulerConfig infiniteFlushDelayConfig = new DruidMonitorSchedulerConfig()
     {
       @Override
-      public Duration getEmitterPeriod()
+      public Duration getEmissionDuration()
       {
         return Duration.millis(Long.MAX_VALUE);
       }

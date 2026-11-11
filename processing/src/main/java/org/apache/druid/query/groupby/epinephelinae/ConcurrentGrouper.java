@@ -23,6 +23,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
+import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -38,6 +39,7 @@ import org.apache.druid.query.QueryInterruptedException;
 import org.apache.druid.query.QueryTimeoutException;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.groupby.GroupByQueryConfig;
+import org.apache.druid.query.groupby.GroupByStatsProvider;
 import org.apache.druid.query.groupby.orderby.DefaultLimitSpec;
 import org.apache.druid.segment.ColumnSelectorFactory;
 
@@ -94,6 +96,8 @@ public class ConcurrentGrouper<KeyType> implements Grouper<KeyType>
   @Nullable
   private final ParallelCombiner<KeyType> parallelCombiner;
   private final boolean mergeThreadLocal;
+  private final long minSpillFileSize;
+  private final GroupByStatsProvider.PerQueryStats perQueryStats;
 
   private volatile boolean initialized = false;
 
@@ -113,7 +117,8 @@ public class ConcurrentGrouper<KeyType> implements Grouper<KeyType>
       final ListeningExecutorService executor,
       final int priority,
       final boolean hasQueryTimeout,
-      final long queryTimeoutAt
+      final long queryTimeoutAt,
+      final GroupByStatsProvider.PerQueryStats perQueryStats
   )
   {
     this(
@@ -137,7 +142,9 @@ public class ConcurrentGrouper<KeyType> implements Grouper<KeyType>
         queryTimeoutAt,
         groupByQueryConfig.getIntermediateCombineDegree(),
         groupByQueryConfig.getNumParallelCombineThreads(),
-        groupByQueryConfig.isMergeThreadLocal()
+        groupByQueryConfig.isMergeThreadLocal(),
+        groupByQueryConfig.getMinSpillFileSize(),
+        perQueryStats
     );
   }
 
@@ -162,7 +169,9 @@ public class ConcurrentGrouper<KeyType> implements Grouper<KeyType>
       final long queryTimeoutAt,
       final int intermediateCombineDegree,
       final int numParallelCombineThreads,
-      final boolean mergeThreadLocal
+      final boolean mergeThreadLocal,
+      final long minSpillFileSize,
+      final GroupByStatsProvider.PerQueryStats perQueryStats
   )
   {
     Preconditions.checkArgument(concurrencyHint > 0, "concurrencyHint > 0");
@@ -212,6 +221,8 @@ public class ConcurrentGrouper<KeyType> implements Grouper<KeyType>
     }
 
     this.mergeThreadLocal = mergeThreadLocal;
+    this.minSpillFileSize = minSpillFileSize;
+    this.perQueryStats = perQueryStats;
   }
 
   @Override
@@ -238,7 +249,9 @@ public class ConcurrentGrouper<KeyType> implements Grouper<KeyType>
                 false,
                 limitSpec,
                 sortHasNonGroupingFields,
-                sliceSize
+                sliceSize,
+                minSpillFileSize,
+                perQueryStats
             );
             grouper.init();
             groupers.add(grouper);
@@ -325,7 +338,7 @@ public class ConcurrentGrouper<KeyType> implements Grouper<KeyType>
       throw new ISE("Grouper is closed");
     }
 
-    groupers.forEach(Grouper::reset);
+    groupers.forEach(SpillingGrouper::reset);
   }
 
   @Override
@@ -445,7 +458,9 @@ public class ConcurrentGrouper<KeyType> implements Grouper<KeyType>
     }
     catch (ExecutionException e) {
       GuavaUtils.cancelAll(true, future, futures);
-      throw new RuntimeException(e.getCause());
+      Throwable cause = e.getCause();
+      Throwables.throwIfUnchecked(cause);
+      throw new RuntimeException(cause);
     }
   }
 
@@ -489,7 +504,7 @@ public class ConcurrentGrouper<KeyType> implements Grouper<KeyType>
   {
     if (!closed) {
       closed = true;
-      groupers.forEach(Grouper::close);
+      groupers.forEach(SpillingGrouper::close);
     }
   }
 

@@ -26,7 +26,6 @@ import com.google.inject.Key;
 import com.google.inject.Module;
 import com.google.inject.TypeLiteral;
 import com.google.inject.name.Names;
-import org.apache.druid.curator.discovery.DiscoveryModule;
 import org.apache.druid.discovery.NodeRole;
 import org.apache.druid.guice.Jerseys;
 import org.apache.druid.guice.JsonConfigProvider;
@@ -36,7 +35,6 @@ import org.apache.druid.guice.ManageLifecycle;
 import org.apache.druid.guice.QueryRunnerFactoryModule;
 import org.apache.druid.guice.QueryableModule;
 import org.apache.druid.guice.RouterProcessingModule;
-import org.apache.druid.guice.annotations.Self;
 import org.apache.druid.guice.http.JettyHttpClientModule;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.query.QuerySegmentWalker;
@@ -56,6 +54,7 @@ import org.apache.druid.server.router.TieredBrokerConfig;
 import org.apache.druid.server.router.TieredBrokerHostSelector;
 import org.apache.druid.server.router.TieredBrokerSelectorStrategiesProvider;
 import org.apache.druid.server.router.TieredBrokerSelectorStrategy;
+import org.apache.druid.storage.local.LocalTmpStorageConfig;
 import org.eclipse.jetty.server.Server;
 
 import java.util.List;
@@ -120,12 +119,15 @@ public class CliRouter extends ServerRunnable
 
           LifecycleModule.register(binder, RouterResource.class);
           LifecycleModule.register(binder, Server.class);
-          DiscoveryModule.register(binder, Self.class);
 
           bindAnnouncer(binder, DiscoverySideEffectsProvider.create());
 
           Jerseys.addResource(binder, SelfDiscoveryResource.class);
           LifecycleModule.registerKey(binder, Key.get(SelfDiscoveryResource.class));
+
+          binder.bind(LocalTmpStorageConfig.class)
+                .toProvider(new LocalTmpStorageConfig.DefaultLocalTmpStorageConfigProvider("router"))
+                .in(LazySingleton.class);
         },
         new LookupSerdeModule()
     );

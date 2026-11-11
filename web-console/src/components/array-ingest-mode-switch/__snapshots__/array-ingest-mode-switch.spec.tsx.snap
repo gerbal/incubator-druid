@@ -1,0 +1,39 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`ArrayIngestModeSwitch matches snapshot 1`] = `
+<div
+  class="bp6-form-group form-group-with-info"
+>
+  <div
+    class="bp6-form-content"
+  >
+    <label
+      class="bp6-control bp6-switch legacy-switch"
+    >
+      <input
+        checked=""
+        class="bp6-control-input"
+        type="checkbox"
+      />
+      <span
+        class="bp6-control-indicator"
+      />
+      Store ARRAYs as MVDs
+    </label>
+    <span
+      class="info-popover bp6-popover-target"
+    >
+      <span
+        aria-expanded="false"
+        aria-haspopup="menu"
+        aria-hidden="true"
+        class="bp6-icon bp6-icon-info-sign"
+      >
+        <svg
+          data-icon="info-sign"
+        />
+      </span>
+    </span>
+  </div>
+</div>
+`;

@@ -24,8 +24,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import org.apache.druid.jackson.DefaultObjectMapper;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 /**
  */
@@ -55,9 +55,7 @@ public class LookupsStateTest
                      + "}";
 
     TypeReference<LookupsState<LookupExtractorFactoryContainer>> typeRef =
-        new TypeReference<LookupsState<LookupExtractorFactoryContainer>>()
-        {
-        };
+        new TypeReference<>() {};
 
     final ObjectMapper mapper = new DefaultObjectMapper();
     mapper.registerSubtypes(LookupExtractorFactoryContainerTest.TestLookupExtractorFactory.class);
@@ -69,7 +67,7 @@ public class LookupsStateTest
         typeRef
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         new LookupsState<>(
             ImmutableMap.of(
                 "l1",

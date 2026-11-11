@@ -24,7 +24,6 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonTypeName;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.query.aggregation.AggregateCombiner;
@@ -60,7 +59,7 @@ import java.util.Objects;
 @JsonTypeName("variance")
 public class VarianceAggregatorFactory extends AggregatorFactory
 {
-  private static final String VARIANCE_TYPE_NAME = "variance";
+  public static final String VARIANCE_TYPE_NAME = "variance";
   public static final ColumnType TYPE = ColumnType.ofComplex(VARIANCE_TYPE_NAME);
 
   protected final String fieldName;
@@ -250,12 +249,6 @@ public class VarianceAggregatorFactory extends AggregatorFactory
   }
 
   @Override
-  public List<AggregatorFactory> getRequiredColumns()
-  {
-    return Collections.singletonList(new VarianceAggregatorFactory(fieldName, fieldName, estimator, inputType));
-  }
-
-  @Override
   public AggregatorFactory getMergingFactory(AggregatorFactory other) throws AggregatorFactoryNotMergeableException
   {
     if (Objects.equals(getName(), other.getName()) && other instanceof VarianceAggregatorFactory) {
@@ -276,7 +269,7 @@ public class VarianceAggregatorFactory extends AggregatorFactory
   public Object finalizeComputation(@Nullable Object object)
   {
     return object == null
-           ? NullHandling.defaultDoubleValue()
+           ? null
            : ((VarianceAggregatorCollector) object).getVariance(isVariancePop);
   }
 

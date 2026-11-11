@@ -33,9 +33,10 @@ import java.util.Set;
 public class JdbcAccessSecurityConfig
 {
   static final Set<String> DEFAULT_ALLOWED_PROPERTIES = ImmutableSet.of(
-      // MySQL
+      // MySQL and MariaDB
       "useSSL",
       "requireSSL",
+      "sslMode",
 
       // PostgreSQL
       "ssl",
@@ -55,7 +56,7 @@ public class JdbcAccessSecurityConfig
       "HOST",
       "PORT",
       "NUM_HOSTS",
-      "DBNAME",
+      "dbname",
 
       // PostgreSQL
       "PGHOST",

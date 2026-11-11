@@ -20,21 +20,25 @@
 package org.apache.druid.sql;
 
 import com.google.common.annotations.VisibleForTesting;
-import org.apache.calcite.tools.ValidationException;
+import org.apache.calcite.plan.RelOptPlanner;
+import org.apache.druid.error.DruidException;
+import org.apache.druid.error.InvalidSqlInput;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.StringUtils;
-import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.query.QueryException;
 import org.apache.druid.query.QueryInterruptedException;
+import org.apache.druid.query.QueryTimeoutException;
 import org.apache.druid.server.QueryResponse;
 import org.apache.druid.server.security.ResourceAction;
 import org.apache.druid.sql.SqlLifecycleManager.Cancelable;
 import org.apache.druid.sql.calcite.planner.DruidPlanner;
+import org.apache.druid.sql.calcite.planner.PlannerContext;
 import org.apache.druid.sql.calcite.planner.PlannerResult;
 import org.apache.druid.sql.calcite.planner.PrepareResult;
 
+import javax.annotation.Nullable;
 import java.util.Set;
-import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Lifecycle for direct SQL statement execution, which means that the query
@@ -66,8 +70,6 @@ import java.util.concurrent.CopyOnWriteArrayList;
  */
 public class DirectStatement extends AbstractStatement implements Cancelable
 {
-  private static final Logger log = new Logger(DirectStatement.class);
-
   /**
    * Represents the execution plan for a query with the ability to run
    * that plan (once).
@@ -157,18 +159,10 @@ public class DirectStatement extends AbstractStatement implements Cancelable
   public DirectStatement(
       final SqlToolbox lifecycleToolbox,
       final SqlQueryPlus queryPlus,
-      final String remoteAddress
+      @Nullable final String remoteAddress
   )
   {
     super(lifecycleToolbox, queryPlus, remoteAddress);
-  }
-
-  public DirectStatement(
-      final SqlToolbox lifecycleToolbox,
-      final SqlQueryPlus sqlRequest
-  )
-  {
-    super(lifecycleToolbox, sqlRequest, null);
   }
 
   /**
@@ -204,32 +198,117 @@ public class DirectStatement extends AbstractStatement implements Cancelable
       throw new ISE("Can plan a query only once.");
     }
     long planningStartNanos = System.nanoTime();
-    try (DruidPlanner planner = sqlToolbox.plannerFactory.createPlanner(
-        sqlToolbox.engine,
-        queryPlus.sql(),
-        queryContext,
-        hook
-    )) {
-      validate(planner);
-      authorize(planner, authorizer());
+    try (DruidPlanner planner = createPlanner()) {
+      // Bound planning wall-clock. Budget is measured from planningStartNanos (before createPlanner), so planner
+      // construction counts against it; if already exhausted, fail now rather than arm a no-op (non-positive) watchdog.
+      final long maxPlanningTimeMs = planner.getPlannerContext().getPlannerConfig().getMaxPlanningTimeMs();
+      final long remainingBudgetMs = remainingPlanningBudgetMs(maxPlanningTimeMs, planningStartNanos);
+      if (maxPlanningTimeMs > 0 && remainingBudgetMs <= 0) {
+        throw planningTimedOut(maxPlanningTimeMs);
+      }
+      try (SqlPlanningTimeout timeout = SqlPlanningTimeout.arm(
+          remainingBudgetMs,
+          planner.getPlannerContext().getCancelFlag(),
+          Thread.currentThread()
+      )) {
+        // Nested planners created during view expansion inherit this flag (PlannerContext#withInheritedCancelFlag).
+        return PlannerContext.withInheritedCancelFlag(
+            planner.getPlannerContext().getCancelFlag(),
+            () -> {
+              try {
+                validate(planner);
+                authorize(planner, authorizer());
 
-      // Adding the statement to the lifecycle manager allows cancellation.
-      // Tests cancel during this call; real clients might do so if the plan
-      // or execution prep stages take too long for some unexpected reason.
-      sqlToolbox.sqlLifecycleManager.add(sqlQueryId(), this);
-      transition(State.PREPARED);
-      resultSet = createResultSet(createPlan(planner));
-      prepareResult = planner.prepareResult();
-      // Double check needed by SqlResourceTest
-      transition(State.PREPARED);
-      reporter.planningTimeNanos(System.nanoTime() - planningStartNanos);
-      return resultSet;
+                // Adding the statement to the lifecycle manager allows cancellation.
+                // Tests cancel during this call; real clients might do so if the plan
+                // or execution prep stages take too long for some unexpected reason.
+                sqlToolbox.sqlLifecycleManager.add(sqlQueryId(), this);
+                transition(State.PREPARED);
+                resultSet = createResultSet(createPlan(planner));
+                prepareResult = planner.prepareResult();
+                // Double check needed by SqlResourceTest
+                transition(State.PREPARED);
+                reporter.planningTimeNanos(System.nanoTime() - planningStartNanos);
+              }
+              catch (RuntimeException | AssertionError e) {
+                // On timeout, the failure is a side effect of aborting the planner; surface it as a timeout.
+                if (timeout.isTimedOut()) {
+                  throw planningTimedOut(maxPlanningTimeMs);
+                }
+                throw e;
+              }
+              // Reject a plan that completed past the deadline (non-cancellable section, or watchdog scheduler jitter).
+              if (timeout.isTimedOut() || planningDeadlineExceeded(maxPlanningTimeMs, planningStartNanos)) {
+                throw planningTimedOut(maxPlanningTimeMs);
+              }
+              return resultSet;
+            }
+        );
+      }
+    }
+    catch (RelOptPlanner.CannotPlanException e) {
+      // Not sure if this is even thrown here.
+      throw DruidException.forPersona(DruidException.Persona.DEVELOPER)
+                          .ofCategory(DruidException.Category.UNCATEGORIZED)
+                          .build(e, "Problem planning SQL query");
     }
     catch (RuntimeException e) {
       state = State.FAILED;
       reporter.failed(e);
       throw e;
     }
+    catch (AssertionError e) {
+      state = State.FAILED;
+      reporter.failed(e);
+      throw InvalidSqlInput.exception(e, "Calcite assertion violated: [%s]", e.getMessage());
+    }
+  }
+
+  /**
+   * Budget left in the planning timeout, given elapsed time since {@code planningStartNanos}. Returns
+   * {@code maxPlanningTimeMs} unchanged when non-positive (disabled); may be non-positive if already overrun.
+   */
+  private static long remainingPlanningBudgetMs(long maxPlanningTimeMs, long planningStartNanos)
+  {
+    if (maxPlanningTimeMs <= 0) {
+      return maxPlanningTimeMs;
+    }
+    final long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - planningStartNanos);
+    return maxPlanningTimeMs - elapsedMs;
+  }
+
+  /**
+   * Whether the planning deadline has been exceeded by elapsed wall-clock time. False when disabled.
+   */
+  private static boolean planningDeadlineExceeded(long maxPlanningTimeMs, long planningStartNanos)
+  {
+    return maxPlanningTimeMs > 0
+           && TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - planningStartNanos) >= maxPlanningTimeMs;
+  }
+
+  private QueryTimeoutException planningTimedOut(long maxPlanningTimeMs)
+  {
+    return new QueryTimeoutException(
+        StringUtils.format(
+            "Query planning for [%s] exceeded the configured maximum planning time of [%,d] ms. This may "
+            + "indicate an overly complex query, for example one with a very large IN filter.",
+            sqlQueryId(),
+            maxPlanningTimeMs
+        )
+    );
+  }
+
+  protected DruidPlanner createPlanner()
+  {
+    return sqlToolbox.plannerFactory.createPlanner(
+        sqlToolbox.engine,
+        queryPlus.sql(),
+        queryPlus.sqlNode(),
+        queryPlus.authResult(),
+        queryPlus.authContextKeys(),
+        queryContext,
+        hook
+    );
   }
 
   /**
@@ -239,12 +318,7 @@ public class DirectStatement extends AbstractStatement implements Cancelable
   @VisibleForTesting
   protected PlannerResult createPlan(DruidPlanner planner)
   {
-    try {
-      return planner.plan();
-    }
-    catch (ValidationException e) {
-      throw new SqlPlanningException(e);
-    }
+    return planner.plan();
   }
 
   /**
@@ -288,12 +362,9 @@ public class DirectStatement extends AbstractStatement implements Cancelable
       return;
     }
     state = State.CANCELLED;
-    final CopyOnWriteArrayList<String> nativeQueryIds = plannerContext.getNativeQueryIds();
 
-    for (String nativeQueryId : nativeQueryIds) {
-      log.debug("Canceling native query [%s]", nativeQueryId);
-      sqlToolbox.queryScheduler.cancelQuery(nativeQueryId);
-    }
+    // Give control to the engine to do engine specific things.
+    sqlToolbox.engine.cancelQuery(plannerContext, sqlToolbox.queryScheduler);
   }
 
   @Override

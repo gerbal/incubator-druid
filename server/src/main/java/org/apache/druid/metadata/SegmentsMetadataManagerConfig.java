@@ -19,25 +19,69 @@
 
 package org.apache.druid.metadata;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.druid.common.config.Configs;
+import org.apache.druid.error.DruidException;
+import org.apache.druid.metadata.segment.cache.SegmentMetadataCache;
 import org.joda.time.Period;
 
+import javax.annotation.Nullable;
+
 /**
+ * Config that dictates polling and caching of segment metadata on leader
+ * Coordinator or Overlord services.
  */
 public class SegmentsMetadataManagerConfig
 {
   public static final String CONFIG_PREFIX = "druid.manager.segments";
 
   @JsonProperty
-  private Period pollDuration = new Period("PT1M");
+  private final Period pollDuration;
+
+  @JsonProperty
+  private final SegmentMetadataCache.UsageMode useIncrementalCache;
+
+  @JsonProperty
+  private final UnusedSegmentKillerConfig killUnused;
+
+  @JsonCreator
+  public SegmentsMetadataManagerConfig(
+      @JsonProperty("pollDuration") @Nullable Period pollDuration,
+      @JsonProperty("useIncrementalCache") @Nullable SegmentMetadataCache.UsageMode useIncrementalCache,
+      @JsonProperty("killUnused") @Nullable UnusedSegmentKillerConfig killUnused
+  )
+  {
+    this.pollDuration = Configs.valueOrDefault(pollDuration, Period.minutes(1));
+    this.useIncrementalCache = Configs.valueOrDefault(useIncrementalCache, SegmentMetadataCache.UsageMode.IF_SYNCED);
+    this.killUnused = Configs.valueOrDefault(killUnused, new UnusedSegmentKillerConfig(null, null, null, null));
+    if (this.killUnused.isEnabled() && this.useIncrementalCache == SegmentMetadataCache.UsageMode.NEVER) {
+      throw DruidException
+          .forPersona(DruidException.Persona.OPERATOR)
+          .ofCategory(DruidException.Category.INVALID_INPUT)
+          .build(
+              "Segment metadata cache must be enabled to allow killing of unused segments."
+              + " Set 'druid.manager.segments.useIncrementalCache=always'"
+              + " or 'druid.manager.segments.useIncrementalCache=ifSynced' to enable the cache."
+          );
+    }
+  }
+
+  /**
+   * Usage mode of the incremental cache.
+   */
+  public SegmentMetadataCache.UsageMode getCacheUsageMode()
+  {
+    return useIncrementalCache;
+  }
 
   public Period getPollDuration()
   {
     return pollDuration;
   }
 
-  public void setPollDuration(Period pollDuration)
+  public UnusedSegmentKillerConfig getKillUnused()
   {
-    this.pollDuration = pollDuration;
+    return killUnused;
   }
 }

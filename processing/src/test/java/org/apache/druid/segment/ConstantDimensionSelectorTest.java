@@ -19,14 +19,19 @@
 
 package org.apache.druid.segment;
 
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.query.extraction.StringFormatExtractionFn;
 import org.apache.druid.query.extraction.SubstringDimExtractionFn;
+import org.apache.druid.query.filter.DruidObjectPredicate;
+import org.apache.druid.query.filter.DruidPredicateFactory;
+import org.apache.druid.query.filter.DruidPredicateMatch;
+import org.apache.druid.query.filter.StringPredicateDruidPredicateFactory;
+import org.apache.druid.query.filter.ValueMatcher;
 import org.apache.druid.segment.data.IndexedInts;
-import org.junit.Assert;
-import org.junit.Test;
+import org.apache.druid.testing.InitializedNullHandlingTest;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
-public class ConstantDimensionSelectorTest
+public class ConstantDimensionSelectorTest extends InitializedNullHandlingTest
 {
   private final DimensionSelector NULL_SELECTOR = DimensionSelector.constant(null);
   private final DimensionSelector CONST_SELECTOR = DimensionSelector.constant("billy");
@@ -43,49 +48,65 @@ public class ConstantDimensionSelectorTest
   public void testGetRow()
   {
     IndexedInts row = NULL_SELECTOR.getRow();
-    Assert.assertEquals(1, row.size());
-    Assert.assertEquals(0, row.get(0));
+    Assertions.assertEquals(1, row.size());
+    Assertions.assertEquals(0, row.get(0));
   }
 
   @Test
   public void testGetValueCardinality()
   {
-    Assert.assertEquals(1, NULL_SELECTOR.getValueCardinality());
-    Assert.assertEquals(1, CONST_SELECTOR.getValueCardinality());
-    Assert.assertEquals(1, NULL_EXTRACTION_SELECTOR.getValueCardinality());
-    Assert.assertEquals(1, CONST_EXTRACTION_SELECTOR.getValueCardinality());
+    Assertions.assertEquals(1, NULL_SELECTOR.getValueCardinality());
+    Assertions.assertEquals(1, CONST_SELECTOR.getValueCardinality());
+    Assertions.assertEquals(1, NULL_EXTRACTION_SELECTOR.getValueCardinality());
+    Assertions.assertEquals(1, CONST_EXTRACTION_SELECTOR.getValueCardinality());
   }
 
   @Test
   public void testLookupName()
   {
-    Assert.assertEquals(null, NULL_SELECTOR.lookupName(0));
-    Assert.assertEquals("billy", CONST_SELECTOR.lookupName(0));
-    Assert.assertEquals("billy", NULL_EXTRACTION_SELECTOR.lookupName(0));
-    Assert.assertEquals("billy", CONST_EXTRACTION_SELECTOR.lookupName(0));
+    Assertions.assertNull(NULL_SELECTOR.lookupName(0));
+    Assertions.assertEquals("billy", CONST_SELECTOR.lookupName(0));
+    Assertions.assertEquals("billy", NULL_EXTRACTION_SELECTOR.lookupName(0));
+    Assertions.assertEquals("billy", CONST_EXTRACTION_SELECTOR.lookupName(0));
   }
 
   @Test
   public void testLookupId()
   {
-    Assert.assertEquals(0, NULL_SELECTOR.idLookup().lookupId(null));
-    Assert.assertEquals(NullHandling.replaceWithDefault() ? 0 : -1, NULL_SELECTOR.idLookup().lookupId(""));
-    Assert.assertEquals(-1, NULL_SELECTOR.idLookup().lookupId("billy"));
-    Assert.assertEquals(-1, NULL_SELECTOR.idLookup().lookupId("bob"));
+    Assertions.assertEquals(0, NULL_SELECTOR.idLookup().lookupId(null));
+    Assertions.assertEquals(-1, NULL_SELECTOR.idLookup().lookupId(""));
+    Assertions.assertEquals(-1, NULL_SELECTOR.idLookup().lookupId("billy"));
+    Assertions.assertEquals(-1, NULL_SELECTOR.idLookup().lookupId("bob"));
 
-    Assert.assertEquals(-1, CONST_SELECTOR.idLookup().lookupId(null));
-    Assert.assertEquals(-1, CONST_SELECTOR.idLookup().lookupId(""));
-    Assert.assertEquals(0, CONST_SELECTOR.idLookup().lookupId("billy"));
-    Assert.assertEquals(-1, CONST_SELECTOR.idLookup().lookupId("bob"));
+    Assertions.assertEquals(-1, CONST_SELECTOR.idLookup().lookupId(null));
+    Assertions.assertEquals(-1, CONST_SELECTOR.idLookup().lookupId(""));
+    Assertions.assertEquals(0, CONST_SELECTOR.idLookup().lookupId("billy"));
+    Assertions.assertEquals(-1, CONST_SELECTOR.idLookup().lookupId("bob"));
 
-    Assert.assertEquals(-1, NULL_EXTRACTION_SELECTOR.idLookup().lookupId(null));
-    Assert.assertEquals(-1, NULL_EXTRACTION_SELECTOR.idLookup().lookupId(""));
-    Assert.assertEquals(0, NULL_EXTRACTION_SELECTOR.idLookup().lookupId("billy"));
-    Assert.assertEquals(-1, NULL_EXTRACTION_SELECTOR.idLookup().lookupId("bob"));
+    Assertions.assertEquals(-1, NULL_EXTRACTION_SELECTOR.idLookup().lookupId(null));
+    Assertions.assertEquals(-1, NULL_EXTRACTION_SELECTOR.idLookup().lookupId(""));
+    Assertions.assertEquals(0, NULL_EXTRACTION_SELECTOR.idLookup().lookupId("billy"));
+    Assertions.assertEquals(-1, NULL_EXTRACTION_SELECTOR.idLookup().lookupId("bob"));
 
-    Assert.assertEquals(-1, CONST_EXTRACTION_SELECTOR.idLookup().lookupId(null));
-    Assert.assertEquals(-1, CONST_EXTRACTION_SELECTOR.idLookup().lookupId(""));
-    Assert.assertEquals(0, CONST_EXTRACTION_SELECTOR.idLookup().lookupId("billy"));
-    Assert.assertEquals(-1, CONST_EXTRACTION_SELECTOR.idLookup().lookupId("bob"));
+    Assertions.assertEquals(-1, CONST_EXTRACTION_SELECTOR.idLookup().lookupId(null));
+    Assertions.assertEquals(-1, CONST_EXTRACTION_SELECTOR.idLookup().lookupId(""));
+    Assertions.assertEquals(0, CONST_EXTRACTION_SELECTOR.idLookup().lookupId("billy"));
+    Assertions.assertEquals(-1, CONST_EXTRACTION_SELECTOR.idLookup().lookupId("bob"));
+  }
+
+  @Test
+  public void testValueMatcherPredicates()
+  {
+    DruidPredicateFactory nullUnkown = StringPredicateDruidPredicateFactory.of(
+        value -> value == null ? DruidPredicateMatch.UNKNOWN : DruidPredicateMatch.TRUE
+    );
+    ValueMatcher matcher = NULL_SELECTOR.makeValueMatcher(nullUnkown);
+    Assertions.assertFalse(matcher.matches(false));
+    Assertions.assertTrue(matcher.matches(true));
+
+    DruidPredicateFactory notUnknown = StringPredicateDruidPredicateFactory.of(DruidObjectPredicate.notNull());
+    matcher = NULL_SELECTOR.makeValueMatcher(notUnknown);
+    Assertions.assertFalse(matcher.matches(false));
+    Assertions.assertFalse(matcher.matches(true));
   }
 }

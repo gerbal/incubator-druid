@@ -19,13 +19,13 @@
 
 package org.apache.druid.query.aggregation.datasketches.theta;
 
-import org.apache.datasketches.Family;
-import org.apache.datasketches.SketchesArgumentException;
+import org.apache.datasketches.common.Family;
+import org.apache.datasketches.common.SketchesArgumentException;
 import org.apache.datasketches.theta.SetOperation;
 import org.apache.datasketches.theta.Union;
 import org.apache.druid.java.util.common.StringUtils;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -36,6 +36,7 @@ public class SketchHolderObjectStrategyTest
   public void testSafeRead()
   {
     SketchHolderObjectStrategy objectStrategy = new SketchHolderObjectStrategy();
+    Assertions.assertTrue(objectStrategy.readRetainsBufferReference());
     Union union = (Union) SetOperation.builder().setNominalEntries(1024).build(Family.UNION);
     union.update(1234L);
 
@@ -54,7 +55,7 @@ public class SketchHolderObjectStrategyTest
       }
 
       final ByteBuffer buf2 = ByteBuffer.wrap(garbage2).order(ByteOrder.LITTLE_ENDIAN);
-      Assert.assertThrows(
+      Assertions.assertThrows(
           IndexOutOfBoundsException.class,
           () -> objectStrategy.fromByteBufferSafe(buf2, garbage2.length).getSketch().compact().getCompactBytes()
       );
@@ -63,7 +64,7 @@ public class SketchHolderObjectStrategyTest
     // non sketch that is too short to contain header should fail with regular java buffer exception
     final byte[] garbage = new byte[]{0x01, 0x02};
     final ByteBuffer buf3 = ByteBuffer.wrap(garbage).order(ByteOrder.LITTLE_ENDIAN);
-    Assert.assertThrows(
+    Assertions.assertThrows(
         IndexOutOfBoundsException.class,
         () -> objectStrategy.fromByteBufferSafe(buf3, garbage.length).getSketch().compact().getCompactBytes()
     );
@@ -71,7 +72,7 @@ public class SketchHolderObjectStrategyTest
     // non sketch that is long enough to check (this one doesn't actually need 'safe' read)
     final byte[] garbageLonger = StringUtils.toUtf8("notasketch");
     final ByteBuffer buf4 = ByteBuffer.wrap(garbageLonger).order(ByteOrder.LITTLE_ENDIAN);
-    Assert.assertThrows(
+    Assertions.assertThrows(
         SketchesArgumentException.class,
         () -> objectStrategy.fromByteBufferSafe(buf4, garbageLonger.length).getSketch().compact().getCompactBytes()
     );

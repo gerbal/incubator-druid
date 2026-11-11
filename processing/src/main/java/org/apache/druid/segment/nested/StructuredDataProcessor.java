@@ -37,12 +37,12 @@ public abstract class StructuredDataProcessor
   }
 
   /**
-   * process a value that is definitely not a {@link Map}, {@link List}, or {@link Object[]}
+   * process a value that is definitely not a {@link Map}, {@link List}, or {@code Object[]}
    */
   public abstract ProcessedValue<?> processField(ArrayList<NestedPathPart> fieldPath, @Nullable Object fieldValue);
 
   /**
-   * Process a {@link List} or {@link Object[]} returning a {@link ProcessedValue} if no further processing should
+   * Process a {@link List} or {@code Object[]} returning a {@link ProcessedValue} if no further processing should
    * be performed by the {@link StructuredDataProcessor}, else a return value of null indicates that each element
    * of the array will be processed separately as a new {@link NestedPathArrayElement} part.
    */
@@ -55,7 +55,7 @@ public abstract class StructuredDataProcessor
    * {@link ProcessedValue} during processing, represented as an ordered sequence of {@link NestedPathPart}.
    *
    * This method processes plain java objects, for each {@link Map} it adds a {@link MapField} to the path, for
-   * {@link List} a {@link ArrayField}, {@link Object[]} a {@link ArrayField}, and so on. {@link ArrayField} and
+   * {@link List} a {@link ArrayField}, {@code Object[]} a {@link ArrayField}, and so on. {@link ArrayField} and
    * {@link ArrayField} will be processed by {@link #processArrayField(ArrayList, List)}
    */
   public ProcessResults processFields(Object raw)
@@ -89,7 +89,7 @@ public abstract class StructuredDataProcessor
   private ProcessResults processMapField(Queue<Field> toProcess, MapField map)
   {
     // just guessing a size for a Map as some constant, it might be bigger than this...
-    final ProcessResults processResults = new ProcessResults().withSize(16);
+    final ProcessResults processResults = new ProcessResults().withSize(16).setHasObjects();
     for (Map.Entry<String, ?> entry : map.getMap().entrySet()) {
       // add estimated size of string key
       processResults.addSize(estimateStringSize(entry.getKey()));
@@ -242,20 +242,36 @@ public abstract class StructuredDataProcessor
     private Set<ArrayList<NestedPathPart>> literalFields;
     private int estimatedSize;
 
+    private boolean hasObjects;
+
     public ProcessResults()
     {
       literalFields = new HashSet<>();
       estimatedSize = 0;
     }
 
+    /**
+     * Set of paths which contain simple values
+     */
     public Set<ArrayList<NestedPathPart>> getLiteralFields()
     {
       return literalFields;
     }
 
+    /**
+     * Estimated size in bytes of the data processed
+     */
     public int getEstimatedSize()
     {
       return estimatedSize;
+    }
+
+    /**
+     * Returns true if
+     */
+    public boolean hasObjects()
+    {
+      return hasObjects;
     }
 
     public ProcessResults addSize(int size)
@@ -277,10 +293,17 @@ public abstract class StructuredDataProcessor
       return this;
     }
 
+    public ProcessResults setHasObjects()
+    {
+      this.hasObjects = true;
+      return this;
+    }
+
     public ProcessResults merge(ProcessResults other)
     {
       this.literalFields.addAll(other.literalFields);
       this.estimatedSize += other.estimatedSize;
+      this.hasObjects = this.hasObjects || other.hasObjects;
       return this;
     }
   }

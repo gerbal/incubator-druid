@@ -33,16 +33,17 @@ import org.apache.druid.query.topn.TopNQuery;
 import org.apache.druid.query.topn.TopNQueryBuilder;
 import org.apache.druid.query.topn.TopNQueryEngine;
 import org.apache.druid.query.topn.TopNResultValue;
+import org.apache.druid.segment.IncrementalIndexSegment;
 import org.apache.druid.segment.TestHelper;
 import org.apache.druid.segment.incremental.IncrementalIndex;
 import org.apache.druid.segment.incremental.IncrementalIndexSchema;
-import org.apache.druid.segment.incremental.IncrementalIndexStorageAdapter;
 import org.apache.druid.segment.incremental.OnheapIncrementalIndex;
 import org.apache.druid.testing.InitializedNullHandlingTest;
+import org.apache.druid.timeline.SegmentId;
 import org.joda.time.DateTime;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
 import java.util.Arrays;
@@ -54,12 +55,12 @@ public class DistinctCountTopNQueryTest extends InitializedNullHandlingTest
 {
   private CloseableStupidPool<ByteBuffer> pool;
 
-  @Before
+  @BeforeEach
   public void setup()
   {
     pool = new CloseableStupidPool<>(
         "TopNQueryEngine-bufferPool",
-        new Supplier<ByteBuffer>()
+        new Supplier<>()
         {
           @Override
           public ByteBuffer get()
@@ -70,7 +71,7 @@ public class DistinctCountTopNQueryTest extends InitializedNullHandlingTest
     );
   }
 
-  @After
+  @AfterEach
   public void teardown()
   {
     pool.close();
@@ -130,12 +131,16 @@ public class DistinctCountTopNQueryTest extends InitializedNullHandlingTest
                           .build();
 
     final Iterable<Result<TopNResultValue>> results =
-        engine.query(query, new IncrementalIndexStorageAdapter(index), null).toList();
+        engine.query(
+            query,
+            new IncrementalIndexSegment(index, SegmentId.dummy(QueryRunnerTestHelper.DATA_SOURCE)),
+            null
+        ).toList();
 
     List<Result<TopNResultValue>> expectedResults = Collections.singletonList(
         new Result<>(
             time,
-            new TopNResultValue(
+            TopNResultValue.create(
                 Arrays.<Map<String, Object>>asList(
                     ImmutableMap.of(
                         client_type, "iphone",

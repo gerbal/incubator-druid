@@ -23,8 +23,10 @@ sidebar_label: "SQL metadata tables"
   ~ under the License.
   -->
 
-> Apache Druid supports two query languages: Druid SQL and [native queries](querying.md).
-> This document describes the SQL language.
+:::info
+ Apache&circledR; Druid supports two query languages: Druid SQL and [native queries](querying.md).
+ This document describes the SQL language.
+:::
 
 
 Druid Brokers infer table and column metadata for each datasource from segments loaded in the cluster, and use this to
@@ -47,8 +49,10 @@ FROM INFORMATION_SCHEMA.COLUMNS
 WHERE "TABLE_SCHEMA" = 'druid' AND "TABLE_NAME" = 'foo'
 ```
 
-> Note: INFORMATION_SCHEMA tables do not currently support Druid-specific functions like `TIME_PARSE` and
-> `APPROX_QUANTILE_DS`. Only standard SQL functions can be used.
+:::info
+ Note: INFORMATION_SCHEMA tables do not currently support Druid-specific functions like `TIME_PARSE` and
+ `APPROX_QUANTILE_DS`. Only standard SQL functions can be used.
+:::
 
 ### SCHEMATA table
 `INFORMATION_SCHEMA.SCHEMATA` provides a list of all known schemas, which include `druid` for standard [Druid Table datasources](datasource.md#table), `lookup` for [Lookups](datasource.md#lookup), `sys` for the virtual [System metadata tables](#system-schema), and `INFORMATION_SCHEMA` for these virtual tables. Tables are allowed to have the same name across different schemas, so the schema may be included in an SQL statement to distinguish them, e.g. `lookup.table` vs `druid.table`.
@@ -105,13 +109,35 @@ SELECT "ORDINAL_POSITION", "COLUMN_NAME", "IS_NULLABLE", "DATA_TYPE", "JDBC_TYPE
 FROM INFORMATION_SCHEMA.COLUMNS
 WHERE "TABLE_NAME" = 'foo'
 ```
+### ROUTINES table
+`INFORMATION_SCHEMA.ROUTINES` provides a list of all known functions.
+
+|Column|Type| Notes|
+|------|----|------|
+|ROUTINE_CATALOG|VARCHAR| The catalog that contains the routine. Always set as `druid`|
+|ROUTINE_SCHEMA|VARCHAR| The schema that contains the routine. Always set as `INFORMATION_SCHEMA`|
+|ROUTINE_NAME|VARCHAR| THe routine name|
+|ROUTINE_TYPE|VARCHAR| The routine type. Always set as `FUNCTION`|
+|IS_AGGREGATOR|VARCHAR| If a routine is an aggregator function, then the value will be set to `YES`, else `NO`|
+|SIGNATURES|VARCHAR| One or more routine signatures|
+
+For example, this query returns information about all the aggregator functions:
+
+```sql
+SELECT "ROUTINE_CATALOG", "ROUTINE_SCHEMA", "ROUTINE_NAME", "ROUTINE_TYPE", "IS_AGGREGATOR", "SIGNATURES"
+FROM "INFORMATION_SCHEMA"."ROUTINES"
+WHERE "IS_AGGREGATOR" = 'YES'
+```
+
 
 ## SYSTEM SCHEMA
 
 The "sys" schema provides visibility into Druid segments, servers and tasks.
 
-> Note: "sys" tables do not currently support Druid-specific functions like `TIME_PARSE` and
-> `APPROX_QUANTILE_DS`. Only standard SQL functions can be used.
+:::info
+ Note: "sys" tables do not currently support Druid-specific functions like `TIME_PARSE` and
+ `APPROX_QUANTILE_DS`. Only standard SQL functions can be used.
+:::
 
 ### SEGMENTS table
 
@@ -129,14 +155,15 @@ Segments table provides details on all Druid segments, whether they are publishe
 |num_replicas|BIGINT|Number of replicas of this segment currently being served|
 |num_rows|BIGINT|Number of rows in this segment, or zero if the number of rows is not known.<br /><br />This row count is gathered by the Broker in the background. It will be zero if the Broker has not gathered a row count for this segment yet. For segments ingested from streams, the reported row count may lag behind the result of a `count(*)` query because the cached `num_rows` on the Broker may be out of date. This will settle shortly after new rows stop being written to that particular segment.|
 |is_active|BIGINT|True for segments that represent the latest state of a datasource.<br /><br />Equivalent to `(is_published = 1 AND is_overshadowed = 0) OR is_realtime = 1`. In steady state, when no ingestion or data management operations are happening, `is_active` will be equivalent to `is_available`. However, they may differ from each other when ingestion or data management operations have executed recently. In these cases, Druid will load and unload segments appropriately to bring actual availability in line with the expected state given by `is_active`.|
-|is_published|BIGINT|Boolean represented as long type where 1 = true, 0 = false. 1 if this segment has been published to the metadata store and is marked as used. See the [segment lifecycle documentation](../design/architecture.md#segment-lifecycle) for more details.|
-|is_available|BIGINT|Boolean represented as long type where 1 = true, 0 = false. 1 if this segment is currently being served by any data serving process, like a Historical or a realtime ingestion task. See the [segment lifecycle documentation](../design/architecture.md#segment-lifecycle) for more details.|
+|is_published|BIGINT|Boolean represented as long type where 1 = true, 0 = false. 1 if this segment has been published to the metadata store and is marked as used. See the [segment lifecycle documentation](../design/storage.md#segment-lifecycle) for more details.|
+|is_available|BIGINT|Boolean represented as long type where 1 = true, 0 = false. 1 if this segment is currently being served by any data serving process, like a Historical or a realtime ingestion task. See the [segment lifecycle documentation](../design/storage.md#segment-lifecycle) for more details.|
 |is_realtime|BIGINT|Boolean represented as long type where 1 = true, 0 = false. 1 if this segment is _only_ served by realtime tasks, and 0 if any Historical process is serving this segment.|
-|is_overshadowed|BIGINT|Boolean represented as long type where 1 = true, 0 = false. 1 if this segment is published and is _fully_ overshadowed by some other published segments. Currently, `is_overshadowed` is always 0 for unpublished segments, although this may change in the future. You can filter for segments that "should be published" by filtering for `is_published = 1 AND is_overshadowed = 0`. Segments can briefly be both published and overshadowed if they were recently replaced, but have not been unpublished yet. See the [segment lifecycle documentation](../design/architecture.md#segment-lifecycle) for more details.|
+|is_overshadowed|BIGINT|Boolean represented as long type where 1 = true, 0 = false. 1 if this segment is published and is _fully_ overshadowed by some other published segments. Currently, `is_overshadowed` is always 0 for unpublished segments, although this may change in the future. You can filter for segments that "should be published" by filtering for `is_published = 1 AND is_overshadowed = 0`. Segments can briefly be both published and overshadowed if they were recently replaced, but have not been unpublished yet. See the [segment lifecycle documentation](../design/storage.md#segment-lifecycle) for more details.|
 |shard_spec|VARCHAR|JSON-serialized form of the segment `ShardSpec`|
 |dimensions|VARCHAR|JSON-serialized form of the segment dimensions|
 |metrics|VARCHAR|JSON-serialized form of the segment metrics|
 |last_compaction_state|VARCHAR|JSON-serialized form of the compaction task's config (compaction task which created this segment). May be null if segment was not created by compaction task.|
+|replication_factor|BIGINT|Total number of replicas of the segment that are required to be loaded across all historical tiers, based on the load rule that currently applies to this segment. If this value is 0, the segment is not assigned to any historical and will not be loaded. This value is -1 if load rules for the segment have not been evaluated yet.|
 
 For example, to retrieve all currently active segments for datasource "wikipedia", use the query:
 
@@ -201,13 +228,19 @@ Servers table lists all discovered servers in the cluster.
 |------|-----|-----|
 |server|VARCHAR|Server name in the form host:port|
 |host|VARCHAR|Hostname of the server|
-|plaintext_port|BIGINT|Unsecured port of the server, or -1 if plaintext traffic is disabled|
+|plaintext_port|BIGINT|Unsecured port the server listens on (`druid.plaintextPort`), or -1 if plaintext traffic is disabled. The port in `server` may differ if [`druid.advertisedPlaintextPort`](../configuration/index.md#advertised-plaintext-port) is set.|
 |tls_port|BIGINT|TLS port of the server, or -1 if TLS is disabled|
 |server_type|VARCHAR|Type of Druid service. Possible values include: COORDINATOR, OVERLORD,  BROKER, ROUTER, HISTORICAL, MIDDLE_MANAGER or PEON.|
 |tier|VARCHAR|Distribution tier see [druid.server.tier](../configuration/index.md#historical-general-configuration). Only valid for HISTORICAL type, for other types it's null|
 |current_size|BIGINT|Current size of segments in bytes on this server. Only valid for HISTORICAL type, for other types it's 0|
 |max_size|BIGINT|Max size in bytes this server recommends to assign to segments see [druid.server.maxSize](../configuration/index.md#historical-general-configuration). Only valid for HISTORICAL type, for other types it's 0|
-|is_leader|BIGINT|1 if the server is currently the 'leader' (for services which have the concept of leadership), otherwise 0 if the server is not the leader, or the default long value (0 or null depending on `druid.generic.useDefaultValueForNull`) if the server type does not have the concept of leadership|
+|is_leader|BIGINT|1 if the server is currently the 'leader' (for services which have the concept of leadership), otherwise 0 if the server is not the leader, or null if the server type does not have the concept of leadership|
+|start_time|STRING|Timestamp in ISO8601 format when the server was announced in the cluster|
+|version|VARCHAR|Druid version running on the server|
+|build_revision|VARCHAR|The git commit of the build that produced the server binary|
+|labels|VARCHAR|Labels for the server configured using the property [`druid.labels`](../configuration/index.md)|
+|available_processors|BIGINT|Total number of CPU processors available to the server|
+|total_memory|BIGINT|Total memory in bytes available to the server|
 
 To retrieve information about all servers, use the query:
 
@@ -239,7 +272,7 @@ GROUP BY servers.server;
 
 ### TASKS table
 
-The tasks table provides information about active and recently-completed indexing tasks. For more information
+The tasks table provides information about active and recently completed tasks. For more information
 check out the documentation for [ingestion tasks](../ingestion/tasks.md).
 
 |Column|Type|Notes|
@@ -272,8 +305,9 @@ The supervisors table provides information about supervisors.
 |Column|Type|Notes|
 |------|-----|-----|
 |supervisor_id|VARCHAR|Supervisor task identifier|
-|state|VARCHAR|Basic state of the supervisor. Available states: `UNHEALTHY_SUPERVISOR`, `UNHEALTHY_TASKS`, `PENDING`, `RUNNING`, `SUSPENDED`, `STOPPING`. Check [Kafka Docs](../development/extensions-core/kafka-supervisor-operations.md) for details.|
-|detailed_state|VARCHAR|Supervisor specific state. (See documentation of the specific supervisor for details, e.g. [Kafka](../development/extensions-core/kafka-ingestion.md) or [Kinesis](../development/extensions-core/kinesis-ingestion.md))|
+|datasource|VARCHAR|Datasource the supervisor operates on|
+|state|VARCHAR|Basic state of the supervisor. Available states: `UNHEALTHY_SUPERVISOR`, `UNHEALTHY_TASKS`, `PENDING`, `RUNNING`, `SUSPENDED`, `STOPPING`. See [Supervisor reference](../ingestion/supervisor.md) for more information.|
+|detailed_state|VARCHAR|Supervisor specific state. See documentation of the specific supervisor for details: [Kafka](../ingestion/kafka-ingestion.md) or [Kinesis](../ingestion/kinesis-ingestion.md).|
 |healthy|BIGINT|Boolean represented as long type where 1 = true, 0 = false. 1 indicates a healthy supervisor|
 |type|VARCHAR|Type of supervisor, e.g. `kafka`, `kinesis` or `materialized_view`|
 |source|VARCHAR|Source of the supervisor, e.g. Kafka topic or Kinesis stream|
@@ -285,3 +319,92 @@ For example, to retrieve supervisor tasks information filtered by health status,
 ```sql
 SELECT * FROM sys.supervisors WHERE healthy=0;
 ```
+
+### SERVER_PROPERTIES table
+
+The `server_properties` table exposes the runtime properties configured on each Druid server. Each row represents a single property key-value pair associated with a specific server. This table supports filter and projection pushdown for efficient querying. If a server is unreachable, the table still returns a row for that server with the `error_message` column populated instead of failing the entire query.
+
+|Column|Type|Notes|
+|------|-----|-----|
+|server|VARCHAR|Host and port of the server, in the form `host:port`|
+|service_name|VARCHAR|Service name of the server, as defined by `druid.service`|
+|node_roles|VARCHAR|Comma-separated list of roles that the server performs. For example, `[coordinator,overlord]` if the server functions as both a Coordinator and an Overlord.|
+|property|VARCHAR|Name of the property|
+|value|VARCHAR|Value of the property|
+|error_message|VARCHAR|Describes why properties could not be retrieved from the server (e.g., connection refused, HTTP error). Null when properties were fetched successfully.|
+
+For example, to retrieve properties for a specific server, use the query
+
+```sql
+SELECT * FROM sys.server_properties WHERE server='192.168.1.1:8081'
+```
+
+### QUERY_CONTEXT_PARAMETERS table
+
+:::info
+The `sys.query_context_parameters` table is experimental. Its columns and their values may change in future releases.
+:::
+
+The `query_context_parameters` table lists the [query context parameters](query-context.md) that users can set, along with their types, defaults, and where they apply. Each row represents one parameter. Parameters that only Druid sets internally are not listed.
+
+Unlike other `sys` tables that expose cluster state, such as `servers`, this table doesn't require `READ` permission on the `STATE` resource. Any user who can query `sys` tables can read it; when `druid.sql.planner.authorizeSystemTablesDirectly` is true, that means `READ` permission on the `SYSTEM_TABLE` resource `query_context_parameters`. Only the `effective_value` and `effective_source` columns, which come from the Broker configuration, require `READ` permission on the `CONFIG` resource. Without it, the query still succeeds, but `effective_value` is null and `effective_source` is `UNAUTHORIZED` in every row.
+
+|Column|Type|Notes|
+|------|-----|-----|
+|name|VARCHAR|Name of the parameter|
+|type|VARCHAR|Value type: `Boolean`, `Integer`, `Long`, `Float`, `String`, `HumanReadableNumber`, `Enum`, or `Object`. A `HumanReadableNumber` is a number that also accepts a [human-readable](../configuration/human-readable-byte.md) form with a unit suffix, such as `10K` or `256MiB`.|
+|value_range|VARCHAR|Accepted range of a numeric parameter, such as `[1, 2147483647]`. Null if the range is not restricted.|
+|default_value|VARCHAR|Built-in default value. For a default that is the value of a runtime property, the property name in the form `${druid.broker.http.maxQueuedBytes}`. The property is read by the services that apply the parameter, which may be other than the Broker. Null if there is no default or it depends on other settings; see `default_description`.|
+|effective_value|VARCHAR|Default value that this Broker applies from the query context defaults when a query doesn't set the parameter: the `queryContext` of the Broker dynamic configuration, else the `druid.query.default.context.<name>` runtime property, else the runtime property in `default_value` as set on this Broker, else a built-in `default_value`. A `null` value in the dynamic configuration unsets `druid.query.default.context.<name>`. Null if none of them is set. Other configuration that a default can come from, such as a runtime property in `default_value` that isn't set explicitly on this Broker or its value on the services that read it, settings described in `default_description`, per-datasource overrides like `perSegmentTimeoutConfig` in the Broker dynamic configuration, or Dart's `druid.msq.dart.query.context.*`, is not reflected. A value set in the query context or with `SET` still takes precedence.|
+|effective_source|VARCHAR|Where `effective_value` comes from: `BROKER_DYNAMIC_CONFIG`, `DEFAULT_CONTEXT_PROPERTY` for `druid.query.default.context.<name>`, `RUNTIME_PROPERTY` for the runtime property in `default_value`, or `BUILT_IN`. `UNAUTHORIZED` if you don't have `READ` permission on the `CONFIG` resource. Otherwise null if `effective_value` is null.|
+|default_description|VARCHAR|Description of the default when it is neither a fixed value nor a single runtime property|
+|description|VARCHAR|Description of the parameter|
+|visibility|VARCHAR|`PUBLIC` for documented parameters, `HIDDEN` for parameters that can be set but are not documented|
+|query_languages|`ARRAY<VARCHAR>`|Query languages that can provide the parameter: `SQL` for Druid SQL, `JSON` for native queries|
+|engines|`ARRAY<VARCHAR>`|Query engines that honor the parameter: `NATIVE`, `MSQ`, or `DART`|
+|native_query_types|`ARRAY<VARCHAR>`|Native query types the parameter applies to, such as `scan` or `groupBy`, as in the native query's `queryType`. An empty array means all native query types. Null if no native engine honors the parameter.|
+|statement_types|`ARRAY<VARCHAR>`|SQL statement types the parameter applies to: `SELECT`, `INSERT`, or `REPLACE`. An empty array means all statement types. Null if Druid SQL can't provide the parameter.|
+|since|VARCHAR|Druid version that introduced the parameter|
+|is_nullable|BIGINT|1 if the parameter accepts a null value, 0 otherwise|
+|deprecation|VARCHAR|Explains the deprecation and any replacement. Null if the parameter is not deprecated.|
+
+For example, to list the deprecated parameters and their replacements, use the query
+
+```sql
+SELECT name, deprecation
+FROM sys.query_context_parameters
+WHERE deprecation IS NOT NULL
+```
+
+### QUERIES table
+
+:::info
+ The `sys.queries` table is an experimental feature. You must enable it by setting the runtime property
+ `druid.sql.planner.enableSysQueriesTable=true` on Broker processes. The main reason this table is experimental
+  is that it only shows queries from the [Dart](dart.md) engine, which is also experimental.
+:::
+
+The queries table provides information about currently running and recently completed SQL queries.
+
+|Column|Type|Notes|
+|------|-----|-----|
+|id|VARCHAR|Execution ID for the query. For Dart queries, this is the `dartQueryId`.|
+|engine|VARCHAR|SQL engine that executed the query, e.g., `msq-dart`|
+|state|VARCHAR|Query status: `ACCEPTED`, `RUNNING`, `SUCCESS`, `FAILED`, or `CANCELED`|
+|info|VARCHAR|JSON-serialized query information including `sqlQueryId`, `sql`, `identity`, `startTime`, and other engine-specific details|
+
+For example, to retrieve all recently completed Dart queries:
+
+```sql
+SELECT *
+FROM sys.queries
+WHERE
+  engine = 'msq-dart'
+  AND state IN ('SUCCESS', 'FAILED', 'CANCELED')
+```
+
+:::info
+ The retention of completed query information is controlled by Dart controller configuration.
+ See `druid.msq.dart.controller.maxRetainedReportCount` and `druid.msq.dart.controller.maxRetainedReportDuration`
+ for details on how long completed queries are retained.
+:::

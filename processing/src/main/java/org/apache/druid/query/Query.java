@@ -22,11 +22,13 @@ package org.apache.druid.query;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Ordering;
+import org.apache.druid.error.DruidException;
 import org.apache.druid.guice.annotations.ExtensionPoint;
 import org.apache.druid.java.util.common.HumanReadableBytes;
 import org.apache.druid.java.util.common.granularity.Granularity;
+import org.apache.druid.query.context.QueryContextParameter;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.datasourcemetadata.DataSourceMetadataQuery;
 import org.apache.druid.query.filter.DimFilter;
 import org.apache.druid.query.groupby.GroupByQuery;
@@ -39,13 +41,18 @@ import org.apache.druid.query.spec.QuerySegmentSpec;
 import org.apache.druid.query.timeboundary.TimeBoundaryQuery;
 import org.apache.druid.query.timeseries.TimeseriesQuery;
 import org.apache.druid.query.topn.TopNQuery;
+import org.apache.druid.query.union.UnionQuery;
 import org.apache.druid.segment.Segment;
 import org.apache.druid.segment.VirtualColumns;
+import org.apache.druid.segment.column.RowSignature;
+import org.apache.druid.segment.column.RowSignature.Finalization;
+import org.apache.druid.utils.CollectionUtils;
 import org.joda.time.DateTimeZone;
 import org.joda.time.Duration;
 import org.joda.time.Interval;
 
 import javax.annotation.Nullable;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -64,6 +71,7 @@ import java.util.UUID;
     @JsonSubTypes.Type(name = Query.TIMESERIES, value = TimeseriesQuery.class),
     @JsonSubTypes.Type(name = Query.TOPN, value = TopNQuery.class),
     @JsonSubTypes.Type(name = Query.WINDOW_OPERATOR, value = WindowOperatorQuery.class),
+    @JsonSubTypes.Type(name = Query.UNION_QUERY, value = UnionQuery.class),
 })
 public interface Query<T>
 {
@@ -77,6 +85,7 @@ public interface Query<T>
   String TIMESERIES = "timeseries";
   String TOPN = "topN";
   String WINDOW_OPERATOR = "windowOperator";
+  String UNION_QUERY = "union";
 
   DataSource getDataSource();
 
@@ -118,14 +127,14 @@ public interface Query<T>
 
   /**
    * Get context value and cast to ContextType in an unsafe way.
-   *
+   * <p>
    * For safe conversion, it's recommended to use following methods instead:
    * <p>
    * {@link QueryContext#getBoolean(String)} <br/>
    * {@link QueryContext#getString(String)} <br/>
    * {@link QueryContext#getInt(String)} <br/>
    * {@link QueryContext#getLong(String)} <br/>
-   * {@link QueryContext#getFloat(String)} <br/>
+   * {@link QueryContext#getFloat(String, float)} <br/>
    * {@link QueryContext#getEnum(String, Class, Enum)} <br/>
    * {@link QueryContext#getHumanReadableBytes(String, HumanReadableBytes)}
    *
@@ -164,15 +173,13 @@ public interface Query<T>
     return context().getHumanReadableBytes(key, defaultValue);
   }
 
-  boolean isDescending();
-
   /**
    * Comparator that represents the order in which results are generated from the
    * {@link QueryRunnerFactory#createRunner(Segment)} and
    * {@link QueryRunnerFactory#mergeRunners(QueryProcessingPool, Iterable)} calls. This is used to combine streams of
    * results from different sources; for example, it's used by historicals to combine streams from different segments,
    * and it's used by the broker to combine streams from different historicals.
-   *
+   * <p>
    * Important note: sometimes, this ordering is used in a type-unsafe way to order @{code Result<BySegmentResultValue>}
    * objects. Because of this, implementations should fall back to {@code Ordering.natural()} when they are given an
    * object that is not of type T.
@@ -182,8 +189,23 @@ public interface Query<T>
   Query<T> withOverriddenContext(Map<String, Object> contextOverride);
 
   /**
-   * Returns a new query, identical to this one, but with a different associated {@link QuerySegmentSpec}.
+   * Returns a new query with the given typed context parameter overridden. A {@code null} value removes the parameter.
    *
+   * @throws BadQueryContextException if the value is invalid
+   */
+  default <V> Query<T> withOverriddenContext(
+      final QueryContextParameter<V> parameter,
+      @Nullable final V value
+  )
+  {
+    return withOverriddenContext(
+        Collections.singletonMap(parameter.getName(), parameter.validate(value))
+    );
+  }
+
+  /**
+   * Returns a new query, identical to this one, but with a different associated {@link QuerySegmentSpec}.
+   * <p>
    * This often changes the behavior of {@link #getRunner(QuerySegmentWalker)}, since most queries inherit that method
    * from {@link BaseQuery}, which implements it by calling {@link QuerySegmentSpec#lookup}.
    */
@@ -220,7 +242,7 @@ public interface Query<T>
   @Nullable
   default String getSqlQueryId()
   {
-    return context().getString(BaseQuery.SQL_QUERY_ID);
+    return context().get(QueryContextParameters.SQL_QUERY_ID);
   }
 
   /**
@@ -243,12 +265,12 @@ public interface Query<T>
 
   default Query<T> withPriority(int priority)
   {
-    return withOverriddenContext(ImmutableMap.of(QueryContexts.PRIORITY_KEY, priority));
+    return withOverriddenContext(QueryContextParameters.PRIORITY, priority);
   }
 
   default Query<T> withLane(String lane)
   {
-    return withOverriddenContext(ImmutableMap.of(QueryContexts.LANE_KEY, lane));
+    return withOverriddenContext(QueryContextParameters.LANE, lane);
   }
 
   default VirtualColumns getVirtualColumns()
@@ -258,16 +280,52 @@ public interface Query<T>
 
   /**
    * Returns the set of columns that this query will need to access out of its datasource.
-   *
+   * <p>
    * This method does not "look into" what the datasource itself is doing. For example, if a query is built on a
    * {@link QueryDataSource}, this method will not return the columns used by that subquery. As another example, if a
    * query is built on a {@link JoinDataSource}, this method will not return the columns from the underlying datasources
    * that are used by the join condition, unless those columns are also used by this query in other ways.
-   *
+   * <p>
    * Returns null if the set of required columns cannot be known ahead of time.
    */
   @Nullable
   default Set<String> getRequiredColumns()
+  {
+    return null;
+  }
+
+  /**
+   * Returns an interval if {@link #getIntervals()} has only a single interval, else explodes
+   */
+  default Interval getSingleInterval()
+  {
+    return CollectionUtils.getOnlyElement(
+        getIntervals(),
+        (i) -> DruidException.defensive(
+            "This method can only be called after query is reduced to a single segment interval, got [%s]",
+            i
+        )
+    );
+  }
+
+  /**
+   * Signals that the execution of this query could also transparently handle
+   * the input {@link QueryDataSource} as well.
+   *
+   * This is a not-so-nice way to support that {@link GroupByQuery} could
+   * collapse other {@link GroupByQuery}-ies in {@link QueryDataSource}-es.
+   */
+  default boolean mayCollapseQueryDataSource()
+  {
+    return false;
+  }
+
+  default RowSignature getResultRowSignature()
+  {
+    return getResultRowSignature(Finalization.UNKNOWN);
+  }
+
+  default RowSignature getResultRowSignature(RowSignature.Finalization finalization)
   {
     return null;
   }

@@ -29,10 +29,14 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 /**
  * Pool that pre-generates objects up to a limit, then permits possibly-blocking "take" operations.
@@ -48,20 +52,52 @@ public class DefaultBlockingPool<T> implements BlockingPool<T>
   private final Condition notEnough;
   private final int maxSize;
 
+  private final AtomicLong pendingRequests;
+
   public DefaultBlockingPool(
       Supplier<T> generator,
       int limit
   )
   {
+    this(generator, limit, false);
+  }
+
+  public DefaultBlockingPool(
+      Supplier<T> generator,
+      int limit,
+      boolean parallelInit
+  )
+  {
     this.objects = new ArrayDeque<>(limit);
     this.maxSize = limit;
 
-    for (int i = 0; i < limit; i++) {
-      objects.add(generator.get());
+    // Parallize allocations can significantly speed up node boot times
+    if (parallelInit) {
+      int parallelism = Runtime.getRuntime().availableProcessors();
+      ForkJoinPool fjp = new ForkJoinPool(parallelism);
+      try {
+        objects.addAll(fjp.submit(
+            () -> IntStream.range(0, limit)
+                           .parallel()
+                           .mapToObj(i -> generator.get())
+                           .collect(Collectors.toCollection(ArrayList::new))
+        ).get());
+      }
+      catch (ExecutionException | InterruptedException e) {
+        throw new RuntimeException(e);
+      }
+      finally {
+        fjp.shutdown();
+      }
+    } else {
+      for (int i = 0; i < limit; i++) {
+        objects.add(generator.get());
+      }
     }
 
     this.lock = new ReentrantLock();
     this.notEnough = lock.newCondition();
+    this.pendingRequests = new AtomicLong();
   }
 
   @Override
@@ -91,11 +127,15 @@ public class DefaultBlockingPool<T> implements BlockingPool<T>
     Preconditions.checkArgument(timeoutMs >= 0, "timeoutMs must be a non-negative value, but was [%s]", timeoutMs);
     checkInitialized();
     try {
+      pendingRequests.incrementAndGet();
       final List<T> objects = timeoutMs > 0 ? pollObjects(elementNum, timeoutMs) : pollObjects(elementNum);
       return objects.stream().map(this::wrapObject).collect(Collectors.toList());
     }
     catch (InterruptedException e) {
       throw new RuntimeException(e);
+    }
+    finally {
+      pendingRequests.decrementAndGet();
     }
   }
 
@@ -104,11 +144,27 @@ public class DefaultBlockingPool<T> implements BlockingPool<T>
   {
     checkInitialized();
     try {
+      pendingRequests.incrementAndGet();
       return takeObjects(elementNum).stream().map(this::wrapObject).collect(Collectors.toList());
     }
     catch (InterruptedException e) {
       throw new RuntimeException(e);
     }
+    finally {
+      pendingRequests.decrementAndGet();
+    }
+  }
+
+  @Override
+  public long getPendingRequests()
+  {
+    return pendingRequests.get();
+  }
+
+  @Override
+  public long getUsedResourcesCount()
+  {
+    return maxSize - objects.size();
   }
 
   private List<T> pollObjects(int elementNum) throws InterruptedException

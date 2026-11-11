@@ -1,0 +1,259 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.druid.server.coordinator.duty;
+
+import org.apache.druid.client.DruidServer;
+import org.apache.druid.client.ImmutableDruidDataSource;
+import org.apache.druid.client.ImmutableDruidServer;
+import org.apache.druid.client.ServerInventoryView;
+import org.apache.druid.java.util.common.logger.Logger;
+import org.apache.druid.server.coordinator.CoordinatorDynamicConfig;
+import org.apache.druid.server.coordinator.DruidCluster;
+import org.apache.druid.server.coordinator.DruidCoordinatorRuntimeParams;
+import org.apache.druid.server.coordinator.ServerHolder;
+import org.apache.druid.server.coordinator.balancer.BalancerStrategy;
+import org.apache.druid.server.coordinator.balancer.BalancerStrategyFactory;
+import org.apache.druid.server.coordinator.loading.LoadQueueTaskMaster;
+import org.apache.druid.server.coordinator.loading.SegmentLoadQueueManager;
+import org.apache.druid.server.coordinator.loading.SegmentLoadingConfig;
+import org.apache.druid.server.coordinator.stats.CoordinatorRunStats;
+import org.apache.druid.server.coordinator.stats.Dimension;
+import org.apache.druid.server.coordinator.stats.RowKey;
+import org.apache.druid.server.coordinator.stats.Stats;
+
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
+
+/**
+ * This duty does the following:
+ * <ul>
+ *   <li>Creates an immutable {@link DruidCluster} consisting of {@link ServerHolder}s
+ *   which represent the current state of the servers in the cluster.</li>
+ *   <li>Starts and stops load peons for new and disappeared servers respectively.</li>
+ *   <li>Cancels in-progress loads on all decommissioning servers. This is done
+ *   here to ensure that under-replicated segments are assigned to active servers
+ *   in the {@link RunRules} duty after this.</li>
+ *   <li>Initializes the {@link BalancerStrategy} for the run.</li>
+ * </ul>
+ */
+public class PrepareBalancerAndLoadQueues implements CoordinatorDuty
+{
+  private static final Logger log = new Logger(PrepareBalancerAndLoadQueues.class);
+
+  private final LoadQueueTaskMaster taskMaster;
+  private final SegmentLoadQueueManager loadQueueManager;
+  private final ServerInventoryView serverInventoryView;
+  private final BalancerStrategyFactory balancerStrategyFactory;
+
+  public PrepareBalancerAndLoadQueues(
+      LoadQueueTaskMaster taskMaster,
+      SegmentLoadQueueManager loadQueueManager,
+      BalancerStrategyFactory balancerStrategyFactory,
+      ServerInventoryView serverInventoryView
+  )
+  {
+    this.taskMaster = taskMaster;
+    this.loadQueueManager = loadQueueManager;
+    this.balancerStrategyFactory = balancerStrategyFactory;
+    this.serverInventoryView = serverInventoryView;
+  }
+
+  @Override
+  public DruidCoordinatorRuntimeParams run(DruidCoordinatorRuntimeParams params)
+  {
+    List<ImmutableDruidServer> currentServers = prepareCurrentServers();
+    taskMaster.resetPeonsForNewServers(currentServers);
+
+    final CoordinatorDynamicConfig dynamicConfig = params.getCoordinatorDynamicConfig();
+    final SegmentLoadingConfig segmentLoadingConfig
+        = SegmentLoadingConfig.create(dynamicConfig, params.getUsedSegmentCount());
+
+    final DruidCluster cluster = prepareCluster(dynamicConfig, segmentLoadingConfig, currentServers);
+    cancelLoadsOnDecommissioningServers(cluster);
+
+    final CoordinatorRunStats stats = params.getCoordinatorStats();
+    collectHistoricalStats(cluster, stats, dynamicConfig.getTierToAliasName());
+    collectUsedSegmentStats(params, stats);
+    collectDebugStats(segmentLoadingConfig, stats);
+
+    final int numBalancerThreads = segmentLoadingConfig.getBalancerComputeThreads();
+    final BalancerStrategy balancerStrategy = balancerStrategyFactory.createBalancerStrategy(numBalancerThreads);
+    log.debug(
+        "Using balancer strategy[%s] with [%d] threads.",
+        balancerStrategy.getClass().getSimpleName(), numBalancerThreads
+    );
+
+    return params.buildFromExisting()
+                 .withDruidCluster(cluster)
+                 .withBalancerStrategy(balancerStrategy)
+                 .withSegmentLoadingConfig(segmentLoadingConfig)
+                 .withSegmentAssignerUsing(loadQueueManager)
+                 .build();
+  }
+
+  /**
+   * Cancels all load/move operations on decommissioning servers. This should
+   * be done before initializing the SegmentReplicantLookup so that
+   * under-replicated segments can be assigned in the current run itself.
+   */
+  private void cancelLoadsOnDecommissioningServers(DruidCluster cluster)
+  {
+    final AtomicInteger cancelledCount = new AtomicInteger(0);
+    final List<ServerHolder> decommissioningServers
+        = cluster.getAllManagedServers().stream()
+                 .filter(ServerHolder::isDecommissioning)
+                 .collect(Collectors.toList());
+
+    for (ServerHolder server : decommissioningServers) {
+      server.getQueuedSegments().forEach(
+          (segment, action) -> {
+            // Cancel the operation if it is a type of load
+            if (action.isLoad() && server.cancelOperation(action, segment)) {
+              cancelledCount.incrementAndGet();
+            }
+          }
+      );
+    }
+  }
+
+  private List<ImmutableDruidServer> prepareCurrentServers()
+  {
+    return serverInventoryView
+        .getInventory()
+        .stream()
+        .filter(DruidServer::isSegmentReplicationOrBroadcastTarget)
+        .map(DruidServer::toImmutableDruidServer)
+        .collect(Collectors.toList());
+  }
+
+  private DruidCluster prepareCluster(
+      CoordinatorDynamicConfig dynamicConfig,
+      SegmentLoadingConfig segmentLoadingConfig,
+      List<ImmutableDruidServer> currentServers
+  )
+  {
+    final Set<String> decommissioningServers = dynamicConfig.getDecommissioningNodes();
+    final Set<String> unmanagedServers = new HashSet<>(dynamicConfig.getCloneServers().keySet());
+    final DruidCluster.Builder cluster = DruidCluster.builder();
+    for (ImmutableDruidServer server : currentServers) {
+      cluster.add(
+          new ServerHolder(
+              server,
+              taskMaster.getPeonForServer(server),
+              decommissioningServers.contains(server.getHost()),
+              unmanagedServers.contains(server.getHost()),
+              segmentLoadingConfig.getMaxSegmentsInLoadQueue(),
+              segmentLoadingConfig.getMaxLifetimeInLoadQueue()
+          )
+      );
+    }
+    return cluster.build();
+  }
+
+  private void collectHistoricalStats(
+      DruidCluster cluster,
+      CoordinatorRunStats stats,
+      Map<String, String> tierToAliasName
+  )
+  {
+    final Map<String, CacheTotals> aliasCacheTotals = new HashMap<>();
+    cluster.getHistoricals().forEach((tier, historicals) -> {
+      final String alias = tierToAliasName.get(tier);
+      final RowKey rowKey = alias == null
+                            ? RowKey.of(Dimension.TIER, tier)
+                            : RowKey.with(Dimension.TIER, tier).and(Dimension.TIER_ALIAS, alias);
+      stats.add(Stats.Tier.HISTORICAL_COUNT, rowKey, historicals.size());
+
+      long storageCapacity = 0;
+      long cacheCapacity = 0;
+      long cacheUsed = 0;
+      long cloneCount = 0;
+      for (ServerHolder holder : historicals) {
+        if (holder.isUnmanaged()) {
+          cloneCount += 1;
+        } else {
+          storageCapacity += holder.getMaxSize();
+          cacheCapacity += holder.getStorageSize();
+          // getCurrSize(), not getSizeUsed(): queued loads are counted at full segment size, which would overstate
+          // disk usage on a tier serving partial loads for the duration of every load
+          cacheUsed += holder.getServer().getCurrSize();
+        }
+      }
+      stats.add(Stats.Tier.CLONE_COUNT, rowKey, cloneCount);
+      stats.add(Stats.Tier.STORAGE_CAPACITY, rowKey, storageCapacity);
+      // Deprecated alias of tier/storage/capacity, emitted until the deprecation period is over
+      stats.add(Stats.Tier.TOTAL_CAPACITY, rowKey, storageCapacity);
+      stats.add(Stats.Tier.CACHE_CAPACITY, rowKey, cacheCapacity);
+      stats.add(Stats.Tier.CACHE_USED, rowKey, cacheUsed);
+      if (cacheCapacity > 0) {
+        stats.add(Stats.Tier.CACHE_UTILIZATION, rowKey, toPercent(cacheUsed, cacheCapacity));
+      }
+      if (alias != null) {
+        aliasCacheTotals.merge(alias, new CacheTotals(cacheUsed, cacheCapacity), CacheTotals::plus);
+      }
+    });
+
+    aliasCacheTotals.forEach((alias, totals) -> {
+      if (totals.capacity() > 0) {
+        stats.add(
+            Stats.Tier.ALIAS_CACHE_UTILIZATION,
+            RowKey.of(Dimension.TIER_ALIAS, alias),
+            toPercent(totals.used(), totals.capacity())
+        );
+      }
+    });
+  }
+
+  private record CacheTotals(long used, long capacity)
+  {
+    CacheTotals plus(CacheTotals other)
+    {
+      return new CacheTotals(used + other.used, capacity + other.capacity);
+    }
+  }
+
+  private static long toPercent(long used, long capacity)
+  {
+    return Math.round(100.0 * used / capacity);
+  }
+
+  private void collectUsedSegmentStats(DruidCoordinatorRuntimeParams params, CoordinatorRunStats stats)
+  {
+    for (final ImmutableDruidDataSource dataSource : params.getDataSourcesSnapshot().getDataSourcesWithAllUsedSegments()) {
+      final long totalSizeOfUsedSegments = dataSource.getTotalSizeOfSegments();
+      final int numUsedSegments = dataSource.getNumSegments();
+
+      final RowKey datasourceKey = RowKey.of(Dimension.DATASOURCE, dataSource.getName());
+      stats.add(Stats.Segments.USED_BYTES, datasourceKey, totalSizeOfUsedSegments);
+      stats.add(Stats.Segments.USED, datasourceKey, numUsedSegments);
+    }
+  }
+
+  private void collectDebugStats(SegmentLoadingConfig config, CoordinatorRunStats stats)
+  {
+    stats.add(Stats.Balancer.COMPUTE_THREADS, config.getBalancerComputeThreads());
+    stats.add(Stats.Segments.REPLICATION_THROTTLE_LIMIT, config.getReplicationThrottleLimit());
+  }
+}

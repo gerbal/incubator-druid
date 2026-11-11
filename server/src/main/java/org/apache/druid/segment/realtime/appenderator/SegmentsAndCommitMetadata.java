@@ -20,28 +20,119 @@
 package org.apache.druid.segment.realtime.appenderator;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
+import org.apache.druid.segment.SegmentSchemaMapping;
 import org.apache.druid.segment.SegmentUtils;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 
 import javax.annotation.Nullable;
-import java.util.Collections;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 public class SegmentsAndCommitMetadata
 {
-  private static final SegmentsAndCommitMetadata NIL = new SegmentsAndCommitMetadata(Collections.emptyList(), null);
-
   private final Object commitMetadata;
   private final ImmutableList<DataSegment> segments;
+  private final SegmentSchemaMapping segmentSchemaMapping;
+
+  private final ImmutableSet<DataSegment> upgradedSegments;
+
+  /**
+   * Whether this object represents segments that were published to the metadata store.
+   */
+  private final boolean wasPublished;
 
   public SegmentsAndCommitMetadata(
       List<DataSegment> segments,
-      @Nullable Object commitMetadata
+      Object commitMetadata
+  )
+  {
+    this(segments, commitMetadata, null, null, false);
+  }
+
+  public SegmentsAndCommitMetadata(
+      List<DataSegment> segments,
+      Object commitMetadata,
+      SegmentSchemaMapping segmentSchemaMapping
+  )
+  {
+    this(segments, commitMetadata, segmentSchemaMapping, null, false);
+  }
+
+  public SegmentsAndCommitMetadata(
+      List<DataSegment> segments,
+      @Nullable Object commitMetadata,
+      @Nullable SegmentSchemaMapping segmentSchemaMapping,
+      @Nullable Set<DataSegment> upgradedSegments
+  )
+  {
+    this(segments, commitMetadata, segmentSchemaMapping, upgradedSegments, false);
+  }
+
+  private SegmentsAndCommitMetadata(
+      List<DataSegment> segments,
+      @Nullable Object commitMetadata,
+      @Nullable SegmentSchemaMapping segmentSchemaMapping,
+      @Nullable Set<DataSegment> upgradedSegments,
+      boolean wasPublished
   )
   {
     this.segments = ImmutableList.copyOf(segments);
     this.commitMetadata = commitMetadata;
+    this.upgradedSegments = upgradedSegments == null ? null : ImmutableSet.copyOf(upgradedSegments);
+    this.segmentSchemaMapping = segmentSchemaMapping;
+    this.wasPublished = wasPublished;
+  }
+
+  public SegmentsAndCommitMetadata withUpgradedSegments(Set<DataSegment> upgradedSegments)
+  {
+    return new SegmentsAndCommitMetadata(
+        this.segments,
+        this.commitMetadata,
+        this.segmentSchemaMapping,
+        upgradedSegments,
+        this.wasPublished
+    );
+  }
+
+  /**
+   * Returns a copy whose segments are replaced (matched by id, preserving order) with the corresponding entries from
+   * {@code publishedSegments}, so the metadata carries the actually-published shard specs rather than the pre-publish
+   * ones. Ids not present in {@code publishedSegments} keep their original entry.
+   */
+  public SegmentsAndCommitMetadata withPublishedSegments(Set<DataSegment> publishedSegments)
+  {
+    final Map<SegmentId, DataSegment> byId = new HashMap<>();
+    for (DataSegment published : publishedSegments) {
+      byId.put(published.getId(), published);
+    }
+    final List<DataSegment> reconciled = new ArrayList<>(segments.size());
+    for (DataSegment original : segments) {
+      reconciled.add(byId.getOrDefault(original.getId(), original));
+    }
+    return new SegmentsAndCommitMetadata(
+        reconciled,
+        this.commitMetadata,
+        this.segmentSchemaMapping,
+        this.upgradedSegments,
+        this.wasPublished
+    );
+  }
+
+  public SegmentsAndCommitMetadata withWasPublished(boolean wasPublished)
+  {
+    return new SegmentsAndCommitMetadata(
+        this.segments,
+        this.commitMetadata,
+        this.segmentSchemaMapping,
+        this.upgradedSegments,
+        wasPublished
+    );
   }
 
   @Nullable
@@ -55,6 +146,28 @@ public class SegmentsAndCommitMetadata
     return segments;
   }
 
+  /**
+   * @return the set of extra upgraded segments committed due to a concurrent replace.
+   */
+  @Nullable
+  public Set<DataSegment> getUpgradedSegments()
+  {
+    return upgradedSegments;
+  }
+
+  public SegmentSchemaMapping getSegmentSchemaMapping()
+  {
+    return segmentSchemaMapping;
+  }
+
+  /**
+   * @see #wasPublished
+   */
+  public boolean wasPublished()
+  {
+    return wasPublished;
+  }
+
   @Override
   public boolean equals(Object o)
   {
@@ -65,14 +178,17 @@ public class SegmentsAndCommitMetadata
       return false;
     }
     SegmentsAndCommitMetadata that = (SegmentsAndCommitMetadata) o;
-    return Objects.equals(commitMetadata, that.commitMetadata) &&
+    return wasPublished == that.wasPublished &&
+           Objects.equals(commitMetadata, that.commitMetadata) &&
+           Objects.equals(upgradedSegments, that.upgradedSegments) &&
+           Objects.equals(segmentSchemaMapping, that.segmentSchemaMapping) &&
            Objects.equals(segments, that.segments);
   }
 
   @Override
   public int hashCode()
   {
-    return Objects.hash(commitMetadata, segments);
+    return Objects.hash(commitMetadata, segments, upgradedSegments, segmentSchemaMapping, wasPublished);
   }
 
   @Override
@@ -81,11 +197,9 @@ public class SegmentsAndCommitMetadata
     return getClass().getSimpleName() + "{" +
            "commitMetadata=" + commitMetadata +
            ", segments=" + SegmentUtils.commaSeparatedIdentifiers(segments) +
+           ", upgradedSegments=" + SegmentUtils.commaSeparatedIdentifiers(upgradedSegments) +
+           ", segmentSchemaMapping=" + segmentSchemaMapping +
+           ", wasPublished=" + wasPublished +
            '}';
-  }
-
-  public static SegmentsAndCommitMetadata nil()
-  {
-    return NIL;
   }
 }

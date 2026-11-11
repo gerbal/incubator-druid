@@ -19,30 +19,35 @@
 
 package org.apache.druid.segment.virtual;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import org.apache.druid.common.config.NullHandling;
+import org.apache.druid.error.DruidException;
+import org.apache.druid.math.expr.Expr;
+import org.apache.druid.math.expr.ExprEval;
+import org.apache.druid.math.expr.ExprMacroTable;
+import org.apache.druid.math.expr.ExpressionProcessing;
 import org.apache.druid.math.expr.ExpressionType;
 import org.apache.druid.math.expr.Parser;
-import org.apache.druid.query.expression.NestedDataExpressions;
 import org.apache.druid.query.expression.TestExprMacroTable;
+import org.apache.druid.query.groupby.DeferExpressionDimensions;
 import org.apache.druid.segment.ColumnInspector;
 import org.apache.druid.segment.column.ColumnCapabilities;
 import org.apache.druid.segment.column.ColumnCapabilitiesImpl;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.ValueType;
-import org.apache.druid.segment.nested.NestedDataComplexTypeSerde;
 import org.apache.druid.testing.InitializedNullHandlingTest;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import javax.annotation.Nullable;
+
+import java.util.List;
 import java.util.Map;
 
 public class ExpressionPlannerTest extends InitializedNullHandlingTest
 {
-  public static final ColumnInspector SYNTHETIC_INSPECTOR = new ColumnInspector()
+  private static ColumnType DICTIONARY_COMPLEX = ColumnType.ofComplex("dictionaryComplex");
+  private static final ColumnInspector SYNTHETIC_INSPECTOR = new ColumnInspector()
   {
     private final Map<String, ColumnCapabilities> capabilitiesMap =
         ImmutableMap.<String, ColumnCapabilities>builder()
@@ -143,6 +148,12 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
                         "double_array_2",
                         ColumnCapabilitiesImpl.createSimpleArrayColumnCapabilities(ColumnType.DOUBLE_ARRAY)
                     )
+                    .put(
+                        "dictionary_complex",
+                        ColumnCapabilitiesImpl.createDefault()
+                                              .setDictionaryEncoded(true)
+                                              .setType(DICTIONARY_COMPLEX)
+                    )
                     .build();
 
     @Nullable
@@ -153,8 +164,7 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
     }
   };
 
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
+  private static final TestMacroTable MACRO_TABLE = new TestMacroTable();
 
   @Test
   public void testUnknown()
@@ -166,13 +176,13 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
     // row by row basis to determine if the expression needs applied to multi-valued inputs
 
     ExpressionPlan thePlan = plan("concat(x, 'x')");
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.UNKNOWN_INPUTS,
             ExpressionPlan.Trait.VECTORIZABLE
         )
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         thePlan.is(
             ExpressionPlan.Trait.NEEDS_APPLIED,
             ExpressionPlan.Trait.INCOMPLETE_INPUTS,
@@ -183,28 +193,28 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
         )
     );
     // this expression has no "unapplied bindings", nothing to apply
-    Assert.assertEquals("concat(\"x\", 'x')", thePlan.getAppliedExpression().stringify());
-    Assert.assertEquals("concat(\"x\", 'x')", thePlan.getAppliedFoldExpression("__acc").stringify());
-    Assert.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
+    Assertions.assertEquals("concat(\"x\", 'x')", thePlan.getAppliedExpression().stringify());
+    Assertions.assertEquals("concat(\"x\", 'x')", thePlan.getAppliedFoldExpression("__acc").stringify());
+    Assertions.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
     ColumnCapabilities inferred = thePlan.inferColumnCapabilities(null);
-    Assert.assertNotNull(inferred);
-    Assert.assertEquals(ValueType.STRING, inferred.getType());
-    Assert.assertTrue(inferred.hasNulls().isTrue());
-    Assert.assertFalse(inferred.isDictionaryEncoded().isMaybeTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
-    Assert.assertFalse(inferred.hasMultipleValues().isMaybeTrue());
-    Assert.assertFalse(inferred.hasBitmapIndexes());
-    Assert.assertFalse(inferred.hasSpatialIndexes());
+    Assertions.assertNotNull(inferred);
+    Assertions.assertEquals(ValueType.STRING, inferred.getType());
+    Assertions.assertTrue(inferred.hasNulls().isTrue());
+    Assertions.assertFalse(inferred.isDictionaryEncoded().isMaybeTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
+    Assertions.assertFalse(inferred.hasMultipleValues().isMaybeTrue());
+    Assertions.assertFalse(inferred.hasBitmapIndexes());
+    Assertions.assertFalse(inferred.hasSpatialIndexes());
 
     // what if both inputs are unknown, can we know things?
     thePlan = plan("x * y");
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.UNKNOWN_INPUTS
         )
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         thePlan.is(
             ExpressionPlan.Trait.NEEDS_APPLIED,
             ExpressionPlan.Trait.VECTORIZABLE,
@@ -216,23 +226,45 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
         )
     );
 
-    Assert.assertEquals("(\"x\" * \"y\")", thePlan.getAppliedExpression().stringify());
-    Assert.assertEquals("(\"x\" * \"y\")", thePlan.getAppliedFoldExpression("__acc").stringify());
-    Assert.assertNull(thePlan.getOutputType());
-    Assert.assertNull(thePlan.inferColumnCapabilities(null));
+    Assertions.assertEquals("(\"x\" * \"y\")", thePlan.getAppliedExpression().stringify());
+    Assertions.assertEquals("(\"x\" * \"y\")", thePlan.getAppliedFoldExpression("__acc").stringify());
+    Assertions.assertNull(thePlan.getOutputType());
+    Assertions.assertNull(thePlan.inferColumnCapabilities(null));
     // no we cannot
+
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
   }
 
   @Test
   public void testScalarStringNondictionaryEncoded()
   {
     ExpressionPlan thePlan = plan("concat(scalar_string, 'x')");
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.VECTORIZABLE
         )
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         thePlan.is(
             ExpressionPlan.Trait.SINGLE_INPUT_SCALAR,
             ExpressionPlan.Trait.SINGLE_INPUT_MAPPABLE,
@@ -243,32 +275,54 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
             ExpressionPlan.Trait.NON_SCALAR_OUTPUT
         )
     );
-    Assert.assertEquals("concat(\"scalar_string\", 'x')", thePlan.getAppliedExpression().stringify());
-    Assert.assertEquals("concat(\"scalar_string\", 'x')", thePlan.getAppliedFoldExpression("__acc").stringify());
-    Assert.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
+    Assertions.assertEquals("concat(\"scalar_string\", 'x')", thePlan.getAppliedExpression().stringify());
+    Assertions.assertEquals("concat(\"scalar_string\", 'x')", thePlan.getAppliedFoldExpression("__acc").stringify());
+    Assertions.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
     ColumnCapabilities inferred = thePlan.inferColumnCapabilities(null);
-    Assert.assertNotNull(inferred);
-    Assert.assertEquals(ValueType.STRING, inferred.getType());
-    Assert.assertTrue(inferred.hasNulls().isTrue());
-    Assert.assertFalse(inferred.isDictionaryEncoded().isMaybeTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
-    Assert.assertFalse(inferred.hasMultipleValues().isMaybeTrue());
-    Assert.assertFalse(inferred.hasBitmapIndexes());
-    Assert.assertFalse(inferred.hasSpatialIndexes());
+    Assertions.assertNotNull(inferred);
+    Assertions.assertEquals(ValueType.STRING, inferred.getType());
+    Assertions.assertTrue(inferred.hasNulls().isTrue());
+    Assertions.assertFalse(inferred.isDictionaryEncoded().isMaybeTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
+    Assertions.assertFalse(inferred.hasMultipleValues().isMaybeTrue());
+    Assertions.assertFalse(inferred.hasBitmapIndexes());
+    Assertions.assertFalse(inferred.hasSpatialIndexes());
+
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
   }
 
   @Test
   public void testScalarNumeric()
   {
     ExpressionPlan thePlan = plan("long1 + 5");
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.SINGLE_INPUT_SCALAR,
             ExpressionPlan.Trait.VECTORIZABLE
         )
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         thePlan.is(
             ExpressionPlan.Trait.SINGLE_INPUT_MAPPABLE,
             ExpressionPlan.Trait.INCOMPLETE_INPUTS,
@@ -278,35 +332,31 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
             ExpressionPlan.Trait.NON_SCALAR_OUTPUT
         )
     );
-    Assert.assertEquals("(\"long1\" + 5)", thePlan.getAppliedExpression().stringify());
-    Assert.assertEquals("(\"long1\" + 5)", thePlan.getAppliedFoldExpression("__acc").stringify());
-    Assert.assertEquals("(\"long1\" + 5)", thePlan.getAppliedFoldExpression("long1").stringify());
-    Assert.assertEquals(ExpressionType.LONG, thePlan.getOutputType());
+    Assertions.assertEquals("(\"long1\" + 5)", thePlan.getAppliedExpression().stringify());
+    Assertions.assertEquals("(\"long1\" + 5)", thePlan.getAppliedFoldExpression("__acc").stringify());
+    Assertions.assertEquals("(\"long1\" + 5)", thePlan.getAppliedFoldExpression("long1").stringify());
+    Assertions.assertEquals(ExpressionType.LONG, thePlan.getOutputType());
     ColumnCapabilities inferred = thePlan.inferColumnCapabilities(null);
-    Assert.assertNotNull(inferred);
-    Assert.assertEquals(ValueType.LONG, inferred.getType());
-    if (NullHandling.sqlCompatible()) {
-      Assert.assertTrue(inferred.hasNulls().isMaybeTrue());
-    } else {
-      Assert.assertFalse(inferred.hasNulls().isMaybeTrue());
-    }
-    Assert.assertFalse(inferred.isDictionaryEncoded().isMaybeTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
-    Assert.assertFalse(inferred.hasMultipleValues().isMaybeTrue());
-    Assert.assertFalse(inferred.hasBitmapIndexes());
-    Assert.assertFalse(inferred.hasSpatialIndexes());
+    Assertions.assertNotNull(inferred);
+    Assertions.assertEquals(ValueType.LONG, inferred.getType());
+    Assertions.assertTrue(inferred.hasNulls().isMaybeTrue());
+    Assertions.assertFalse(inferred.isDictionaryEncoded().isMaybeTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
+    Assertions.assertFalse(inferred.hasMultipleValues().isMaybeTrue());
+    Assertions.assertFalse(inferred.hasBitmapIndexes());
+    Assertions.assertFalse(inferred.hasSpatialIndexes());
 
     thePlan = plan("long1 + 5.0");
-    Assert.assertEquals(ExpressionType.DOUBLE, thePlan.getOutputType());
+    Assertions.assertEquals(ExpressionType.DOUBLE, thePlan.getOutputType());
 
     thePlan = plan("double1 * double2");
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.VECTORIZABLE
         )
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         thePlan.is(
             ExpressionPlan.Trait.SINGLE_INPUT_SCALAR,
             ExpressionPlan.Trait.SINGLE_INPUT_MAPPABLE,
@@ -317,38 +367,55 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
             ExpressionPlan.Trait.NON_SCALAR_OUTPUT
         )
     );
-    Assert.assertEquals("(\"double1\" * \"double2\")", thePlan.getAppliedExpression().stringify());
-    Assert.assertEquals("(\"double1\" * \"double2\")", thePlan.getAppliedFoldExpression("__acc").stringify());
-    Assert.assertEquals("(\"double1\" * \"double2\")", thePlan.getAppliedFoldExpression("double1").stringify());
-    Assert.assertEquals(ExpressionType.DOUBLE, thePlan.getOutputType());
+    Assertions.assertEquals("(\"double1\" * \"double2\")", thePlan.getAppliedExpression().stringify());
+    Assertions.assertEquals("(\"double1\" * \"double2\")", thePlan.getAppliedFoldExpression("__acc").stringify());
+    Assertions.assertEquals("(\"double1\" * \"double2\")", thePlan.getAppliedFoldExpression("double1").stringify());
+    Assertions.assertEquals(ExpressionType.DOUBLE, thePlan.getOutputType());
     inferred = thePlan.inferColumnCapabilities(null);
-    Assert.assertNotNull(inferred);
-    Assert.assertEquals(ValueType.DOUBLE, inferred.getType());
-    if (NullHandling.sqlCompatible()) {
-      Assert.assertTrue(inferred.hasNulls().isMaybeTrue());
-    } else {
-      Assert.assertFalse(inferred.hasNulls().isMaybeTrue());
-    }
-    Assert.assertFalse(inferred.isDictionaryEncoded().isMaybeTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
-    Assert.assertFalse(inferred.hasMultipleValues().isMaybeTrue());
-    Assert.assertFalse(inferred.hasBitmapIndexes());
-    Assert.assertFalse(inferred.hasSpatialIndexes());
+    Assertions.assertNotNull(inferred);
+    Assertions.assertEquals(ValueType.DOUBLE, inferred.getType());
+    Assertions.assertTrue(inferred.hasNulls().isMaybeTrue());
+    Assertions.assertFalse(inferred.isDictionaryEncoded().isMaybeTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
+    Assertions.assertFalse(inferred.hasMultipleValues().isMaybeTrue());
+    Assertions.assertFalse(inferred.hasBitmapIndexes());
+    Assertions.assertFalse(inferred.hasSpatialIndexes());
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertTrue(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
   }
 
   @Test
   public void testScalarStringDictionaryEncoded()
   {
     ExpressionPlan thePlan = plan("concat(scalar_dictionary_string, 'x')");
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.SINGLE_INPUT_SCALAR,
             ExpressionPlan.Trait.SINGLE_INPUT_MAPPABLE,
             ExpressionPlan.Trait.VECTORIZABLE
         )
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         thePlan.is(
             ExpressionPlan.Trait.INCOMPLETE_INPUTS,
             ExpressionPlan.Trait.UNKNOWN_INPUTS,
@@ -357,31 +424,55 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
             ExpressionPlan.Trait.NON_SCALAR_OUTPUT
         )
     );
-    Assert.assertEquals("concat(\"scalar_dictionary_string\", 'x')", thePlan.getAppliedExpression().stringify());
-    Assert.assertEquals(
+    Assertions.assertEquals("concat(\"scalar_dictionary_string\", 'x')", thePlan.getAppliedExpression().stringify());
+    Assertions.assertEquals(
         "concat(\"scalar_dictionary_string\", 'x')",
         thePlan.getAppliedFoldExpression("__acc").stringify()
     );
-    Assert.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
+    Assertions.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
     ColumnCapabilities inferred = thePlan.inferColumnCapabilities(null);
-    Assert.assertNotNull(inferred);
-    Assert.assertEquals(ValueType.STRING, inferred.getType());
-    Assert.assertTrue(inferred.hasNulls().isTrue());
-    Assert.assertTrue(inferred.isDictionaryEncoded().isTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
-    Assert.assertFalse(inferred.hasMultipleValues().isMaybeTrue());
-    Assert.assertFalse(inferred.hasBitmapIndexes());
-    Assert.assertFalse(inferred.hasSpatialIndexes());
+    Assertions.assertNotNull(inferred);
+    Assertions.assertEquals(ValueType.STRING, inferred.getType());
+    Assertions.assertTrue(inferred.hasNulls().isTrue());
+    Assertions.assertTrue(inferred.isDictionaryEncoded().isTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
+    Assertions.assertFalse(inferred.hasMultipleValues().isMaybeTrue());
+    Assertions.assertTrue(inferred.hasBitmapIndexes());
+    Assertions.assertFalse(inferred.hasSpatialIndexes());
+
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    // innately deferrable
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+
 
     // multiple input columns
     thePlan = plan("concat(scalar_dictionary_string, scalar_dictionary_string_nonunique)");
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.VECTORIZABLE
         )
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         thePlan.is(
             ExpressionPlan.Trait.SINGLE_INPUT_SCALAR,
             ExpressionPlan.Trait.SINGLE_INPUT_MAPPABLE,
@@ -392,39 +483,62 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
             ExpressionPlan.Trait.NON_SCALAR_OUTPUT
         )
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "concat(\"scalar_dictionary_string\", \"scalar_dictionary_string_nonunique\")",
         thePlan.getAppliedExpression().stringify()
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "concat(\"scalar_dictionary_string\", \"scalar_dictionary_string_nonunique\")",
         thePlan.getAppliedFoldExpression("__acc").stringify()
     );
     // what if scalar_dictionary_string_nonunique is an accumulator instead? nope, still no NEEDS_APPLIED so nothing to do
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "concat(\"scalar_dictionary_string\", \"scalar_dictionary_string_nonunique\")",
         thePlan.getAppliedFoldExpression("scalar_dictionary_string_nonunique").stringify()
     );
-    Assert.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
+    Assertions.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
     inferred = thePlan.inferColumnCapabilities(null);
-    Assert.assertNotNull(inferred);
-    Assert.assertEquals(ValueType.STRING, inferred.getType());
-    Assert.assertTrue(inferred.hasNulls().isTrue());
-    Assert.assertFalse(inferred.isDictionaryEncoded().isMaybeTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
-    Assert.assertFalse(inferred.hasMultipleValues().isMaybeTrue());
-    Assert.assertFalse(inferred.hasBitmapIndexes());
-    Assert.assertFalse(inferred.hasSpatialIndexes());
+    Assertions.assertNotNull(inferred);
+    Assertions.assertEquals(ValueType.STRING, inferred.getType());
+    Assertions.assertTrue(inferred.hasNulls().isTrue());
+    Assertions.assertFalse(inferred.isDictionaryEncoded().isMaybeTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
+    Assertions.assertFalse(inferred.hasMultipleValues().isMaybeTrue());
+    Assertions.assertFalse(inferred.hasBitmapIndexes());
+    Assertions.assertFalse(inferred.hasSpatialIndexes());
+
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertTrue(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertTrue(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+
 
     // array output of dictionary encoded string are not considered single scalar/mappable, nor vectorizable
     thePlan = plan("array(scalar_dictionary_string)");
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.NON_SCALAR_OUTPUT
         )
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         thePlan.is(
             ExpressionPlan.Trait.INCOMPLETE_INPUTS,
             ExpressionPlan.Trait.UNKNOWN_INPUTS,
@@ -433,6 +547,27 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
             ExpressionPlan.Trait.SINGLE_INPUT_SCALAR,
             ExpressionPlan.Trait.SINGLE_INPUT_MAPPABLE,
             ExpressionPlan.Trait.VECTORIZABLE
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertTrue(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertTrue(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
         )
     );
   }
@@ -441,13 +576,13 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
   public void testMultiValueStringDictionaryEncoded()
   {
     ExpressionPlan thePlan = plan("concat(multi_dictionary_string, 'x')");
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.NEEDS_APPLIED,
             ExpressionPlan.Trait.SINGLE_INPUT_MAPPABLE
         )
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         thePlan.is(
             ExpressionPlan.Trait.INCOMPLETE_INPUTS,
             ExpressionPlan.Trait.UNKNOWN_INPUTS,
@@ -456,25 +591,48 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
             ExpressionPlan.Trait.VECTORIZABLE
         )
     );
-    Assert.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
+    Assertions.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
     ColumnCapabilities inferred = thePlan.inferColumnCapabilities(null);
-    Assert.assertNotNull(inferred);
-    Assert.assertEquals(ValueType.STRING, inferred.getType());
-    Assert.assertTrue(inferred.hasNulls().isMaybeTrue());
-    Assert.assertTrue(inferred.isDictionaryEncoded().isTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
-    Assert.assertTrue(inferred.hasMultipleValues().isTrue());
-    Assert.assertFalse(inferred.hasBitmapIndexes());
-    Assert.assertFalse(inferred.hasSpatialIndexes());
+    Assertions.assertNotNull(inferred);
+    Assertions.assertEquals(ValueType.STRING, inferred.getType());
+    Assertions.assertTrue(inferred.hasNulls().isMaybeTrue());
+    Assertions.assertTrue(inferred.isDictionaryEncoded().isTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
+    Assertions.assertTrue(inferred.hasMultipleValues().isTrue());
+    Assertions.assertTrue(inferred.hasBitmapIndexes());
+    Assertions.assertFalse(inferred.hasSpatialIndexes());
+
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+
 
     thePlan = plan("concat(scalar_string, multi_dictionary_string_nonunique)");
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.NEEDS_APPLIED
         )
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         thePlan.is(
             ExpressionPlan.Trait.INCOMPLETE_INPUTS,
             ExpressionPlan.Trait.UNKNOWN_INPUTS,
@@ -483,27 +641,49 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
             ExpressionPlan.Trait.VECTORIZABLE
         )
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "map((\"multi_dictionary_string_nonunique\") -> concat(\"scalar_string\", \"multi_dictionary_string_nonunique\"), \"multi_dictionary_string_nonunique\")",
         thePlan.getAppliedExpression().stringify()
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "fold((\"multi_dictionary_string_nonunique\", \"scalar_string\") -> concat(\"scalar_string\", \"multi_dictionary_string_nonunique\"), \"multi_dictionary_string_nonunique\", \"scalar_string\")",
         thePlan.getAppliedFoldExpression("scalar_string").stringify()
     );
-    Assert.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
+    Assertions.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
     inferred = thePlan.inferColumnCapabilities(null);
-    Assert.assertNotNull(inferred);
-    Assert.assertEquals(ValueType.STRING, inferred.getType());
-    Assert.assertTrue(inferred.hasMultipleValues().isTrue());
+    Assertions.assertNotNull(inferred);
+    Assertions.assertEquals(ValueType.STRING, inferred.getType());
+    Assertions.assertTrue(inferred.hasMultipleValues().isTrue());
+
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
 
     thePlan = plan("concat(multi_dictionary_string, multi_dictionary_string_nonunique)");
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.NEEDS_APPLIED
         )
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         thePlan.is(
             ExpressionPlan.Trait.INCOMPLETE_INPUTS,
             ExpressionPlan.Trait.UNKNOWN_INPUTS,
@@ -512,35 +692,78 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
             ExpressionPlan.Trait.VECTORIZABLE
         )
     );
-    Assert.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
+    Assertions.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
     // whoa
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "cartesian_map((\"multi_dictionary_string\", \"multi_dictionary_string_nonunique\") -> concat(\"multi_dictionary_string\", \"multi_dictionary_string_nonunique\"), \"multi_dictionary_string\", \"multi_dictionary_string_nonunique\")",
         thePlan.getAppliedExpression().stringify()
     );
     // sort of funny, but technically correct
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "cartesian_fold((\"multi_dictionary_string\", \"multi_dictionary_string_nonunique\", \"__acc\") -> concat(\"multi_dictionary_string\", \"multi_dictionary_string_nonunique\"), \"multi_dictionary_string\", \"multi_dictionary_string_nonunique\", \"__acc\")",
         thePlan.getAppliedFoldExpression("__acc").stringify()
     );
     inferred = thePlan.inferColumnCapabilities(null);
-    Assert.assertNotNull(inferred);
-    Assert.assertEquals(ValueType.STRING, inferred.getType());
-    Assert.assertTrue(inferred.hasMultipleValues().isTrue());
+    Assertions.assertNotNull(inferred);
+    Assertions.assertEquals(ValueType.STRING, inferred.getType());
+    Assertions.assertTrue(inferred.hasMultipleValues().isTrue());
+
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
 
     thePlan = plan("array_append(multi_dictionary_string, 'foo')");
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.NON_SCALAR_OUTPUT
         )
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         thePlan.is(
             ExpressionPlan.Trait.NEEDS_APPLIED,
             ExpressionPlan.Trait.INCOMPLETE_INPUTS,
             ExpressionPlan.Trait.UNKNOWN_INPUTS,
             ExpressionPlan.Trait.NON_SCALAR_INPUTS,
             ExpressionPlan.Trait.VECTORIZABLE
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
         )
     );
   }
@@ -548,18 +771,14 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
   @Test
   public void testMultiValueStringDictionaryEncodedIllegalAccumulator()
   {
-    expectedException.expect(IllegalStateException.class);
-    expectedException.expectMessage(
-        "Accumulator cannot be implicitly transformed, if it is an ARRAY or multi-valued type it must be used explicitly as such"
-    );
     ExpressionPlan thePlan = plan("concat(multi_dictionary_string, 'x')");
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.NEEDS_APPLIED,
             ExpressionPlan.Trait.SINGLE_INPUT_MAPPABLE
         )
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         thePlan.is(
             ExpressionPlan.Trait.INCOMPLETE_INPUTS,
             ExpressionPlan.Trait.UNKNOWN_INPUTS,
@@ -568,15 +787,36 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
             ExpressionPlan.Trait.VECTORIZABLE
         )
     );
-    Assert.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
+    Assertions.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
 
     thePlan = plan("concat(multi_dictionary_string, multi_dictionary_string_nonunique)");
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.NEEDS_APPLIED
         )
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         thePlan.is(
             ExpressionPlan.Trait.INCOMPLETE_INPUTS,
             ExpressionPlan.Trait.UNKNOWN_INPUTS,
@@ -587,21 +827,28 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
     );
     // what happens if we try to use a multi-valued input that was not explicitly used as multi-valued as the
     // accumulator?
-    thePlan.getAppliedFoldExpression("multi_dictionary_string");
-    Assert.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
+    final ExpressionPlan illegalAccumulatorPlan = thePlan;
+    final IllegalStateException exception = Assertions.assertThrows(
+        IllegalStateException.class,
+        () -> illegalAccumulatorPlan.getAppliedFoldExpression("multi_dictionary_string")
+    );
+    Assertions.assertEquals(
+        "Accumulator cannot be implicitly transformed, if it is an ARRAY or multi-valued type it must be used explicitly as such",
+        exception.getMessage()
+    );
   }
 
   @Test
   public void testIncompleteString()
   {
     ExpressionPlan thePlan = plan("concat(string_unknown, 'x')");
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.INCOMPLETE_INPUTS
         )
     );
-    Assert.assertFalse(
-        thePlan.is(
+    Assertions.assertFalse(
+        thePlan.any(
             ExpressionPlan.Trait.SINGLE_INPUT_SCALAR,
             ExpressionPlan.Trait.SINGLE_INPUT_MAPPABLE,
             ExpressionPlan.Trait.UNKNOWN_INPUTS,
@@ -613,11 +860,33 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
     );
     // incomplete inputs are not transformed either, rather this will need to be detected and handled on a row-by-row
     // basis
-    Assert.assertEquals("concat(\"string_unknown\", 'x')", thePlan.getAppliedExpression().stringify());
-    Assert.assertEquals("concat(\"string_unknown\", 'x')", thePlan.getAppliedFoldExpression("__acc").stringify());
+    Assertions.assertEquals("concat(\"string_unknown\", 'x')", thePlan.getAppliedExpression().stringify());
+    Assertions.assertEquals("concat(\"string_unknown\", 'x')", thePlan.getAppliedFoldExpression("__acc").stringify());
     // incomplete and unknown skip output type since we don't reliably know
-    Assert.assertNull(thePlan.getOutputType());
-    Assert.assertNull(thePlan.inferColumnCapabilities(null));
+    Assertions.assertNull(thePlan.getOutputType());
+    Assertions.assertNull(thePlan.inferColumnCapabilities(null));
+
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
   }
 
   @Test
@@ -629,51 +898,115 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
     assertArrayInAndOut(thePlan);
     // with a string hint, it should look like a multi-valued string
     ColumnCapabilities inferred = thePlan.inferColumnCapabilities(ColumnType.STRING);
-    Assert.assertNotNull(inferred);
-    Assert.assertEquals(ValueType.STRING, inferred.getType());
-    Assert.assertTrue(inferred.hasNulls().isMaybeTrue());
-    Assert.assertFalse(inferred.isDictionaryEncoded().isMaybeTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
-    Assert.assertTrue(inferred.hasMultipleValues().isTrue());
-    Assert.assertFalse(inferred.hasBitmapIndexes());
-    Assert.assertFalse(inferred.hasSpatialIndexes());
+    Assertions.assertNotNull(inferred);
+    Assertions.assertEquals(ValueType.STRING, inferred.getType());
+    Assertions.assertTrue(inferred.hasNulls().isMaybeTrue());
+    Assertions.assertFalse(inferred.isDictionaryEncoded().isMaybeTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
+    Assertions.assertTrue(inferred.hasMultipleValues().isTrue());
+    Assertions.assertFalse(inferred.hasBitmapIndexes());
+    Assertions.assertFalse(inferred.hasSpatialIndexes());
     // with no hint though, let the array free
     inferred = thePlan.inferColumnCapabilities(ColumnType.STRING_ARRAY);
-    Assert.assertNotNull(inferred);
-    Assert.assertEquals(ColumnType.STRING_ARRAY, inferred.toColumnType());
-    Assert.assertTrue(inferred.hasNulls().isMaybeTrue());
-    Assert.assertFalse(inferred.isDictionaryEncoded().isMaybeTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
-    Assert.assertFalse(inferred.hasMultipleValues().isMaybeTrue());
-    Assert.assertFalse(inferred.hasBitmapIndexes());
-    Assert.assertFalse(inferred.hasSpatialIndexes());
+    Assertions.assertNotNull(inferred);
+    Assertions.assertEquals(ColumnType.STRING_ARRAY, inferred.toColumnType());
+    Assertions.assertTrue(inferred.hasNulls().isMaybeTrue());
+    Assertions.assertFalse(inferred.isDictionaryEncoded().isMaybeTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
+    Assertions.assertFalse(inferred.hasMultipleValues().isMaybeTrue());
+    Assertions.assertFalse(inferred.hasBitmapIndexes());
+    Assertions.assertFalse(inferred.hasSpatialIndexes());
 
-    Assert.assertEquals("array_append(\"scalar_string\", 'x')", thePlan.getAppliedExpression().stringify());
-    Assert.assertEquals("array_append(\"scalar_string\", 'x')", thePlan.getAppliedFoldExpression("__acc").stringify());
-    Assert.assertEquals(ExpressionType.STRING_ARRAY, thePlan.getOutputType());
+    Assertions.assertEquals("array_append(\"scalar_string\", 'x')", thePlan.getAppliedExpression().stringify());
+    Assertions.assertEquals("array_append(\"scalar_string\", 'x')", thePlan.getAppliedFoldExpression("__acc").stringify());
+    Assertions.assertEquals(ExpressionType.STRING_ARRAY, thePlan.getOutputType());
+
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
 
     // multi-valued are cool too
     thePlan = plan("array_append(multi_dictionary_string, 'x')");
     assertArrayInAndOut(thePlan);
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
 
     // what about incomplete inputs with arrays? they are not reported as incomplete because they are treated as arrays
     thePlan = plan("array_append(string_unknown, 'x')");
     assertArrayInAndOut(thePlan);
-    Assert.assertEquals(ExpressionType.STRING_ARRAY, thePlan.getOutputType());
+    Assertions.assertEquals(ExpressionType.STRING_ARRAY, thePlan.getOutputType());
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
 
     // what about if it is the scalar argument? there it is
     thePlan = plan("array_append(multi_dictionary_string, string_unknown)");
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.NON_SCALAR_INPUTS,
             ExpressionPlan.Trait.INCOMPLETE_INPUTS,
             ExpressionPlan.Trait.NON_SCALAR_OUTPUT
         )
     );
-    Assert.assertFalse(
-        thePlan.is(
+    Assertions.assertFalse(
+        thePlan.any(
             ExpressionPlan.Trait.SINGLE_INPUT_SCALAR,
             ExpressionPlan.Trait.SINGLE_INPUT_MAPPABLE,
             ExpressionPlan.Trait.UNKNOWN_INPUTS,
@@ -682,14 +1015,77 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
         )
     );
     // incomplete and unknown skip output type since we don't reliably know
-    Assert.assertNull(thePlan.getOutputType());
+    Assertions.assertNull(thePlan.getOutputType());
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
 
     // array types are cool too
     thePlan = plan("array_append(string_array_1, 'x')");
     assertArrayInAndOut(thePlan);
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
 
     thePlan = plan("array_append(string_array_1, 'x')");
     assertArrayInAndOut(thePlan);
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
   }
 
 
@@ -699,40 +1095,99 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
     ExpressionPlan thePlan = plan("array_to_string(array_append(scalar_string, 'x'), ',')");
     assertArrayInput(thePlan);
     ColumnCapabilities inferred = thePlan.inferColumnCapabilities(ColumnType.STRING);
-    Assert.assertNotNull(inferred);
-    Assert.assertEquals(ValueType.STRING, inferred.getType());
-    Assert.assertTrue(inferred.hasNulls().isTrue());
-    Assert.assertFalse(inferred.isDictionaryEncoded().isMaybeTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
-    Assert.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
-    Assert.assertFalse(inferred.hasMultipleValues().isMaybeTrue());
-    Assert.assertFalse(inferred.hasBitmapIndexes());
-    Assert.assertFalse(inferred.hasSpatialIndexes());
+    Assertions.assertNotNull(inferred);
+    Assertions.assertEquals(ValueType.STRING, inferred.getType());
+    Assertions.assertTrue(inferred.hasNulls().isTrue());
+    Assertions.assertFalse(inferred.isDictionaryEncoded().isMaybeTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesSorted().isMaybeTrue());
+    Assertions.assertFalse(inferred.areDictionaryValuesUnique().isMaybeTrue());
+    Assertions.assertFalse(inferred.hasMultipleValues().isMaybeTrue());
+    Assertions.assertFalse(inferred.hasBitmapIndexes());
+    Assertions.assertFalse(inferred.hasSpatialIndexes());
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "array_to_string(array_append(\"scalar_string\", 'x'), ',')",
         thePlan.getAppliedExpression().stringify()
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "array_to_string(array_append(\"scalar_string\", 'x'), ',')",
         thePlan.getAppliedFoldExpression("__acc").stringify()
     );
-    Assert.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
+    Assertions.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
+
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
 
     // what about a multi-valued input
     thePlan = plan("array_to_string(array_append(scalar_string, multi_dictionary_string), ',')");
-    assertArrayInput(thePlan);
+    Assertions.assertTrue(
+        thePlan.is(
+            ExpressionPlan.Trait.NON_SCALAR_INPUTS,
+            ExpressionPlan.Trait.NEEDS_APPLIED
+        )
+    );
+    Assertions.assertFalse(
+        thePlan.any(
+            ExpressionPlan.Trait.SINGLE_INPUT_SCALAR,
+            ExpressionPlan.Trait.SINGLE_INPUT_MAPPABLE,
+            ExpressionPlan.Trait.NON_SCALAR_OUTPUT,
+            ExpressionPlan.Trait.INCOMPLETE_INPUTS,
+            ExpressionPlan.Trait.UNKNOWN_INPUTS,
+            ExpressionPlan.Trait.VECTORIZABLE
+        )
+    );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "array_to_string(map((\"multi_dictionary_string\") -> array_append(\"scalar_string\", \"multi_dictionary_string\"), \"multi_dictionary_string\"), ',')",
         thePlan.getAppliedExpression().stringify()
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "array_to_string(fold((\"multi_dictionary_string\", \"scalar_string\") -> array_append(\"scalar_string\", \"multi_dictionary_string\"), \"multi_dictionary_string\", \"scalar_string\"), ',')",
         thePlan.getAppliedFoldExpression("scalar_string").stringify()
     );
     // why is this null
-    Assert.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
+    Assertions.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
+
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
   }
 
   @Test
@@ -741,146 +1196,300 @@ public class ExpressionPlannerTest extends InitializedNullHandlingTest
     ExpressionPlan thePlan = plan("array_to_string(array_append(string_array_1, 'x'), ',')");
     assertArrayInput(thePlan);
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "array_to_string(array_append(\"string_array_1\", 'x'), ',')",
         thePlan.getAppliedExpression().stringify()
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "array_to_string(array_append(\"string_array_1\", 'x'), ',')",
         thePlan.getAppliedFoldExpression("__acc").stringify()
     );
-    Assert.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
+    Assertions.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
 
 
     thePlan = plan("array_to_string(array_concat(string_array_1, string_array_2), ',')");
     assertArrayInput(thePlan);
-    Assert.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
+    Assertions.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
 
     thePlan = plan("fold((x, acc) -> acc + x, array_concat(long_array_1, long_array_2), 0)");
     assertArrayInput(thePlan);
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "fold((\"x\", \"acc\") -> (\"acc\" + \"x\"), array_concat(\"long_array_1\", \"long_array_2\"), 0)",
         thePlan.getAppliedExpression().stringify()
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "fold((\"x\", \"acc\") -> (\"acc\" + \"x\"), array_concat(\"long_array_1\", \"long_array_2\"), 0)",
         thePlan.getAppliedFoldExpression("__acc").stringify()
     );
-    Assert.assertEquals(ExpressionType.LONG, thePlan.getOutputType());
+    Assertions.assertEquals(ExpressionType.LONG, thePlan.getOutputType());
 
     thePlan = plan("fold((x, acc) -> acc * x, array_concat(double_array_1, double_array_2), 0.0)");
     assertArrayInput(thePlan);
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "fold((\"x\", \"acc\") -> (\"acc\" * \"x\"), array_concat(\"double_array_1\", \"double_array_2\"), 0.0)",
         thePlan.getAppliedExpression().stringify()
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "fold((\"x\", \"acc\") -> (\"acc\" * \"x\"), array_concat(\"double_array_1\", \"double_array_2\"), 0.0)",
         thePlan.getAppliedFoldExpression("__acc").stringify()
     );
-    Assert.assertEquals(ExpressionType.DOUBLE, thePlan.getOutputType());
+    Assertions.assertEquals(ExpressionType.DOUBLE, thePlan.getOutputType());
   }
 
   @Test
   public void testArrayConstruction()
   {
     ExpressionPlan thePlan = plan("array(long1, long2)");
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.NON_SCALAR_OUTPUT
         )
     );
-    Assert.assertFalse(
-        thePlan.is(
+    Assertions.assertFalse(
+        thePlan.any(
             ExpressionPlan.Trait.SINGLE_INPUT_SCALAR,
             ExpressionPlan.Trait.SINGLE_INPUT_MAPPABLE,
             ExpressionPlan.Trait.UNKNOWN_INPUTS,
             ExpressionPlan.Trait.INCOMPLETE_INPUTS,
             ExpressionPlan.Trait.NEEDS_APPLIED,
-            ExpressionPlan.Trait.NON_SCALAR_INPUTS,
-            ExpressionPlan.Trait.VECTORIZABLE
+            ExpressionPlan.Trait.NON_SCALAR_INPUTS
         )
     );
-    Assert.assertEquals(ExpressionType.LONG_ARRAY, thePlan.getOutputType());
+    assertFallbackVectorizable(thePlan);
+    Assertions.assertEquals(ExpressionType.LONG_ARRAY, thePlan.getOutputType());
 
     thePlan = plan("array(long1, double1)");
-    Assert.assertEquals(ExpressionType.DOUBLE_ARRAY, thePlan.getOutputType());
+    Assertions.assertEquals(ExpressionType.DOUBLE_ARRAY, thePlan.getOutputType());
     thePlan = plan("array(long1, double1, scalar_string)");
-    Assert.assertEquals(ExpressionType.STRING_ARRAY, thePlan.getOutputType());
+    Assertions.assertEquals(ExpressionType.STRING_ARRAY, thePlan.getOutputType());
   }
 
   @Test
   public void testNestedColumnExpression()
   {
     ExpressionPlan thePlan = plan("json_object('long1', long1, 'long2', long2)");
-    Assert.assertFalse(
-        thePlan.is(
+    Assertions.assertFalse(
+        thePlan.any(
             ExpressionPlan.Trait.NON_SCALAR_OUTPUT,
             ExpressionPlan.Trait.SINGLE_INPUT_SCALAR,
             ExpressionPlan.Trait.SINGLE_INPUT_MAPPABLE,
             ExpressionPlan.Trait.UNKNOWN_INPUTS,
             ExpressionPlan.Trait.INCOMPLETE_INPUTS,
             ExpressionPlan.Trait.NEEDS_APPLIED,
-            ExpressionPlan.Trait.NON_SCALAR_INPUTS,
-            ExpressionPlan.Trait.VECTORIZABLE
+            ExpressionPlan.Trait.NON_SCALAR_INPUTS
         )
     );
-    Assert.assertEquals(NestedDataExpressions.TYPE, thePlan.getOutputType());
+    Assertions.assertEquals(ExpressionType.NESTED_DATA, thePlan.getOutputType());
     ColumnCapabilities inferred = thePlan.inferColumnCapabilities(
         ExpressionType.toColumnType(thePlan.getOutputType())
     );
-    Assert.assertEquals(
-        NestedDataComplexTypeSerde.TYPE.getType(),
+    Assertions.assertEquals(
+        ColumnType.NESTED_DATA.getType(),
         inferred.getType()
     );
-    Assert.assertEquals(
-        NestedDataExpressions.TYPE.getComplexTypeName(),
+    Assertions.assertEquals(
+        ColumnType.NESTED_DATA.getComplexTypeName(),
         inferred.getComplexTypeName()
     );
+
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    // all numeric inputs so these are true
+    Assertions.assertTrue(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertTrue(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+  }
+
+  @Test
+  public void testDictionaryComplexStringOutput()
+  {
+    ExpressionPlan thePlan = plan("dict_complex_to_string(dictionary_complex)");
+    Assertions.assertFalse(
+        thePlan.any(
+            ExpressionPlan.Trait.NON_SCALAR_OUTPUT,
+            ExpressionPlan.Trait.SINGLE_INPUT_MAPPABLE,
+            ExpressionPlan.Trait.UNKNOWN_INPUTS,
+            ExpressionPlan.Trait.INCOMPLETE_INPUTS,
+            ExpressionPlan.Trait.NEEDS_APPLIED,
+            ExpressionPlan.Trait.NON_SCALAR_INPUTS
+        )
+    );
+    Assertions.assertTrue(
+        thePlan.is(
+            ExpressionPlan.Trait.SINGLE_INPUT_SCALAR
+        )
+    );
+    assertFallbackVectorizable(thePlan);
+
+    Assertions.assertEquals(ExpressionType.STRING, thePlan.getOutputType());
+    ColumnCapabilities inferred = thePlan.inferColumnCapabilities(
+        ExpressionType.toColumnType(thePlan.getOutputType())
+    );
+    Assertions.assertEquals(
+        ColumnType.STRING.getType(),
+        inferred.getType()
+    );
+    Assertions.assertFalse(inferred.isDictionaryEncoded().isMaybeTrue());
+
+    Assertions.assertFalse(
+        DeferExpressionDimensions.SINGLE_STRING.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH_NON_NUMERIC.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+    Assertions.assertFalse(
+        DeferExpressionDimensions.FIXED_WIDTH.useDeferredGroupBySelector(
+            thePlan,
+            thePlan.getAnalysis().getRequiredBindingsList(),
+            SYNTHETIC_INSPECTOR
+        )
+    );
+  }
+
+  @Test
+  public void testNowIsNotConstant()
+  {
+    ExpressionPlan thePlan = plan("now()");
+    Assertions.assertFalse(
+        thePlan.is(ExpressionPlan.Trait.CONSTANT)
+    );
+    Assertions.assertFalse(thePlan.isConstant());
+  }
+
+  @Test
+  public void testNowWrappedInExpressionIsNotConstant()
+  {
+    ExpressionPlan thePlan = plan("now() + 1000");
+    Assertions.assertFalse(
+        thePlan.is(ExpressionPlan.Trait.CONSTANT)
+    );
+    Assertions.assertFalse(thePlan.isConstant());
   }
 
   private static ExpressionPlan plan(String expression)
   {
-    return ExpressionPlanner.plan(SYNTHETIC_INSPECTOR, Parser.parse(expression, TestExprMacroTable.INSTANCE));
+    return ExpressionPlanner.plan(SYNTHETIC_INSPECTOR, Parser.parse(expression, MACRO_TABLE));
   }
 
   private static void assertArrayInput(ExpressionPlan thePlan)
   {
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.NON_SCALAR_INPUTS
         )
     );
-    Assert.assertFalse(
-        thePlan.is(
+    Assertions.assertFalse(
+        thePlan.any(
             ExpressionPlan.Trait.SINGLE_INPUT_SCALAR,
             ExpressionPlan.Trait.SINGLE_INPUT_MAPPABLE,
             ExpressionPlan.Trait.NON_SCALAR_OUTPUT,
             ExpressionPlan.Trait.INCOMPLETE_INPUTS,
             ExpressionPlan.Trait.UNKNOWN_INPUTS,
-            ExpressionPlan.Trait.NEEDS_APPLIED,
-            ExpressionPlan.Trait.VECTORIZABLE
+            ExpressionPlan.Trait.NEEDS_APPLIED
         )
     );
+    assertFallbackVectorizable(thePlan);
   }
 
   private static void assertArrayInAndOut(ExpressionPlan thePlan)
   {
-    Assert.assertTrue(
+    Assertions.assertTrue(
         thePlan.is(
             ExpressionPlan.Trait.NON_SCALAR_INPUTS,
             ExpressionPlan.Trait.NON_SCALAR_OUTPUT
         )
     );
-    Assert.assertFalse(
-        thePlan.is(
+    Assertions.assertFalse(
+        thePlan.any(
             ExpressionPlan.Trait.SINGLE_INPUT_SCALAR,
             ExpressionPlan.Trait.SINGLE_INPUT_MAPPABLE,
             ExpressionPlan.Trait.INCOMPLETE_INPUTS,
             ExpressionPlan.Trait.UNKNOWN_INPUTS,
-            ExpressionPlan.Trait.NEEDS_APPLIED,
-            ExpressionPlan.Trait.VECTORIZABLE
+            ExpressionPlan.Trait.NEEDS_APPLIED
         )
     );
+    assertFallbackVectorizable(thePlan);
+  }
+
+
+  private static void assertFallbackVectorizable(ExpressionPlan thePlan)
+  {
+    if (ExpressionProcessing.allowVectorizeFallback()) {
+      Assertions.assertTrue(
+          thePlan.is(
+              ExpressionPlan.Trait.VECTORIZABLE
+          )
+      );
+    } else {
+      Assertions.assertFalse(
+          thePlan.is(
+              ExpressionPlan.Trait.VECTORIZABLE
+          )
+      );
+    }
+  }
+
+  private static class TestMacroTable extends ExprMacroTable
+  {
+    public TestMacroTable()
+    {
+      super(
+          ImmutableList.<ExprMacroTable.ExprMacro>builder()
+                       .addAll(TestExprMacroTable.INSTANCE.getMacros())
+                       .add(new ExprMacroTable.ExprMacro()
+                       {
+                         @Override
+                         public Expr apply(List<Expr> args)
+                         {
+                           return new ExprMacroTable.BaseScalarMacroFunctionExpr(this, args)
+                           {
+                             @Override
+                             public ExprEval eval(ObjectBinding bindings)
+                             {
+                               throw DruidException.defensive("just for planner test");
+                             }
+
+                             @Nullable
+                             @Override
+                             public ExpressionType getOutputType(InputBindingInspector inspector)
+                             {
+                               return ExpressionType.STRING;
+                             }
+                           };
+                         }
+
+                         @Override
+                         public String name()
+                         {
+                           return "dict_complex_to_string";
+                         }
+                       })
+                       .build()
+      );
+    }
   }
 }

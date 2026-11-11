@@ -1,0 +1,51 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`FancyNumericInput matches snapshot 1`] = `
+<div
+  class="bp6-control-group fancy-numeric-input bp6-numeric-input"
+  role="group"
+>
+  <div
+    class="bp6-input-group"
+  >
+    <input
+      autocomplete="off"
+      class="bp6-input"
+      type="text"
+      value="5"
+    />
+  </div>
+  <div
+    class="bp6-button-group bp6-vertical bp6-fixed"
+  >
+    <button
+      aria-label="increment"
+      class="bp6-button"
+      type="button"
+    >
+      <span
+        aria-hidden="true"
+        class="bp6-icon bp6-icon-chevron-up"
+      >
+        <svg
+          data-icon="chevron-up"
+        />
+      </span>
+    </button>
+    <button
+      aria-label="decrement"
+      class="bp6-button"
+      type="button"
+    >
+      <span
+        aria-hidden="true"
+        class="bp6-icon bp6-icon-chevron-down"
+      >
+        <svg
+          data-icon="chevron-down"
+        />
+      </span>
+    </button>
+  </div>
+</div>
+`;

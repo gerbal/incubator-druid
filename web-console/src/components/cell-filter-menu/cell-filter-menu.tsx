@@ -18,9 +18,8 @@
 
 import { Menu, MenuItem } from '@blueprintjs/core';
 import { IconNames } from '@blueprintjs/icons';
-import type { Column, SqlExpression, SqlQuery } from 'druid-query-toolkit';
+import type { Column, SqlExpression, SqlQueryBase } from 'druid-query-toolkit';
 import { C, L, SqlComparison, SqlLiteral, SqlRecord, trimString } from 'druid-query-toolkit';
-import React from 'react';
 
 import type { QueryAction } from '../../utils';
 import { copyAndAlert, prettyPrintSql, stringifyValue } from '../../utils';
@@ -81,7 +80,7 @@ export interface CellFilterMenuProps {
   value: unknown;
   headerIndex: number;
   runeMode?: boolean;
-  query: SqlQuery | undefined;
+  query: SqlQueryBase | undefined;
   onQueryAction?(action: QueryAction): void;
   onShowFullValue?(valueString: string): void;
 }
@@ -148,7 +147,6 @@ export function CellFilterMenu(props: CellFilterMenuProps) {
 
     const updatedClause =
       currentClauses.length === 1 && val ? addToClause(currentClauses[0], val) : undefined;
-    console.log(updatedClause, currentClauses);
 
     const jsonColumn = column.nativeType === 'COMPLEX<json>';
     return (

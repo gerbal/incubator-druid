@@ -19,6 +19,7 @@
 
 package org.apache.druid.sql.calcite.planner;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableSet;
 import com.google.inject.Guice;
 import com.google.inject.Injector;
@@ -26,48 +27,59 @@ import com.google.inject.Key;
 import com.google.inject.Scopes;
 import com.google.inject.TypeLiteral;
 import com.google.inject.multibindings.Multibinder;
+import jakarta.validation.Validation;
+import jakarta.validation.Validator;
 import org.apache.calcite.plan.RelOptRule;
 import org.apache.calcite.plan.RelOptRuleCall;
 import org.apache.calcite.rel.logical.LogicalTableScan;
+import org.apache.calcite.rel.rules.ProjectMergeRule;
 import org.apache.calcite.schema.Schema;
 import org.apache.druid.guice.LazySingleton;
+import org.apache.druid.guice.security.PolicyModule;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.jackson.JacksonModule;
 import org.apache.druid.math.expr.ExprMacroTable;
+import org.apache.druid.query.QueryContext;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.segment.join.JoinableFactoryWrapper;
 import org.apache.druid.server.QueryLifecycleFactory;
 import org.apache.druid.server.security.AuthorizerMapper;
+import org.apache.druid.server.security.Resource;
 import org.apache.druid.server.security.ResourceType;
+import org.apache.druid.sql.SqlStatementFactory;
 import org.apache.druid.sql.calcite.aggregation.SqlAggregator;
 import org.apache.druid.sql.calcite.expression.SqlOperatorConversion;
+import org.apache.druid.sql.calcite.parser.DruidSqlParser;
 import org.apache.druid.sql.calcite.rule.ExtensionCalciteRuleProvider;
+import org.apache.druid.sql.calcite.run.NativeSqlEngine;
+import org.apache.druid.sql.calcite.schema.ConstantDruidSchemaCatalogProvider;
 import org.apache.druid.sql.calcite.schema.DruidSchemaCatalog;
+import org.apache.druid.sql.calcite.schema.DruidSchemaCatalogProvider;
 import org.apache.druid.sql.calcite.schema.DruidSchemaName;
 import org.apache.druid.sql.calcite.schema.NamedSchema;
 import org.apache.druid.sql.calcite.util.CalciteTestBase;
-import org.apache.druid.sql.calcite.util.CalciteTests;
 import org.easymock.EasyMock;
-import org.easymock.EasyMockRunner;
+import org.easymock.EasyMockExtension;
 import org.easymock.Mock;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
 
-import javax.validation.Validation;
-import javax.validation.Validator;
 import java.util.Collections;
+import java.util.Optional;
 import java.util.Set;
 
 import static org.apache.calcite.plan.RelOptRule.any;
 import static org.apache.calcite.plan.RelOptRule.operand;
 
-@RunWith(EasyMockRunner.class)
+@ExtendWith(EasyMockExtension.class)
 public class CalcitePlannerModuleTest extends CalciteTestBase
 {
   private static final String SCHEMA_1 = "SCHEMA_1";
   private static final String SCHEMA_2 = "SCHEMA_2";
   private static final String DRUID_SCHEMA_NAME = "DRUID_SCHEMA_NAME";
+  private static final int BLOAT = 1200;
 
   @Mock
   private NamedSchema druidSchema1;
@@ -95,15 +107,18 @@ public class CalcitePlannerModuleTest extends CalciteTestBase
   private Injector injector;
   private RelOptRule customRule;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
+
     EasyMock.expect(druidSchema1.getSchema()).andStubReturn(schema1);
     EasyMock.expect(druidSchema2.getSchema()).andStubReturn(schema2);
     EasyMock.expect(druidSchema1.getSchemaName()).andStubReturn(SCHEMA_1);
     EasyMock.expect(druidSchema2.getSchemaName()).andStubReturn(SCHEMA_2);
-    EasyMock.expect(druidSchema1.getSchemaResourceType(EasyMock.anyString())).andStubReturn(ResourceType.DATASOURCE);
-    EasyMock.expect(druidSchema2.getSchemaResourceType(EasyMock.anyString())).andStubReturn("test");
+    EasyMock.expect(druidSchema1.getSchemaResource(EasyMock.anyString()))
+            .andStubReturn(new Resource("resource", ResourceType.DATASOURCE));
+    EasyMock.expect(druidSchema2.getSchemaResource(EasyMock.anyString()))
+            .andStubReturn(new Resource("resource", "test"));
     EasyMock.replay(druidSchema1, druidSchema2);
     aggregators = ImmutableSet.of();
     operatorConversions = ImmutableSet.of();
@@ -117,6 +132,7 @@ public class CalcitePlannerModuleTest extends CalciteTestBase
     };
     injector = Guice.createInjector(
         new JacksonModule(),
+        new PolicyModule(),
         binder -> {
           binder.bind(Validator.class).toInstance(Validation.buildDefaultValidatorFactory().getValidator());
           binder.bindScope(LazySingleton.class, Scopes.SINGLETON);
@@ -126,9 +142,11 @@ public class CalcitePlannerModuleTest extends CalciteTestBase
           binder.bind(String.class).annotatedWith(DruidSchemaName.class).toInstance(DRUID_SCHEMA_NAME);
           binder.bind(Key.get(new TypeLiteral<Set<SqlAggregator>>() {})).toInstance(aggregators);
           binder.bind(Key.get(new TypeLiteral<Set<SqlOperatorConversion>>() {})).toInstance(operatorConversions);
-          binder.bind(DruidSchemaCatalog.class).toInstance(rootSchema);
+          binder.bind(DruidSchemaCatalogProvider.class)
+                .toInstance(new ConstantDruidSchemaCatalogProvider(rootSchema));
           binder.bind(JoinableFactoryWrapper.class).toInstance(joinableFactoryWrapper);
           binder.bind(CatalogResolver.class).toInstance(CatalogResolver.NULL_RESOLVER);
+          binder.bind(CatalogTableWriter.class).toInstance(CatalogTableWriter.NOT_AVAILABLE);
         },
         target,
         binder -> {
@@ -143,56 +161,114 @@ public class CalcitePlannerModuleTest extends CalciteTestBase
   public void testDruidOperatorTableIsInjectable()
   {
     DruidOperatorTable operatorTable = injector.getInstance(DruidOperatorTable.class);
-    Assert.assertNotNull(operatorTable);
+    Assertions.assertNotNull(operatorTable);
 
     // Should be a singleton.
     DruidOperatorTable other = injector.getInstance(DruidOperatorTable.class);
-    Assert.assertSame(other, operatorTable);
+    Assertions.assertSame(other, operatorTable);
   }
 
   @Test
   public void testPlannerFactoryIsInjectable()
   {
     PlannerFactory plannerFactory = injector.getInstance(PlannerFactory.class);
-    Assert.assertNotNull(PlannerFactory.class);
+    Assertions.assertNotNull(PlannerFactory.class);
 
     // Should be a singleton.
     PlannerFactory other = injector.getInstance(PlannerFactory.class);
-    Assert.assertSame(other, plannerFactory);
+    Assertions.assertSame(other, plannerFactory);
   }
 
   @Test
   public void testPlannerConfigIsInjected()
   {
     PlannerConfig plannerConfig = injector.getInstance(PlannerConfig.class);
-    Assert.assertNotNull(plannerConfig);
+    Assertions.assertNotNull(plannerConfig);
   }
 
   @Test
   public void testExtensionCalciteRule()
   {
-    PlannerToolbox toolbox = new PlannerToolbox(
-        injector.getInstance(DruidOperatorTable.class),
-        macroTable,
-        new DefaultObjectMapper(),
-        injector.getInstance(PlannerConfig.class),
-        rootSchema,
-        joinableFactoryWrapper,
-        CatalogResolver.NULL_RESOLVER,
-        "druid",
-        new CalciteRulesManager(ImmutableSet.of()),
-        CalciteTests.TEST_AUTHORIZER_MAPPER
-    );
+    ObjectMapper mapper = new DefaultObjectMapper();
+    PlannerToolbox toolbox = injector.getInstance(PlannerFactory.class);
+
+    final String sql = "SELECT 1";
     PlannerContext context = PlannerContext.create(
         toolbox,
-        "SELECT 1",
-        null,
+        sql,
+        DruidSqlParser.parse(sql, false).getMainStatement(),
+        new NativeSqlEngine(queryLifecycleFactory, mapper, (SqlStatementFactory) null),
+        null, // Don't need an authentication result
+        Collections.emptySet(),
         Collections.emptyMap(),
         null
     );
+
     boolean containsCustomRule = injector.getInstance(CalciteRulesManager.class)
                                          .druidConventionRuleSet(context)
                                          .contains(customRule);
-    Assert.assertTrue(containsCustomRule);
+    Assertions.assertTrue(containsCustomRule);
+  }
+
+  @Test
+  public void testGeneratedSqlQueryIdIsStoredInContext()
+  {
+    final PlannerToolbox toolbox = injector.getInstance(PlannerFactory.class);
+    final String sql = "SELECT 1";
+    final PlannerContext context = PlannerContext.create(
+        toolbox,
+        sql,
+        DruidSqlParser.parse(sql, false).getMainStatement(),
+        new NativeSqlEngine(queryLifecycleFactory, new DefaultObjectMapper(), (SqlStatementFactory) null),
+        null, // Don't need an authentication result
+        Collections.emptySet(),
+        Collections.emptyMap(),
+        null
+    );
+
+    Assertions.assertNotNull(context.getSqlQueryId());
+    Assertions.assertEquals(context.getSqlQueryId(), context.queryContext().get(QueryContextParameters.SQL_QUERY_ID));
+  }
+
+  @Test
+  public void testConfigurableBloat()
+  {
+    ObjectMapper mapper = new DefaultObjectMapper();
+    PlannerToolbox toolbox = injector.getInstance(PlannerFactory.class);
+
+    final String sql = "SELECT 1";
+    PlannerContext contextWithBloat = PlannerContext.create(
+            toolbox,
+            sql,
+            DruidSqlParser.parse(sql, false).getMainStatement(),
+            new NativeSqlEngine(queryLifecycleFactory, mapper, (SqlStatementFactory) null),
+            null, // Don't need an authentication result
+            Collections.emptySet(),
+            QueryContext.ofMap(QueryContextParameters.SQL_PLANNER_BLOAT, BLOAT),
+            null
+    );
+
+    PlannerContext contextWithoutBloat = PlannerContext.create(
+            toolbox,
+            sql,
+            DruidSqlParser.parse(sql, false).getMainStatement(),
+            new NativeSqlEngine(queryLifecycleFactory, mapper, (SqlStatementFactory) null),
+            null, // Don't need an authentication result
+            Collections.emptySet(),
+            Collections.emptyMap(),
+            null
+    );
+
+    assertBloat(contextWithBloat, BLOAT);
+    assertBloat(contextWithoutBloat, QueryContextParameters.SQL_PLANNER_BLOAT.getLiteralDefault());
+  }
+
+  private void assertBloat(PlannerContext context, int expectedBloat)
+  {
+    Optional<ProjectMergeRule> firstProjectMergeRule = injector.getInstance(CalciteRulesManager.class).baseRuleSet(context, false).stream()
+            .filter(rule -> rule instanceof ProjectMergeRule)
+            .map(rule -> (ProjectMergeRule) rule)
+            .findAny();
+    Assertions.assertTrue(firstProjectMergeRule.isPresent() && firstProjectMergeRule.get().config.bloat() == expectedBloat);
   }
 }

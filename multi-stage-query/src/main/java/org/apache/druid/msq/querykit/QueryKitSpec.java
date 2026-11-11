@@ -1,0 +1,75 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.druid.msq.querykit;
+
+import org.apache.druid.msq.kernel.QueryDefinition;
+import org.apache.druid.query.DataSource;
+import org.apache.druid.query.Query;
+
+/**
+ * Container for {@link QueryKit}, {@link DataSourcePlanners}, and the queryId that we want to build.
+ */
+public class QueryKitSpec
+{
+  private final QueryKit<Query<?>> queryKit;
+  private final String queryId;
+  private final DataSourcePlanners dataSourcePlanners;
+
+  /**
+   * @param queryKit           kit that is used to translate native subqueries; i.e.,
+   *                           {@link org.apache.druid.query.QueryDataSource}. Typically a {@link MultiQueryKit}.
+   * @param dataSourcePlanners planners for datasource types that {@link DataSourcePlan} does not handle itself
+   * @param queryId            queryId of the resulting {@link QueryDefinition}
+   */
+  public QueryKitSpec(
+      QueryKit<Query<?>> queryKit,
+      DataSourcePlanners dataSourcePlanners,
+      String queryId
+  )
+  {
+    this.queryId = queryId;
+    this.dataSourcePlanners = dataSourcePlanners;
+    this.queryKit = queryKit;
+  }
+
+  /**
+   * Instance of {@link QueryKit} for recursive calls.
+   */
+  public QueryKit<Query<?>> getQueryKit()
+  {
+    return queryKit;
+  }
+
+  /**
+   * Registered {@link DataSourcePlanner}, keyed on the exact {@link DataSource} class each one plans.
+   */
+  public DataSourcePlanners getDataSourcePlanners()
+  {
+    return dataSourcePlanners;
+  }
+
+  /**
+   * Query ID to use when building {@link QueryDefinition}.
+   */
+  public String getQueryId()
+  {
+    return queryId;
+  }
+}

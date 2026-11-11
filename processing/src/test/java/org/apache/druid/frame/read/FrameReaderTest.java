@@ -24,25 +24,27 @@ import org.apache.druid.frame.Frame;
 import org.apache.druid.frame.FrameType;
 import org.apache.druid.frame.allocation.HeapMemoryAllocator;
 import org.apache.druid.frame.testutil.FrameSequenceBuilder;
-import org.apache.druid.segment.QueryableIndexStorageAdapter;
-import org.apache.druid.segment.StorageAdapter;
+import org.apache.druid.segment.CursorFactory;
+import org.apache.druid.segment.QueryableIndexCursorFactory;
 import org.apache.druid.segment.TestIndex;
 import org.apache.druid.testing.InitializedNullHandlingTest;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.ArrayList;
 import java.util.List;
 
-@RunWith(Parameterized.class)
+@ParameterizedClass
+
+@MethodSource("constructorFeeder")
 public class FrameReaderTest extends InitializedNullHandlingTest
 {
   private final FrameType frameType;
 
-  private StorageAdapter inputAdapter;
+  private CursorFactory inputCursorFactory;
   private Frame frame;
   private FrameReader frameReader;
 
@@ -51,7 +53,6 @@ public class FrameReaderTest extends InitializedNullHandlingTest
     this.frameType = frameType;
   }
 
-  @Parameterized.Parameters(name = "frameType = {0}")
   public static Iterable<Object[]> constructorFeeder()
   {
     final List<Object[]> constructors = new ArrayList<>();
@@ -63,13 +64,13 @@ public class FrameReaderTest extends InitializedNullHandlingTest
     return constructors;
   }
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
-    inputAdapter = new QueryableIndexStorageAdapter(TestIndex.getNoRollupMMappedTestIndex());
+    inputCursorFactory = new QueryableIndexCursorFactory(TestIndex.getNoRollupMMappedTestIndex());
 
     final FrameSequenceBuilder frameSequenceBuilder =
-        FrameSequenceBuilder.fromAdapter(inputAdapter)
+        FrameSequenceBuilder.fromCursorFactory(inputCursorFactory)
                             .frameType(frameType)
                             .allocator(HeapMemoryAllocator.unlimited());
 
@@ -80,17 +81,17 @@ public class FrameReaderTest extends InitializedNullHandlingTest
   @Test
   public void testSignature()
   {
-    Assert.assertEquals(inputAdapter.getRowSignature(), frameReader.signature());
+    Assertions.assertEquals(inputCursorFactory.getRowSignature(), frameReader.signature());
   }
 
   @Test
   public void testColumnCapabilitiesToColumnType()
   {
-    for (final String columnName : inputAdapter.getRowSignature().getColumnNames()) {
-      Assert.assertEquals(
-          columnName,
-          inputAdapter.getRowSignature().getColumnCapabilities(columnName).toColumnType(),
-          frameReader.columnCapabilities(frame, columnName).toColumnType()
+    for (final String columnName : inputCursorFactory.getRowSignature().getColumnNames()) {
+      Assertions.assertEquals(
+          inputCursorFactory.getRowSignature().getColumnCapabilities(columnName).toColumnType(),
+          frameReader.columnCapabilities(frame, columnName).toColumnType(),
+          columnName
       );
     }
   }

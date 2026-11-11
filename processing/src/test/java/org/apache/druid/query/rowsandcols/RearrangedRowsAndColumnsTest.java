@@ -24,7 +24,7 @@ import org.apache.druid.query.rowsandcols.column.Column;
 import org.apache.druid.query.rowsandcols.column.ColumnAccessor;
 import org.apache.druid.query.rowsandcols.column.IntArrayColumn;
 import org.apache.druid.query.rowsandcols.column.ObjectArrayColumn;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.AbstractList;
 import java.util.Collections;
@@ -64,7 +64,7 @@ public class RearrangedRowsAndColumnsTest extends RowsAndColumnsTestBase
   @SuppressWarnings("UnusedCollectionModifiedInPlace")
   private static void shuffleArray(int[] pointers)
   {
-    Collections.shuffle(new AbstractList<Object>()
+    Collections.shuffle(new AbstractList<>()
     {
       @Override
       public Object get(int index)

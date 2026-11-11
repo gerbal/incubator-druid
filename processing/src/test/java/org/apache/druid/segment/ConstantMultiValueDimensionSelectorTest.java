@@ -19,14 +19,15 @@
 
 package org.apache.druid.segment;
 
-import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
 import org.apache.druid.query.extraction.StringFormatExtractionFn;
 import org.apache.druid.query.extraction.SubstringDimExtractionFn;
+import org.apache.druid.query.filter.DruidObjectPredicate;
+import org.apache.druid.query.filter.StringPredicateDruidPredicateFactory;
 import org.apache.druid.segment.data.IndexedInts;
 import org.apache.druid.testing.InitializedNullHandlingTest;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
 
@@ -49,109 +50,109 @@ public class ConstantMultiValueDimensionSelectorTest extends InitializedNullHand
   public void testGetRow()
   {
     IndexedInts row = NULL_SELECTOR.getRow();
-    Assert.assertEquals(1, row.size());
-    Assert.assertEquals(0, row.get(0));
+    Assertions.assertEquals(1, row.size());
+    Assertions.assertEquals(0, row.get(0));
 
     row = EMPTY_SELECTOR.getRow();
-    Assert.assertEquals(1, row.size());
-    Assert.assertEquals(0, row.get(0));
+    Assertions.assertEquals(1, row.size());
+    Assertions.assertEquals(0, row.get(0));
 
     row = SINGLE_SELECTOR.getRow();
-    Assert.assertEquals(1, row.size());
-    Assert.assertEquals(0, row.get(0));
+    Assertions.assertEquals(1, row.size());
+    Assertions.assertEquals(0, row.get(0));
 
     row = CONST_SELECTOR.getRow();
-    Assert.assertEquals(2, row.size());
-    Assert.assertEquals(0, row.get(0));
-    Assert.assertEquals(1, row.get(1));
+    Assertions.assertEquals(2, row.size());
+    Assertions.assertEquals(0, row.get(0));
+    Assertions.assertEquals(1, row.get(1));
 
     row = NULL_EXTRACTION_SELECTOR.getRow();
-    Assert.assertEquals(1, row.size());
-    Assert.assertEquals(0, row.get(0));
+    Assertions.assertEquals(1, row.size());
+    Assertions.assertEquals(0, row.get(0));
 
     row = CONST_EXTRACTION_SELECTOR.getRow();
-    Assert.assertEquals(3, row.size());
-    Assert.assertEquals(0, row.get(0));
-    Assert.assertEquals(1, row.get(1));
-    Assert.assertEquals(2, row.get(2));
+    Assertions.assertEquals(3, row.size());
+    Assertions.assertEquals(0, row.get(0));
+    Assertions.assertEquals(1, row.get(1));
+    Assertions.assertEquals(2, row.get(2));
   }
 
   @Test
   public void testLookupName()
   {
-    Assert.assertNull(NULL_SELECTOR.lookupName(0));
+    Assertions.assertNull(NULL_SELECTOR.lookupName(0));
 
-    Assert.assertNull(EMPTY_SELECTOR.lookupName(0));
+    Assertions.assertNull(EMPTY_SELECTOR.lookupName(0));
 
-    Assert.assertEquals("billy", CONST_SELECTOR.lookupName(0));
-    Assert.assertEquals("douglas", CONST_SELECTOR.lookupName(1));
+    Assertions.assertEquals("billy", CONST_SELECTOR.lookupName(0));
+    Assertions.assertEquals("douglas", CONST_SELECTOR.lookupName(1));
 
-    Assert.assertEquals("billy", NULL_EXTRACTION_SELECTOR.lookupName(0));
+    Assertions.assertEquals("billy", NULL_EXTRACTION_SELECTOR.lookupName(0));
 
-    Assert.assertEquals("bill", CONST_EXTRACTION_SELECTOR.lookupName(0));
-    Assert.assertEquals("doug", CONST_EXTRACTION_SELECTOR.lookupName(1));
-    Assert.assertEquals("bill", CONST_EXTRACTION_SELECTOR.lookupName(2));
+    Assertions.assertEquals("bill", CONST_EXTRACTION_SELECTOR.lookupName(0));
+    Assertions.assertEquals("doug", CONST_EXTRACTION_SELECTOR.lookupName(1));
+    Assertions.assertEquals("bill", CONST_EXTRACTION_SELECTOR.lookupName(2));
   }
 
   @Test
   public void testGetObject()
   {
-    Assert.assertNull(NULL_SELECTOR.lookupName(0));
+    Assertions.assertNull(NULL_SELECTOR.lookupName(0));
 
-    Assert.assertNull(EMPTY_SELECTOR.lookupName(0));
+    Assertions.assertNull(EMPTY_SELECTOR.lookupName(0));
 
-    Assert.assertEquals("billy", SINGLE_SELECTOR.getObject());
-    Assert.assertEquals(ImmutableList.of("billy", "douglas"), CONST_SELECTOR.getObject());
+    Assertions.assertEquals("billy", SINGLE_SELECTOR.getObject());
+    Assertions.assertEquals(ImmutableList.of("billy", "douglas"), CONST_SELECTOR.getObject());
 
-    Assert.assertEquals("billy", NULL_EXTRACTION_SELECTOR.getObject());
+    Assertions.assertEquals("billy", NULL_EXTRACTION_SELECTOR.getObject());
 
-    Assert.assertEquals(ImmutableList.of("bill", "doug", "bill"), CONST_EXTRACTION_SELECTOR.getObject());
+    Assertions.assertEquals(ImmutableList.of("bill", "doug", "bill"), CONST_EXTRACTION_SELECTOR.getObject());
   }
 
   @Test
   public void testCoverage()
   {
-    Assert.assertEquals(DimensionDictionarySelector.CARDINALITY_UNKNOWN, CONST_SELECTOR.getValueCardinality());
-    Assert.assertNull(CONST_SELECTOR.idLookup());
-    Assert.assertEquals(Object.class, CONST_SELECTOR.classOfObject());
-    Assert.assertTrue(CONST_SELECTOR.nameLookupPossibleInAdvance());
+    Assertions.assertEquals(DimensionDictionarySelector.CARDINALITY_UNKNOWN, CONST_SELECTOR.getValueCardinality());
+    Assertions.assertNull(CONST_SELECTOR.idLookup());
+    Assertions.assertEquals(Object.class, CONST_SELECTOR.classOfObject());
+    Assertions.assertTrue(CONST_SELECTOR.nameLookupPossibleInAdvance());
   }
 
   @Test
   public void testValueMatcher()
   {
-    Assert.assertTrue(NULL_SELECTOR.makeValueMatcher((String) null).matches());
-    Assert.assertFalse(NULL_SELECTOR.makeValueMatcher("douglas").matches());
+    Assertions.assertTrue(NULL_SELECTOR.makeValueMatcher((String) null).matches(false));
+    Assertions.assertFalse(NULL_SELECTOR.makeValueMatcher("douglas").matches(false));
 
-    Assert.assertTrue(EMPTY_SELECTOR.makeValueMatcher((String) null).matches());
-    Assert.assertFalse(EMPTY_SELECTOR.makeValueMatcher("douglas").matches());
+    Assertions.assertTrue(EMPTY_SELECTOR.makeValueMatcher((String) null).matches(false));
+    Assertions.assertFalse(EMPTY_SELECTOR.makeValueMatcher("douglas").matches(false));
 
-    Assert.assertTrue(CONST_SELECTOR.makeValueMatcher("billy").matches());
-    Assert.assertTrue(CONST_SELECTOR.makeValueMatcher("douglas").matches());
-    Assert.assertFalse(CONST_SELECTOR.makeValueMatcher("debbie").matches());
+    Assertions.assertTrue(CONST_SELECTOR.makeValueMatcher("billy").matches(false));
+    Assertions.assertTrue(CONST_SELECTOR.makeValueMatcher("douglas").matches(false));
+    Assertions.assertFalse(CONST_SELECTOR.makeValueMatcher("debbie").matches(false));
 
-    Assert.assertTrue(NULL_EXTRACTION_SELECTOR.makeValueMatcher("billy").matches());
-    Assert.assertFalse(NULL_EXTRACTION_SELECTOR.makeValueMatcher((String) null).matches());
+    Assertions.assertTrue(NULL_EXTRACTION_SELECTOR.makeValueMatcher("billy").matches(false));
+    Assertions.assertFalse(NULL_EXTRACTION_SELECTOR.makeValueMatcher((String) null).matches(false));
 
-    Assert.assertTrue(CONST_EXTRACTION_SELECTOR.makeValueMatcher("bill").matches());
-    Assert.assertTrue(CONST_EXTRACTION_SELECTOR.makeValueMatcher("doug").matches());
-    Assert.assertFalse(CONST_EXTRACTION_SELECTOR.makeValueMatcher("billy").matches());
+    Assertions.assertTrue(CONST_EXTRACTION_SELECTOR.makeValueMatcher("bill").matches(false));
+    Assertions.assertTrue(CONST_EXTRACTION_SELECTOR.makeValueMatcher("doug").matches(false));
+    Assertions.assertFalse(CONST_EXTRACTION_SELECTOR.makeValueMatcher("billy").matches(false));
 
-    Assert.assertTrue(NULL_SELECTOR.makeValueMatcher(Predicates.isNull()).matches());
-    Assert.assertFalse(NULL_SELECTOR.makeValueMatcher(Predicates.equalTo("billy")).matches());
+    Assertions.assertTrue(NULL_SELECTOR.makeValueMatcher(StringPredicateDruidPredicateFactory.of(DruidObjectPredicate.isNull())).matches(false));
+    Assertions.assertFalse(NULL_SELECTOR.makeValueMatcher(StringPredicateDruidPredicateFactory.equalTo("billy")).matches(false));
 
-    Assert.assertTrue(EMPTY_SELECTOR.makeValueMatcher(Predicates.equalTo(null)).matches());
-    Assert.assertFalse(EMPTY_SELECTOR.makeValueMatcher(Predicates.equalTo("douglas")).matches());
+    Assertions.assertTrue(EMPTY_SELECTOR.makeValueMatcher(StringPredicateDruidPredicateFactory.equalTo(null)).matches(false));
+    Assertions.assertFalse(EMPTY_SELECTOR.makeValueMatcher(StringPredicateDruidPredicateFactory.equalTo("douglas")).matches(false));
 
-    Assert.assertTrue(CONST_SELECTOR.makeValueMatcher(Predicates.equalTo("billy")).matches());
-    Assert.assertTrue(CONST_SELECTOR.makeValueMatcher(Predicates.equalTo("douglas")).matches());
-    Assert.assertFalse(CONST_SELECTOR.makeValueMatcher(Predicates.equalTo("debbie")).matches());
+    Assertions.assertTrue(CONST_SELECTOR.makeValueMatcher(StringPredicateDruidPredicateFactory.equalTo("billy")).matches(false));
+    Assertions.assertTrue(CONST_SELECTOR.makeValueMatcher(StringPredicateDruidPredicateFactory.equalTo("douglas")).matches(false));
+    Assertions.assertFalse(CONST_SELECTOR.makeValueMatcher(StringPredicateDruidPredicateFactory.equalTo("debbie")).matches(false));
 
-    Assert.assertTrue(NULL_EXTRACTION_SELECTOR.makeValueMatcher(Predicates.equalTo("billy")).matches());
-    Assert.assertFalse(NULL_EXTRACTION_SELECTOR.makeValueMatcher(Predicates.equalTo(null)).matches());
+    Assertions.assertTrue(NULL_EXTRACTION_SELECTOR.makeValueMatcher(StringPredicateDruidPredicateFactory.equalTo("billy")).matches(false));
+    Assertions.assertFalse(NULL_EXTRACTION_SELECTOR.makeValueMatcher(StringPredicateDruidPredicateFactory.equalTo(null)).matches(false));
 
-    Assert.assertTrue(CONST_EXTRACTION_SELECTOR.makeValueMatcher(Predicates.equalTo("bill")).matches());
-    Assert.assertTrue(CONST_EXTRACTION_SELECTOR.makeValueMatcher(Predicates.equalTo("doug")).matches());
-    Assert.assertFalse(CONST_EXTRACTION_SELECTOR.makeValueMatcher(Predicates.equalTo("billy")).matches());
+    Assertions.assertTrue(CONST_EXTRACTION_SELECTOR.makeValueMatcher(StringPredicateDruidPredicateFactory.equalTo("bill")).matches(false));
+    Assertions.assertTrue(CONST_EXTRACTION_SELECTOR.makeValueMatcher(StringPredicateDruidPredicateFactory.equalTo("doug")).matches(false));
+    Assertions.assertFalse(CONST_EXTRACTION_SELECTOR.makeValueMatcher(StringPredicateDruidPredicateFactory.equalTo("billy")).matches(false));
   }
 }

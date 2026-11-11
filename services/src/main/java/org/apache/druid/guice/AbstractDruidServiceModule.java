@@ -41,8 +41,8 @@ import java.util.Set;
  * <pre>
  *   public class MyModule extends AbstractDruidServiceModule
  *   {
- *     @ProvidesIntoSet
- *     @Named("jsonNameOfNodeRole")
+ *     &#64;ProvidesIntoSet
+ *     &#64;Named("jsonNameOfNodeRole")
  *     public Class<? extends DruidService> getDataNodeService()
  *     {
  *       return DataNodeService.class;
@@ -71,11 +71,11 @@ public abstract class AbstractDruidServiceModule implements Module
     binder.install(MultibindingsScanner.asModule());
     MapBinder<NodeRole, Set<Class<? extends DruidService>>> serviceBinder = MapBinder.newMapBinder(
         binder,
-        new TypeLiteral<NodeRole>(){},
-        new TypeLiteral<Set<Class<? extends DruidService>>>(){}
+        new TypeLiteral<>() {},
+        new TypeLiteral<>() {}
     );
     serviceBinder
         .addBinding(role)
-        .to(Key.get(new TypeLiteral<Set<Class<? extends DruidService>>>(){}, role.getDruidServiceInjectName()));
+        .to(Key.get(new TypeLiteral<>() {}, role.getDruidServiceInjectName()));
   }
 }

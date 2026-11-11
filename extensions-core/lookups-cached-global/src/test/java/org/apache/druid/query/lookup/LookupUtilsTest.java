@@ -32,9 +32,9 @@ import org.apache.druid.guice.annotations.Json;
 import org.apache.druid.guice.annotations.Self;
 import org.apache.druid.initialization.Initialization;
 import org.apache.druid.server.DruidNode;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.Map;
@@ -42,14 +42,10 @@ import java.util.Map;
 public class LookupUtilsTest
 {
   private static final TypeReference<Map<String, Object>> LOOKUPS_ALL_GENERIC_REFERENCE =
-      new TypeReference<Map<String, Object>>()
-      {
-      };
+      new TypeReference<>() {};
 
   private static final TypeReference<Map<String, LookupExtractorFactoryContainer>> LOOKUPS_ALL_REFERENCE =
-      new TypeReference<Map<String, LookupExtractorFactoryContainer>>()
-      {
-      };
+      new TypeReference<>() {};
 
   private static final String LOOKUP_VALID_INNER = "  \"lookup_uri_good\": {\n"
                                                    + "    \"version\": \"2021-12-03T01:04:05.151Z\",\n"
@@ -108,7 +104,7 @@ public class LookupUtilsTest
                                                       + "}";
   private ObjectMapper mapper;
 
-  @Before
+  @BeforeEach
   public void setup()
   {
     final Injector injector = makeInjector();
@@ -130,7 +126,7 @@ public class LookupUtilsTest
     Map<String, LookupExtractorFactoryContainer> actualLookup =
         LookupUtils.tryConvertObjectMapToLookupConfigMap(validLookupGeneric, mapper);
 
-    Assert.assertEquals(mapper.writeValueAsString(validLookupExpected), mapper.writeValueAsString(actualLookup));
+    Assertions.assertEquals(mapper.writeValueAsString(validLookupExpected), mapper.writeValueAsString(actualLookup));
   }
 
   @Test
@@ -145,7 +141,7 @@ public class LookupUtilsTest
     Map<String, LookupExtractorFactoryContainer> actualLookup =
         LookupUtils.tryConvertObjectMapToLookupConfigMap(validLookupGeneric, mapper);
 
-    Assert.assertTrue(actualLookup.isEmpty());
+    Assertions.assertTrue(actualLookup.isEmpty());
   }
 
   @Test
@@ -163,7 +159,7 @@ public class LookupUtilsTest
     Map<String, LookupExtractorFactoryContainer> actualLookup =
         LookupUtils.tryConvertObjectMapToLookupConfigMap(validLookupGeneric, mapper);
 
-    Assert.assertEquals(mapper.writeValueAsString(validLookupExpected), mapper.writeValueAsString(actualLookup));
+    Assertions.assertEquals(mapper.writeValueAsString(validLookupExpected), mapper.writeValueAsString(actualLookup));
   }
 
   private Injector makeInjector()

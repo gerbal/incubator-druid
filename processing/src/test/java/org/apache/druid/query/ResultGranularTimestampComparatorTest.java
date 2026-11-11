@@ -23,19 +23,19 @@ import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.granularity.Granularity;
 import org.joda.time.DateTime;
-import org.junit.Assert;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.Arrays;
 
 /**
  */
-@RunWith(Parameterized.class)
+@ParameterizedClass
+@MethodSource("constructorFeeder")
 public class ResultGranularTimestampComparatorTest
 {
-  @Parameterized.Parameters(name = "descending={0}")
   public static Iterable<Object[]> constructorFeeder()
   {
     return QueryRunnerTestHelper.transformToConstructionFeeder(Arrays.asList(false, true));
@@ -53,37 +53,37 @@ public class ResultGranularTimestampComparatorTest
   @Test
   public void testCompareAll()
   {
-    Result<Object> r1 = new Result<Object>(time, null);
-    Result<Object> r2 = new Result<Object>(time.plusYears(5), null);
+    Result<Object> r1 = new Result<>(time, null);
+    Result<Object> r2 = new Result<>(time.plusYears(5), null);
 
-    Assert.assertEquals(ResultGranularTimestampComparator.create(Granularities.ALL, descending).compare(r1, r2), 0);
+    Assertions.assertEquals(ResultGranularTimestampComparator.create(Granularities.ALL, descending).compare(r1, r2), 0);
   }
 
   @Test
   public void testCompareDay()
   {
-    Result<Object> res = new Result<Object>(time, null);
-    Result<Object> same = new Result<Object>(time.plusHours(12), null);
-    Result<Object> greater = new Result<Object>(time.plusHours(25), null);
-    Result<Object> less = new Result<Object>(time.minusHours(1), null);
+    Result<Object> res = new Result<>(time, null);
+    Result<Object> same = new Result<>(time.plusHours(12), null);
+    Result<Object> greater = new Result<>(time.plusHours(25), null);
+    Result<Object> less = new Result<>(time.minusHours(1), null);
 
     Granularity day = Granularities.DAY;
-    Assert.assertEquals(ResultGranularTimestampComparator.create(day, descending).compare(res, same), 0);
-    Assert.assertEquals(ResultGranularTimestampComparator.create(day, descending).compare(res, greater), descending ? 1 : -1);
-    Assert.assertEquals(ResultGranularTimestampComparator.create(day, descending).compare(res, less), descending ? -1 : 1);
+    Assertions.assertEquals(ResultGranularTimestampComparator.create(day, descending).compare(res, same), 0);
+    Assertions.assertEquals(ResultGranularTimestampComparator.create(day, descending).compare(res, greater), descending ? 1 : -1);
+    Assertions.assertEquals(ResultGranularTimestampComparator.create(day, descending).compare(res, less), descending ? -1 : 1);
   }
   
   @Test
   public void testCompareHour()
   {
-    Result<Object> res = new Result<Object>(time, null);
-    Result<Object> same = new Result<Object>(time.plusMinutes(55), null);
-    Result<Object> greater = new Result<Object>(time.plusHours(1), null);
-    Result<Object> less = new Result<Object>(time.minusHours(1), null);
+    Result<Object> res = new Result<>(time, null);
+    Result<Object> same = new Result<>(time.plusMinutes(55), null);
+    Result<Object> greater = new Result<>(time.plusHours(1), null);
+    Result<Object> less = new Result<>(time.minusHours(1), null);
 
     Granularity hour = Granularities.HOUR;
-    Assert.assertEquals(ResultGranularTimestampComparator.create(hour, descending).compare(res, same), 0);
-    Assert.assertEquals(ResultGranularTimestampComparator.create(hour, descending).compare(res, greater), descending ? 1 : -1);
-    Assert.assertEquals(ResultGranularTimestampComparator.create(hour, descending).compare(res, less), descending ? -1 : 1);
+    Assertions.assertEquals(ResultGranularTimestampComparator.create(hour, descending).compare(res, same), 0);
+    Assertions.assertEquals(ResultGranularTimestampComparator.create(hour, descending).compare(res, greater), descending ? 1 : -1);
+    Assertions.assertEquals(ResultGranularTimestampComparator.create(hour, descending).compare(res, less), descending ? -1 : 1);
   }
 }

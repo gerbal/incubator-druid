@@ -20,8 +20,8 @@
 package org.apache.druid.guice;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import jakarta.validation.constraints.NotNull;
 
-import javax.validation.constraints.NotNull;
 import java.util.LinkedHashSet;
 
 /**
@@ -41,17 +41,10 @@ public class ExtensionsConfig
   private boolean useExtensionClassloaderFirst = false;
 
   @JsonProperty
-  private String hadoopDependenciesDir = "hadoop-dependencies";
-
-  @JsonProperty
-  private String hadoopContainerDruidClasspath = null;
-
-  //Only applicable when hadoopContainerDruidClasspath is explicitly specified.
-  @JsonProperty
-  private boolean addExtensionsToHadoopContainer = false;
-
-  @JsonProperty
   private LinkedHashSet<String> loadList;
+
+  @JsonProperty
+  private LinkedHashSet<String> modulesForEmbeddedTest = null;
 
   public boolean searchCurrentClassloader()
   {
@@ -68,24 +61,19 @@ public class ExtensionsConfig
     return useExtensionClassloaderFirst;
   }
 
-  public String getHadoopDependenciesDir()
-  {
-    return hadoopDependenciesDir;
-  }
-
-  public String getHadoopContainerDruidClasspath()
-  {
-    return hadoopContainerDruidClasspath;
-  }
-
-  public boolean getAddExtensionsToHadoopContainer()
-  {
-    return addExtensionsToHadoopContainer;
-  }
-
   public LinkedHashSet<String> getLoadList()
   {
     return loadList;
+  }
+
+  /**
+   * List of extension {@code DruidModule} class names that should be used in an
+   * embedded test. This property is for TESTING ONLY and must NEVER be set in
+   * production.
+   */
+  public LinkedHashSet<String> getModulesForEmbeddedTest()
+  {
+    return modulesForEmbeddedTest;
   }
 
   @Override
@@ -95,9 +83,6 @@ public class ExtensionsConfig
            "searchCurrentClassloader=" + searchCurrentClassloader +
            ", directory='" + directory + '\'' +
            ", useExtensionClassloaderFirst=" + useExtensionClassloaderFirst +
-           ", hadoopDependenciesDir='" + hadoopDependenciesDir + '\'' +
-           ", hadoopContainerDruidClasspath='" + hadoopContainerDruidClasspath + '\'' +
-           ", addExtensionsToHadoopContainer=" + addExtensionsToHadoopContainer +
            ", loadList=" + loadList +
            '}';
   }

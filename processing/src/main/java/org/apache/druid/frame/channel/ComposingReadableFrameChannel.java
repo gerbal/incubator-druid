@@ -23,7 +23,7 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
-import org.apache.druid.frame.Frame;
+import org.apache.druid.query.rowsandcols.RowsAndColumns;
 
 import javax.annotation.concurrent.NotThreadSafe;
 import java.util.ArrayList;
@@ -42,6 +42,7 @@ public class ComposingReadableFrameChannel implements ReadableFrameChannel
   private final List<Supplier<ReadableFrameChannel>> channels;
   private ReadableFrameChannel currentChannel;
   private int currentIndex;
+  private boolean finished;
 
   public ComposingReadableFrameChannel(
       int partition,
@@ -70,40 +71,17 @@ public class ComposingReadableFrameChannel implements ReadableFrameChannel
   @Override
   public boolean isFinished()
   {
-    initCurrentChannel();
-    if (!currentChannel.isFinished()) {
-      return false;
-    }
-    currentChannel.close();
-    currentChannel = null;
-    if (isLastIndex()) {
-      return true;
-    }
-    ++currentIndex;
-    return isFinished();
+    return advancePastFinishedChannels();
   }
 
   @Override
   public boolean canRead()
   {
-    initCurrentChannel();
-    if (currentChannel.canRead()) {
-      return true;
-    }
-    if (currentChannel.isFinished()) {
-      currentChannel.close();
-      currentChannel = null;
-      if (isLastIndex()) {
-        return false;
-      }
-      ++currentIndex;
-      return canRead();
-    }
-    return false;
+    return !advancePastFinishedChannels() && currentChannel.canRead();
   }
 
   @Override
-  public Frame read()
+  public RowsAndColumns read()
   {
     return currentChannel.read();
   }
@@ -111,17 +89,10 @@ public class ComposingReadableFrameChannel implements ReadableFrameChannel
   @Override
   public ListenableFuture<?> readabilityFuture()
   {
-    initCurrentChannel();
-    if (!currentChannel.isFinished()) {
-      return currentChannel.readabilityFuture();
-    }
-    currentChannel.close();
-    currentChannel = null;
-    if (isLastIndex()) {
+    if (advancePastFinishedChannels()) {
       return Futures.immediateFuture(true);
     }
-    ++currentIndex;
-    return readabilityFuture();
+    return currentChannel.readabilityFuture();
   }
 
   @Override
@@ -132,9 +103,26 @@ public class ComposingReadableFrameChannel implements ReadableFrameChannel
     }
   }
 
-  private boolean isLastIndex()
+  /**
+   * Closes finished channels and moves on to the next one, until reaching a channel that is not finished. Returns
+   * whether all channels are finished.
+   */
+  private boolean advancePastFinishedChannels()
   {
-    return currentIndex == channels.size() - 1;
+    while (!finished) {
+      initCurrentChannel();
+      if (!currentChannel.isFinished()) {
+        return false;
+      }
+      currentChannel.close();
+      currentChannel = null;
+      if (currentIndex == channels.size() - 1) {
+        finished = true;
+      } else {
+        ++currentIndex;
+      }
+    }
+    return true;
   }
 
   private void initCurrentChannel()

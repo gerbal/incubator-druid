@@ -17,14 +17,14 @@
  */
 
 import { Button, ButtonGroup, Intent } from '@blueprintjs/core';
-import copy from 'copy-to-clipboard';
 import * as JSONBig from 'json-bigint-native';
 import React from 'react';
-import AceEditor from 'react-ace';
 
+import { hjson } from '../../editor-languages/hjson';
 import { useQueryManager } from '../../hooks';
 import { Api, AppToaster, UrlBaser } from '../../singletons';
-import { downloadFile } from '../../utils';
+import { copyToClipboard, downloadFile } from '../../utils';
+import { CodeEditor } from '../code-editor/code-editor';
 import { Loader } from '../loader/loader';
 
 import './show-json.scss';
@@ -38,9 +38,9 @@ export interface ShowJsonProps {
 export const ShowJson = React.memo(function ShowJson(props: ShowJsonProps) {
   const { endpoint, transform, downloadFilename } = props;
 
-  const [jsonState] = useQueryManager<null, string>({
-    processQuery: async () => {
-      const resp = await Api.instance.get(endpoint);
+  const [jsonState, queryManager] = useQueryManager<null, string>({
+    processQuery: async (_, signal) => {
+      const resp = await Api.instance.get(endpoint, { signal });
       let data = resp.data;
       if (transform) data = transform(data);
       return typeof data === 'string' ? data : JSONBig.stringify(data, undefined, 2);
@@ -53,20 +53,26 @@ export const ShowJson = React.memo(function ShowJson(props: ShowJsonProps) {
     <div className="show-json">
       <div className="top-actions">
         <ButtonGroup className="right-buttons">
+          <Button
+            disabled={jsonState.loading}
+            text="Refresh"
+            variant="minimal"
+            onClick={() => queryManager.rerunLastQuery()}
+          />
           {downloadFilename && (
             <Button
               disabled={jsonState.loading}
               text="Download"
-              minimal
+              variant="minimal"
               onClick={() => downloadFile(jsonValue, 'json', downloadFilename)}
             />
           )}
           <Button
             text="Copy"
-            minimal
+            variant="minimal"
             disabled={jsonState.loading}
             onClick={() => {
-              copy(jsonValue, { format: 'text/plain' });
+              copyToClipboard(jsonValue);
               AppToaster.show({
                 message: 'JSON value copied to clipboard',
                 intent: Intent.SUCCESS,
@@ -76,7 +82,7 @@ export const ShowJson = React.memo(function ShowJson(props: ShowJsonProps) {
           <Button
             text="View raw"
             disabled={!jsonValue}
-            minimal
+            variant="minimal"
             onClick={() => window.open(UrlBaser.base(endpoint), '_blank')}
           />
         </ButtonGroup>
@@ -85,17 +91,10 @@ export const ShowJson = React.memo(function ShowJson(props: ShowJsonProps) {
         {jsonState.loading ? (
           <Loader />
         ) : (
-          <AceEditor
-            mode="hjson"
-            theme="solarized_dark"
+          <CodeEditor
+            language={hjson()}
             readOnly
-            fontSize={12}
-            width="100%"
-            height="100%"
-            showPrintMargin={false}
-            showGutter={false}
-            value={!jsonState.error ? jsonValue : jsonState.getErrorMessage()}
-            style={{}}
+            value={(!jsonState.error ? jsonValue : jsonState.getErrorMessage()) ?? ''}
           />
         )}
       </div>

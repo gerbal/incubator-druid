@@ -20,8 +20,8 @@
 package org.apache.druid.sql.calcite.external;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Supplier;
 import com.google.common.collect.ImmutableList;
-import org.apache.calcite.avatica.SqlType;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.schema.FunctionParameter;
@@ -31,10 +31,8 @@ import org.apache.calcite.sql.SqlIdentifier;
 import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlOperandCountRange;
 import org.apache.calcite.sql.SqlOperator;
-import org.apache.calcite.sql.SqlTypeNameSpec;
 import org.apache.calcite.sql.type.SqlOperandCountRanges;
-import org.apache.calcite.sql.type.SqlOperandTypeChecker;
-import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.calcite.sql.type.SqlOperandMetadata;
 import org.apache.druid.catalog.model.ColumnSpec;
 import org.apache.druid.catalog.model.table.ExternalTableSpec;
 import org.apache.druid.catalog.model.table.TableFunction;
@@ -47,6 +45,7 @@ import org.apache.druid.server.security.Action;
 import org.apache.druid.server.security.Resource;
 import org.apache.druid.server.security.ResourceAction;
 import org.apache.druid.server.security.ResourceType;
+import org.apache.druid.sql.calcite.planner.CatalogColumnTypes;
 import org.apache.druid.sql.calcite.planner.DruidTypeSystem;
 import org.apache.druid.sql.calcite.table.ExternalTable;
 
@@ -55,6 +54,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -128,7 +128,7 @@ public class Externals
    * declared types. We catch missing required parameters at conversion time,
    * where we also catch invalid values, incompatible values, and so on.
    */
-  public static SqlOperandTypeChecker variadic(List<FunctionParameter> params)
+  public static SqlOperandMetadata variadic(List<FunctionParameter> params)
   {
     int min = 0;
     for (FunctionParameter param : params) {
@@ -137,12 +137,13 @@ public class Externals
       }
     }
     SqlOperandCountRange range = SqlOperandCountRanges.between(min, params.size());
-    return new SqlOperandTypeChecker()
+    return new SqlOperandMetadata()
     {
       @Override
       public boolean checkOperandTypes(
           SqlCallBinding callBinding,
-          boolean throwOnFailure)
+          boolean throwOnFailure
+      )
       {
         return range.isValidCount(callBinding.getOperandCount());
       }
@@ -151,6 +152,12 @@ public class Externals
       public SqlOperandCountRange getOperandCountRange()
       {
         return range;
+      }
+
+      @Override
+      public boolean isFixedParameters()
+      {
+        return true;
       }
 
       @Override
@@ -170,6 +177,26 @@ public class Externals
       {
         return Consistency.NONE;
       }
+
+      @Override
+      public List<RelDataType> paramTypes(RelDataTypeFactory typeFactory)
+      {
+        final List<RelDataType> types = new ArrayList<>(params.size());
+        for (FunctionParameter param : params) {
+          types.add(param.getType(typeFactory));
+        }
+        return types;
+      }
+
+      @Override
+      public List<String> paramNames()
+      {
+        final List<String> names = new ArrayList<>(params.size());
+        for (FunctionParameter param : params) {
+          names.add(param.getName());
+        }
+        return names;
+      }
     };
   }
 
@@ -179,7 +206,7 @@ public class Externals
    */
   public static Map<String, Object> convertArguments(
       final TableFunction fn,
-      final List<Object> arguments
+      final List<?> arguments
   )
   {
     final List<TableFunction.ParameterDefn> params = fn.parameters();
@@ -203,7 +230,7 @@ public class Externals
     final List<ColumnSpec> columns = new ArrayList<>();
     for (int i = 0; i < schema.size(); i += 2) {
       final String name = convertName((SqlIdentifier) schema.get(i));
-      final String sqlType = convertType(name, (SqlDataTypeSpec) schema.get(i + 1));
+      final String sqlType = CatalogColumnTypes.forExternalColumn(name, (SqlDataTypeSpec) schema.get(i + 1));
       columns.add(new ColumnSpec(name, sqlType, null));
     }
     return columns;
@@ -219,67 +246,20 @@ public class Externals
     if (!ident.isSimple()) {
       throw new IAE(StringUtils.format(
           "Column [%s] must have a simple name",
-          ident));
+          ident
+      ));
     }
     return ident.getSimple();
-  }
-
-  /**
-   * Define the SQL input column type from a type provided in the
-   * EXTEND clause. Calcite allows any form of type. But, Druid
-   * requires only the Druid supported types (and their aliases.)
-   * <p>
-   * Druid has its own rules for nullability. We ignore any nullability
-   * clause in the EXTEND list.
-   */
-  private static String convertType(String name, SqlDataTypeSpec dataType)
-  {
-    SqlTypeNameSpec spec = dataType.getTypeNameSpec();
-    if (spec == null) {
-      throw unsupportedType(name, dataType);
-    }
-    SqlIdentifier typeNameIdentifier = spec.getTypeName();
-    if (typeNameIdentifier == null || !typeNameIdentifier.isSimple()) {
-      throw unsupportedType(name, dataType);
-    }
-    String simpleName = typeNameIdentifier.getSimple();
-    if (StringUtils.toLowerCase(simpleName).startsWith(("complex<"))) {
-      return simpleName;
-    }
-    SqlTypeName type = SqlTypeName.get(simpleName);
-    if (type == null) {
-      throw unsupportedType(name, dataType);
-    }
-    if (SqlTypeName.CHAR_TYPES.contains(type)) {
-      return SqlTypeName.VARCHAR.name();
-    }
-    if (SqlTypeName.INT_TYPES.contains(type)) {
-      return SqlTypeName.BIGINT.name();
-    }
-    switch (type) {
-      case DOUBLE:
-        return SqlType.DOUBLE.name();
-      case FLOAT:
-      case REAL:
-        return SqlType.FLOAT.name();
-      default:
-        throw unsupportedType(name, dataType);
-    }
-  }
-
-  private static RuntimeException unsupportedType(String name, SqlDataTypeSpec dataType)
-  {
-    return new IAE(StringUtils.format(
-        "Column [%s] has an unsupported type: [%s]",
-        name,
-        dataType));
   }
 
   /**
    * Create an MSQ ExternalTable given an external table spec. Enforces type restructions
    * (which should be revisited.)
    */
-  public static ExternalTable buildExternalTable(ExternalTableSpec spec, ObjectMapper jsonMapper)
+  public static ExternalTable buildExternalTable(
+      ExternalTableSpec spec,
+      ObjectMapper jsonMapper
+  )
   {
     // Prevent a RowSignature that has a ColumnSignature with name "__time" and type that is not LONG because it
     // will be automatically cast to LONG while processing in RowBasedColumnSelectorFactory.
@@ -294,7 +274,7 @@ public class Externals
                     + "Please change the column name to something other than __time");
     }
 
-    return toExternalTable(spec, jsonMapper);
+    return toExternalTable(spec, jsonMapper, spec.inputSourceTypesSupplier);
   }
 
   public static ResourceAction externalRead(String name)
@@ -302,16 +282,21 @@ public class Externals
     return new ResourceAction(new Resource(name, ResourceType.EXTERNAL), Action.READ);
   }
 
-  public static ExternalTable toExternalTable(ExternalTableSpec spec, ObjectMapper jsonMapper)
+  public static ExternalTable toExternalTable(
+      ExternalTableSpec spec,
+      ObjectMapper jsonMapper,
+      Supplier<Set<String>> inputSourceTypesSupplier
+  )
   {
     return new ExternalTable(
         new ExternalDataSource(
             spec.inputSource,
             spec.inputFormat,
             spec.signature
-          ),
+        ),
         spec.signature,
-        jsonMapper
+        jsonMapper,
+        inputSourceTypesSupplier
     );
   }
 

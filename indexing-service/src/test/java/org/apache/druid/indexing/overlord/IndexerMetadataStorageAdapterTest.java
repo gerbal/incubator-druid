@@ -20,39 +20,34 @@
 package org.apache.druid.indexing.overlord;
 
 import com.google.common.collect.ImmutableList;
+import org.apache.druid.error.DruidException;
 import org.apache.druid.indexer.TaskInfo;
 import org.apache.druid.indexer.TaskStatus;
 import org.apache.druid.indexing.common.task.NoopTask;
-import org.apache.druid.indexing.common.task.Task;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.Intervals;
+import org.apache.druid.metadata.TaskLookup;
 import org.easymock.EasyMock;
-import org.hamcrest.CoreMatchers;
 import org.joda.time.Interval;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
 public class IndexerMetadataStorageAdapterTest
 {
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
-
-  private TaskStorageQueryAdapter taskStorageQueryAdapter;
+  private TaskStorage taskStorage;
   private IndexerMetadataStorageCoordinator indexerMetadataStorageCoordinator;
   private IndexerMetadataStorageAdapter indexerMetadataStorageAdapter;
 
-  @Before
+  @BeforeEach
   public void setup()
   {
     indexerMetadataStorageCoordinator = EasyMock.strictMock(IndexerMetadataStorageCoordinator.class);
-    taskStorageQueryAdapter = EasyMock.strictMock(TaskStorageQueryAdapter.class);
+    taskStorage = EasyMock.strictMock(TaskStorage.class);
     indexerMetadataStorageAdapter = new IndexerMetadataStorageAdapter(
-        taskStorageQueryAdapter,
+        taskStorage,
         indexerMetadataStorageCoordinator
     );
   }
@@ -60,23 +55,19 @@ public class IndexerMetadataStorageAdapterTest
   @Test
   public void testDeletePendingSegments()
   {
-    final List<TaskInfo<Task, TaskStatus>> taskInfos = ImmutableList.of(
-        new TaskInfo<>(
-            "id1",
+    final List<TaskInfo> taskInfos = ImmutableList.of(
+        new TaskInfo(
             DateTimes.of("2017-12-01"),
             TaskStatus.running("id1"),
-            "dataSource",
-            NoopTask.create("id1", 0)
+            NoopTask.create()
         ),
-        new TaskInfo<>(
-            "id1",
+        new TaskInfo(
             DateTimes.of("2017-12-02"),
             TaskStatus.running("id2"),
-            "dataSource",
-            NoopTask.create("id2", 0)
+            NoopTask.create()
         )
     );
-    EasyMock.expect(taskStorageQueryAdapter.getActiveTaskInfo("dataSource")).andReturn(taskInfos);
+    EasyMock.expect(taskStorage.getTaskInfos(TaskLookup.activeTasksOnly(), "dataSource")).andReturn(taskInfos);
 
     final Interval deleteInterval = Intervals.of("2017-01-01/2017-12-01");
     EasyMock
@@ -87,32 +78,29 @@ public class IndexerMetadataStorageAdapterTest
             )
         )
         .andReturn(10);
-    EasyMock.replay(taskStorageQueryAdapter, indexerMetadataStorageCoordinator);
+    EasyMock.replay(taskStorage, indexerMetadataStorageCoordinator);
 
-    Assert.assertEquals(10, indexerMetadataStorageAdapter.deletePendingSegments("dataSource", deleteInterval));
+    Assertions.assertEquals(10, indexerMetadataStorageAdapter.deletePendingSegments("dataSource", deleteInterval));
   }
 
   @Test
-  public void testDeletePendingSegmentsOfRunningTasks()
+  public void testDeletePendingSegmentsOfOneOverlappingRunningTask()
   {
-    final ImmutableList<TaskInfo<Task, TaskStatus>> taskInfos = ImmutableList.of(
-        new TaskInfo<>(
-            "id1",
+    final ImmutableList<TaskInfo> taskInfos = ImmutableList.of(
+        new TaskInfo(
             DateTimes.of("2017-11-01"),
             TaskStatus.running("id1"),
-            "dataSource",
-            NoopTask.create("id1", 0)
+            new NoopTask("id1", null, "dataSource", 1L, 0L, null)
         ),
-        new TaskInfo<>(
-            "id1",
+        new TaskInfo(
             DateTimes.of("2017-12-02"),
             TaskStatus.running("id2"),
-            "dataSource",
-            NoopTask.create("id2", 0)
+            new NoopTask("id2", null, "dataSource", 1L, 0L, null)
         )
     );
 
-    EasyMock.expect(taskStorageQueryAdapter.getActiveTaskInfo("dataSource")).andReturn(taskInfos);
+    EasyMock.expect(taskStorage.getTaskInfos(TaskLookup.activeTasksOnly(), "dataSource"))
+            .andReturn(taskInfos);
 
     final Interval deleteInterval = Intervals.of("2017-01-01/2017-12-01");
     EasyMock
@@ -123,10 +111,65 @@ public class IndexerMetadataStorageAdapterTest
             )
         )
         .andReturn(10);
-    EasyMock.replay(taskStorageQueryAdapter, indexerMetadataStorageCoordinator);
+    EasyMock.replay(taskStorage, indexerMetadataStorageCoordinator);
 
-    expectedException.expect(CoreMatchers.instanceOf(IllegalArgumentException.class));
-    expectedException.expectMessage("Cannot delete pendingSegments because there is at least one active task created");
-    indexerMetadataStorageAdapter.deletePendingSegments("dataSource", deleteInterval);
+    final DruidException exception = Assertions.assertThrows(
+        DruidException.class,
+        () -> indexerMetadataStorageAdapter.deletePendingSegments("dataSource", deleteInterval)
+    );
+    Assertions.assertEquals(DruidException.Persona.USER, exception.getTargetPersona());
+    Assertions.assertEquals(DruidException.Category.INVALID_INPUT, exception.getCategory());
+    Assertions.assertEquals("invalidInput", exception.getErrorCode());
+    Assertions.assertEquals(
+        "Cannot delete pendingSegments for datasource[dataSource] as there is at least one active task[id1]"
+        + " created at[2017-11-01T00:00:00.000Z] that overlaps with the delete "
+        + "interval[2017-01-01T00:00:00.000Z/2017-12-01T00:00:00.000Z]. Please retry when there are no active tasks.",
+        exception.getMessage()
+    );
+  }
+
+  @Test
+  public void testDeletePendingSegmentsOfMultipleOverlappingRunningTasks()
+  {
+    final ImmutableList<TaskInfo> taskInfos = ImmutableList.of(
+        new TaskInfo(
+            DateTimes.of("2017-12-01"),
+            TaskStatus.running("id1"),
+            new NoopTask("id1", null, "dataSource", 1L, 0L, null)
+        ),
+        new TaskInfo(
+            DateTimes.of("2017-11-01"),
+            TaskStatus.running("id2"),
+            new NoopTask("id2", null, "dataSource", 1L, 0L, null)
+        )
+    );
+
+    EasyMock.expect(taskStorage.getTaskInfos(TaskLookup.activeTasksOnly(), "dataSource"))
+            .andReturn(taskInfos);
+
+    final Interval deleteInterval = Intervals.of("2017-01-01/2018-12-01");
+    EasyMock
+        .expect(
+            indexerMetadataStorageCoordinator.deletePendingSegmentsCreatedInInterval(
+                EasyMock.anyString(),
+                EasyMock.eq(deleteInterval)
+            )
+        )
+        .andReturn(10);
+    EasyMock.replay(taskStorage, indexerMetadataStorageCoordinator);
+
+    final DruidException exception = Assertions.assertThrows(
+        DruidException.class,
+        () -> indexerMetadataStorageAdapter.deletePendingSegments("dataSource", deleteInterval)
+    );
+    Assertions.assertEquals(DruidException.Persona.USER, exception.getTargetPersona());
+    Assertions.assertEquals(DruidException.Category.INVALID_INPUT, exception.getCategory());
+    Assertions.assertEquals("invalidInput", exception.getErrorCode());
+    Assertions.assertEquals(
+        "Cannot delete pendingSegments for datasource[dataSource] as there is at least one active task[id2]"
+        + " created at[2017-11-01T00:00:00.000Z] that overlaps with the delete"
+        + " interval[2017-01-01T00:00:00.000Z/2018-12-01T00:00:00.000Z]. Please retry when there are no active tasks.",
+        exception.getMessage()
+    );
   }
 }

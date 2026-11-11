@@ -21,9 +21,7 @@ package org.apache.druid.benchmark;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.collect.ImmutableMap;
 import org.apache.druid.benchmark.query.QueryBenchmarkUtil;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.java.util.common.FileUtils;
@@ -33,7 +31,7 @@ import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.query.Druids;
 import org.apache.druid.query.FinalizeResultsQueryRunner;
 import org.apache.druid.query.Query;
-import org.apache.druid.query.QueryContexts;
+import org.apache.druid.query.QueryContext;
 import org.apache.druid.query.QueryPlus;
 import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QueryRunnerFactory;
@@ -43,6 +41,7 @@ import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
 import org.apache.druid.query.aggregation.FilteredAggregatorFactory;
 import org.apache.druid.query.aggregation.hyperloglog.HyperUniquesSerde;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.context.ResponseContext;
 import org.apache.druid.query.filter.BoundDimFilter;
 import org.apache.druid.query.filter.DimFilter;
@@ -104,10 +103,6 @@ import java.util.concurrent.TimeUnit;
 @Measurement(iterations = 25)
 public class FilteredAggregatorBenchmark
 {
-  static {
-    NullHandling.initializeForTests();
-  }
-
   @Param({"75000"})
   private int rowsPerSegment;
 
@@ -140,11 +135,6 @@ public class FilteredAggregatorBenchmark
         JSON_MAPPER,
         new ColumnConfig()
         {
-          @Override
-          public int columnCacheSizeBytes()
-          {
-            return 0;
-          }
         }
     );
     INDEX_MERGER_V9 = new IndexMergerV9(JSON_MAPPER, INDEX_IO, OffHeapMemorySegmentWriteOutMediumFactory.instance());
@@ -158,7 +148,7 @@ public class FilteredAggregatorBenchmark
   {
     log.info("SETUP CALLED AT " + System.currentTimeMillis());
 
-    ComplexMetrics.registerSerde("hyperUnique", new HyperUniquesSerde());
+    ComplexMetrics.registerSerde(HyperUniquesSerde.TYPE_NAME, new HyperUniquesSerde());
 
     schemaInfo = GeneratorBasicSchemas.SCHEMA_MAP.get(schema);
 
@@ -282,7 +272,7 @@ public class FilteredAggregatorBenchmark
       File indexFile = INDEX_MERGER_V9.persist(
           incIndex,
           qIndexesDir,
-          new IndexSpec(),
+          IndexSpec.getDefault(),
           null
       );
       incIndex.close();
@@ -320,9 +310,11 @@ public class FilteredAggregatorBenchmark
 
     final QueryPlus<T> queryToRun = QueryPlus.wrap(
         query.withOverriddenContext(
-            ImmutableMap.of(
-                QueryContexts.VECTORIZE_KEY, vectorize,
-                QueryContexts.VECTORIZE_VIRTUAL_COLUMNS_KEY, vectorize
+            QueryContext.ofMap(
+                QueryContextParameters.VECTORIZE,
+                QueryContextParameters.VECTORIZE.parse(vectorize),
+                QueryContextParameters.VECTORIZE_VIRTUAL_COLUMNS,
+                QueryContextParameters.VECTORIZE_VIRTUAL_COLUMNS.parse(vectorize)
             )
         )
     );

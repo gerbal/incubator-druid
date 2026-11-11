@@ -19,29 +19,20 @@
 
 package org.apache.druid.server.metrics;
 
-import com.google.common.base.Function;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Lists;
 import org.apache.druid.client.DruidServerConfig;
 import org.apache.druid.java.util.common.Intervals;
-import org.apache.druid.java.util.emitter.service.ServiceEmitter;
-import org.apache.druid.java.util.emitter.service.ServiceEventBuilder;
-import org.apache.druid.java.util.emitter.service.ServiceMetricEvent;
+import org.apache.druid.java.util.metrics.StubServiceEmitter;
 import org.apache.druid.server.SegmentManager;
 import org.apache.druid.server.coordination.SegmentLoadDropHandler;
 import org.apache.druid.timeline.DataSegment;
-import org.easymock.Capture;
-import org.easymock.CaptureType;
+import org.apache.druid.timeline.SegmentId;
 import org.easymock.EasyMock;
 import org.easymock.EasyMockSupport;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
-import javax.annotation.Nullable;
-import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 public class HistoricalMetricsMonitorTest extends EasyMockSupport
@@ -49,15 +40,15 @@ public class HistoricalMetricsMonitorTest extends EasyMockSupport
   private DruidServerConfig druidServerConfig;
   private SegmentManager segmentManager;
   private SegmentLoadDropHandler segmentLoadDropMgr;
-  private ServiceEmitter serviceEmitter;
+  private StubServiceEmitter serviceEmitter;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
     druidServerConfig = EasyMock.createStrictMock(DruidServerConfig.class);
     segmentManager = EasyMock.createStrictMock(SegmentManager.class);
     segmentLoadDropMgr = EasyMock.createStrictMock(SegmentLoadDropHandler.class);
-    serviceEmitter = EasyMock.createStrictMock(ServiceEmitter.class);
+    serviceEmitter = new StubServiceEmitter("test", "localhost");
   }
 
   @Test
@@ -65,23 +56,21 @@ public class HistoricalMetricsMonitorTest extends EasyMockSupport
   {
     final long size = 5;
     final String dataSource = "dataSource";
-    final DataSegment dataSegment = new DataSegment(
-        dataSource,
-        Intervals.of("2014/2015"),
-        "version",
-        ImmutableMap.of(),
-        ImmutableList.of(),
-        ImmutableList.of(),
-        null,
-        1,
-        size
-    );
+    final DataSegment dataSegment = DataSegment.builder(SegmentId.of(dataSource, Intervals.of("2014/2015"), "version", 0))
+                                               .loadSpec(ImmutableMap.of())
+                                               .dimensions(ImmutableList.of())
+                                               .metrics(ImmutableList.of())
+                                               .binaryVersion(1)
+                                               .size(size)
+                                               .build();
     final long maxSize = 10;
     final int priority = 111;
     final String tier = "tier";
 
+    EasyMock.expect(druidServerConfig.getTier()).andReturn(tier).once();
+    EasyMock.expect(druidServerConfig.getPriority()).andReturn(priority).once();
     EasyMock.expect(druidServerConfig.getMaxSize()).andReturn(maxSize).once();
-    EasyMock.expect(segmentLoadDropMgr.getPendingDeleteSnapshot()).andReturn(ImmutableList.of(dataSegment)).once();
+    EasyMock.expect(segmentLoadDropMgr.getSegmentsToDelete()).andReturn(ImmutableList.of(dataSegment)).once();
     EasyMock.expect(druidServerConfig.getTier()).andReturn(tier).once();
     EasyMock.expect(druidServerConfig.getPriority()).andReturn(priority).once();
     EasyMock.expect(segmentManager.getDataSourceSizes()).andReturn(ImmutableMap.of(dataSource, size));
@@ -98,72 +87,30 @@ public class HistoricalMetricsMonitorTest extends EasyMockSupport
         segmentLoadDropMgr
     );
 
-    final Capture<ServiceEventBuilder<ServiceMetricEvent>> eventCapture = EasyMock.newCapture(CaptureType.ALL);
-    serviceEmitter.emit(EasyMock.capture(eventCapture));
-    EasyMock.expectLastCall().times(5);
-
-    EasyMock.replay(druidServerConfig, segmentManager, segmentLoadDropMgr, serviceEmitter);
+    EasyMock.replay(druidServerConfig, segmentManager, segmentLoadDropMgr);
     monitor.doMonitor(serviceEmitter);
-    EasyMock.verify(druidServerConfig, segmentManager, segmentLoadDropMgr, serviceEmitter);
+    EasyMock.verify(druidServerConfig, segmentManager, segmentLoadDropMgr);
 
-    final String host = "host";
-    final String service = "service";
-    Assert.assertTrue(eventCapture.hasCaptured());
-    final List<Map<String, Object>> events = Lists.transform(
-        eventCapture.getValues(),
-        new Function<ServiceEventBuilder<ServiceMetricEvent>, Map<String, Object>>()
-        {
-          @Nullable
-          @Override
-          public Map<String, Object> apply(
-              @Nullable ServiceEventBuilder<ServiceMetricEvent> input
-          )
-          {
-            final HashMap<String, Object> map = new HashMap<>(input.build(service, host).toMap());
-            Assert.assertNotNull(map.remove("feed"));
-            Assert.assertNotNull(map.remove("timestamp"));
-            Assert.assertNotNull(map.remove("service"));
-            Assert.assertNotNull(map.remove("host"));
-            return map;
-          }
-        }
+    serviceEmitter.verifyValue("segment/max", Map.of("tier", tier, "priority", String.valueOf(priority)), maxSize);
+    serviceEmitter.verifyValue(
+        "segment/pendingDelete",
+        Map.of("tier", tier, "dataSource", dataSource, "priority", String.valueOf(priority)),
+        dataSegment.getSize()
     );
-
-    Assert.assertEquals(ImmutableMap.<String, Object>of(
-        "metric", "segment/max",
-        "value", maxSize
-    ), events.get(0));
-
-    Assert.assertEquals(ImmutableMap.<String, Object>of(
-        "dataSource", dataSource,
-        "metric", "segment/pendingDelete",
-        "priority", String.valueOf(priority),
-        "tier", tier,
-        "value", dataSegment.getSize()
-    ), events.get(1));
-
-    Assert.assertEquals(ImmutableMap.<String, Object>of(
-        "metric", "segment/used",
-        "value", dataSegment.getSize(),
-        "tier", tier,
-        "priority", String.valueOf(priority),
-        "dataSource", dataSource
-    ), events.get(2));
-
-    Assert.assertEquals(ImmutableMap.<String, Object>of(
-        "metric", "segment/usedPercent",
-        "value", dataSegment.getSize() * 1.0D / maxSize,
-        "tier", tier,
-        "priority", String.valueOf(priority),
-        "dataSource", dataSource
-    ), events.get(3));
-
-    Assert.assertEquals(ImmutableMap.<String, Object>of(
-        "metric", "segment/count",
-        "value", 1L,
-        "tier", tier,
-        "priority", String.valueOf(priority),
-        "dataSource", dataSource
-    ), events.get(4));
+    serviceEmitter.verifyValue(
+        "segment/used",
+        Map.of("tier", tier, "priority", String.valueOf(priority), "dataSource", dataSource),
+        dataSegment.getSize()
+    );
+    serviceEmitter.verifyValue(
+        "segment/usedPercent",
+        Map.of("tier", tier, "priority", String.valueOf(priority), "dataSource", dataSource),
+        dataSegment.getSize() * 1.0D / maxSize
+    );
+    serviceEmitter.verifyValue(
+        "segment/count",
+        Map.of("tier", tier, "priority", String.valueOf(priority), "dataSource", dataSource),
+        1L
+    );
   }
 }

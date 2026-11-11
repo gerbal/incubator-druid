@@ -30,8 +30,8 @@ import org.apache.druid.java.util.common.guava.Yielders;
 import org.apache.druid.query.Query;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 
@@ -47,7 +47,21 @@ public class DefaultObjectMapperTest
   {
     final DateTime time = DateTimes.nowUtc();
 
-    Assert.assertEquals(StringUtils.format("\"%s\"", time), mapper.writeValueAsString(time));
+    Assertions.assertEquals(StringUtils.format("\"%s\"", time), mapper.writeValueAsString(time));
+
+    // string token
+    Assertions.assertEquals(time, mapper.readValue(StringUtils.format("\"%s\"", time), DateTime.class));
+
+    // int token
+    DateTime result = mapper.readValue("1717267200000", DateTime.class);
+    Assertions.assertEquals(DateTimes.utc(1717267200000L), result);
+
+    // unexpected token
+    String badString = "{\"dateTime\": true}";
+    Exception ex = Assertions.assertThrows(Exception.class, () -> {
+      mapper.readValue(badString, DateTime.class);
+    });
+    Assertions.assertTrue(ex.getMessage().contains("expected int or string token"));
   }
 
   @Test
@@ -65,7 +79,7 @@ public class DefaultObjectMapperTest
         )
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "[\"a\",\"b\",null,\"1970-01-01T00:00:00.002Z\",5,\"UTC\",\"c\"]",
         mapper.writeValueAsString(Yielders.each(sequence))
     );
@@ -80,11 +94,11 @@ public class DefaultObjectMapperTest
     }
     catch (InvalidTypeIdException e) {
       String message = e.getMessage();
-      Assert.assertTrue(message, message.startsWith("Please make sure to load all the necessary extensions and " +
-          "jars with type 'random' on 'testService' service."));
+      Assertions.assertTrue(message.startsWith("Please make sure to load all the necessary extensions and " +
+          "jars with type 'random' on 'testService' service."), message);
       return;
     }
-    Assert.fail("We expect InvalidTypeIdException to be thrown");
+    Assertions.fail("We expect InvalidTypeIdException to be thrown");
   }
 
   @Test
@@ -96,10 +110,11 @@ public class DefaultObjectMapperTest
     }
     catch (InvalidTypeIdException e) {
       String message = e.getMessage();
-      Assert.assertTrue(message, message.startsWith("Please make sure to load all the necessary extensions and " +
-          "jars with type 'random'."));
+      Assertions.assertTrue(message.startsWith("Please make sure to load all the necessary extensions and " +
+          "jars with type 'random'."), message);
       return;
     }
-    Assert.fail("We expect InvalidTypeIdException to be thrown");
+    Assertions.fail("We expect InvalidTypeIdException to be thrown");
   }
 }
+

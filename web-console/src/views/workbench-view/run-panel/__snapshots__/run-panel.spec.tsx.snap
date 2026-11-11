@@ -1,0 +1,131 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`RunPanel matches snapshot on msq (auto) query 1`] = `
+<div
+  class="run-panel"
+>
+  <button
+    class="bp6-button bp6-intent-primary"
+    type="button"
+  >
+    <span
+      aria-hidden="true"
+      class="bp6-icon bp6-icon-caret-right"
+    >
+      <svg
+        data-icon="caret-right"
+      />
+    </span>
+    <span
+      class="bp6-button-text"
+    >
+      Run
+    </span>
+  </button>
+  <div
+    class="bp6-button-group"
+  >
+    <span
+      class="bp6-popover-target"
+    >
+      <button
+        aria-expanded="false"
+        aria-haspopup="menu"
+        class="bp6-button"
+        type="button"
+      >
+        <span
+          class="bp6-button-text"
+        >
+          Engine: SQL (task)
+        </span>
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-caret-down"
+        >
+          <svg
+            data-icon="caret-down"
+          />
+        </span>
+      </button>
+    </span>
+    <span
+      class="max-tasks-button bp6-popover-target"
+    >
+      <button
+        aria-expanded="false"
+        aria-haspopup="menu"
+        class="bp6-button"
+        type="button"
+      >
+        <span
+          class="bp6-button-text"
+        >
+          Max tasks: 9 (full cluster capacity)
+        </span>
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-caret-down"
+        >
+          <svg
+            data-icon="caret-down"
+          />
+        </span>
+      </button>
+    </span>
+  </div>
+</div>
+`;
+
+exports[`RunPanel matches snapshot on native (auto) query 1`] = `
+<div
+  class="run-panel"
+>
+  <button
+    class="bp6-button bp6-intent-primary"
+    type="button"
+  >
+    <span
+      aria-hidden="true"
+      class="bp6-icon bp6-icon-caret-right"
+    >
+      <svg
+        data-icon="caret-right"
+      />
+    </span>
+    <span
+      class="bp6-button-text"
+    >
+      Run
+    </span>
+  </button>
+  <div
+    class="bp6-button-group"
+  >
+    <span
+      class="bp6-popover-target"
+    >
+      <button
+        aria-expanded="false"
+        aria-haspopup="menu"
+        class="bp6-button"
+        type="button"
+      >
+        <span
+          class="bp6-button-text"
+        >
+          Engine: Auto [SQL (native)]
+        </span>
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-caret-down"
+        >
+          <svg
+            data-icon="caret-down"
+          />
+        </span>
+      </button>
+    </span>
+  </div>
+</div>
+`;

@@ -20,16 +20,17 @@
 package org.apache.druid.frame.read.columnar;
 
 import org.apache.datasketches.memory.Memory;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.frame.Frame;
 import org.apache.druid.frame.write.columnar.FrameColumnWriters;
 import org.apache.druid.frame.write.columnar.LongFrameMaker;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.query.monomorphicprocessing.RuntimeShapeInspector;
+import org.apache.druid.query.rowsandcols.column.Column;
+import org.apache.druid.query.rowsandcols.column.ColumnAccessorBasedColumn;
+import org.apache.druid.query.rowsandcols.column.accessor.LongColumnAccessorBase;
 import org.apache.druid.segment.ColumnValueSelector;
 import org.apache.druid.segment.LongColumnSelector;
 import org.apache.druid.segment.column.ColumnCapabilitiesImpl;
-import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.NumericColumn;
 import org.apache.druid.segment.data.ReadableOffset;
 import org.apache.druid.segment.vector.BaseLongVectorValueSelector;
@@ -37,6 +38,7 @@ import org.apache.druid.segment.vector.ReadableVectorInspector;
 import org.apache.druid.segment.vector.ReadableVectorOffset;
 import org.apache.druid.segment.vector.VectorValueSelector;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 public class LongFrameColumnReader implements FrameColumnReader
@@ -49,19 +51,35 @@ public class LongFrameColumnReader implements FrameColumnReader
   }
 
   @Override
+  public Column readRACColumn(Frame frame)
+  {
+    final LongFrameColumn frameCol = makeLongFrameColumn(frame);
+
+    return new ColumnAccessorBasedColumn(frameCol);
+
+  }
+
+  @Override
   public ColumnPlus readColumn(final Frame frame)
+  {
+    final LongFrameColumn frameCol = makeLongFrameColumn(frame);
+
+    return new ColumnPlus(
+        frameCol,
+        ColumnCapabilitiesImpl.createSimpleNumericColumnCapabilities(frameCol.getType())
+                              .setHasNulls(frameCol.hasNulls),
+        frame.numRows()
+    );
+  }
+
+  @Nonnull
+  private LongFrameColumn makeLongFrameColumn(Frame frame)
   {
     final Memory memory = frame.region(columnNumber);
     validate(memory, frame.numRows());
 
     final boolean hasNulls = getHasNulls(memory);
-
-    return new ColumnPlus(
-        new LongFrameColumn(frame, hasNulls, memory),
-        ColumnCapabilitiesImpl.createSimpleNumericColumnCapabilities(ColumnType.LONG)
-                              .setHasNulls(NullHandling.sqlCompatible() && hasNulls),
-        frame.numRows()
-    );
+    return new LongFrameColumn(frame, hasNulls, memory);
   }
 
   private void validate(final Memory region, final int numRows)
@@ -90,7 +108,7 @@ public class LongFrameColumnReader implements FrameColumnReader
     return memoryRange.getByte(Byte.BYTES) != 0;
   }
 
-  private static class LongFrameColumn implements NumericColumn
+  private static class LongFrameColumn extends LongColumnAccessorBase implements NumericColumn
   {
     private final Frame frame;
     private final boolean hasNulls;
@@ -119,14 +137,14 @@ public class LongFrameColumnReader implements FrameColumnReader
         @Override
         public long getLong()
         {
-          assert NullHandling.replaceWithDefault() || !isNull();
-          return LongFrameColumn.this.getLong(frame.physicalRow(offset.getOffset()));
+          assert !isNull();
+          return LongFrameColumn.this.getLongPhysical(frame.physicalRow(offset.getOffset()));
         }
 
         @Override
         public boolean isNull()
         {
-          return LongFrameColumn.this.isNull(frame.physicalRow(offset.getOffset()));
+          return LongFrameColumn.this.isNullPhysical(frame.physicalRow(offset.getOffset()));
         }
 
         @Override
@@ -180,10 +198,10 @@ public class LongFrameColumnReader implements FrameColumnReader
 
             for (int i = 0; i < offset.getCurrentVectorSize(); i++) {
               final int physicalRow = frame.physicalRow(i + start);
-              longVector[i] = getLong(physicalRow);
+              longVector[i] = getLongPhysical(physicalRow);
 
               if (hasNulls) {
-                nullVector[i] = isNull(physicalRow);
+                nullVector[i] = isNullPhysical(physicalRow);
               }
             }
           } else {
@@ -191,10 +209,10 @@ public class LongFrameColumnReader implements FrameColumnReader
 
             for (int i = 0; i < offset.getCurrentVectorSize(); i++) {
               final int physicalRow = frame.physicalRow(offsets[i]);
-              longVector[i] = getLong(physicalRow);
+              longVector[i] = getLongPhysical(physicalRow);
 
               if (hasNulls) {
-                nullVector[i] = isNull(physicalRow);
+                nullVector[i] = isNullPhysical(physicalRow);
               }
             }
           }
@@ -220,7 +238,7 @@ public class LongFrameColumnReader implements FrameColumnReader
         throw new ISE("Row [%d] out of bounds", rowNum);
       }
 
-      return getLong(frame.physicalRow(rowNum));
+      return getLongPhysical(frame.physicalRow(rowNum));
     }
 
     @Override
@@ -235,7 +253,25 @@ public class LongFrameColumnReader implements FrameColumnReader
       // Do nothing.
     }
 
-    private boolean isNull(final int physicalRow)
+    @Override
+    public int numRows()
+    {
+      return length();
+    }
+
+    @Override
+    public boolean isNull(int rowNum)
+    {
+      return isNullPhysical(frame.physicalRow(rowNum));
+    }
+
+    @Override
+    public long getLong(int rowNum)
+    {
+      return getLongPhysical(frame.physicalRow(rowNum));
+    }
+
+    private boolean isNullPhysical(final int physicalRow)
     {
       if (hasNulls) {
         final long rowPosition = memoryPosition + (long) sz * physicalRow;
@@ -245,7 +281,7 @@ public class LongFrameColumnReader implements FrameColumnReader
       }
     }
 
-    private long getLong(final int physicalRow)
+    private long getLongPhysical(final int physicalRow)
     {
       final long rowPosition = memoryPosition + (long) sz * physicalRow;
 

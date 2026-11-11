@@ -19,9 +19,12 @@
 
 package org.apache.druid.sql.calcite.expression.builtin;
 
+import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexCall;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.sql.SqlIntervalQualifier;
 import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.type.SqlTypeName;
@@ -39,6 +42,7 @@ import org.apache.druid.sql.calcite.planner.Calcites;
 import org.apache.druid.sql.calcite.planner.PlannerContext;
 import org.joda.time.Period;
 
+import java.math.BigDecimal;
 import java.util.function.Function;
 
 public class CastOperatorConversion implements SqlOperatorConversion
@@ -79,6 +83,12 @@ public class CastOperatorConversion implements SqlOperatorConversion
       );
     } else if (SqlTypeName.DATETIME_TYPES.contains(fromType) && SqlTypeName.CHAR_TYPES.contains(toType)) {
       return castDateTimeToChar(plannerContext, operandExpression, fromType, Calcites.getColumnTypeForRelDataType(rexNode.getType()));
+    } else if (SqlTypeName.NUMERIC_TYPES.contains(fromType) && SqlTypeName.INTERVAL_TYPES.contains(toType)) {
+      return castNumericToInterval(
+          operandExpression,
+          Calcites.getColumnTypeForRelDataType(operand.getType()),
+          rexNode.getType()
+      );
     } else {
       // Handle other casts. If either type is ANY, use the other type instead. If both are ANY, this means nulls
       // downstream, Druid will try its best
@@ -92,8 +102,17 @@ public class CastOperatorConversion implements SqlOperatorConversion
                                               ? ExpressionType.fromColumnType(fromDruidType)
                                               : ExpressionType.fromColumnType(toDruidType);
 
-      if (fromExpressionType == null || toExpressionType == null) {
-        // We have no runtime type for these SQL types.
+      if (toExpressionType == null) {
+        // We have no runtime type for to SQL type.
+        return null;
+      }
+      if (fromExpressionType == null) {
+        // Calcites.getColumnTypeForRelDataType returns null in cases of NULL, but also any type which cannot be
+        // mapped to a native druid type. in the case of the former, make a null literal of the toType
+        if (fromType.equals(SqlTypeName.NULL)) {
+          return DruidExpression.ofLiteral(toDruidType, DruidExpression.nullLiteral());
+        }
+        // otherwise, we have no runtime type for from SQL type.
         return null;
       }
 
@@ -108,7 +127,8 @@ public class CastOperatorConversion implements SqlOperatorConversion
         // Ignore casts for simple extractions (use Function.identity) since it is ok in many cases.
         typeCastExpression = operandExpression.map(
             Function.identity(),
-            expression -> StringUtils.format("CAST(%s, '%s')", expression, toExpressionType.asTypeString())
+            expression -> StringUtils.format("CAST(%s, '%s')", expression, toExpressionType.asTypeString()),
+            toDruidType
         );
       }
 
@@ -117,7 +137,7 @@ public class CastOperatorConversion implements SqlOperatorConversion
         return TimeFloorOperatorConversion.applyTimestampFloor(
             typeCastExpression,
             new PeriodGranularity(Period.days(1), null, plannerContext.getTimeZone()),
-            plannerContext.getExprMacroTable()
+            plannerContext
         );
       } else {
         return typeCastExpression;
@@ -147,13 +167,42 @@ public class CastOperatorConversion implements SqlOperatorConversion
       return TimeFloorOperatorConversion.applyTimestampFloor(
           timestampExpression,
           new PeriodGranularity(Period.days(1), null, plannerContext.getTimeZone()),
-          plannerContext.getExprMacroTable()
+          plannerContext
       );
     } else if (toType == SqlTypeName.TIMESTAMP) {
       return timestampExpression;
     } else {
       throw new ISE("Unsupported DateTime type[%s]", toType);
     }
+  }
+
+  /**
+   * Returns an expression that scales a number to the representation of an interval: milliseconds for day-time
+   * intervals and months for year-month intervals.
+   */
+  private static DruidExpression castNumericToInterval(
+      final DruidExpression operand,
+      final ColumnType fromDruidType,
+      final RelDataType toType
+  )
+  {
+    final SqlIntervalQualifier intervalQualifier =
+        Preconditions.checkNotNull(toType.getIntervalQualifier(), "intervalQualifier");
+    final BigDecimal multiplier = intervalQualifier.getUnit().multiplier;
+
+    return DruidExpression.ofExpression(
+        ColumnType.LONG,
+        args -> {
+          final String scaled;
+          if (multiplier.compareTo(BigDecimal.ONE) != 0) {
+            scaled = StringUtils.format("(%s * %s)", args.getFirst().getExpression(), multiplier.toPlainString());
+          } else {
+            scaled = args.getFirst().getExpression();
+          }
+          return ColumnType.LONG.equals(fromDruidType) ? scaled : StringUtils.format("CAST(%s, 'LONG')", scaled);
+        },
+        ImmutableList.of(operand)
+    );
   }
 
   private static DruidExpression castDateTimeToChar(

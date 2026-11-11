@@ -19,8 +19,7 @@
 
 package org.apache.druid.sql;
 
-import org.apache.druid.sql.http.SqlQuery;
-
+import javax.annotation.Nullable;
 import javax.servlet.http.HttpServletRequest;
 
 /**
@@ -44,20 +43,30 @@ public class SqlStatementFactory
   }
 
   public HttpStatement httpStatement(
-      final SqlQuery sqlQuery,
+      final SqlQueryPlus sqlQueryPlus,
       final HttpServletRequest req
   )
   {
-    return new HttpStatement(lifecycleToolbox, sqlQuery, req);
+    return new HttpStatement(lifecycleToolbox, sqlQueryPlus, req);
   }
 
   public DirectStatement directStatement(final SqlQueryPlus sqlRequest)
   {
-    return new DirectStatement(lifecycleToolbox, sqlRequest);
+    return new DirectStatement(lifecycleToolbox, sqlRequest, null);
+  }
+
+  public DirectStatement directStatement(final SqlQueryPlus sqlRequest, @Nullable final String remoteAddress)
+  {
+    return new DirectStatement(lifecycleToolbox, sqlRequest, remoteAddress);
   }
 
   public PreparedStatement preparedStatement(final SqlQueryPlus sqlRequest)
   {
-    return new PreparedStatement(lifecycleToolbox, sqlRequest);
+    return new PreparedStatement(lifecycleToolbox, sqlRequest, null);
+  }
+
+  public PreparedStatement preparedStatement(final SqlQueryPlus sqlRequest, @Nullable final String remoteAddress)
+  {
+    return new PreparedStatement(lifecycleToolbox, sqlRequest, remoteAddress);
   }
 }

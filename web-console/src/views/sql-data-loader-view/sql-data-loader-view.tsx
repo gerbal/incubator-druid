@@ -19,20 +19,29 @@
 import type { IconName } from '@blueprintjs/core';
 import { Card, Icon, Intent } from '@blueprintjs/core';
 import { IconNames } from '@blueprintjs/icons';
-import { SqlQuery } from 'druid-query-toolkit';
+import { SqlQuery, SqlTable } from 'druid-query-toolkit';
+import type { JSX } from 'react';
 import React, { useState } from 'react';
 
-import type { ExternalConfig, QueryContext, QueryWithContext } from '../../druid-models';
+import type {
+  CapacityInfo,
+  ConsoleViewId,
+  ExternalConfig,
+  QueryContext,
+  QueryWithContext,
+} from '../../druid-models';
 import {
+  DEFAULT_SERVER_QUERY_CONTEXT,
   Execution,
   externalConfigToIngestQueryPattern,
   ingestQueryPatternToQuery,
 } from '../../druid-models';
 import type { Capabilities } from '../../helpers';
-import { maybeGetClusterCapacity, submitTaskQuery } from '../../helpers';
+import { submitTaskQuery } from '../../helpers';
 import { useLocalStorageState } from '../../hooks';
 import { AppToaster } from '../../singletons';
 import { deepDelete, LocalStorageKeys } from '../../utils';
+import type { TableFilters } from '../../utils/table-filters';
 import { CapacityAlert } from '../workbench-view/capacity-alert/capacity-alert';
 import { InputFormatStep } from '../workbench-view/input-format-step/input-format-step';
 import { InputSourceStep } from '../workbench-view/input-source-step/input-source-step';
@@ -51,13 +60,21 @@ interface LoaderContent extends QueryWithContext {
 export interface SqlDataLoaderViewProps {
   capabilities: Capabilities;
   goToQuery(queryWithContext: QueryWithContext): void;
-  goToIngestion(taskId: string): void;
+  goToView(tab: ConsoleViewId, filters?: TableFilters): void;
+  getClusterCapacity: (() => Promise<CapacityInfo | undefined>) | undefined;
+  serverQueryContext?: QueryContext;
 }
 
 export const SqlDataLoaderView = React.memo(function SqlDataLoaderView(
   props: SqlDataLoaderViewProps,
 ) {
-  const { capabilities, goToQuery, goToIngestion } = props;
+  const {
+    capabilities,
+    goToQuery,
+    goToView,
+    getClusterCapacity,
+    serverQueryContext = DEFAULT_SERVER_QUERY_CONTEXT,
+  } = props;
   const [alertElement, setAlertElement] = useState<JSX.Element | undefined>();
   const [externalConfigStep, setExternalConfigStep] = useState<Partial<ExternalConfig>>({});
   const [content, setContent] = useLocalStorageState<LoaderContent | undefined>(
@@ -130,14 +147,16 @@ export const SqlDataLoaderView = React.memo(function SqlDataLoaderView(
           onBack={() => setContent(undefined)}
           onDone={async () => {
             const { queryString, queryContext } = content;
-            const ingestDatasource = SqlQuery.parse(queryString).getIngestTable()?.getName();
+            const ingestTable = SqlQuery.parse(queryString).getIngestTable();
+            const ingestDatasource =
+              ingestTable instanceof SqlTable ? ingestTable.getName() : undefined;
 
             if (!ingestDatasource) {
               AppToaster.show({ message: `Must have an ingest datasource`, intent: Intent.DANGER });
               return;
             }
 
-            const clusterCapacity = capabilities.getClusterCapacity();
+            const clusterCapacity = capabilities.getMaxTaskSlots();
             let effectiveContext = queryContext || {};
             if (
               typeof effectiveContext.maxNumTasks === 'undefined' &&
@@ -146,7 +165,7 @@ export const SqlDataLoaderView = React.memo(function SqlDataLoaderView(
               effectiveContext = { ...effectiveContext, maxNumTasks: clusterCapacity };
             }
 
-            const capacityInfo = await maybeGetClusterCapacity();
+            const capacityInfo = await getClusterCapacity?.();
 
             const effectiveMaxNumTasks = effectiveContext.maxNumTasks ?? 2;
 
@@ -169,44 +188,41 @@ export const SqlDataLoaderView = React.memo(function SqlDataLoaderView(
           }}
           extraCallout={
             <MaxTasksButton
-              clusterCapacity={capabilities.getClusterCapacity()}
+              clusterCapacity={capabilities.getMaxTaskSlots()}
               queryContext={content.queryContext || {}}
               changeQueryContext={queryContext => setContent({ ...content, queryContext })}
-              minimal
+              defaultQueryContext={serverQueryContext}
+              variant="minimal"
             />
           }
         />
       ) : inputFormat && inputSource ? (
         <TitleFrame title="Load data" subtitle="Parse">
           <InputFormatStep
-            inputSource={inputSource}
+            initInputSource={inputSource}
             initInputFormat={inputFormat}
             doneButton={false}
-            onSet={({ inputFormat, signature, isArrays, timeExpression }) => {
+            onSet={({ inputSource, inputFormat, signature, timeExpression, arrayMode }) => {
               setContent({
                 queryString: ingestQueryPatternToQuery(
                   externalConfigToIngestQueryPattern(
                     { inputSource, inputFormat, signature },
-                    isArrays,
                     timeExpression,
                     undefined,
+                    arrayMode,
                   ),
                 ).toString(),
-                queryContext: {
-                  finalizeAggregations: false,
-                  groupByEnableMultiValueUnnesting: false,
-                },
               });
             }}
             altText="Skip the wizard and continue with custom SQL"
-            onAltSet={({ inputFormat, signature, isArrays, timeExpression }) => {
+            onAltSet={({ inputSource, inputFormat, signature, timeExpression, arrayMode }) => {
               goToQuery({
                 queryString: ingestQueryPatternToQuery(
                   externalConfigToIngestQueryPattern(
                     { inputSource, inputFormat, signature },
-                    isArrays,
                     timeExpression,
                     undefined,
+                    arrayMode,
                   ),
                 ).toString(),
               });
@@ -220,7 +236,6 @@ export const SqlDataLoaderView = React.memo(function SqlDataLoaderView(
         <TitleFrame title="Load data" subtitle="Select input type">
           <InputSourceStep
             initInputSource={inputSource}
-            mode="sampler"
             onSet={(inputSource, inputFormat) => {
               setExternalConfigStep({ inputSource, inputFormat });
             }}
@@ -231,8 +246,11 @@ export const SqlDataLoaderView = React.memo(function SqlDataLoaderView(
         <IngestionProgressDialog
           taskId={content.id}
           goToQuery={goToQuery}
-          goToIngestion={goToIngestion}
-          onReset={() => setContent(undefined)}
+          goToView={goToView}
+          onReset={() => {
+            setExternalConfigStep({});
+            setContent(undefined);
+          }}
           onClose={() => setContent(deepDelete(content, 'id'))}
         />
       )}

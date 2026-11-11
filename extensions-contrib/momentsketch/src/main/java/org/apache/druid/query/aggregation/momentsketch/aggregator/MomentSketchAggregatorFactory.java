@@ -23,14 +23,17 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.query.aggregation.AggregateCombiner;
 import org.apache.druid.query.aggregation.Aggregator;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.AggregatorFactoryNotMergeableException;
 import org.apache.druid.query.aggregation.AggregatorUtil;
 import org.apache.druid.query.aggregation.BufferAggregator;
+import org.apache.druid.query.aggregation.ObjectAggregateCombiner;
 import org.apache.druid.query.aggregation.momentsketch.MomentSketchWrapper;
 import org.apache.druid.query.cache.CacheKeyBuilder;
 import org.apache.druid.segment.ColumnSelectorFactory;
+import org.apache.druid.segment.ColumnValueSelector;
 import org.apache.druid.segment.column.ColumnCapabilities;
 import org.apache.druid.segment.column.ColumnType;
 
@@ -152,6 +155,50 @@ public class MomentSketchAggregatorFactory extends AggregatorFactory
   }
 
   @Override
+  public AggregateCombiner<MomentSketchWrapper> makeAggregateCombiner()
+  {
+    return new ObjectAggregateCombiner<>()
+    {
+      @Nullable
+      private MomentSketchWrapper combined;
+
+      @Override
+      public void reset(final ColumnValueSelector selector)
+      {
+        combined = null;
+        fold(selector);
+      }
+
+      @Override
+      public void fold(final ColumnValueSelector selector)
+      {
+        final MomentSketchWrapper other = (MomentSketchWrapper) selector.getObject();
+        if (other == null) {
+          return;
+        }
+        if (combined == null) {
+          combined = new MomentSketchWrapper(k);
+          combined.setCompressed(compress);
+        }
+        combined.merge(other);
+      }
+
+      @Nullable
+      @Override
+      public MomentSketchWrapper getObject()
+      {
+        return combined;
+      }
+
+      @Override
+      public Class<MomentSketchWrapper> classOfObject()
+      {
+        return MomentSketchWrapper.class;
+      }
+    };
+  }
+
+  @Override
   public AggregatorFactory getCombiningFactory()
   {
     return new MomentSketchMergeAggregatorFactory(name, k, compress);
@@ -165,19 +212,6 @@ public class MomentSketchAggregatorFactory extends AggregatorFactory
     } else {
       throw new AggregatorFactoryNotMergeableException(this, other);
     }
-  }
-
-  @Override
-  public List<AggregatorFactory> getRequiredColumns()
-  {
-    return Collections.singletonList(
-        new MomentSketchAggregatorFactory(
-            fieldName,
-            fieldName,
-            k,
-            compress
-        )
-    );
   }
 
   private MomentSketchWrapper deserializeFromByteArray(byte[] bytes)

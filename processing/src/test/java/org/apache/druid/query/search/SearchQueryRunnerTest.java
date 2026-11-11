@@ -22,7 +22,6 @@ package org.apache.druid.query.search;
 import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.data.input.MapBasedInputRow;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.Intervals;
@@ -31,15 +30,19 @@ import org.apache.druid.java.util.common.guava.Sequences;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.js.JavaScriptConfig;
 import org.apache.druid.query.Druids;
+import org.apache.druid.query.FluentQueryRunner;
 import org.apache.druid.query.Query;
+import org.apache.druid.query.QueryContext;
 import org.apache.druid.query.QueryPlus;
 import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QueryRunnerFactory;
 import org.apache.druid.query.QueryRunnerTestHelper;
 import org.apache.druid.query.Result;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.context.ResponseContext;
 import org.apache.druid.query.dimension.DefaultDimensionSpec;
 import org.apache.druid.query.dimension.ExtractionDimensionSpec;
+import org.apache.druid.query.expression.TestExprMacroTable;
 import org.apache.druid.query.extraction.ExtractionFn;
 import org.apache.druid.query.extraction.JavaScriptExtractionFn;
 import org.apache.druid.query.extraction.MapLookupExtractor;
@@ -60,13 +63,14 @@ import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.incremental.IncrementalIndex;
 import org.apache.druid.segment.incremental.IncrementalIndexSchema;
 import org.apache.druid.segment.incremental.OnheapIncrementalIndex;
+import org.apache.druid.segment.virtual.ExpressionVirtualColumn;
 import org.apache.druid.segment.virtual.ListFilteredVirtualColumn;
 import org.apache.druid.testing.InitializedNullHandlingTest;
 import org.apache.druid.timeline.SegmentId;
-import org.junit.Assert;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -76,7 +80,8 @@ import java.util.List;
 /**
  *
  */
-@RunWith(Parameterized.class)
+@ParameterizedClass
+@MethodSource("constructorFeeder")
 public class SearchQueryRunnerTest extends InitializedNullHandlingTest
 {
   private static final Logger LOG = new Logger(SearchQueryRunnerTest.class);
@@ -84,7 +89,6 @@ public class SearchQueryRunnerTest extends InitializedNullHandlingTest
   private static final SearchQueryQueryToolChest TOOL_CHEST = new SearchQueryQueryToolChest(CONFIG);
   private static final SearchStrategySelector SELECTOR = new SearchStrategySelector(Suppliers.ofInstance(CONFIG));
 
-  @Parameterized.Parameters(name = "{0}")
   public static Iterable<Object[]> constructorFeeder()
   {
     return QueryRunnerTestHelper.transformToConstructionFeeder(
@@ -93,7 +97,8 @@ public class SearchQueryRunnerTest extends InitializedNullHandlingTest
                 SELECTOR,
                 TOOL_CHEST,
                 QueryRunnerTestHelper.NOOP_QUERYWATCHER
-            )
+            ),
+            true
         )
     );
   }
@@ -106,8 +111,10 @@ public class SearchQueryRunnerTest extends InitializedNullHandlingTest
   )
   {
     this.runner = runner;
-    this.decoratedRunner = TOOL_CHEST.postMergeQueryDecoration(
-        TOOL_CHEST.mergeResults(TOOL_CHEST.preMergeQueryDecoration(runner)));
+    this.decoratedRunner = FluentQueryRunner.create(runner, TOOL_CHEST)
+        .applyPreMergeDecoration()
+        .mergeResults(true)
+        .applyPostMergeDecoration();
   }
 
   @Test
@@ -118,11 +125,11 @@ public class SearchQueryRunnerTest extends InitializedNullHandlingTest
           TestHelper.makeJsonMapper().writeValueAsString(hit),
           SearchHit.class
       );
-      Assert.assertEquals(hit, read);
+      Assertions.assertEquals(hit, read);
       if (hit.getCount() == null) {
-        Assert.assertNull(read.getCount());
+        Assertions.assertNull(read.getCount());
       } else {
-        Assert.assertEquals(hit.getCount(), read.getCount());
+        Assertions.assertEquals(hit.getCount(), read.getCount());
       }
     }
   }
@@ -162,7 +169,7 @@ public class SearchQueryRunnerTest extends InitializedNullHandlingTest
 
     // double the value
     QueryRunner mergedRunner = TOOL_CHEST.mergeResults(
-        new QueryRunner<Result<SearchResultValue>>()
+        new QueryRunner<>()
         {
           @Override
           public Sequence<Result<SearchResultValue>> run(
@@ -753,7 +760,7 @@ public class SearchQueryRunnerTest extends InitializedNullHandlingTest
                                     .granularity(QueryRunnerTestHelper.ALL_GRAN)
                                     .intervals(QueryRunnerTestHelper.FULL_ON_INTERVAL_SPEC)
                                     // simulate when cardinality is big enough to fallback to cursorOnly strategy
-                                    .context(ImmutableMap.of("searchStrategy", "cursorOnly"))
+                                    .context(QueryContext.ofMap(QueryContextParameters.SEARCH_STRATEGY, "cursorOnly"))
                                     .build();
 
     QueryRunnerFactory factory = new SearchQueryRunnerFactory(
@@ -762,11 +769,11 @@ public class SearchQueryRunnerTest extends InitializedNullHandlingTest
         QueryRunnerTestHelper.NOOP_QUERYWATCHER
     );
     QueryRunner runner = factory.createRunner(
-        new QueryableIndexSegment(TestIndex.persistRealtimeAndLoadMMapped(index), SegmentId.dummy("asdf"))
+        new QueryableIndexSegment(TestIndex.persistAndMemoryMap(index), SegmentId.dummy("asdf"))
     );
     List<SearchHit> expectedHits = new ArrayList<>();
     expectedHits.add(new SearchHit("table", "table", 1));
-    expectedHits.add(new SearchHit("table", NullHandling.defaultStringValue(), 1));
+    expectedHits.add(new SearchHit("table", null, 1));
     checkSearchQuery(searchQuery, runner, expectedHits);
   }
 
@@ -824,6 +831,33 @@ public class SearchQueryRunnerTest extends InitializedNullHandlingTest
     checkSearchQuery(searchQuery, expectedHits);
   }
 
+  @Test
+  public void testSearchVirtualColumns()
+  {
+    List<SearchHit> expectedHits = new ArrayList<>();
+    expectedHits.add(new SearchHit("vquality", "a", 93));
+    expectedHits.add(new SearchHit("vquality", "not a", 1116));
+
+    checkSearchQuery(
+        Druids.newSearchQueryBuilder()
+              .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
+              .granularity(QueryRunnerTestHelper.ALL_GRAN)
+              .virtualColumns(
+                  new ExpressionVirtualColumn(
+                      "vquality",
+                      "case_searched(like(quality,'a%'), 'a', 'not a')",
+                      ColumnType.STRING,
+                      TestExprMacroTable.INSTANCE
+                  )
+              )
+              .dimensions("vquality")
+              .intervals(QueryRunnerTestHelper.FULL_ON_INTERVAL_SPEC)
+              .query("")
+              .build(),
+        expectedHits
+    );
+  }
+
   private void checkSearchQuery(Query searchQuery, List<SearchHit> expectedResults)
   {
     checkSearchQuery(searchQuery, runner, expectedResults);
@@ -835,8 +869,7 @@ public class SearchQueryRunnerTest extends InitializedNullHandlingTest
     Iterable<Result<SearchResultValue>> results = runner.run(QueryPlus.wrap(searchQuery)).toList();
     List<SearchHit> copy = new ArrayList<>(expectedResults);
     for (Result<SearchResultValue> result : results) {
-      Assert.assertEquals(DateTimes.of("2011-01-12T00:00:00.000Z"), result.getTimestamp());
-      Assert.assertTrue(result.getValue() instanceof Iterable);
+      Assertions.assertEquals(DateTimes.of("2011-01-12T00:00:00.000Z"), result.getTimestamp());
 
       Iterable<SearchHit> resultValues = result.getValue();
       for (SearchHit resultValue : resultValues) {
@@ -878,6 +911,6 @@ public class SearchQueryRunnerTest extends InitializedNullHandlingTest
         LOG.info(v.toString());
       }
     }
-    Assert.fail(errorMsg);
+    Assertions.fail(errorMsg);
   }
 }

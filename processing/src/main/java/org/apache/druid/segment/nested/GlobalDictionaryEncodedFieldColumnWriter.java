@@ -29,16 +29,18 @@ import it.unimi.dsi.fastutil.ints.IntIterator;
 import org.apache.druid.collections.bitmap.ImmutableBitmap;
 import org.apache.druid.collections.bitmap.MutableBitmap;
 import org.apache.druid.io.Channels;
-import org.apache.druid.java.util.common.io.smoosh.FileSmoosher;
-import org.apache.druid.java.util.common.io.smoosh.SmooshedWriter;
+import org.apache.druid.java.util.common.io.Closer;
 import org.apache.druid.java.util.common.logger.Logger;
-import org.apache.druid.segment.IndexSpec;
+import org.apache.druid.segment.column.BitmapIndexType;
 import org.apache.druid.segment.data.CompressedVSizeColumnarIntsSerializer;
 import org.apache.druid.segment.data.CompressionStrategy;
 import org.apache.druid.segment.data.FixedIndexedIntWriter;
 import org.apache.druid.segment.data.GenericIndexedWriter;
 import org.apache.druid.segment.data.SingleValueColumnarIntsSerializer;
 import org.apache.druid.segment.data.VSizeColumnarIntsSerializer;
+import org.apache.druid.segment.file.SegmentFileBuilder;
+import org.apache.druid.segment.file.SegmentFileChannel;
+import org.apache.druid.segment.serde.ColumnSerializerUtils;
 import org.apache.druid.segment.serde.DictionaryEncodedColumnPartSerde;
 import org.apache.druid.segment.serde.Serializer;
 import org.apache.druid.segment.writeout.SegmentWriteOutMedium;
@@ -50,16 +52,23 @@ import java.nio.ByteOrder;
 import java.nio.channels.WritableByteChannel;
 
 /**
- * Base class for writer of global dictionary encoded nested literal columns for {@link NestedDataColumnSerializer}.
- * {@link NestedDataColumnSerializer} while processing the 'raw' nested data will call {@link #addValue(int, Object)}
- * for all literal writers, which for this type of writer entails building a local dictionary to map into to the global
- * dictionary ({@link #localDictionary}) and writes this unsorted localId to an intermediate integer column,
- * {@link #intermediateValueWriter}.
+ * Base class for writer of global dictionary encoded nested field columns for {@link NestedDataColumnSerializer}.
+ * Nested columns are written in multiple passes. The first pass processes the 'raw' nested data with a
+ * {@link StructuredDataProcessor} which will call {@link #addValue(int, Object)} for writers of each field which is
+ * present. For this type of writer, this entails building a local dictionary ({@link #localDictionary}) to map into
+ * the global dictionary ({@link #globalDictionaryIdLookup}) and writes this unsorted localId to an intermediate
+ * integer column, {@link #intermediateValueWriter}.
  * <p>
- * When processing the 'raw' value column is complete, the {@link #writeTo(int, FileSmoosher)} method will sort the
- * local ids and write them out to a local sorted dictionary, iterate over {@link #intermediateValueWriter} swapping
+ * When processing the 'raw' value column is complete, the {@link #writeTo(int, SegmentFileBuilder)} method will sort
+ * the local ids and write them out to a local sorted dictionary, iterate over {@link #intermediateValueWriter} swapping
  * the unsorted local ids with the sorted ids and writing to the compressed id column writer
- * {@link #encodedValueSerializer} building the bitmap indexes along the way.
+ * {@link #encodedValueSerializer}, building the bitmap indexes along the way.
+ *
+ * @see ScalarDoubleFieldColumnWriter   - single type double columns
+ * @see ScalarLongFieldColumnWriter     - single type long columns
+ * @see ScalarStringFieldColumnWriter   - single type string columns
+ * @see VariantArrayFieldColumnWriter   - single type array columns of double, long, or string
+ * @see VariantFieldColumnWriter        - mixed type columns of any combination
  */
 public abstract class GlobalDictionaryEncodedFieldColumnWriter<T>
 {
@@ -68,11 +77,14 @@ public abstract class GlobalDictionaryEncodedFieldColumnWriter<T>
   protected final SegmentWriteOutMedium segmentWriteOutMedium;
   protected final String columnName;
   protected final String fieldName;
-  protected final IndexSpec indexSpec;
-  protected final GlobalDictionaryIdLookup globalDictionaryIdLookup;
+  protected final NestedCommonFormatColumnFormatSpec columnFormatSpec;
+  protected final DictionaryIdLookup globalDictionaryIdLookup;
   protected final LocalDimensionDictionary localDictionary = new LocalDimensionDictionary();
 
+  public BitmapIndexType bitmapIndexType = BitmapIndexType.DictionaryEncodedValueIndex.INSTANCE;
   protected final Int2ObjectRBTreeMap<MutableBitmap> arrayElements = new Int2ObjectRBTreeMap<>();
+
+  protected final Closer fieldResourceCloser = Closer.create();
 
   protected FixedIndexedIntWriter intermediateValueWriter;
   // maybe someday we allow no bitmap indexes or multi-value columns
@@ -86,19 +98,20 @@ public abstract class GlobalDictionaryEncodedFieldColumnWriter<T>
       String columnName,
       String fieldName,
       SegmentWriteOutMedium segmentWriteOutMedium,
-      IndexSpec indexSpec,
-      GlobalDictionaryIdLookup globalDictionaryIdLookup
+      NestedCommonFormatColumnFormatSpec columnFormatSpec,
+      DictionaryIdLookup globalDictionaryIdLookup
   )
   {
     this.columnName = columnName;
     this.fieldName = fieldName;
+    this.columnFormatSpec = columnFormatSpec;
     this.segmentWriteOutMedium = segmentWriteOutMedium;
-    this.indexSpec = indexSpec;
     this.globalDictionaryIdLookup = globalDictionaryIdLookup;
   }
 
   /**
-   * Perform any value conversion needed before storing the value in the
+   * Perform any value conversion needed before looking up the global id in the value dictionary (such as null handling
+   * stuff or array processing to add the elements to the dictionary before adding the int[] to the dictionary)
    */
   T processValue(int row, Object value)
   {
@@ -106,8 +119,8 @@ public abstract class GlobalDictionaryEncodedFieldColumnWriter<T>
   }
 
   /**
-   * Hook to allow implementors the chance to do additional operations during {@link #addValue(int, Object)}, such as
-   * writing an additional value column
+   * Hook to allow implementors the chance to do additional operations during {@link #writeTo(int, SegmentFileBuilder)},
+   * such as writing an additional value column
    */
   void writeValue(@Nullable T value) throws IOException
   {
@@ -148,24 +161,24 @@ public abstract class GlobalDictionaryEncodedFieldColumnWriter<T>
       localId = localDictionary.add(globalId);
     }
     intermediateValueWriter.write(localId);
-    writeValue(value);
     cursorPosition++;
   }
 
+  /**
+   * Backfill intermediate column with null values
+   */
   private void fillNull(int row) throws IOException
   {
-    final T value = processValue(row, null);
     final int localId = localDictionary.add(0);
     while (cursorPosition < row) {
       intermediateValueWriter.write(localId);
-      writeValue(value);
       cursorPosition++;
     }
   }
 
 
   /**
-   * How many bytes {@link #writeColumnTo(WritableByteChannel, FileSmoosher)} is expected to write to the segment.
+   * How many bytes {@link #writeColumnTo(WritableByteChannel, SegmentFileBuilder)} is expected to write to the segment.
    */
   long getSerializedColumnSize() throws IOException
   {
@@ -176,9 +189,13 @@ public abstract class GlobalDictionaryEncodedFieldColumnWriter<T>
    * Defines how to write the column, including the dictionary id column, along with any additional columns
    * such as the long or double value column as type appropriate.
    */
-  abstract void writeColumnTo(WritableByteChannel channel, FileSmoosher smoosher) throws IOException;
+  void writeColumnTo(WritableByteChannel channel, SegmentFileBuilder fileBuilder) throws IOException
+  {
+    writeLongAndDoubleColumnLength(channel, 0, 0);
+    encodedValueSerializer.writeTo(channel, fileBuilder);
+  }
 
-  public void writeTo(int finalRowCount, FileSmoosher smoosher) throws IOException
+  public void writeTo(int finalRowCount, SegmentFileBuilder fileBuilder) throws IOException
   {
     if (finalRowCount > cursorPosition) {
       fillNull(finalRowCount);
@@ -190,17 +207,12 @@ public abstract class GlobalDictionaryEncodedFieldColumnWriter<T>
     sortedDictionaryWriter.open();
     final FixedIndexedIntWriter arrayElementDictionaryWriter = new FixedIndexedIntWriter(tmpWriteoutMedium, true);
     arrayElementDictionaryWriter.open();
-    GenericIndexedWriter<ImmutableBitmap> bitmapIndexWriter = new GenericIndexedWriter<>(
-        tmpWriteoutMedium,
-        columnName,
-        indexSpec.getBitmapSerdeFactory().getObjectStrategy()
-    );
-    bitmapIndexWriter.open();
-    bitmapIndexWriter.setObjectsNotSorted();
+    BitmapIndexType.Writer bitmapIndexWriter = bitmapIndexType.getWriter();
+    bitmapIndexWriter.openWriter(tmpWriteoutMedium, columnName, columnFormatSpec.getBitmapEncoding().getObjectStrategy());
     GenericIndexedWriter<ImmutableBitmap> arrayElementIndexWriter = new GenericIndexedWriter<>(
         tmpWriteoutMedium,
         columnName,
-        indexSpec.getBitmapSerdeFactory().getObjectStrategy()
+        columnFormatSpec.getBitmapEncoding().getObjectStrategy()
     );
     arrayElementIndexWriter.open();
     arrayElementIndexWriter.setObjectsNotSorted();
@@ -215,39 +227,34 @@ public abstract class GlobalDictionaryEncodedFieldColumnWriter<T>
     IntArrays.unstableSort(sortedGlobal);
 
     final int[] unsortedToSorted = new int[unsortedToGlobal.length];
-    final MutableBitmap[] bitmaps = new MutableBitmap[sortedGlobal.length];
     for (int index = 0; index < sortedGlobal.length; index++) {
       final int globalId = sortedGlobal[index];
       sortedDictionaryWriter.write(globalId);
       final int unsortedId = globalToUnsorted.get(globalId);
       unsortedToSorted[unsortedId] = index;
-      bitmaps[index] = indexSpec.getBitmapSerdeFactory().getBitmapFactory().makeEmptyMutableBitmap();
     }
 
     for (Int2ObjectMap.Entry<MutableBitmap> arrayElement : arrayElements.int2ObjectEntrySet()) {
       arrayElementDictionaryWriter.write(arrayElement.getIntKey());
       arrayElementIndexWriter.write(
-          indexSpec.getBitmapSerdeFactory().getBitmapFactory().makeImmutableBitmap(arrayElement.getValue())
+          columnFormatSpec.getBitmapEncoding().getBitmapFactory().makeImmutableBitmap(arrayElement.getValue())
       );
     }
 
     openColumnSerializer(tmpWriteoutMedium, sortedGlobal[sortedGlobal.length - 1]);
+    bitmapIndexWriter.init(columnFormatSpec.getBitmapEncoding().getBitmapFactory(), sortedGlobal.length);
     final IntIterator rows = intermediateValueWriter.getIterator();
     int rowCount = 0;
     while (rows.hasNext()) {
       final int unsortedLocalId = rows.nextInt();
       final int sortedLocalId = unsortedToSorted[unsortedLocalId];
       encodedValueSerializer.addValue(sortedLocalId);
-      bitmaps[sortedLocalId].add(rowCount++);
+      T value = (T) globalDictionaryIdLookup.getDictionaryValue(unsortedToGlobal[unsortedLocalId]);
+      writeValue(value);
+      bitmapIndexWriter.add(rowCount, sortedLocalId, value);
+      rowCount++;
     }
-
-    for (int i = 0; i < bitmaps.length; i++) {
-      final MutableBitmap bitmap = bitmaps[i];
-      bitmapIndexWriter.write(
-          indexSpec.getBitmapSerdeFactory().getBitmapFactory().makeImmutableBitmap(bitmap)
-      );
-      bitmaps[i] = null; // Reclaim memory
-    }
+    bitmapIndexWriter.finalizeWriter(columnFormatSpec.getBitmapEncoding().getBitmapFactory());
 
     final Serializer fieldSerializer = new Serializer()
     {
@@ -260,48 +267,50 @@ public abstract class GlobalDictionaryEncodedFieldColumnWriter<T>
         } else {
           arraySize = 0;
         }
-        return 1 + Integer.BYTES +
+        return 1 + Integer.BYTES + // version + feature flags
                sortedDictionaryWriter.getSerializedSize() +
+               getSerializedColumnSize() +
                bitmapIndexWriter.getSerializedSize() +
-               arraySize +
-               getSerializedColumnSize();
+               arraySize;
       }
 
       @Override
-      public void writeTo(WritableByteChannel channel, FileSmoosher smoosher) throws IOException
+      public void writeTo(WritableByteChannel channel, SegmentFileBuilder fileBuilder) throws IOException
       {
         Channels.writeFully(channel, ByteBuffer.wrap(new byte[]{version.asByte()}));
-        channel.write(ByteBuffer.wrap(Ints.toByteArray(flags)));
-        sortedDictionaryWriter.writeTo(channel, smoosher);
-        writeColumnTo(channel, smoosher);
-        bitmapIndexWriter.writeTo(channel, smoosher);
+        Channels.writeFully(channel, ByteBuffer.wrap(Ints.toByteArray(flags)));
+        sortedDictionaryWriter.writeTo(channel, fileBuilder);
+        writeColumnTo(channel, fileBuilder);
+        bitmapIndexWriter.writeTo(channel, fileBuilder);
         if (arrayElements.size() > 0) {
-          arrayElementDictionaryWriter.writeTo(channel, smoosher);
-          arrayElementIndexWriter.writeTo(channel, smoosher);
+          arrayElementDictionaryWriter.writeTo(channel, fileBuilder);
+          arrayElementIndexWriter.writeTo(channel, fileBuilder);
         }
       }
     };
-    final String fieldFileName = NestedDataColumnSerializer.getInternalFileName(columnName, fieldName);
+    final String fieldFileName = ColumnSerializerUtils.getInternalFileName(columnName, fieldName);
     final long size = fieldSerializer.getSerializedSize();
     log.debug("Column [%s] serializing [%s] field of size [%d].", columnName, fieldName, size);
-    try (SmooshedWriter smooshChannel = smoosher.addWithSmooshedWriter(fieldFileName, size)) {
-      fieldSerializer.writeTo(smooshChannel, smoosher);
+    try (SegmentFileChannel channel = fileBuilder.addWithChannel(fieldFileName, size)) {
+      fieldSerializer.writeTo(channel, fileBuilder);
     }
     finally {
       tmpWriteoutMedium.close();
+      fieldResourceCloser.close();
     }
   }
 
-  private void openColumnSerializer(SegmentWriteOutMedium medium, int maxId) throws IOException
+  public void openColumnSerializer(SegmentWriteOutMedium medium, int maxId) throws IOException
   {
-    if (indexSpec.getDimensionCompression() != CompressionStrategy.UNCOMPRESSED) {
+    if (columnFormatSpec.getDictionaryEncodedColumnCompression() != CompressionStrategy.UNCOMPRESSED) {
       this.version = DictionaryEncodedColumnPartSerde.VERSION.COMPRESSED;
       encodedValueSerializer = CompressedVSizeColumnarIntsSerializer.create(
           fieldName,
           medium,
           columnName,
           maxId,
-          indexSpec.getDimensionCompression()
+          columnFormatSpec.getDictionaryEncodedColumnCompression(),
+          fieldResourceCloser
       );
     } else {
       encodedValueSerializer = new VSizeColumnarIntsSerializer(medium, maxId);

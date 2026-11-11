@@ -30,8 +30,12 @@ import org.apache.druid.indexing.kinesis.supervisor.KinesisSupervisorTuningConfi
 import org.apache.druid.indexing.overlord.sampler.InputSourceSampler;
 import org.apache.druid.indexing.overlord.sampler.SamplerConfig;
 import org.apache.druid.indexing.seekablestream.SeekableStreamSamplerSpec;
+import org.apache.druid.java.util.common.UOE;
+import org.apache.druid.server.security.ResourceAction;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+import java.util.Set;
 
 public class KinesisSamplerSpec extends SeekableStreamSamplerSpec
 {
@@ -65,16 +69,27 @@ public class KinesisSamplerSpec extends SeekableStreamSamplerSpec
             ioConfig.getAwsAssumedRoleArn(),
             ioConfig.getAwsExternalId()
         ),
-        ioConfig.getRecordsPerFetch() != null ? ioConfig.getRecordsPerFetch() : DEFAULT_RECORDS_PER_FETCH,
         ioConfig.getFetchDelayMillis(),
         1,
-        ioConfig.isDeaggregate(),
-        tuningConfig.getRecordBufferSizeOrDefault(Runtime.getRuntime().maxMemory(), ioConfig.isDeaggregate()),
+        tuningConfig.getRecordBufferSizeBytesOrDefault(Runtime.getRuntime().maxMemory()),
         tuningConfig.getRecordBufferOfferTimeout(),
         tuningConfig.getRecordBufferFullWait(),
-        tuningConfig.getMaxRecordsPerPollOrDefault(ioConfig.isDeaggregate()),
+        tuningConfig.getMaxBytesPerPollOrDefault(),
         ioConfig.isUseEarliestSequenceNumber(),
         tuningConfig.isUseListShards()
     );
+  }
+
+  @Override
+  public String getType()
+  {
+    return KinesisIndexingServiceModule.SCHEME;
+  }
+
+  @Nonnull
+  @Override
+  public Set<ResourceAction> getInputSourceResources() throws UOE
+  {
+    return KinesisIndexTask.INPUT_SOURCE_RESOURCES;
   }
 }

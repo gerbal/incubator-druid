@@ -1,6 +1,7 @@
 ---
 id: tutorial-batch-native
 title: "Load data with native batch ingestion"
+sidebar_label: Load data with native batch ingestion
 ---
 
 <!--
@@ -23,7 +24,7 @@ title: "Load data with native batch ingestion"
   -->
 
 
-This topic shows you how to load and query data files in Apache Druid using its native batch ingestion feature. 
+This topic shows you how to load and query data files in Apache&circledR; Druid using its native batch ingestion feature. 
 
 ## Prerequisites
 
@@ -76,7 +77,7 @@ in the Druid root directory represents Wikipedia page edits for a given day.
    Feel free to select other **Input format** options to get a sense of their configuration settings 
    and how Druid parses other types of data.  
 
-6. With the JSON parser selected, click **Next: Parse time**. The **Parse time** settings are where you view and adjust the 
+6. With the JSON input format selected, click **Next: Parse time**. The **Parse time** settings are where you view and adjust the 
    primary timestamp column for the data.
 
    ![Data loader parse time](../assets/tutorial-batch-data-loader-04.png "Data loader parse time")
@@ -90,8 +91,8 @@ in the Druid root directory represents Wikipedia page edits for a given day.
    You do not need to adjust transformation or filtering settings, as applying ingestion time transforms and 
    filters are out of scope for this tutorial.
 
-8. The Configure schema settings are where you configure what [dimensions](../ingestion/data-model.md#dimensions) 
-   and [metrics](../ingestion/data-model.md#metrics) are ingested. The outcome of this configuration represents exactly how the 
+8. The Configure schema settings are where you configure what [dimensions](../ingestion/schema-model.md#dimensions) 
+   and [metrics](../ingestion/schema-model.md#metrics) are ingested. The outcome of this configuration represents exactly how the 
    data will appear in Druid after ingestion. 
 
    Since our dataset is very small, you can turn off [rollup](../ingestion/rollup.md) 
@@ -149,7 +150,10 @@ You can now see the data as a datasource in the console and try out a query, as 
 
    ![Datasource view](../assets/tutorial-batch-data-loader-10.png "Datasource view")
 
-   > Notice the other actions you can perform for a datasource, including configuring retention rules, compaction, and more. 
+:::info
+ Notice the other actions you can perform for a datasource, including configuring retention rules, compaction, and more.
+:::
+
 3. Run the prepopulated query, `SELECT * FROM "wikipedia"` to see the results.
 
    ![Query view](../assets/tutorial-batch-data-loader-11.png "Query view")

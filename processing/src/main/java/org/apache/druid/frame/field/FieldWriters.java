@@ -19,9 +19,11 @@
 
 package org.apache.druid.frame.field;
 
+import org.apache.druid.frame.FrameType;
 import org.apache.druid.frame.key.RowKey;
 import org.apache.druid.frame.write.RowBasedFrameWriterFactory;
 import org.apache.druid.frame.write.UnsupportedColumnTypeException;
+import org.apache.druid.frame.write.cast.TypeCastSelectors;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.query.dimension.DefaultDimensionSpec;
 import org.apache.druid.segment.ColumnSelectorFactory;
@@ -32,7 +34,6 @@ import org.apache.druid.segment.serde.ComplexMetricSerde;
 import org.apache.druid.segment.serde.ComplexMetrics;
 
 import javax.annotation.Nullable;
-import java.util.List;
 
 /**
  * Helper used to write field values to row-based frames or {@link RowKey}.
@@ -55,9 +56,11 @@ public class FieldWriters
    * @throws UnsupportedColumnTypeException if "type" cannot be handled
    */
   public static FieldWriter create(
+      final FrameType frameType,
       final ColumnSelectorFactory columnSelectorFactory,
       final String columnName,
-      final ColumnType columnType
+      final ColumnType columnType,
+      final boolean removeNullBytes
   )
   {
     if (columnType == null) {
@@ -67,21 +70,33 @@ public class FieldWriters
     switch (columnType.getType()) {
       case LONG:
         return makeLongWriter(columnSelectorFactory, columnName);
+
       case FLOAT:
-        return makeFloatWriter(columnSelectorFactory, columnName);
+        return makeFloatWriter(columnSelectorFactory, columnName, frameType);
+
       case DOUBLE:
-        return makeDoubleWriter(columnSelectorFactory, columnName);
+        return makeDoubleWriter(columnSelectorFactory, columnName, frameType);
+
       case STRING:
-        return makeStringWriter(columnSelectorFactory, columnName);
+        return makeStringWriter(columnSelectorFactory, columnName, removeNullBytes);
+
+      case COMPLEX:
+        return makeComplexWriter(columnSelectorFactory, columnName, columnType.getComplexTypeName());
+
       case ARRAY:
         switch (columnType.getElementType().getType()) {
           case STRING:
-            return makeStringArrayWriter(columnSelectorFactory, columnName);
-          default:
+            return makeStringArrayWriter(columnSelectorFactory, columnName, removeNullBytes);
+          case LONG:
+            return makeLongArrayWriter(columnSelectorFactory, columnName);
+          case FLOAT:
+            return makeFloatArrayWriter(columnSelectorFactory, columnName, frameType);
+          case DOUBLE:
+            return makeDoubleArrayWriter(columnSelectorFactory, columnName, frameType);
+          case ARRAY:
+          case COMPLEX:
             throw new UnsupportedColumnTypeException(columnName, columnType);
         }
-      case COMPLEX:
-        return makeComplexWriter(columnSelectorFactory, columnName, columnType.getComplexTypeName());
       default:
         throw new UnsupportedColumnTypeException(columnName, columnType);
     }
@@ -92,45 +107,84 @@ public class FieldWriters
       final String columnName
   )
   {
-    final ColumnValueSelector<?> selector = selectorFactory.makeColumnValueSelector(columnName);
-    return new LongFieldWriter(selector);
+    final ColumnValueSelector<?> selector =
+        TypeCastSelectors.makeColumnValueSelector(selectorFactory, columnName, ColumnType.LONG);
+    return LongFieldWriter.forPrimitive(selector);
   }
 
   private static FieldWriter makeFloatWriter(
       final ColumnSelectorFactory selectorFactory,
-      final String columnName
+      final String columnName,
+      final FrameType frameType
   )
   {
-    final ColumnValueSelector<?> selector = selectorFactory.makeColumnValueSelector(columnName);
-    return new FloatFieldWriter(selector);
+    final ColumnValueSelector<?> selector =
+        TypeCastSelectors.makeColumnValueSelector(selectorFactory, columnName, ColumnType.FLOAT);
+    return FloatFieldWriter.forPrimitive(selector, frameType);
   }
 
   private static FieldWriter makeDoubleWriter(
       final ColumnSelectorFactory selectorFactory,
-      final String columnName
+      final String columnName,
+      final FrameType frameType
   )
   {
-    final ColumnValueSelector<?> selector = selectorFactory.makeColumnValueSelector(columnName);
-    return new DoubleFieldWriter(selector);
+    final ColumnValueSelector<?> selector =
+        TypeCastSelectors.makeColumnValueSelector(selectorFactory, columnName, ColumnType.DOUBLE);
+    return DoubleFieldWriter.forPrimitive(selector, frameType);
   }
 
   private static FieldWriter makeStringWriter(
       final ColumnSelectorFactory selectorFactory,
-      final String columnName
+      final String columnName,
+      final boolean removeNullBytes
   )
   {
     final DimensionSelector selector = selectorFactory.makeDimensionSelector(DefaultDimensionSpec.of(columnName));
-    return new StringFieldWriter(selector);
+    return new StringFieldWriter(selector, removeNullBytes);
   }
 
   private static FieldWriter makeStringArrayWriter(
       final ColumnSelectorFactory selectorFactory,
+      final String columnName,
+      final boolean removeNullBytes
+  )
+  {
+    final ColumnValueSelector<?> selector =
+        TypeCastSelectors.makeColumnValueSelector(selectorFactory, columnName, ColumnType.STRING_ARRAY);
+    return new StringArrayFieldWriter(selector, removeNullBytes);
+  }
+
+  private static FieldWriter makeLongArrayWriter(
+      final ColumnSelectorFactory selectorFactory,
       final String columnName
   )
   {
-    //noinspection unchecked
-    final ColumnValueSelector<List<String>> selector = selectorFactory.makeColumnValueSelector(columnName);
-    return new StringArrayFieldWriter(selector);
+    final ColumnValueSelector<?> selector =
+        TypeCastSelectors.makeColumnValueSelector(selectorFactory, columnName, ColumnType.LONG_ARRAY);
+    return NumericArrayFieldWriter.getLongArrayFieldWriter(selector);
+  }
+
+  private static FieldWriter makeFloatArrayWriter(
+      final ColumnSelectorFactory selectorFactory,
+      final String columnName,
+      final FrameType frameType
+  )
+  {
+    final ColumnValueSelector<?> selector =
+        TypeCastSelectors.makeColumnValueSelector(selectorFactory, columnName, ColumnType.FLOAT_ARRAY);
+    return NumericArrayFieldWriter.getFloatArrayFieldWriter(selector, frameType);
+  }
+
+  private static FieldWriter makeDoubleArrayWriter(
+      final ColumnSelectorFactory selectorFactory,
+      final String columnName,
+      final FrameType frameType
+  )
+  {
+    final ColumnValueSelector<?> selector =
+        TypeCastSelectors.makeColumnValueSelector(selectorFactory, columnName, ColumnType.DOUBLE_ARRAY);
+    return NumericArrayFieldWriter.getDoubleArrayFieldWriter(selector, frameType);
   }
 
   private static FieldWriter makeComplexWriter(
@@ -148,7 +202,8 @@ public class FieldWriters
       throw new ISE("No serde for complexTypeName[%s], cannot write column [%s]", columnTypeName, columnName);
     }
 
-    final ColumnValueSelector<?> selector = selectorFactory.makeColumnValueSelector(columnName);
+    final ColumnValueSelector<?> selector =
+        TypeCastSelectors.makeColumnValueSelector(selectorFactory, columnName, ColumnType.ofComplex(columnTypeName));
     return new ComplexFieldWriter(serde, selector);
   }
 }

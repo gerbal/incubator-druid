@@ -27,14 +27,16 @@ import org.apache.druid.client.DruidServer;
 import org.apache.druid.client.FilteredServerInventoryView;
 import org.apache.druid.client.TimelineServerView;
 import org.apache.druid.client.selector.HighestPriorityTierSelectorStrategy;
+import org.apache.druid.client.selector.HistoricalFilter;
 import org.apache.druid.client.selector.RandomServerSelectorStrategy;
 import org.apache.druid.client.selector.ServerSelector;
 import org.apache.druid.java.util.common.Intervals;
+import org.apache.druid.query.TableDataSource;
 import org.apache.druid.query.metadata.SegmentMetadataQueryConfig;
-import org.apache.druid.query.planning.DataSourceAnalysis;
 import org.apache.druid.server.coordination.ServerType;
 import org.apache.druid.server.security.AuthConfig;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 import org.apache.druid.timeline.VersionedIntervalTimeline;
 import org.apache.druid.timeline.partition.NumberedShardSpec;
 import org.apache.druid.timeline.partition.ShardSpec;
@@ -42,9 +44,9 @@ import org.apache.druid.timeline.partition.SingleElementPartitionChunk;
 import org.easymock.EasyMock;
 import org.joda.time.DateTime;
 import org.joda.time.chrono.ISOChronology;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
@@ -63,11 +65,11 @@ public class ClientInfoResourceTest
   private TimelineServerView timelineServerView;
   private ClientInfoResource resource;
 
-  @Before
+  @BeforeEach
   public void setup()
   {
     VersionedIntervalTimeline<String, ServerSelector> timeline = new VersionedIntervalTimeline<>(Ordering.natural());
-    DruidServer server = new DruidServer("name", "host", null, 1234, ServerType.HISTORICAL, "tier", 0);
+    DruidServer server = new DruidServer("name", "host", null, 1234, null, ServerType.HISTORICAL, "tier", 0);
 
     addSegment(timeline, server, "1960-02-13/1961-02-14", ImmutableList.of("d5"), ImmutableList.of("m5"), "v0");
 
@@ -129,7 +131,7 @@ public class ClientInfoResourceTest
     EasyMock.expect(serverInventoryView.getInventory()).andReturn(ImmutableList.of(server)).anyTimes();
 
     timelineServerView = EasyMock.createMock(TimelineServerView.class);
-    EasyMock.expect(timelineServerView.getTimeline(EasyMock.anyObject(DataSourceAnalysis.class)))
+    EasyMock.expect(timelineServerView.getTimeline(EasyMock.anyObject(TableDataSource.class)))
             .andReturn((Optional) Optional.of(timeline));
 
     EasyMock.replay(serverInventoryView, timelineServerView);
@@ -146,7 +148,7 @@ public class ClientInfoResourceTest
         KEY_METRICS, ImmutableSet.of("m1", "m2")
     );
     EasyMock.verify(serverInventoryView);
-    Assert.assertEquals(expected, actual);
+    Assertions.assertEquals(expected, actual);
   }
 
   @Test
@@ -163,7 +165,7 @@ public class ClientInfoResourceTest
     );
 
     EasyMock.verify(serverInventoryView, timelineServerView);
-    Assert.assertEquals(expected, actual);
+    Assertions.assertEquals(expected, actual);
   }
 
   @Test
@@ -184,7 +186,7 @@ public class ClientInfoResourceTest
     );
 
     EasyMock.verify(serverInventoryView, timelineServerView);
-    Assert.assertEquals(expected, actual);
+    Assertions.assertEquals(expected, actual);
   }
 
   @Test
@@ -193,7 +195,7 @@ public class ClientInfoResourceTest
     Map<String, Object> actual = resource.getDatasource(dataSource, null, null);
     Map<String, Object> expected = ImmutableMap.of(KEY_DIMENSIONS, ImmutableSet.of(), KEY_METRICS, ImmutableSet.of());
 
-    Assert.assertEquals(expected, actual);
+    Assertions.assertEquals(expected, actual);
   }
 
   @Test
@@ -212,7 +214,7 @@ public class ClientInfoResourceTest
 
     Map<String, Object> actual = defaultResource.getDatasource(dataSource, null, null);
 
-    Assert.assertEquals(expected, actual);
+    Assertions.assertEquals(expected, actual);
   }
 
   @Test
@@ -223,7 +225,7 @@ public class ClientInfoResourceTest
         "2015-02-02T09:00:00.000Z/2015-02-06T23:00:00.000Z",
         "true"
     );
-    
+
     Map<String, Object> expected = ImmutableMap.of(
         "2015-02-02T09:00:00.000Z/2015-02-03T00:00:00.000Z",
         ImmutableMap.of(KEY_DIMENSIONS, ImmutableSet.of("d1"), KEY_METRICS, ImmutableSet.of("m1")),
@@ -239,7 +241,7 @@ public class ClientInfoResourceTest
     );
 
     EasyMock.verify(serverInventoryView, timelineServerView);
-    Assert.assertEquals(expected, actual);
+    Assertions.assertEquals(expected, actual);
 
   }
 
@@ -264,7 +266,7 @@ public class ClientInfoResourceTest
     );
 
     EasyMock.verify(serverInventoryView, timelineServerView);
-    Assert.assertEquals(expected, actual);
+    Assertions.assertEquals(expected, actual);
   }
 
   /**
@@ -286,7 +288,7 @@ public class ClientInfoResourceTest
     );
 
     EasyMock.verify(serverInventoryView, timelineServerView);
-    Assert.assertEquals(expected, actual);
+    Assertions.assertEquals(expected, actual);
   }
 
   /**
@@ -299,7 +301,7 @@ public class ClientInfoResourceTest
     Map<String, Object> expected = ImmutableMap.of();
 
     EasyMock.verify(serverInventoryView, timelineServerView);
-    Assert.assertEquals(expected, actual);
+    Assertions.assertEquals(expected, actual);
   }
 
   @Test
@@ -347,7 +349,7 @@ public class ClientInfoResourceTest
     ).build();
 
     EasyMock.verify(serverInventoryView, timelineServerView);
-    Assert.assertEquals(expected, actual);
+    Assertions.assertEquals(expected, actual);
   }
 
   private void addSegment(
@@ -359,17 +361,14 @@ public class ClientInfoResourceTest
       String version
   )
   {
-    DataSegment segment = DataSegment.builder()
-                                     .dataSource(dataSource)
-                                     .interval(Intervals.of(interval))
-                                     .version(version)
+    DataSegment segment = DataSegment.builder(SegmentId.of(dataSource, Intervals.of(interval), version, 0))
                                      .dimensions(dims)
                                      .metrics(metrics)
                                      .size(1)
                                      .build();
     server.addDataSegment(segment);
-    ServerSelector ss = new ServerSelector(segment, new HighestPriorityTierSelectorStrategy(new RandomServerSelectorStrategy()));
-    timeline.add(Intervals.of(interval), version, new SingleElementPartitionChunk<ServerSelector>(ss));
+    ServerSelector ss = new ServerSelector(segment, new HighestPriorityTierSelectorStrategy(new RandomServerSelectorStrategy()), HistoricalFilter.IDENTITY_FILTER);
+    timeline.add(Intervals.of(interval), version, new SingleElementPartitionChunk<>(ss));
   }
 
   private void addSegmentWithShardSpec(
@@ -382,17 +381,14 @@ public class ClientInfoResourceTest
       ShardSpec shardSpec
   )
   {
-    DataSegment segment = DataSegment.builder()
-                                     .dataSource(dataSource)
-                                     .interval(Intervals.of(interval))
-                                     .version(version)
+    DataSegment segment = DataSegment.builder(SegmentId.of(dataSource, Intervals.of(interval), version, shardSpec))
                                      .dimensions(dims)
                                      .metrics(metrics)
                                      .shardSpec(shardSpec)
                                      .size(1)
                                      .build();
     server.addDataSegment(segment);
-    ServerSelector ss = new ServerSelector(segment, new HighestPriorityTierSelectorStrategy(new RandomServerSelectorStrategy()));
+    ServerSelector ss = new ServerSelector(segment, new HighestPriorityTierSelectorStrategy(new RandomServerSelectorStrategy()), HistoricalFilter.IDENTITY_FILTER);
     timeline.add(Intervals.of(interval), version, shardSpec.createChunk(ss));
   }
 

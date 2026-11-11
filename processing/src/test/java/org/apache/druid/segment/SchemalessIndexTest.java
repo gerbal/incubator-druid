@@ -37,7 +37,6 @@ import org.apache.druid.query.aggregation.hyperloglog.HyperUniquesAggregatorFact
 import org.apache.druid.query.aggregation.hyperloglog.HyperUniquesSerde;
 import org.apache.druid.segment.incremental.IncrementalIndex;
 import org.apache.druid.segment.incremental.IncrementalIndexSchema;
-import org.apache.druid.segment.incremental.IndexSizeExceededException;
 import org.apache.druid.segment.incremental.OnheapIncrementalIndex;
 import org.apache.druid.segment.serde.ComplexMetrics;
 import org.apache.druid.segment.writeout.SegmentWriteOutMediumFactory;
@@ -76,7 +75,7 @@ public class SchemalessIndexTest
       new CountAggregatorFactory("count")
   };
 
-  private static final IndexSpec INDEX_SPEC = new IndexSpec();
+  private static final IndexSpec INDEX_SPEC = IndexSpec.getDefault();
 
   private static final List<Map<String, Object>> EVENTS = new ArrayList<>();
 
@@ -88,7 +87,7 @@ public class SchemalessIndexTest
   private static QueryableIndex mergedIndex = null;
 
   static {
-    ComplexMetrics.registerSerde("hyperUnique", new HyperUniquesSerde());
+    ComplexMetrics.registerSerde(HyperUniquesSerde.TYPE_NAME, new HyperUniquesSerde());
   }
 
   private final IndexMerger indexMerger;
@@ -111,6 +110,11 @@ public class SchemalessIndexTest
 
       return index;
     }
+  }
+
+  IncrementalIndex createIncrementalIndex()
+  {
+    return makeIncrementalIndex(TEST_FILE, METRIC_AGGS);
   }
 
   public static QueryableIndex getIncrementalIndex(int index1, int index2)
@@ -162,16 +166,11 @@ public class SchemalessIndexTest
           }
         }
 
-        try {
-          theIndex.add(new MapBasedInputRow(timestamp, dims, event));
-        }
-        catch (IndexSizeExceededException e) {
-          throw new RuntimeException(e);
-        }
+        theIndex.add(new MapBasedInputRow(timestamp, dims, event));
 
         count++;
       }
-      QueryableIndex retVal = TestIndex.persistRealtimeAndLoadMMapped(theIndex);
+      QueryableIndex retVal = TestIndex.persistAndMemoryMap(theIndex);
       entry.put(index2, retVal);
       return retVal;
     }
@@ -184,45 +183,61 @@ public class SchemalessIndexTest
         return mergedIndex;
       }
 
-      try {
-        IncrementalIndex top = makeIncrementalIndex("druid.sample.json.top", METRIC_AGGS);
-        IncrementalIndex bottom = makeIncrementalIndex("druid.sample.json.bottom", METRIC_AGGS);
+      mergedIndex = createMergedIncrementalIndex();
+      return mergedIndex;
+    }
+  }
 
-        File tmpFile = File.createTempFile("yay", "who");
-        tmpFile.delete();
+  QueryableIndex createMergedIncrementalIndex()
+  {
+    final IncrementalIndex top = makeIncrementalIndex("druid.sample.json.top", METRIC_AGGS);
+    final IncrementalIndex bottom = makeIncrementalIndex("druid.sample.json.bottom", METRIC_AGGS);
+    QueryableIndex topIndex = null;
+    QueryableIndex bottomIndex = null;
 
-        File topFile = new File(tmpFile, "top");
-        File bottomFile = new File(tmpFile, "bottom");
-        File mergedFile = new File(tmpFile, "merged");
+    try {
+      File tmpFile = FileUtils.createTempDir("yay");
 
-        FileUtils.mkdirp(topFile);
-        FileUtils.mkdirp(bottomFile);
-        FileUtils.mkdirp(mergedFile);
-        topFile.deleteOnExit();
-        bottomFile.deleteOnExit();
-        mergedFile.deleteOnExit();
+      File topFile = new File(tmpFile, "top");
+      File bottomFile = new File(tmpFile, "bottom");
+      File mergedFile = new File(tmpFile, "merged");
 
-        indexMerger.persist(top, topFile, INDEX_SPEC, null);
-        indexMerger.persist(bottom, bottomFile, INDEX_SPEC, null);
+      FileUtils.mkdirp(topFile);
+      FileUtils.mkdirp(bottomFile);
+      FileUtils.mkdirp(mergedFile);
+      topFile.deleteOnExit();
+      bottomFile.deleteOnExit();
+      mergedFile.deleteOnExit();
 
-        mergedIndex = indexIO.loadIndex(
-            indexMerger.mergeQueryableIndex(
-                Arrays.asList(indexIO.loadIndex(topFile), indexIO.loadIndex(bottomFile)),
-                true,
-                METRIC_AGGS,
-                mergedFile,
-                INDEX_SPEC,
-                null,
-                -1
-            )
-        );
+      indexMerger.persist(top, topFile, INDEX_SPEC, null);
+      indexMerger.persist(bottom, bottomFile, INDEX_SPEC, null);
+      topIndex = indexIO.loadIndex(topFile);
+      bottomIndex = indexIO.loadIndex(bottomFile);
 
-        return mergedIndex;
+      return indexIO.loadIndex(
+          indexMerger.mergeQueryableIndex(
+              Arrays.asList(topIndex, bottomIndex),
+              true,
+              METRIC_AGGS,
+              mergedFile,
+              INDEX_SPEC,
+              null,
+              -1
+          )
+      );
+    }
+    catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+    finally {
+      if (topIndex != null) {
+        topIndex.close();
       }
-      catch (IOException e) {
-        mergedIndex = null;
-        throw new RuntimeException(e);
+      if (bottomIndex != null) {
+        bottomIndex.close();
       }
+      top.close();
+      bottom.close();
     }
   }
 
@@ -245,8 +260,7 @@ public class SchemalessIndexTest
       }
 
       try {
-        File tmpFile = File.createTempFile("yay", "who");
-        tmpFile.delete();
+        File tmpFile = FileUtils.createTempDir("yay");
 
         File mergedFile = new File(tmpFile, "merged");
 
@@ -283,8 +297,7 @@ public class SchemalessIndexTest
       }
 
       try {
-        File tmpFile = File.createTempFile("yay", "who");
-        tmpFile.delete();
+        File tmpFile = FileUtils.createTempDir("yay");
 
         File mergedFile = new File(tmpFile, "merged");
 
@@ -310,8 +323,8 @@ public class SchemalessIndexTest
   {
     return getMergedIncrementalIndex(
         Arrays.asList(
-            new Pair<String, AggregatorFactory[]>("druid.sample.json.top", METRIC_AGGS_NO_UNIQ),
-            new Pair<String, AggregatorFactory[]>("druid.sample.json.bottom", METRIC_AGGS)
+            new Pair<>("druid.sample.json.top", METRIC_AGGS_NO_UNIQ),
+            new Pair<>("druid.sample.json.bottom", METRIC_AGGS)
         )
     );
   }
@@ -370,9 +383,7 @@ public class SchemalessIndexTest
               new MapBasedInputRow(timestamp, dims, event)
           );
 
-          File tmpFile = File.createTempFile("billy", "yay");
-          tmpFile.delete();
-          FileUtils.mkdirp(tmpFile);
+          File tmpFile = FileUtils.createTempDir("billy");
           tmpFile.deleteOnExit();
 
           indexMerger.persist(rowIndex, tmpFile, INDEX_SPEC, null);
@@ -450,8 +461,7 @@ public class SchemalessIndexTest
   private QueryableIndex makeMergedMMappedIndex(Iterable<Pair<String, AggregatorFactory[]>> files)
   {
     try {
-      File tmpFile = File.createTempFile("yay", "who");
-      tmpFile.delete();
+      File tmpFile = FileUtils.createTempDir("yay");
       File mergedFile = new File(tmpFile, "merged");
       FileUtils.mkdirp(mergedFile);
       mergedFile.deleteOnExit();
@@ -463,7 +473,7 @@ public class SchemalessIndexTest
               Lists.newArrayList(
                   Iterables.transform(
                       filesToMap,
-                      new Function<File, QueryableIndex>()
+                      new Function<>()
                       {
                         @Override
                         public QueryableIndex apply(@Nullable File input)

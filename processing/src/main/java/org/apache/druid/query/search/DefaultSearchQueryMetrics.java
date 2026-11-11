@@ -25,9 +25,7 @@ import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.query.BitmapResultFactory;
 import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryMetrics;
-import org.apache.druid.query.filter.Filter;
-
-import java.util.List;
+import org.apache.druid.query.filter.FilterBundle;
 
 /**
  * This class is implemented with delegation to another QueryMetrics for compatibility, see "Making subinterfaces of
@@ -148,21 +146,27 @@ public class DefaultSearchQueryMetrics implements SearchQueryMetrics
   }
 
   @Override
+  public void statusCode(int code)
+  {
+    delegateQueryMetrics.statusCode(code);
+  }
+
+  @Override
   public void segment(String segmentIdentifier)
   {
     delegateQueryMetrics.segment(segmentIdentifier);
   }
 
   @Override
-  public void preFilters(List<Filter> preFilters)
+  public void projection(String projection)
   {
-    delegateQueryMetrics.preFilters(preFilters);
+    delegateQueryMetrics.projection(projection);
   }
 
   @Override
-  public void postFilters(List<Filter> postFilters)
+  public void filterBundle(FilterBundle.BundleInfo bundleInfo)
   {
-    delegateQueryMetrics.postFilters(postFilters);
+    delegateQueryMetrics.filterBundle(bundleInfo);
   }
 
   @Override
@@ -217,6 +221,54 @@ public class DefaultSearchQueryMetrics implements SearchQueryMetrics
   public QueryMetrics reportSegmentAndCacheTime(long timeNs)
   {
     return delegateQueryMetrics.reportSegmentAndCacheTime(timeNs);
+  }
+
+  @Override
+  public QueryMetrics reportSegmentOnDemandLoadTime(long timeNs)
+  {
+    return delegateQueryMetrics.reportSegmentOnDemandLoadTime(timeNs);
+  }
+
+  @Override
+  public QueryMetrics reportSegmentOnDemandLoadTimeAvg(long timeNs)
+  {
+    return delegateQueryMetrics.reportSegmentOnDemandLoadTimeAvg(timeNs);
+  }
+
+  @Override
+  public QueryMetrics reportSegmentOnDemandLoadWaitTimeMax(long timeNs)
+  {
+    return delegateQueryMetrics.reportSegmentOnDemandLoadWaitTimeMax(timeNs);
+  }
+
+  @Override
+  public QueryMetrics reportSegmentOnDemandLoadWaitTimeAvg(long timeNs)
+  {
+    return delegateQueryMetrics.reportSegmentOnDemandLoadWaitTimeAvg(timeNs);
+  }
+
+  @Override
+  public QueryMetrics reportSegmentOnDemandLoadTimeMax(long timeNs)
+  {
+    return delegateQueryMetrics.reportSegmentOnDemandLoadTimeMax(timeNs);
+  }
+
+  @Override
+  public QueryMetrics reportSegmentOnDemandLoadBytes(long byteCount)
+  {
+    return delegateQueryMetrics.reportSegmentOnDemandLoadBytes(byteCount);
+  }
+
+  @Override
+  public QueryMetrics reportSegmentOnDemandLoadCount(long count)
+  {
+    return delegateQueryMetrics.reportSegmentOnDemandLoadCount(count);
+  }
+
+  @Override
+  public QueryMetrics reportResultCachePoll(boolean hit)
+  {
+    return delegateQueryMetrics.reportResultCachePoll(hit);
   }
 
   @Override

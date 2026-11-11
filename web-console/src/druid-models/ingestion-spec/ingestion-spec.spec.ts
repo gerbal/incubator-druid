@@ -16,20 +16,84 @@
  * limitations under the License.
  */
 
-import { CSV_SAMPLE } from '../../utils/sampler.mock';
+import { CSV_SAMPLE, JSON_SAMPLE } from '../../utils/sampler.mock';
 
 import type { IngestionSpec } from './ingestion-spec';
 import {
   adjustId,
   cleanSpec,
-  guessColumnTypeFromHeaderAndRows,
+  DEFAULT_FORCE_SEGMENT_SORT_BY_TIME,
+  getIoConfigFormFields,
   guessColumnTypeFromInput,
-  guessInputFormat,
+  guessColumnTypeFromSampleResponse,
+  guessKafkaInputFormat,
+  guessSimpleInputFormat,
+  issueWithIoConfig,
   updateSchemaWithSample,
   upgradeSpec,
 } from './ingestion-spec';
 
 describe('ingestion-spec', () => {
+  it('validates Kafka partition selection without contacting Kafka', () => {
+    const ioConfig = { type: 'kafka', topic: 'events' };
+    expect(issueWithIoConfig(ioConfig, true)).toBeUndefined();
+    for (const partitionIds of [[0, 2], ['1', '2'], [2147483647], ['2147483647']]) {
+      expect(issueWithIoConfig({ ...ioConfig, partitionIds }, true)).toBeUndefined();
+    }
+    for (const partitionIds of [
+      [],
+      [-1],
+      [0.5],
+      [NaN],
+      [2147483648],
+      ['2147483648'],
+      ['abc'],
+      ['-1'],
+      ['1.5'],
+    ]) {
+      expect(issueWithIoConfig({ ...ioConfig, partitionIds }, true)).toBeDefined();
+    }
+    expect(
+      issueWithIoConfig({ ...ioConfig, topicPattern: 'events.*', partitionIds: [0] }, true),
+    ).toBeDefined();
+  });
+
+  it('accepts comma-separated Kafka partition IDs in the form', () => {
+    const partitionIdsField = getIoConfigFormFields('kafka').find(
+      field => field.name === 'partitionIds',
+    );
+
+    expect(partitionIdsField?.type).toBe('string-array');
+    expect(partitionIdsField?.placeholder).toBe('Optional; comma-separated, e.g. 0, 2');
+    expect(partitionIdsField?.valueAdjustment?.(['1', '2', '3'])).toEqual([1, 2, 3]);
+    // Values the server rejects are kept as strings, not coerced to numbers.
+    expect(partitionIdsField?.valueAdjustment?.(['1e3', '0x10', '-1', 'abc'])).toEqual([
+      '1e3',
+      '0x10',
+      '-1',
+      'abc',
+    ]);
+    expect(partitionIdsField?.valueAdjustment?.([])).toBeUndefined();
+    expect(partitionIdsField?.valueAdjustment?.(undefined)).toBeUndefined();
+
+    // The field is shown for a topic, and stays shown while it holds a value so it can be cleared.
+    const defined = partitionIdsField?.defined;
+    expect(typeof defined).toBe('function');
+    if (typeof defined === 'function') {
+      expect(defined({ type: 'kafka', topic: 'events' })).toBe(true);
+      expect(defined({ type: 'kafka', topicPattern: 'events.*' })).toBe(false);
+      expect(defined({ type: 'kafka', topicPattern: 'events.*', partitionIds: [0] })).toBe(true);
+      expect(defined({ type: 'kinesis', partitionIds: [0] })).toBe(false);
+    }
+
+    const hideInMore = partitionIdsField?.hideInMore;
+    expect(typeof hideInMore).toBe('function');
+    if (typeof hideInMore === 'function') {
+      expect(hideInMore({})).toBe(true);
+      expect(hideInMore({ partitionIds: [1] })).toBe(false);
+    }
+  });
+
   it('upgrades / downgrades task spec 1', () => {
     const oldTaskSpec = {
       type: 'index_parallel',
@@ -367,6 +431,7 @@ describe('ingestion-spec', () => {
   it('upgrades / downgrades back compat supervisor spec', () => {
     const backCompatSupervisorSpec = {
       type: 'kafka',
+      id: 'metrics-kafka',
       spec: {
         dataSchema: {
           dataSource: 'metrics-kafka',
@@ -484,6 +549,7 @@ describe('ingestion-spec', () => {
     };
 
     expect(cleanSpec(upgradeSpec(backCompatSupervisorSpec))).toEqual({
+      id: 'metrics-kafka',
       spec: {
         dataSchema: {
           dataSource: 'metrics-kafka',
@@ -558,6 +624,7 @@ describe('ingestion-spec', () => {
         },
       } as any),
     ).toEqual({
+      id: 'index_parallel_coronavirus_hamlcmea_2020-03-19T00:56:12.175Z',
       type: 'index_parallel',
       spec: {
         dataSchema: {},
@@ -565,26 +632,26 @@ describe('ingestion-spec', () => {
     });
   });
 
-  describe('guessInputFormat', () => {
+  describe('guessSimpleInputFormat', () => {
     it('works for parquet', () => {
-      expect(guessInputFormat(['PAR1lol']).type).toEqual('parquet');
+      expect(guessSimpleInputFormat(['PAR1lol']).type).toEqual('parquet');
     });
 
     it('works for orc', () => {
-      expect(guessInputFormat(['ORClol']).type).toEqual('orc');
+      expect(guessSimpleInputFormat(['ORClol']).type).toEqual('orc');
     });
 
     it('works for AVRO', () => {
-      expect(guessInputFormat(['Obj\x01lol']).type).toEqual('avro_ocf');
-      expect(guessInputFormat(['Obj1lol']).type).toEqual('regex');
+      expect(guessSimpleInputFormat(['Obj\x01lol']).type).toEqual('avro_ocf');
+      expect(guessSimpleInputFormat(['Obj1lol']).type).toEqual('regex');
     });
 
     it('works for JSON (strict)', () => {
-      expect(guessInputFormat(['{"a":1}'])).toEqual({ type: 'json' });
+      expect(guessSimpleInputFormat(['{"a":1}'])).toEqual({ type: 'json' });
     });
 
     it('works for JSON (lax)', () => {
-      expect(guessInputFormat([`{hello:'world'}`])).toEqual({
+      expect(guessSimpleInputFormat([`{hello:'world'}`])).toEqual({
         type: 'json',
         featureSpec: {
           ALLOW_BACKSLASH_ESCAPING_ANY_CHARACTER: true,
@@ -602,14 +669,14 @@ describe('ingestion-spec', () => {
     });
 
     it('works for CSV (with header)', () => {
-      expect(guessInputFormat(['A,B,"X,1",Y'])).toEqual({
+      expect(guessSimpleInputFormat(['A,B,"X,1",Y'])).toEqual({
         type: 'csv',
         findColumnsFromHeader: true,
       });
     });
 
     it('works for CSV (no header)', () => {
-      expect(guessInputFormat(['"A,1","B,2",1,2'])).toEqual({
+      expect(guessSimpleInputFormat(['"A,1","B,2",1,2'])).toEqual({
         type: 'csv',
         findColumnsFromHeader: false,
         columns: ['column1', 'column2', 'column3', 'column4'],
@@ -617,14 +684,14 @@ describe('ingestion-spec', () => {
     });
 
     it('works for TSV (with header)', () => {
-      expect(guessInputFormat(['A\tB\tX\tY'])).toEqual({
+      expect(guessSimpleInputFormat(['A\tB\tX\tY'])).toEqual({
         type: 'tsv',
         findColumnsFromHeader: true,
       });
     });
 
     it('works for TSV (no header)', () => {
-      expect(guessInputFormat(['A\tB\t1\t2\t3\t4\t5\t6\t7\t8\t9'])).toEqual({
+      expect(guessSimpleInputFormat(['A\tB\t1\t2\t3\t4\t5\t6\t7\t8\t9'])).toEqual({
         type: 'tsv',
         findColumnsFromHeader: false,
         columns: [
@@ -644,7 +711,7 @@ describe('ingestion-spec', () => {
     });
 
     it('works for TSV with ;', () => {
-      const inputFormat = guessInputFormat(['A;B;X;Y']);
+      const inputFormat = guessSimpleInputFormat(['A;B;X;Y']);
       expect(inputFormat).toEqual({
         type: 'tsv',
         delimiter: ';',
@@ -653,7 +720,7 @@ describe('ingestion-spec', () => {
     });
 
     it('works for TSV with |', () => {
-      const inputFormat = guessInputFormat(['A|B|X|Y']);
+      const inputFormat = guessSimpleInputFormat(['A|B|X|Y']);
       expect(inputFormat).toEqual({
         type: 'tsv',
         delimiter: '|',
@@ -662,10 +729,40 @@ describe('ingestion-spec', () => {
     });
 
     it('works for regex', () => {
-      expect(guessInputFormat(['A/B/X/Y'])).toEqual({
+      expect(guessSimpleInputFormat(['A/B/X/Y'])).toEqual({
         type: 'regex',
         pattern: '([\\s\\S]*)',
         columns: ['line'],
+      });
+    });
+  });
+
+  describe('guessKafkaInputFormat', () => {
+    const sample = [
+      {
+        'kafka.timestamp': 1710962988515,
+        'kafka.topic': 'kttm2',
+        'raw':
+          '{"timestamp":"2019-08-25T00:00:00.031Z","session":"S56194838","number":"16","event":{"type":"PercentClear","percentage":55},"agent":{"type":"Browser","category":"Personal computer","browser":"Chrome","browser_version":"76.0.3809.100","os":"Windows 7","platform":"Windows"},"client_ip":"181.13.41.82","geo_ip":{"continent":"South America","country":"Argentina","region":"Santa Fe","city":"Rosario"},"language":["es","es-419"],"adblock_list":"NoAdblock","app_version":"1.9.6","path":"http://www.koalastothemax.com/","loaded_image":"http://www.koalastothemax.com/img/koalas2.jpg","referrer":"Direct","referrer_host":"Direct","server_ip":"172.31.57.89","screen":"1680x1050","window":"1680x939","session_length":76261,"timezone":"N/A","timezone_offset":"180"}',
+      },
+      {
+        'kafka.timestamp': 1710962988518,
+        'kafka.topic': 'kttm2',
+        'raw':
+          '{"timestamp":"2019-08-25T00:00:00.059Z","session":"S46093731","number":"24","event":{"type":"PercentClear","percentage":85},"agent":{"type":"Mobile Browser","category":"Smartphone","browser":"Chrome Mobile","browser_version":"50.0.2661.89","os":"Android","platform":"Android"},"client_ip":"177.242.100.0","geo_ip":{"continent":"North America","country":"Mexico","region":"Chihuahua","city":"Nuevo Casas Grandes"},"language":["en","es","es-419","es-MX"],"adblock_list":"NoAdblock","app_version":"1.9.6","path":"https://koalastothemax.com/","loaded_image":"https://koalastothemax.com/img/koalas1.jpg","referrer":"https://www.google.com/","referrer_host":"www.google.com","server_ip":"172.31.11.5","screen":"320x570","window":"540x743","session_length":252689,"timezone":"CDT","timezone_offset":"300"}',
+      },
+    ];
+
+    it('works when single topic', () => {
+      expect(guessKafkaInputFormat(sample, false)).toEqual({ type: 'json' });
+    });
+
+    it('works when multi-topic', () => {
+      expect(guessKafkaInputFormat(sample, true)).toEqual({
+        type: 'kafka',
+        valueFormat: {
+          type: 'json',
+        },
       });
     });
   });
@@ -709,25 +806,94 @@ describe('spec utils', () => {
     });
 
     it('works for long', () => {
-      expect(guessColumnTypeFromInput([1, 2, 3], false)).toEqual('long');
-      expect(guessColumnTypeFromInput([1, 2, 3], true)).toEqual('long');
-      expect(guessColumnTypeFromInput(['1', '2', '3'], false)).toEqual('string');
-      expect(guessColumnTypeFromInput(['1', '2', '3'], true)).toEqual('long');
+      expect(guessColumnTypeFromInput([null, 1, 2, 3], false)).toEqual('long');
+      expect(guessColumnTypeFromInput([null, 1, 2, 3], true)).toEqual('long');
+      expect(guessColumnTypeFromInput([null, '1', '2', '3'], false)).toEqual('string');
+      expect(guessColumnTypeFromInput([null, '1', '2', '3'], true)).toEqual('long');
     });
 
     it('works for double', () => {
-      expect(guessColumnTypeFromInput([1, 2.1, 3], false)).toEqual('double');
-      expect(guessColumnTypeFromInput([1, 2.1, 3], true)).toEqual('double');
-      expect(guessColumnTypeFromInput(['1', '2.1', '3'], false)).toEqual('string');
-      expect(guessColumnTypeFromInput(['1', '2.1', '3'], true)).toEqual('double');
+      expect(guessColumnTypeFromInput([null, 1, 2.1, 3], false)).toEqual('double');
+      expect(guessColumnTypeFromInput([null, 1, 2.1, 3], true)).toEqual('double');
+      expect(guessColumnTypeFromInput([null, '1', '2.1', '3'], false)).toEqual('string');
+      expect(guessColumnTypeFromInput([null, '1', '2.1', '3'], true)).toEqual('double');
+      expect(guessColumnTypeFromInput([null, '1.0', '2.0', '3.0'], true)).toEqual('double');
     });
 
-    it('works for multi-value', () => {
-      expect(guessColumnTypeFromInput(['a', ['b'], 'c'], false)).toEqual('string');
-      expect(guessColumnTypeFromInput([1, [2], 3], false)).toEqual('string');
-      expect(guessColumnTypeFromInput([true, [true, 7, false], false, 'x'], false)).toEqual(
-        'string',
-      );
+    it('works for ARRAY<string>', () => {
+      expect(
+        guessColumnTypeFromInput(
+          [
+            ['A', 'B'],
+            ['A', 'C'],
+          ],
+          false,
+        ),
+      ).toEqual('ARRAY<string>');
+    });
+
+    it('works for ARRAY<long>', () => {
+      expect(
+        guessColumnTypeFromInput(
+          [
+            [1, 2],
+            [3, 4],
+          ],
+          false,
+        ),
+      ).toEqual('ARRAY<long>');
+
+      expect(
+        guessColumnTypeFromInput(
+          [
+            ['1', '2'],
+            ['3', '4'],
+          ],
+          false,
+        ),
+      ).toEqual('ARRAY<string>');
+
+      expect(
+        guessColumnTypeFromInput(
+          [
+            ['1', '2'],
+            ['3', '4'],
+          ],
+          true,
+        ),
+      ).toEqual('ARRAY<long>');
+    });
+
+    it('works for ARRAY<double>', () => {
+      expect(
+        guessColumnTypeFromInput(
+          [
+            [1.1, 2.2],
+            [3.3, 4.4],
+          ],
+          false,
+        ),
+      ).toEqual('ARRAY<double>');
+
+      expect(
+        guessColumnTypeFromInput(
+          [
+            ['1.1', '2.2'],
+            ['3.3', '4.4'],
+          ],
+          false,
+        ),
+      ).toEqual('ARRAY<string>');
+
+      expect(
+        guessColumnTypeFromInput(
+          [
+            ['1.1', '2.2'],
+            ['3.3', '4.4'],
+          ],
+          true,
+        ),
+      ).toEqual('ARRAY<double>');
     });
 
     it('works for complex arrays', () => {
@@ -745,130 +911,394 @@ describe('spec utils', () => {
     });
   });
 
-  describe('guessColumnTypeFromHeaderAndRows', () => {
-    it('works in empty dataset', () => {
-      expect(guessColumnTypeFromHeaderAndRows({ header: ['c0'], rows: [] }, 'c0', false)).toEqual(
-        'string',
-      );
-    });
-
+  describe('guessColumnTypeFromSampleResponse', () => {
     it('works for generic dataset', () => {
-      expect(guessColumnTypeFromHeaderAndRows(CSV_SAMPLE, 'user', false)).toEqual('string');
-      expect(guessColumnTypeFromHeaderAndRows(CSV_SAMPLE, 'followers', false)).toEqual('string');
-      expect(guessColumnTypeFromHeaderAndRows(CSV_SAMPLE, 'followers', true)).toEqual('long');
-      expect(guessColumnTypeFromHeaderAndRows(CSV_SAMPLE, 'spend', true)).toEqual('double');
-      expect(guessColumnTypeFromHeaderAndRows(CSV_SAMPLE, 'nums', false)).toEqual('string');
-      expect(guessColumnTypeFromHeaderAndRows(CSV_SAMPLE, 'nums', true)).toEqual('string');
+      expect(guessColumnTypeFromSampleResponse(CSV_SAMPLE, 'user', false)).toEqual('string');
+      expect(guessColumnTypeFromSampleResponse(CSV_SAMPLE, 'followers', false)).toEqual('string');
+      expect(guessColumnTypeFromSampleResponse(CSV_SAMPLE, 'followers', true)).toEqual('long');
+      expect(guessColumnTypeFromSampleResponse(CSV_SAMPLE, 'spend', true)).toEqual('double');
+      expect(guessColumnTypeFromSampleResponse(CSV_SAMPLE, 'nums', false)).toEqual('ARRAY<string>');
+      expect(guessColumnTypeFromSampleResponse(CSV_SAMPLE, 'nums', true)).toEqual('ARRAY<long>');
     });
   });
 
-  it('updateSchemaWithSample', () => {
-    const withRollup = updateSchemaWithSample(
-      ingestionSpec,
-      { header: ['header'], rows: [] },
-      'specific',
-      true,
-    );
-
-    expect(withRollup).toMatchInlineSnapshot(`
-      Object {
-        "spec": Object {
-          "dataSchema": Object {
+  describe('updateSchemaWithSample', () => {
+    it('works with when not forcing time, arrays', () => {
+      const updateSpec = updateSchemaWithSample(
+        ingestionSpec,
+        JSON_SAMPLE,
+        false,
+        'fixed',
+        'array',
+        true,
+      );
+      expect(updateSpec.spec).toMatchInlineSnapshot(`
+        {
+          "dataSchema": {
             "dataSource": "wikipedia",
-            "dimensionsSpec": Object {
-              "dimensions": Array [
-                "header",
+            "dimensionsSpec": {
+              "dimensions": [
+                {
+                  "name": "__time",
+                  "type": "long",
+                },
+                "user",
+                "id",
+                {
+                  "castToType": "ARRAY<STRING>",
+                  "name": "tags",
+                  "type": "auto",
+                },
+                {
+                  "castToType": "ARRAY<LONG>",
+                  "name": "nums",
+                  "type": "auto",
+                },
               ],
+              "forceSegmentSortByTime": false,
             },
-            "granularitySpec": Object {
+            "granularitySpec": {
               "queryGranularity": "hour",
               "rollup": true,
               "segmentGranularity": "day",
             },
-            "metricsSpec": Array [
-              Object {
+            "metricsSpec": [
+              {
                 "name": "count",
                 "type": "count",
               },
+              {
+                "fieldName": "followers",
+                "name": "sum_followers",
+                "type": "longSum",
+              },
+              {
+                "fieldName": "spend",
+                "name": "sum_spend",
+                "type": "doubleSum",
+              },
             ],
-            "timestampSpec": Object {
+            "timestampSpec": {
               "column": "timestamp",
               "format": "iso",
             },
           },
-          "ioConfig": Object {
-            "inputFormat": Object {
+          "ioConfig": {
+            "inputFormat": {
               "type": "json",
             },
-            "inputSource": Object {
+            "inputSource": {
               "type": "http",
-              "uris": Array [
+              "uris": [
                 "https://website.com/wikipedia.json.gz",
               ],
             },
             "type": "index_parallel",
           },
-          "tuningConfig": Object {
+          "tuningConfig": {
             "forceGuaranteedRollup": true,
-            "partitionsSpec": Object {
+            "partitionsSpec": {
               "type": "hashed",
             },
             "type": "index_parallel",
           },
-        },
-        "type": "index_parallel",
-      }
-    `);
+        }
+      `);
+    });
 
-    const noRollup = updateSchemaWithSample(
-      ingestionSpec,
-      { header: ['header'], rows: [] },
-      'specific',
-      false,
-    );
-
-    expect(noRollup).toMatchInlineSnapshot(`
-      Object {
-        "spec": Object {
-          "dataSchema": Object {
+    it('works with rollup, arrays', () => {
+      const updateSpec = updateSchemaWithSample(
+        ingestionSpec,
+        JSON_SAMPLE,
+        DEFAULT_FORCE_SEGMENT_SORT_BY_TIME,
+        'fixed',
+        'array',
+        true,
+      );
+      expect(updateSpec.spec).toMatchInlineSnapshot(`
+        {
+          "dataSchema": {
             "dataSource": "wikipedia",
-            "dimensionsSpec": Object {
-              "dimensions": Array [
-                "header",
+            "dimensionsSpec": {
+              "dimensions": [
+                "user",
+                "id",
+                {
+                  "castToType": "ARRAY<STRING>",
+                  "name": "tags",
+                  "type": "auto",
+                },
+                {
+                  "castToType": "ARRAY<LONG>",
+                  "name": "nums",
+                  "type": "auto",
+                },
               ],
             },
-            "granularitySpec": Object {
-              "queryGranularity": "none",
-              "rollup": false,
+            "granularitySpec": {
+              "queryGranularity": "hour",
+              "rollup": true,
               "segmentGranularity": "day",
             },
-            "timestampSpec": Object {
+            "metricsSpec": [
+              {
+                "name": "count",
+                "type": "count",
+              },
+              {
+                "fieldName": "followers",
+                "name": "sum_followers",
+                "type": "longSum",
+              },
+              {
+                "fieldName": "spend",
+                "name": "sum_spend",
+                "type": "doubleSum",
+              },
+            ],
+            "timestampSpec": {
               "column": "timestamp",
               "format": "iso",
             },
           },
-          "ioConfig": Object {
-            "inputFormat": Object {
+          "ioConfig": {
+            "inputFormat": {
               "type": "json",
             },
-            "inputSource": Object {
+            "inputSource": {
               "type": "http",
-              "uris": Array [
+              "uris": [
                 "https://website.com/wikipedia.json.gz",
               ],
             },
             "type": "index_parallel",
           },
-          "tuningConfig": Object {
-            "partitionsSpec": Object {
+          "tuningConfig": {
+            "forceGuaranteedRollup": true,
+            "partitionsSpec": {
+              "type": "hashed",
+            },
+            "type": "index_parallel",
+          },
+        }
+      `);
+    });
+
+    it('works with rollup, MVDs', () => {
+      const updateSpec = updateSchemaWithSample(
+        ingestionSpec,
+        JSON_SAMPLE,
+        DEFAULT_FORCE_SEGMENT_SORT_BY_TIME,
+        'fixed',
+        'mvd',
+        true,
+      );
+      expect(updateSpec.spec).toMatchInlineSnapshot(`
+        {
+          "dataSchema": {
+            "dataSource": "wikipedia",
+            "dimensionsSpec": {
+              "dimensions": [
+                "user",
+                "id",
+                {
+                  "multiValueHandling": "SORTED_ARRAY",
+                  "name": "tags",
+                  "type": "string",
+                },
+                {
+                  "multiValueHandling": "SORTED_ARRAY",
+                  "name": "nums",
+                  "type": "string",
+                },
+              ],
+            },
+            "granularitySpec": {
+              "queryGranularity": "hour",
+              "rollup": true,
+              "segmentGranularity": "day",
+            },
+            "metricsSpec": [
+              {
+                "name": "count",
+                "type": "count",
+              },
+              {
+                "fieldName": "followers",
+                "name": "sum_followers",
+                "type": "longSum",
+              },
+              {
+                "fieldName": "spend",
+                "name": "sum_spend",
+                "type": "doubleSum",
+              },
+            ],
+            "timestampSpec": {
+              "column": "timestamp",
+              "format": "iso",
+            },
+          },
+          "ioConfig": {
+            "inputFormat": {
+              "type": "json",
+            },
+            "inputSource": {
+              "type": "http",
+              "uris": [
+                "https://website.com/wikipedia.json.gz",
+              ],
+            },
+            "type": "index_parallel",
+          },
+          "tuningConfig": {
+            "forceGuaranteedRollup": true,
+            "partitionsSpec": {
+              "type": "hashed",
+            },
+            "type": "index_parallel",
+          },
+        }
+      `);
+    });
+
+    it('works without rollup, arrays', () => {
+      const updatedSpec = updateSchemaWithSample(
+        ingestionSpec,
+        JSON_SAMPLE,
+        DEFAULT_FORCE_SEGMENT_SORT_BY_TIME,
+        'fixed',
+        'array',
+        false,
+      );
+      expect(updatedSpec.spec).toMatchInlineSnapshot(`
+        {
+          "dataSchema": {
+            "dataSource": "wikipedia",
+            "dimensionsSpec": {
+              "dimensions": [
+                "user",
+                {
+                  "name": "followers",
+                  "type": "long",
+                },
+                {
+                  "name": "spend",
+                  "type": "double",
+                },
+                "id",
+                {
+                  "castToType": "ARRAY<STRING>",
+                  "name": "tags",
+                  "type": "auto",
+                },
+                {
+                  "castToType": "ARRAY<LONG>",
+                  "name": "nums",
+                  "type": "auto",
+                },
+              ],
+            },
+            "granularitySpec": {
+              "queryGranularity": "none",
+              "rollup": false,
+              "segmentGranularity": "day",
+            },
+            "timestampSpec": {
+              "column": "timestamp",
+              "format": "iso",
+            },
+          },
+          "ioConfig": {
+            "inputFormat": {
+              "type": "json",
+            },
+            "inputSource": {
+              "type": "http",
+              "uris": [
+                "https://website.com/wikipedia.json.gz",
+              ],
+            },
+            "type": "index_parallel",
+          },
+          "tuningConfig": {
+            "partitionsSpec": {
               "type": "dynamic",
             },
             "type": "index_parallel",
           },
-        },
-        "type": "index_parallel",
-      }
-    `);
+        }
+      `);
+    });
+
+    it('works without rollup, MVDs', () => {
+      const updatedSpec = updateSchemaWithSample(
+        ingestionSpec,
+        JSON_SAMPLE,
+        DEFAULT_FORCE_SEGMENT_SORT_BY_TIME,
+        'fixed',
+        'mvd',
+        false,
+      );
+      expect(updatedSpec.spec).toMatchInlineSnapshot(`
+        {
+          "dataSchema": {
+            "dataSource": "wikipedia",
+            "dimensionsSpec": {
+              "dimensions": [
+                "user",
+                {
+                  "name": "followers",
+                  "type": "long",
+                },
+                {
+                  "name": "spend",
+                  "type": "double",
+                },
+                "id",
+                {
+                  "multiValueHandling": "SORTED_ARRAY",
+                  "name": "tags",
+                  "type": "string",
+                },
+                {
+                  "multiValueHandling": "SORTED_ARRAY",
+                  "name": "nums",
+                  "type": "string",
+                },
+              ],
+            },
+            "granularitySpec": {
+              "queryGranularity": "none",
+              "rollup": false,
+              "segmentGranularity": "day",
+            },
+            "timestampSpec": {
+              "column": "timestamp",
+              "format": "iso",
+            },
+          },
+          "ioConfig": {
+            "inputFormat": {
+              "type": "json",
+            },
+            "inputSource": {
+              "type": "http",
+              "uris": [
+                "https://website.com/wikipedia.json.gz",
+              ],
+            },
+            "type": "index_parallel",
+          },
+          "tuningConfig": {
+            "partitionsSpec": {
+              "type": "dynamic",
+            },
+            "type": "index_parallel",
+          },
+        }
+      `);
+    });
   });
 
   it('adjustId', () => {

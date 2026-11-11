@@ -22,14 +22,12 @@ package org.apache.druid.segment.serde;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import org.apache.druid.segment.IndexIO;
-import org.apache.druid.segment.column.ColumnBuilder;
-import org.apache.druid.segment.column.ColumnConfig;
 import org.apache.druid.segment.column.ValueType;
 import org.apache.druid.segment.data.CompressedColumnarFloatsSupplier;
 
 import javax.annotation.Nullable;
-import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Objects;
 
 /**
  */
@@ -99,23 +97,38 @@ public class FloatNumericColumnPartSerde implements ColumnPartSerde
   @Override
   public Deserializer getDeserializer()
   {
-    return new Deserializer()
-    {
-      @Override
-      public void read(ByteBuffer buffer, ColumnBuilder builder, ColumnConfig columnConfig)
-      {
-        final CompressedColumnarFloatsSupplier column = CompressedColumnarFloatsSupplier.fromByteBuffer(
-            buffer,
-            byteOrder
-        );
-        FloatNumericColumnSupplier columnSupplier = new FloatNumericColumnSupplier(
-            column,
-            IndexIO.LEGACY_FACTORY.getBitmapFactory().makeEmptyImmutableBitmap()
-        );
-        builder.setType(ValueType.FLOAT)
-               .setHasMultipleValues(false)
-               .setNumericColumnSupplier(columnSupplier);
-      }
+    return (buffer, builder, columnConfig, parent) -> {
+      final CompressedColumnarFloatsSupplier column = CompressedColumnarFloatsSupplier.fromByteBuffer(
+          buffer,
+          byteOrder,
+          builder.getFileMapper()
+      );
+      FloatNumericColumnSupplier columnSupplier = new FloatNumericColumnSupplier(
+          column,
+          IndexIO.LEGACY_FACTORY.getBitmapFactory().makeEmptyImmutableBitmap()
+      );
+      builder.setType(ValueType.FLOAT)
+             .setHasMultipleValues(false)
+             .setNumericColumnSupplier(columnSupplier);
     };
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    final FloatNumericColumnPartSerde that = (FloatNumericColumnPartSerde) o;
+    return Objects.equals(byteOrder, that.byteOrder);
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return Objects.hashCode(byteOrder);
   }
 }

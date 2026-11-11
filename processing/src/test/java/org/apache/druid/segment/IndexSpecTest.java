@@ -22,15 +22,13 @@ package org.apache.druid.segment;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import nl.jqno.equalsverifier.EqualsVerifier;
 import org.apache.druid.jackson.DefaultObjectMapper;
-import org.apache.druid.segment.data.BitmapSerdeFactory;
+import org.apache.druid.segment.column.StringBitmapIndexType;
 import org.apache.druid.segment.data.CompressionFactory;
 import org.apache.druid.segment.data.CompressionFactory.LongEncodingStrategy;
 import org.apache.druid.segment.data.CompressionStrategy;
 import org.apache.druid.segment.data.RoaringBitmapSerdeFactory;
-import org.junit.Assert;
-import org.junit.Test;
-
-import java.util.Map;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 public class IndexSpecTest
 {
@@ -43,12 +41,12 @@ public class IndexSpecTest
         + ", \"longEncoding\" : \"auto\", \"stringDictionaryEncoding\":{\"type\":\"frontCoded\", \"bucketSize\":16}}";
 
     final IndexSpec spec = objectMapper.readValue(json, IndexSpec.class);
-    Assert.assertEquals(RoaringBitmapSerdeFactory.getInstance(), spec.getBitmapSerdeFactory());
-    Assert.assertEquals(CompressionStrategy.LZ4, spec.getDimensionCompression());
-    Assert.assertEquals(CompressionStrategy.LZF, spec.getMetricCompression());
-    Assert.assertEquals(CompressionFactory.LongEncodingStrategy.AUTO, spec.getLongEncoding());
+    Assertions.assertEquals(RoaringBitmapSerdeFactory.getInstance(), spec.getBitmapSerdeFactory());
+    Assertions.assertEquals(CompressionStrategy.LZ4, spec.getDimensionCompression());
+    Assertions.assertEquals(CompressionStrategy.LZF, spec.getMetricCompression());
+    Assertions.assertEquals(CompressionFactory.LongEncodingStrategy.AUTO, spec.getLongEncoding());
 
-    Assert.assertEquals(spec, objectMapper.readValue(objectMapper.writeValueAsBytes(spec), IndexSpec.class));
+    Assertions.assertEquals(spec, objectMapper.readValue(objectMapper.writeValueAsBytes(spec), IndexSpec.class));
   }
 
   @Test
@@ -59,46 +57,42 @@ public class IndexSpecTest
 
     final IndexSpec spec = objectMapper.readValue(json, IndexSpec.class);
 
-    Assert.assertEquals(CompressionStrategy.UNCOMPRESSED, spec.getDimensionCompression());
-    Assert.assertEquals(spec, objectMapper.readValue(objectMapper.writeValueAsBytes(spec), IndexSpec.class));
+    Assertions.assertEquals(CompressionStrategy.UNCOMPRESSED, spec.getDimensionCompression());
+    Assertions.assertEquals(spec, objectMapper.readValue(objectMapper.writeValueAsBytes(spec), IndexSpec.class));
   }
 
   @Test
   public void testDefaults()
   {
-    final IndexSpec spec = new IndexSpec();
-    Assert.assertEquals(CompressionStrategy.LZ4, spec.getDimensionCompression());
-    Assert.assertEquals(CompressionStrategy.LZ4, spec.getMetricCompression());
-    Assert.assertEquals(CompressionFactory.LongEncodingStrategy.LONGS, spec.getLongEncoding());
+    final IndexSpec spec = IndexSpec.getDefault().getEffectiveSpec();
+    Assertions.assertEquals(CompressionStrategy.LZ4, spec.getDimensionCompression());
+    Assertions.assertEquals(CompressionStrategy.LZ4, spec.getMetricCompression());
+    Assertions.assertEquals(LongEncodingStrategy.LONGS, spec.getLongEncoding());
   }
 
   @Test
-  public void testAsMap()
+  public void testSerdeWithStringColumnFormatSpec() throws Exception
   {
     final ObjectMapper objectMapper = new DefaultObjectMapper();
-    final IndexSpec spec = new IndexSpec();
-    final Map<String, Object> map = spec.asMap(objectMapper);
-    Assert.assertEquals(
-        spec.getBitmapSerdeFactory(),
-        objectMapper.convertValue(map.get("bitmap"), BitmapSerdeFactory.class)
-    );
-    Assert.assertEquals(
-        spec.getDimensionCompression(),
-        objectMapper.convertValue(map.get("dimensionCompression"), CompressionStrategy.class)
-    );
-    Assert.assertEquals(
-        spec.getMetricCompression(),
-        objectMapper.convertValue(map.get("metricCompression"), CompressionStrategy.class)
-    );
-    Assert.assertEquals(
-        spec.getLongEncoding(),
-        objectMapper.convertValue(map.get("longEncoding"), LongEncodingStrategy.class)
-    );
+    final String json = "{ \"stringColumnFormatSpec\" : { \"maxStringLength\" : 50 } }";
+
+    final IndexSpec spec = objectMapper.readValue(json, IndexSpec.class);
+    Assertions.assertNotNull(spec.getStringColumnFormatSpec());
+    Assertions.assertEquals(Integer.valueOf(50), spec.getStringColumnFormatSpec().getMaxStringLength());
+
+    Assertions.assertEquals(spec, objectMapper.readValue(objectMapper.writeValueAsBytes(spec), IndexSpec.class));
   }
 
   @Test
   public void testEquals()
   {
-    EqualsVerifier.forClass(IndexSpec.class).usingGetClass().verify();
+    EqualsVerifier.forClass(IndexSpec.class)
+                  .usingGetClass()
+                  .withPrefabValues(
+                      StringBitmapIndexType.class,
+                      StringBitmapIndexType.DictionaryEncodedValueIndex.INSTANCE,
+                      StringBitmapIndexType.NoIndex.INSTANCE
+                  )
+                  .verify();
   }
 }

@@ -29,17 +29,19 @@ import org.apache.druid.server.lookup.namespace.cache.CacheScheduler;
 import org.apache.druid.server.lookup.namespace.cache.NamespaceExtractionCacheManager;
 import org.apache.druid.server.lookup.namespace.cache.OnHeapNamespaceExtractionCacheManager;
 import org.apache.druid.server.metrics.NoopServiceEmitter;
+import org.apache.druid.utils.JvmUtils;
 import org.easymock.EasyMock;
 import org.joda.time.Period;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.Collections;
+
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class JdbcCacheGeneratorTest
 {
@@ -70,44 +72,41 @@ public class JdbcCacheGeneratorTest
 
   private JdbcCacheGenerator target;
 
-  @Rule
-  public ExpectedException exception = ExpectedException.none();
-
-  @Before
+  @BeforeEach
   public void setup()
   {
-    target = new JdbcCacheGenerator();
+    target = new JdbcCacheGenerator(JvmUtils.getRuntimeInfo());
   }
 
   @Test
   public void indicatesMissingJdbcJarsWithTsColumn()
   {
-    String tsColumn = "tsColumn";
-    JdbcExtractionNamespace missingJarNamespace = createJdbcExtractionNamespace(
-        MISSING_METADATA_STORAGE_CONNECTOR_CONFIG,
-        tsColumn
-    );
+    final Throwable exception = assertThrows(IllegalStateException.class, () -> {
+      final String tsColumn = "tsColumn";
+      final JdbcExtractionNamespace missingJarNamespace = createJdbcExtractionNamespace(
+          MISSING_METADATA_STORAGE_CONNECTOR_CONFIG,
+          tsColumn
+      );
 
-    exception.expect(IllegalStateException.class);
-    exception.expectMessage(MISSING_JDB_DRIVER_JAR_MSG);
-
-    target.generateCache(missingJarNamespace, KEY, LAST_VERSION, CACHE_MANAGER.allocateCache());
+      target.generateCache(missingJarNamespace, KEY, LAST_VERSION, CACHE_MANAGER.allocateCache());
+    });
+    assertTrue(exception.getMessage().contains(MISSING_JDB_DRIVER_JAR_MSG));
   }
 
   @Test
   public void indicatesMissingJdbcJarsWithoutTsColumn()
   {
-    String missingTsColumn = null;
-    @SuppressWarnings("ConstantConditions")  // for missingTsColumn
-        JdbcExtractionNamespace missingJarNamespace = createJdbcExtractionNamespace(
-        MISSING_METADATA_STORAGE_CONNECTOR_CONFIG,
-        missingTsColumn
-    );
+    final Throwable exception = assertThrows(IllegalStateException.class, () -> {
+      final String missingTsColumn = null;
+      @SuppressWarnings("ConstantConditions")  // for missingTsColumn
+      final JdbcExtractionNamespace missingJarNamespace = createJdbcExtractionNamespace(
+          MISSING_METADATA_STORAGE_CONNECTOR_CONFIG,
+          missingTsColumn
+      );
 
-    exception.expect(IllegalStateException.class);
-    exception.expectMessage(MISSING_JDB_DRIVER_JAR_MSG);
-
-    target.generateCache(missingJarNamespace, KEY, LAST_VERSION, CACHE_MANAGER.allocateCache());
+      target.generateCache(missingJarNamespace, KEY, LAST_VERSION, CACHE_MANAGER.allocateCache());
+    });
+    assertTrue(exception.getMessage().contains(MISSING_JDB_DRIVER_JAR_MSG));
   }
 
   @SuppressWarnings("SameParameterValue")
@@ -136,6 +135,8 @@ public class JdbcCacheGeneratorTest
         tsColumn,
         "filter",
         Period.ZERO,
+        null,
+        0,
         null,
         new JdbcAccessSecurityConfig()
     );

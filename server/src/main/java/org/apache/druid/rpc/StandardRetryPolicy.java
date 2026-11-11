@@ -19,10 +19,10 @@
 
 package org.apache.druid.rpc;
 
+import io.netty.channel.ChannelException;
+import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http.HttpResponseStatus;
 import org.apache.druid.java.util.common.IAE;
-import org.jboss.netty.channel.ChannelException;
-import org.jboss.netty.handler.codec.http.HttpResponse;
-import org.jboss.netty.handler.codec.http.HttpResponseStatus;
 
 import java.io.IOException;
 
@@ -37,20 +37,39 @@ public class StandardRetryPolicy implements ServiceRetryPolicy
   private static final long DEFAULT_MIN_WAIT_MS = 100;
   private static final long DEFAULT_MAX_WAIT_MS = 30_000;
 
+  /**
+   * Number of attempts that leads to about an hour of total waiting, assuming wait time is determined
+   * by the function in {@link ServiceClientImpl#computeBackoffMs(ServiceRetryPolicy, long)}.
+   */
+  private static final int MAX_ATTEMPTS_ABOUT_AN_HOUR = 125;
+
   private static final StandardRetryPolicy DEFAULT_UNLIMITED_POLICY = new Builder().maxAttempts(UNLIMITED).build();
+  private static final StandardRetryPolicy DEFAULT_UNLIMITED_POLICY_NO_RETRY_LOG = new Builder().maxAttempts(UNLIMITED)
+                                                                                                .retryLoggable(false)
+                                                                                                .build();
+  private static final StandardRetryPolicy DEFAULT_ABOUT_AN_HOUR_POLICY =
+      new Builder().maxAttempts(MAX_ATTEMPTS_ABOUT_AN_HOUR).build();
   private static final StandardRetryPolicy DEFAULT_NO_RETRIES_POLICY = new Builder().maxAttempts(1).build();
 
   private final long maxAttempts;
   private final long minWaitMillis;
   private final long maxWaitMillis;
   private final boolean retryNotAvailable;
+  private final boolean retryLoggable;
 
-  private StandardRetryPolicy(long maxAttempts, long minWaitMillis, long maxWaitMillis, boolean retryNotAvailable)
+  private StandardRetryPolicy(
+      long maxAttempts,
+      long minWaitMillis,
+      long maxWaitMillis,
+      boolean retryNotAvailable,
+      boolean retryLoggable
+  )
   {
     this.maxAttempts = maxAttempts;
     this.minWaitMillis = minWaitMillis;
     this.maxWaitMillis = maxWaitMillis;
     this.retryNotAvailable = retryNotAvailable;
+    this.retryLoggable = retryLoggable;
 
     if (maxAttempts == 0) {
       throw new IAE("maxAttempts must be positive (limited) or negative (unlimited); cannot be zero.");
@@ -62,11 +81,35 @@ public class StandardRetryPolicy implements ServiceRetryPolicy
     return new Builder();
   }
 
+  /**
+   * Standard unlimited retry policy. Never stops retrying as long as errors remain retryable.
+   * See {@link ServiceClient} documentation for details on what errors are retryable.
+   */
   public static StandardRetryPolicy unlimited()
   {
     return DEFAULT_UNLIMITED_POLICY;
   }
 
+  /**
+   * Standard unlimited retry policy along with muted the logging for the retries.
+   */
+  public static StandardRetryPolicy unlimitedWithoutRetryLogging()
+  {
+    return DEFAULT_UNLIMITED_POLICY_NO_RETRY_LOG;
+  }
+
+  /**
+   * Retry policy that uses up to about an hour of total wait time. Note that this is just the total waiting time
+   * between attempts. It does not include the time that each attempt takes to execute.
+   */
+  public static StandardRetryPolicy aboutAnHour()
+  {
+    return DEFAULT_ABOUT_AN_HOUR_POLICY;
+  }
+
+  /**
+   * Retry policy that never retries.
+   */
   public static StandardRetryPolicy noRetries()
   {
     return DEFAULT_NO_RETRIES_POLICY;
@@ -93,14 +136,15 @@ public class StandardRetryPolicy implements ServiceRetryPolicy
   @Override
   public boolean retryHttpResponse(final HttpResponse response)
   {
-    final int code = response.getStatus().getCode();
+    final int code = response.status().code();
 
-    return code == HttpResponseStatus.BAD_GATEWAY.getCode()
-           || code == HttpResponseStatus.SERVICE_UNAVAILABLE.getCode()
-           || code == HttpResponseStatus.GATEWAY_TIMEOUT.getCode()
-
+    return code == HttpResponseStatus.BAD_GATEWAY.code()
+           || code == HttpResponseStatus.SERVICE_UNAVAILABLE.code()
+           || code == HttpResponseStatus.GATEWAY_TIMEOUT.code()
+           // 401 can happen from things like expiration and might be retryable
+           || code == HttpResponseStatus.UNAUTHORIZED.code()
            // Technically shouldn't retry this last one, but servers sometimes return HTTP 500 for retryable errors.
-           || code == HttpResponseStatus.INTERNAL_SERVER_ERROR.getCode();
+           || code == HttpResponseStatus.INTERNAL_SERVER_ERROR.code();
   }
 
   @Override
@@ -109,6 +153,12 @@ public class StandardRetryPolicy implements ServiceRetryPolicy
     return t instanceof IOException
            || t instanceof ChannelException
            || (t.getCause() != null && retryThrowable(t.getCause()));
+  }
+
+  @Override
+  public boolean retryLoggable()
+  {
+    return retryLoggable;
   }
 
   @Override
@@ -123,6 +173,7 @@ public class StandardRetryPolicy implements ServiceRetryPolicy
     private long minWaitMillis = DEFAULT_MIN_WAIT_MS;
     private long maxWaitMillis = DEFAULT_MAX_WAIT_MS;
     private boolean retryNotAvailable = true;
+    private boolean retryLoggable = true;
 
     public Builder maxAttempts(final long maxAttempts)
     {
@@ -148,9 +199,15 @@ public class StandardRetryPolicy implements ServiceRetryPolicy
       return this;
     }
 
+    public Builder retryLoggable(final boolean retryLoggable)
+    {
+      this.retryLoggable = retryLoggable;
+      return this;
+    }
+
     public StandardRetryPolicy build()
     {
-      return new StandardRetryPolicy(maxAttempts, minWaitMillis, maxWaitMillis, retryNotAvailable);
+      return new StandardRetryPolicy(maxAttempts, minWaitMillis, maxWaitMillis, retryNotAvailable, retryLoggable);
     }
   }
 }

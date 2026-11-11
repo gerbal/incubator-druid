@@ -21,7 +21,7 @@ package org.apache.druid.java.util.common.guava;
 
 import com.google.common.collect.Lists;
 import org.apache.druid.java.util.common.StringUtils;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -34,7 +34,7 @@ public class MappedSequenceTest
   @Test
   public void testSanity() throws Exception
   {
-    Function<Integer, Integer> fn = new Function<Integer, Integer>()
+    Function<Integer, Integer> fn = new Function<>()
     {
       @Override
       public Integer apply(Integer input)

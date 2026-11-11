@@ -16,363 +16,141 @@
  * limitations under the License.
  */
 
-import type { ResizeEntry } from '@blueprintjs/core';
-import { ResizeSensor2 } from '@blueprintjs/popover2';
-import type { Ace } from 'ace-builds';
-import ace from 'ace-builds';
-import classNames from 'classnames';
-import { C, T } from 'druid-query-toolkit';
-import escape from 'lodash.escape';
+import { Intent } from '@blueprintjs/core';
+import { IconNames } from '@blueprintjs/icons';
+import { closeCompletion } from '@codemirror/autocomplete';
+import { Compartment, Prec } from '@codemirror/state';
+import type { EditorView } from '@codemirror/view';
+import { keymap } from '@codemirror/view';
 import React from 'react';
-import AceEditor from 'react-ace';
 
-import {
-  SQL_CONSTANTS,
-  SQL_DYNAMICS,
-  SQL_EXPRESSION_PARTS,
-  SQL_KEYWORDS,
-} from '../../../../lib/keywords';
-import { SQL_DATA_TYPES, SQL_FUNCTIONS } from '../../../../lib/sql-docs';
-import { AceEditorStateCache } from '../../../singletons/ace-editor-state-cache';
-import type { ColumnMetadata, RowColumn } from '../../../utils';
-import { uniq } from '../../../utils';
+import { CodeEditor } from '../../../components';
+import { useQueryContextParameters } from '../../../contexts/query-context-parameters-context';
+import { useAvailableSqlFunctions } from '../../../contexts/sql-functions-context';
+import { NATIVE_JSON_QUERY_COMPLETIONS } from '../../../druid-models';
+import { dsql } from '../../../editor-languages/dsql';
+import { hjson } from '../../../editor-languages/hjson';
+import { useConstant, usePermanentCallback } from '../../../hooks';
+import { AppToaster } from '../../../singletons';
+import type { ColumnMetadata, QuerySlice } from '../../../utils';
+
+import { subQueryMarkers } from './sub-query-markers';
 
 import './flexible-query-input.scss';
 
-const langTools = ace.require('ace/ext/language_tools');
-
 const V_PADDING = 10;
-const SCROLLBAR = 20;
 
-const COMPLETER = {
-  insertMatch: (editor: any, data: Ace.Completion) => {
-    editor.completer.insertMatch({ value: data.name });
-  },
+// Mod+Enter and Mod+Shift+Enter are the global run / preview hotkeys (see RunPanel). Claim them in the
+// editor so CodeMirror does not also act on them (defaultKeymap binds Mod-Enter to insertBlankLine).
+// The event still bubbles up to the hotkey handler.
+const runKeyHandler = (view: EditorView) => {
+  closeCompletion(view);
+  return true;
 };
-
-interface ItemDescription {
-  name: string;
-  syntax: string;
-  description: string;
-}
+const RUN_KEYS_EXTENSION = Prec.highest(
+  keymap.of([
+    { key: 'Mod-Enter', run: runKeyHandler },
+    { key: 'Mod-Shift-Enter', run: runKeyHandler },
+  ]),
+);
 
 export interface FlexibleQueryInputProps {
+  /** Gives you the CodeMirror EditorView (to use with focusEditorAt for example) */
+  ref?: React.Ref<EditorView | undefined>;
   queryString: string;
   onQueryStringChange?: (newQueryString: string) => void;
-  autoHeight: boolean;
-  minRows?: number;
-  showGutter?: boolean;
+  readOnly?: boolean;
+  runQuerySlice?: (querySlice: QuerySlice) => void;
+  running?: boolean;
+  /** Defaults to true */
+  showLineNumbers?: boolean;
   placeholder?: string;
   columnMetadata?: readonly ColumnMetadata[];
-  currentSchema?: string;
-  currentTable?: string;
-  editorStateId?: string;
-  leaveBackground?: boolean;
+  /** Makes the editor remember its state (undo history, selection) between mounts, see CodeEditor */
+  stateCacheId?: string;
+  /** Defaults to true */
+  transparentBackground?: boolean;
 }
 
-export interface FlexibleQueryInputState {
-  // For reasons (https://github.com/securingsincity/react-ace/issues/415) react ace editor needs an explicit height
-  // Since this component will grow and shrink dynamically we will measure its height and then set it.
-  editorHeight: number;
-  quotedCompletions: Ace.Completion[];
-  unquotedCompletions: Ace.Completion[];
-  prevColumnMetadata?: readonly ColumnMetadata[];
-  prevCurrentTable?: string;
-  prevCurrentSchema?: string;
-}
+export function FlexibleQueryInput(props: FlexibleQueryInputProps) {
+  const {
+    ref,
+    queryString,
+    onQueryStringChange,
+    readOnly,
+    runQuerySlice,
+    running,
+    showLineNumbers = true,
+    placeholder,
+    columnMetadata,
+    stateCacheId,
+    transparentBackground = true,
+  } = props;
 
-export class FlexibleQueryInput extends React.PureComponent<
-  FlexibleQueryInputProps,
-  FlexibleQueryInputState
-> {
-  private aceEditor: Ace.Editor | undefined;
+  const availableSqlFunctions = useAvailableSqlFunctions();
+  const queryContextParameters = useQueryContextParameters();
+  const editorViewRef = React.useRef<EditorView | undefined>(undefined);
+  React.useImperativeHandle(ref, () => editorViewRef.current);
 
-  static replaceDefaultAutoCompleter(): void {
-    if (!langTools) return;
-
-    const keywordList = ([] as Ace.Completion[]).concat(
-      SQL_KEYWORDS.map(v => ({ name: v, value: v, score: 0, meta: 'keyword' })),
-      SQL_EXPRESSION_PARTS.map(v => ({ name: v, value: v, score: 0, meta: 'keyword' })),
-      SQL_CONSTANTS.map(v => ({ name: v, value: v, score: 0, meta: 'constant' })),
-      SQL_DYNAMICS.map(v => ({ name: v, value: v, score: 0, meta: 'dynamic' })),
-      Object.entries(SQL_DATA_TYPES).map(([name, [runtime, description]]) => ({
-        name,
-        value: name,
-        score: 0,
-        meta: 'type',
-        syntax: `Druid runtime type: ${runtime}`,
-        description,
-      })),
-    );
-
-    langTools.setCompleters([
-      langTools.snippetCompleter,
-      langTools.textCompleter,
-      {
-        getCompletions: (
-          _state: string,
-          _session: Ace.EditSession,
-          _pos: Ace.Point,
-          _prefix: string,
-          callback: any,
-        ) => {
-          return callback(null, keywordList);
-        },
-        getDocTooltip: (item: any) => {
-          if (item.meta === 'type') {
-            item.docHTML = FlexibleQueryInput.makeDocHtml(item);
-          }
-        },
-      },
-    ]);
-  }
-
-  static addFunctionAutoCompleter(): void {
-    if (!langTools) return;
-
-    const functionList: Ace.Completion[] = Object.entries(SQL_FUNCTIONS).flatMap(
-      ([name, versions]) => {
-        return versions.map(([args, description]) => ({
-          name: name,
-          value: versions.length > 1 ? `${name}(${args})` : name,
-          score: 1100, // Use a high score to appear over the 'local' suggestions that have a score of 1000
-          meta: 'function',
-          syntax: `${name}(${args})`,
-          description,
-          completer: COMPLETER,
-        }));
-      },
-    );
-
-    langTools.addCompleter({
-      getCompletions: (_editor: any, _session: any, _pos: any, _prefix: any, callback: any) => {
-        callback(null, functionList);
-      },
-      getDocTooltip: (item: any) => {
-        if (item.meta === 'function') {
-          item.docHTML = FlexibleQueryInput.makeDocHtml(item);
-        }
-      },
-    });
-  }
-
-  static makeDocHtml(item: ItemDescription) {
-    return `
-<div class="doc-name">${item.name}</div>
-<div class="doc-syntax">${escape(item.syntax)}</div>
-<div class="doc-description">${item.description}</div>`;
-  }
-
-  static getCompletions(
-    columnMetadata: readonly ColumnMetadata[],
-    currentSchema: string | undefined,
-    currentTable: string | undefined,
-    quote: boolean,
-  ): Ace.Completion[] {
-    return ([] as Ace.Completion[]).concat(
-      uniq(columnMetadata.map(d => d.TABLE_SCHEMA)).map(v => ({
-        value: quote ? String(T(v)) : v,
-        score: 10,
-        meta: 'schema',
-      })),
-      uniq(
-        columnMetadata
-          .filter(d => (currentSchema ? d.TABLE_SCHEMA === currentSchema : true))
-          .map(d => d.TABLE_NAME),
-      ).map(v => ({
-        value: quote ? String(T(v)) : v,
-        score: 49,
-        meta: 'datasource',
-      })),
-      uniq(
-        columnMetadata
-          .filter(d =>
-            currentTable && currentSchema
-              ? d.TABLE_NAME === currentTable && d.TABLE_SCHEMA === currentSchema
-              : true,
-          )
-          .map(d => d.COLUMN_NAME),
-      ).map(v => ({
-        value: quote ? String(C(v)) : v,
-        score: 50,
-        meta: 'column',
-      })),
-    );
-  }
-
-  static getDerivedStateFromProps(props: FlexibleQueryInputProps, state: FlexibleQueryInputState) {
-    const { columnMetadata, currentSchema, currentTable } = props;
-
-    if (
-      columnMetadata &&
-      (columnMetadata !== state.prevColumnMetadata ||
-        currentSchema !== state.prevCurrentSchema ||
-        currentTable !== state.prevCurrentTable)
-    ) {
-      return {
-        quotedCompletions: FlexibleQueryInput.getCompletions(
-          columnMetadata,
-          currentSchema,
-          currentTable,
-          true,
-        ),
-        unquotedCompletions: FlexibleQueryInput.getCompletions(
-          columnMetadata,
-          currentSchema,
-          currentTable,
-          false,
-        ),
-        prevColumnMetadata: columnMetadata,
-        prevCurrentSchema: currentSchema,
-        prevCurrentTable: currentTable,
-      };
-    }
-    return null;
-  }
-
-  constructor(props: FlexibleQueryInputProps, context: any) {
-    super(props, context);
-    this.state = {
-      editorHeight: 200,
-      quotedCompletions: [],
-      unquotedCompletions: [],
-    };
-  }
-
-  componentDidMount(): void {
-    FlexibleQueryInput.replaceDefaultAutoCompleter();
-    FlexibleQueryInput.addFunctionAutoCompleter();
-    if (langTools) {
-      langTools.addCompleter({
-        getCompletions: (
-          _state: string,
-          session: Ace.EditSession,
-          pos: Ace.Point,
-          prefix: string,
-          callback: any,
-        ) => {
-          const charBeforePrefix = session.getLine(pos.row)[pos.column - prefix.length - 1];
-          callback(
-            null,
-            charBeforePrefix === '"'
-              ? this.state.unquotedCompletions
-              : this.state.quotedCompletions,
-          );
-        },
+  const handleRunSubQuery = usePermanentCallback((slice: QuerySlice) => {
+    if (!runQuerySlice) return;
+    if (running) {
+      AppToaster.show({
+        icon: IconNames.WARNING_SIGN,
+        intent: Intent.WARNING,
+        message: `Another query is currently running`,
       });
-    }
-  }
-
-  componentWillUnmount() {
-    const { editorStateId } = this.props;
-    if (editorStateId && this.aceEditor) {
-      AceEditorStateCache.saveState(editorStateId, this.aceEditor);
-    }
-  }
-
-  private readonly handleAceContainerResize = (entries: ResizeEntry[]) => {
-    if (entries.length !== 1) return;
-    this.setState({ editorHeight: entries[0].contentRect.height });
-  };
-
-  private readonly handleChange = (value: string) => {
-    const { onQueryStringChange } = this.props;
-    if (!onQueryStringChange) return;
-    onQueryStringChange(value);
-  };
-
-  public goToPosition(rowColumn: RowColumn) {
-    const { aceEditor } = this;
-    if (!aceEditor) return;
-    aceEditor.focus(); // Grab the focus
-    aceEditor.getSelection().moveCursorTo(rowColumn.row, rowColumn.column);
-    if (rowColumn.endRow && rowColumn.endColumn) {
-      aceEditor
-        .getSelection()
-        .selectToPosition({ row: rowColumn.endRow, column: rowColumn.endColumn });
-    }
-  }
-
-  renderAce() {
-    const {
-      queryString,
-      onQueryStringChange,
-      autoHeight,
-      minRows,
-      showGutter,
-      placeholder,
-      editorStateId,
-    } = this.props;
-    const { editorHeight } = this.state;
-
-    const jsonMode = queryString.trim().startsWith('{');
-
-    let height: number;
-    if (autoHeight) {
-      height =
-        Math.max(queryString.split('\n').length, minRows ?? 2) * 18 + 2 * V_PADDING + SCROLLBAR;
-    } else {
-      height = editorHeight;
+      return;
     }
 
-    return (
-      <AceEditor
-        mode={jsonMode ? 'hjson' : 'dsql'}
-        theme="solarized_dark"
-        className={classNames(
-          'placeholder-padding',
-          this.props.leaveBackground ? undefined : 'no-background',
-        )}
-        name="ace-editor"
-        onChange={this.handleChange}
-        focus
-        fontSize={13}
-        width="100%"
-        height={height + 'px'}
-        showGutter={showGutter}
-        showPrintMargin={false}
-        value={queryString}
-        readOnly={!onQueryStringChange}
-        editorProps={{
-          $blockScrolling: Infinity,
-        }}
-        setOptions={{
-          enableBasicAutocompletion: !jsonMode,
-          enableLiveAutocompletion: !jsonMode,
-          showLineNumbers: true,
-          tabSize: 2,
-          newLineMode: 'unix' as any, // This type is specified incorrectly in AceEditor
-        }}
-        style={{}}
-        placeholder={placeholder || 'SELECT * FROM ...'}
-        onLoad={(editor: Ace.Editor) => {
-          editor.renderer.setPadding(V_PADDING);
-          editor.renderer.setScrollMargin(V_PADDING, V_PADDING, 0, 0);
+    runQuerySlice(slice);
+  });
 
-          if (editorStateId) {
-            AceEditorStateCache.applyState(editorStateId, editor);
-          }
+  // The sub query markers live on the line numbers, so they are only there when the line numbers are
+  const subQueriesEnabled = Boolean(runQuerySlice) && showLineNumbers;
+  const subQueryCompartment = useConstant(() => new Compartment());
+  const subQueryExtension = React.useMemo(
+    () => (subQueriesEnabled ? subQueryMarkers(handleRunSubQuery) : []),
+    [subQueriesEnabled, handleRunSubQuery],
+  );
+  const extensions = useConstant(() => [
+    RUN_KEYS_EXTENSION,
+    subQueryCompartment.of(subQueryExtension),
+  ]);
 
-          this.aceEditor = editor;
-        }}
-      />
-    );
-  }
+  React.useEffect(() => {
+    editorViewRef.current?.dispatch({
+      effects: subQueryCompartment.reconfigure(subQueryExtension),
+    });
+  }, [subQueryCompartment, subQueryExtension]);
 
-  render(): JSX.Element {
-    const { autoHeight } = this.props;
+  const isJson = queryString.trim().startsWith('{');
+  const language = React.useMemo(
+    () =>
+      isJson
+        ? hjson({ jsonCompletions: NATIVE_JSON_QUERY_COMPLETIONS })
+        : dsql({ columnMetadata, availableSqlFunctions, queryContextParameters }),
+    [isJson, columnMetadata, availableSqlFunctions, queryContextParameters],
+  );
 
-    // Set the key in the AceEditor to force a rebind and prevent an error that happens otherwise
-    return (
-      <div className="flexible-query-input">
-        {autoHeight ? (
-          this.renderAce()
-        ) : (
-          <ResizeSensor2 onResize={this.handleAceContainerResize}>
-            <div className="ace-container">{this.renderAce()}</div>
-          </ResizeSensor2>
-        )}
+  return (
+    <div className="flexible-query-input">
+      <div className="editor-container">
+        <CodeEditor
+          ref={editorViewRef}
+          language={language}
+          transparentBackground={transparentBackground}
+          value={queryString}
+          onChange={onQueryStringChange}
+          readOnly={readOnly}
+          autoFocus
+          showLineNumbers={showLineNumbers}
+          padding={V_PADDING}
+          placeholder={placeholder || 'SELECT * FROM ...'}
+          stateCacheId={stateCacheId}
+          extensions={extensions}
+        />
       </div>
-    );
-  }
+    </div>
+  );
 }

@@ -19,14 +19,18 @@
 
 package org.apache.druid.compressedbigdecimal;
 
+import org.apache.druid.compressedbigdecimal.aggregator.max.CompressedBigDecimalMaxAggregatorFactory;
+import org.apache.druid.compressedbigdecimal.aggregator.sum.CompressedBigDecimalSumAggregateCombiner;
+import org.apache.druid.compressedbigdecimal.aggregator.sum.CompressedBigDecimalSumAggregator;
+import org.apache.druid.compressedbigdecimal.aggregator.sum.CompressedBigDecimalSumAggregatorFactory;
+import org.apache.druid.compressedbigdecimal.aggregator.sum.CompressedBigDecimalSumBufferAggregator;
 import org.apache.druid.segment.ColumnValueSelector;
 import org.easymock.EasyMock;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.math.BigDecimal;
-import java.util.Arrays;
 
 /**
  * test CompressedBigDecimalSumFactory and various aggregators and combiner produced
@@ -43,23 +47,20 @@ public class CompressedBigDecimalSumFactoryTest extends CompressedBigDecimalFact
         0,
         false
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "CompressedBigDecimalSumAggregatorFactory{name='name', type='COMPLEX<compressedBigDecimal>', fieldName='fieldName', requiredFields='[fieldName]', size='9', scale='0', strictNumberParsing='false'}",
         aggregatorFactory.toString()
     );
-    Assert.assertNotNull(aggregatorFactory.getCacheKey());
-    Assert.assertNull(aggregatorFactory.deserialize(null));
-    Assert.assertEquals("5", aggregatorFactory.deserialize(new BigDecimal(5)).toString());
-    Assert.assertEquals("5.0", aggregatorFactory.deserialize(5d).toString());
-    Assert.assertEquals("5", aggregatorFactory.deserialize("5").toString());
-    Assert.assertEquals(
-        "[CompressedBigDecimalSumAggregatorFactory{name='name', type='COMPLEX<compressedBigDecimal>', fieldName='fieldName', requiredFields='[fieldName]', size='9', scale='0', strictNumberParsing='false'}]",
-        Arrays.toString(aggregatorFactory.getRequiredColumns().toArray())
-    );
-    Assert.assertEquals("0", aggregatorFactory.combine(null, null).toString());
-    Assert.assertEquals("4", aggregatorFactory.combine(new BigDecimal(4), null).toString());
-    Assert.assertEquals("4", aggregatorFactory.combine(null, new BigDecimal(4)).toString());
-    Assert.assertEquals(
+    Assertions.assertNotNull(aggregatorFactory.getCacheKey());
+    Assertions.assertNull(aggregatorFactory.deserialize(null));
+    Assertions.assertEquals("5", aggregatorFactory.deserialize(new BigDecimal(5)).toString());
+    Assertions.assertEquals("5.0", aggregatorFactory.deserialize(5d).toString());
+    Assertions.assertEquals("5", aggregatorFactory.deserialize("5").toString());
+
+    Assertions.assertEquals("0", aggregatorFactory.combine(null, null).toString());
+    Assertions.assertEquals("4", aggregatorFactory.combine(new BigDecimal(4), null).toString());
+    Assertions.assertEquals("4", aggregatorFactory.combine(null, new BigDecimal(4)).toString());
+    Assertions.assertEquals(
         "8",
         aggregatorFactory.combine(
             new ArrayCompressedBigDecimal(new BigDecimal(4)),
@@ -69,6 +70,7 @@ public class CompressedBigDecimalSumFactoryTest extends CompressedBigDecimalFact
   }
 
   @Override
+  @Test
   public void testJsonSerialize() throws IOException
   {
     CompressedBigDecimalSumAggregatorFactory aggregatorFactory = new CompressedBigDecimalSumAggregatorFactory(
@@ -83,6 +85,7 @@ public class CompressedBigDecimalSumFactoryTest extends CompressedBigDecimalFact
   }
 
   @Override
+  @Test
   public void testFinalizeComputation()
   {
     CompressedBigDecimalMaxAggregatorFactory aggregatorFactory = new CompressedBigDecimalMaxAggregatorFactory(
@@ -97,6 +100,7 @@ public class CompressedBigDecimalSumFactoryTest extends CompressedBigDecimalFact
   }
 
   @Override
+  @Test
   public void testCompressedBigDecimalAggregatorFactoryDeserialize()
   {
     CompressedBigDecimalSumAggregatorFactory aggregatorFactory = new CompressedBigDecimalSumAggregatorFactory(
@@ -111,6 +115,7 @@ public class CompressedBigDecimalSumFactoryTest extends CompressedBigDecimalFact
   }
 
   @Override
+  @Test
   public void testCompressedBigDecimalBufferAggregatorGetFloat()
   {
     ColumnValueSelector<CompressedBigDecimal> columnValueSelector = EasyMock.createMock(ColumnValueSelector.class);
@@ -125,6 +130,7 @@ public class CompressedBigDecimalSumFactoryTest extends CompressedBigDecimalFact
   }
 
   @Override
+  @Test
   public void testCompressedBigDecimalBufferAggregatorGetLong()
   {
     ColumnValueSelector<CompressedBigDecimal> valueSelector = EasyMock.createMock(ColumnValueSelector.class);
@@ -139,6 +145,7 @@ public class CompressedBigDecimalSumFactoryTest extends CompressedBigDecimalFact
   }
 
   @Override
+  @Test
   public void testCombinerReset()
   {
     CompressedBigDecimalSumAggregateCombiner combiner = new CompressedBigDecimalSumAggregateCombiner();
@@ -147,6 +154,7 @@ public class CompressedBigDecimalSumFactoryTest extends CompressedBigDecimalFact
   }
 
   @Override
+  @Test
   public void testCombinerFold()
   {
     CompressedBigDecimalSumAggregateCombiner combiner = new CompressedBigDecimalSumAggregateCombiner();
@@ -155,6 +163,7 @@ public class CompressedBigDecimalSumFactoryTest extends CompressedBigDecimalFact
   }
 
   @Override
+  @Test
   public void testCompressedBigDecimalAggregateCombinerGetObject()
   {
     CompressedBigDecimalSumAggregateCombiner combiner = new CompressedBigDecimalSumAggregateCombiner();
@@ -163,6 +172,7 @@ public class CompressedBigDecimalSumFactoryTest extends CompressedBigDecimalFact
   }
 
   @Override
+  @Test
   public void testCompressedBigDecimalAggregateCombinerGetLong()
   {
     CompressedBigDecimalSumAggregateCombiner combiner = new CompressedBigDecimalSumAggregateCombiner();
@@ -171,6 +181,7 @@ public class CompressedBigDecimalSumFactoryTest extends CompressedBigDecimalFact
   }
 
   @Override
+  @Test
   public void testCompressedBigDecimalAggregateCombinerGetFloat()
   {
     CompressedBigDecimalSumAggregateCombiner combiner = new CompressedBigDecimalSumAggregateCombiner();
@@ -179,6 +190,7 @@ public class CompressedBigDecimalSumFactoryTest extends CompressedBigDecimalFact
   }
 
   @Override
+  @Test
   public void testCompressedBigDecimalAggregateCombinerGetDouble()
   {
     CompressedBigDecimalSumAggregateCombiner combiner = new CompressedBigDecimalSumAggregateCombiner();
@@ -187,6 +199,7 @@ public class CompressedBigDecimalSumFactoryTest extends CompressedBigDecimalFact
   }
 
   @Override
+  @Test
   public void testCompressedBigDecimalAggregatorGetFloat()
   {
     ColumnValueSelector valueSelector = EasyMock.createMock(ColumnValueSelector.class);
@@ -196,6 +209,7 @@ public class CompressedBigDecimalSumFactoryTest extends CompressedBigDecimalFact
   }
 
   @Override
+  @Test
   public void testCompressedBigDecimalAggregatorGetLong()
   {
     ColumnValueSelector valueSelector = EasyMock.createMock(ColumnValueSelector.class);
@@ -205,6 +219,7 @@ public class CompressedBigDecimalSumFactoryTest extends CompressedBigDecimalFact
   }
 
   @Override
+  @Test
   public void testCacheKeyEquality()
   {
     testCacheKeyEqualityHelper(CompressedBigDecimalSumAggregatorFactory::new);

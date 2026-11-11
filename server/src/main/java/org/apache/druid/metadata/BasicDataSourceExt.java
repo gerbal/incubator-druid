@@ -50,7 +50,7 @@ public class BasicDataSourceExt extends BasicDataSource
    * Note that these properties are not currently checked against any security configuration such as
    * an allow list for JDBC properties. Instead, they are supposed to be checked before adding to this class.
    *
-   * @see SQLFirehoseDatabaseConnector#validateConfigs
+   * @see SQLInputSourceDatabaseConnector#validateConfigs
    */
   private Properties connectionProperties;
 
@@ -101,6 +101,8 @@ public class BasicDataSourceExt extends BasicDataSource
   }
 
   @VisibleForTesting
+  // This test accessor returns the properties tracked by this subclass; the superclass getter is package-private.
+  // codeql[java/non-overriding-package-private]
   public Properties getConnectionProperties()
   {
     return connectionProperties;

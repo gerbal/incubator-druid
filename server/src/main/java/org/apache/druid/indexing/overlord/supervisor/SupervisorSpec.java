@@ -19,11 +19,17 @@
 
 package org.apache.druid.indexing.overlord.supervisor;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import org.apache.druid.error.DruidException;
 import org.apache.druid.indexing.overlord.supervisor.autoscaler.SupervisorTaskAutoScaler;
+import org.apache.druid.server.security.ResourceAction;
 
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.util.List;
+import java.util.Set;
 
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type")
 @JsonSubTypes(value = {
@@ -32,7 +38,7 @@ import java.util.List;
 public interface SupervisorSpec
 {
   /**
-   * Return an unique id of {@link Supervisor}.
+   * Return a unique id of {@link Supervisor}.
    */
   String getId();
 
@@ -72,10 +78,76 @@ public interface SupervisorSpec
   String getType();
 
   /**
-   * This API is only used for informational purposes in
-   * org.apache.druid.sql.calcite.schema.SystemSchema.SupervisorsTable
+   * @return The types of {@link org.apache.druid.data.input.InputSource} that the task uses. Empty set is returned if
+   * the task does not use any. Users can be given permission to access particular types of
+   * input sources but not others, using the
+   * {@link org.apache.druid.server.security.AuthConfig#enableInputSourceSecurity} config.
+   */
+  @JsonIgnore
+  @Nonnull
+  default Set<ResourceAction> getInputSourceResources() throws UnsupportedOperationException
+  {
+    throw DruidException.forPersona(DruidException.Persona.OPERATOR)
+                        .ofCategory(DruidException.Category.UNSUPPORTED)
+                        .build("Supervisor type[%s] does not support input source based security", getType());
+  }
+
+  /**
+   * Return source (like stream or topic name) for the supervisor
+   * This API is currently used for spec validation in {@link org.apache.druid.indexing.seekablestream.supervisor.SeekableStreamSupervisorSpec}
+   * and for returning the spec with source in {@link org.apache.druid.indexing.overlord.supervisor.SupervisorResource}
+   * when the spec is requested with system flag.
    *
-   * @return source like stream or topic name
+   * @return source
    */
   String getSource();
+
+  /**
+   * Validates this supervisor spec against current system state at submission time.
+   * Implementations should throw a {@link DruidException} with category
+   * {@link DruidException.Category#INVALID_INPUT} when the spec should be rejected.
+   * <p>
+   * The default implementation does no validation.
+   */
+  default void validateSpec() throws DruidException
+  {
+    // The default implementation does not do any validation checks.
+  }
+
+  /**
+   * Checks if a spec can be replaced with a proposed spec (proposesSpec).
+   * <p>
+   * By default, this method does no validation checks. Implementations of this method can choose to define rules
+   * for spec updates and throw an exception if the update is not allowed.
+   * </p>
+   *
+   * @param proposedSpec the proposed supervisor spec
+   * @throws DruidException if the spec update is not allowed
+   */
+  default void validateSpecUpdateTo(SupervisorSpec proposedSpec) throws DruidException
+  {
+    // The default implementation does not do any validation checks.
+  }
+
+  /**
+   * Updates this user-submitted supervisor spec by merging values from the given {@code existingSpec}.
+   * This method may be used to carry forward existing spec values when a supervisor is being resubmitted.
+   *
+   * @param existingSpec used spec to merge values from
+   */
+  default void merge(@Nullable SupervisorSpec existingSpec)
+  {
+    // No-op by default
+  }
+
+  /**
+   * Returns the action to take when this (running) spec is updated to {@code proposedSpec}.
+   * Invoked on the running spec; default is conservative and always restarts the supervisor and its tasks.
+   *
+   * @param proposedSpec the proposed supervisor spec
+   */
+  default SupervisorSpecUpdateAction getActionOnUpdateTo(SupervisorSpec proposedSpec)
+  {
+    return SupervisorSpecUpdateAction.RESTART_SUPERVISOR_AND_TASKS;
+  }
 }

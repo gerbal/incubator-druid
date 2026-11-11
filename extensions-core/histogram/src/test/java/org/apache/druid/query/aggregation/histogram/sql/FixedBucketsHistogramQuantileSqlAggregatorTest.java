@@ -19,16 +19,13 @@
 
 package org.apache.druid.query.aggregation.histogram.sql;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import com.google.inject.Injector;
-import org.apache.druid.common.config.NullHandling;
-import org.apache.druid.guice.DruidInjectorBuilder;
+import org.apache.druid.initialization.DruidModule;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.query.Druids;
-import org.apache.druid.query.QueryContexts;
+import org.apache.druid.query.QueryContext;
 import org.apache.druid.query.QueryDataSource;
-import org.apache.druid.query.QueryRunnerFactoryConglomerate;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
 import org.apache.druid.query.aggregation.DoubleSumAggregatorFactory;
 import org.apache.druid.query.aggregation.FilteredAggregatorFactory;
@@ -36,86 +33,92 @@ import org.apache.druid.query.aggregation.histogram.ApproximateHistogramDruidMod
 import org.apache.druid.query.aggregation.histogram.FixedBucketsHistogram;
 import org.apache.druid.query.aggregation.histogram.FixedBucketsHistogramAggregatorFactory;
 import org.apache.druid.query.aggregation.histogram.QuantilePostAggregator;
+import org.apache.druid.query.aggregation.histogram.sql.FixedBucketsHistogramQuantileSqlAggregatorTest.FixedBucketsHistogramComponentSupplier;
 import org.apache.druid.query.aggregation.post.ArithmeticPostAggregator;
 import org.apache.druid.query.aggregation.post.FieldAccessPostAggregator;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.dimension.DefaultDimensionSpec;
 import org.apache.druid.query.expression.TestExprMacroTable;
-import org.apache.druid.query.filter.NotDimFilter;
-import org.apache.druid.query.filter.SelectorDimFilter;
 import org.apache.druid.query.groupby.GroupByQuery;
-import org.apache.druid.query.ordering.StringComparators;
 import org.apache.druid.query.spec.MultipleIntervalSegmentSpec;
 import org.apache.druid.segment.IndexBuilder;
 import org.apache.druid.segment.QueryableIndex;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.incremental.IncrementalIndexSchema;
-import org.apache.druid.segment.join.JoinableFactoryWrapper;
 import org.apache.druid.segment.virtual.ExpressionVirtualColumn;
 import org.apache.druid.segment.writeout.OffHeapMemorySegmentWriteOutMediumFactory;
+import org.apache.druid.server.SpecificSegmentsQuerySegmentWalker;
 import org.apache.druid.sql.calcite.BaseCalciteQueryTest;
+import org.apache.druid.sql.calcite.SqlTestFrameworkConfig;
+import org.apache.druid.sql.calcite.TempDirProducer;
 import org.apache.druid.sql.calcite.filtration.Filtration;
 import org.apache.druid.sql.calcite.util.CalciteTests;
-import org.apache.druid.sql.calcite.util.SpecificSegmentsQuerySegmentWalker;
+import org.apache.druid.sql.calcite.util.DruidModuleCollection;
+import org.apache.druid.sql.calcite.util.SqlTestFramework.StandardComponentSupplier;
 import org.apache.druid.sql.calcite.util.TestDataBuilder;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 import org.apache.druid.timeline.partition.LinearShardSpec;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
 import java.util.List;
 
+@SqlTestFrameworkConfig.ComponentSupplier(FixedBucketsHistogramComponentSupplier.class)
 public class FixedBucketsHistogramQuantileSqlAggregatorTest extends BaseCalciteQueryTest
 {
-  @Override
-  public void configureGuice(DruidInjectorBuilder builder)
+  protected static class FixedBucketsHistogramComponentSupplier extends StandardComponentSupplier
   {
-    super.configureGuice(builder);
-    builder.addModule(new ApproximateHistogramDruidModule());
-  }
+    public FixedBucketsHistogramComponentSupplier(TempDirProducer tempFolderProducer)
+    {
+      super(tempFolderProducer);
+    }
 
-  @Override
-  public SpecificSegmentsQuerySegmentWalker createQuerySegmentWalker(
-      final QueryRunnerFactoryConglomerate conglomerate,
-      final JoinableFactoryWrapper joinableFactory,
-      final Injector injector
-  ) throws IOException
-  {
-    ApproximateHistogramDruidModule.registerSerde();
+    @Override
+    public DruidModule getCoreModule()
+    {
+      return DruidModuleCollection.of(super.getCoreModule(), new ApproximateHistogramDruidModule());
+    }
 
-    final QueryableIndex index = IndexBuilder.create(CalciteTests.getJsonMapper())
-                                             .tmpDir(temporaryFolder.newFolder())
-                                             .segmentWriteOutMediumFactory(OffHeapMemorySegmentWriteOutMediumFactory.instance())
-                                             .schema(
-                                                 new IncrementalIndexSchema.Builder()
-                                                     .withMetrics(
-                                                         new CountAggregatorFactory("cnt"),
-                                                         new DoubleSumAggregatorFactory("m1", "m1"),
-                                                         new FixedBucketsHistogramAggregatorFactory(
-                                                             "fbhist_m1",
-                                                             "m1",
-                                                             20,
-                                                             0,
-                                                             10,
-                                                             FixedBucketsHistogram.OutlierHandlingMode.IGNORE,
-                                                             false
-                                                         )
-                                                     )
-                                                     .withRollup(false)
-                                                     .build()
-                                             )
-                                             .rows(TestDataBuilder.ROWS1)
-                                             .buildMMappedIndex();
+    @Override
+    public SpecificSegmentsQuerySegmentWalker addSegmentsToWalker(
+        SpecificSegmentsQuerySegmentWalker walker,
+        ObjectMapper jsonMapper
+    )
+    {
+      ApproximateHistogramDruidModule.registerSerde();
 
-    return new SpecificSegmentsQuerySegmentWalker(conglomerate).add(
-        DataSegment.builder()
-                   .dataSource(CalciteTests.DATASOURCE1)
-                   .interval(index.getDataInterval())
-                   .version("1")
-                   .shardSpec(new LinearShardSpec(0))
-                   .size(0)
-                   .build(),
-        index
-    );
+      final QueryableIndex index = IndexBuilder.create(jsonMapper)
+                                               .tmpDir(tempDirProducer.newTempFolder())
+                                               .segmentWriteOutMediumFactory(OffHeapMemorySegmentWriteOutMediumFactory.instance())
+                                               .schema(
+                                                   new IncrementalIndexSchema.Builder()
+                                                       .withMetrics(
+                                                           new CountAggregatorFactory("cnt"),
+                                                           new DoubleSumAggregatorFactory("m1", "m1"),
+                                                           new FixedBucketsHistogramAggregatorFactory(
+                                                               "fbhist_m1",
+                                                               "m1",
+                                                               20,
+                                                               0,
+                                                               10,
+                                                               FixedBucketsHistogram.OutlierHandlingMode.IGNORE,
+                                                               false
+                                                           )
+                                                       )
+                                                       .withRollup(false)
+                                                       .build()
+                                               )
+                                               .rows(TestDataBuilder.ROWS1)
+                                               .buildMMappedIndex();
+
+      return walker.add(
+          DataSegment.builder(SegmentId.of(CalciteTests.DATASOURCE1, index.getDataInterval(), "1", 0))
+                     .shardSpec(new LinearShardSpec(0))
+                     .size(0)
+                     .build(),
+          index
+      );
+    }
   }
 
   @Test
@@ -131,6 +134,9 @@ public class FixedBucketsHistogramQuantileSqlAggregatorTest extends BaseCalciteQ
             6.494999885559082,
             5.497499942779541,
             6.499499797821045,
+            6.499499797821045,
+            6.499499797821045,
+            6.499499797821045,
             1.25
         }
     );
@@ -145,6 +151,9 @@ public class FixedBucketsHistogramQuantileSqlAggregatorTest extends BaseCalciteQ
         + "APPROX_QUANTILE_FIXED_BUCKETS(m1, 0.99, 20, 0.0, 10.0) FILTER(WHERE dim1 = 'abc'),\n"
         + "APPROX_QUANTILE_FIXED_BUCKETS(m1, 0.999, 20, 0.0, 10.0) FILTER(WHERE dim1 <> 'abc'),\n"
         + "APPROX_QUANTILE_FIXED_BUCKETS(m1, 0.999, 20, 0.0, 10.0) FILTER(WHERE dim1 = 'abc'),\n"
+        + "APPROX_QUANTILE_FIXED_BUCKETS(m1, 0.999, 20, 0.0, 10.0, 'ignore') FILTER(WHERE dim1 = 'abc'),\n"
+        + "APPROX_QUANTILE_FIXED_BUCKETS(m1, 0.999, 20, 0.0, 10.0, 'clip') FILTER(WHERE dim1 = 'abc'),\n"
+        + "APPROX_QUANTILE_FIXED_BUCKETS(m1, 0.999, 20, 0.0, 10.0, 'overflow') FILTER(WHERE dim1 = 'abc'),\n"
         + "APPROX_QUANTILE_FIXED_BUCKETS(cnt, 0.5, 20, 0.0, 10.0)\n"
         + "FROM foo",
         ImmutableList.of(
@@ -189,7 +198,7 @@ public class FixedBucketsHistogramQuantileSqlAggregatorTest extends BaseCalciteQ
                               FixedBucketsHistogram.OutlierHandlingMode.IGNORE,
                               false
                           ),
-                          new SelectorDimFilter("dim1", "abc", null)
+                          equality("dim1", "abc", ColumnType.STRING)
                       ),
                       new FilteredAggregatorFactory(
                           new FixedBucketsHistogramAggregatorFactory(
@@ -201,10 +210,34 @@ public class FixedBucketsHistogramQuantileSqlAggregatorTest extends BaseCalciteQ
                               FixedBucketsHistogram.OutlierHandlingMode.IGNORE,
                               false
                           ),
-                          new NotDimFilter(new SelectorDimFilter("dim1", "abc", null))
+                          not(equality("dim1", "abc", ColumnType.STRING))
+                      ),
+                      new FilteredAggregatorFactory(
+                          new FixedBucketsHistogramAggregatorFactory(
+                              "a9:agg",
+                              "m1",
+                              20,
+                              0.0d,
+                              10.0d,
+                              FixedBucketsHistogram.OutlierHandlingMode.CLIP,
+                              false
+                          ),
+                          equality("dim1", "abc", ColumnType.STRING)
+                      ),
+                      new FilteredAggregatorFactory(
+                          new FixedBucketsHistogramAggregatorFactory(
+                              "a10:agg",
+                              "m1",
+                              20,
+                              0.0d,
+                              10.0d,
+                              FixedBucketsHistogram.OutlierHandlingMode.OVERFLOW,
+                              false
+                          ),
+                          equality("dim1", "abc", ColumnType.STRING)
                       ),
                       new FixedBucketsHistogramAggregatorFactory(
-                          "a8:agg",
+                          "a11:agg",
                           "cnt",
                           20,
                           0.0d,
@@ -222,7 +255,55 @@ public class FixedBucketsHistogramQuantileSqlAggregatorTest extends BaseCalciteQ
                       new QuantilePostAggregator("a5", "a5:agg", 0.99f),
                       new QuantilePostAggregator("a6", "a6:agg", 0.999f),
                       new QuantilePostAggregator("a7", "a5:agg", 0.999f),
-                      new QuantilePostAggregator("a8", "a8:agg", 0.50f)
+                      new QuantilePostAggregator("a8", "a5:agg", 0.999f),
+                      new QuantilePostAggregator("a9", "a9:agg", 0.999f),
+                      new QuantilePostAggregator("a10", "a10:agg", 0.999f),
+                      new QuantilePostAggregator("a11", "a11:agg", 0.50f)
+                  )
+                  .context(QUERY_CONTEXT_DEFAULT)
+                  .build()
+        ),
+        expectedResults
+    );
+  }
+
+  @Test
+  public void testQuantileWithCastedLiteralArguments()
+  {
+    final List<Object[]> expectedResults = ImmutableList.of(new Object[]{6.499499797821045});
+    testQuery(
+        "SELECT\n"
+        + "APPROX_QUANTILE_FIXED_BUCKETS("
+        + "m1, "
+        + "CAST(0.999 AS DOUBLE), "
+        + "CAST(20 AS INTEGER), "
+        + "CAST(0.0 AS DOUBLE), "
+        + "CAST(10.0 AS DOUBLE), "
+        + "CAST('overflow' AS VARCHAR)"
+        + ") "
+        + "FILTER(WHERE dim1 = 'abc')\n"
+        + "FROM foo",
+        ImmutableList.of(
+            Druids.newTimeseriesQueryBuilder()
+                  .dataSource(CalciteTests.DATASOURCE1)
+                  .intervals(new MultipleIntervalSegmentSpec(ImmutableList.of(Filtration.eternity())))
+                  .granularity(Granularities.ALL)
+                  .aggregators(ImmutableList.of(
+                      new FilteredAggregatorFactory(
+                          new FixedBucketsHistogramAggregatorFactory(
+                              "a0:agg",
+                              "m1",
+                              20,
+                              0.0d,
+                              10.0d,
+                              FixedBucketsHistogram.OutlierHandlingMode.OVERFLOW,
+                              false
+                          ),
+                          equality("dim1", "abc", ColumnType.STRING)
+                      )
+                  ))
+                  .postAggregators(
+                      new QuantilePostAggregator("a0", "a0:agg", 0.999f)
                   )
                   .context(QUERY_CONTEXT_DEFAULT)
                   .build()
@@ -293,7 +374,7 @@ public class FixedBucketsHistogramQuantileSqlAggregatorTest extends BaseCalciteQ
                               FixedBucketsHistogram.OutlierHandlingMode.IGNORE,
                               false
                           ),
-                          new SelectorDimFilter("dim1", "abc", null)
+                          equality("dim1", "abc", ColumnType.STRING)
                       ),
                       new FilteredAggregatorFactory(
                           new FixedBucketsHistogramAggregatorFactory(
@@ -305,7 +386,7 @@ public class FixedBucketsHistogramQuantileSqlAggregatorTest extends BaseCalciteQ
                               FixedBucketsHistogram.OutlierHandlingMode.IGNORE,
                               false
                           ),
-                          new NotDimFilter(new SelectorDimFilter("dim1", "abc", null))
+                          not(equality("dim1", "abc", ColumnType.STRING))
                       )
                   ))
                   .postAggregators(
@@ -318,22 +399,11 @@ public class FixedBucketsHistogramQuantileSqlAggregatorTest extends BaseCalciteQ
                       new QuantilePostAggregator("a6", "a6:agg", 0.999f),
                       new QuantilePostAggregator("a7", "a5:agg", 0.999f)
                   )
-                  .context(ImmutableMap.of(QueryContexts.CTX_SQL_QUERY_ID, "dummy"))
+                  .context(QueryContext.ofMap(QueryContextParameters.SQL_QUERY_ID, "dummy"))
                   .build()
         ),
         ImmutableList.of(
-            NullHandling.replaceWithDefault()
-            ? new Object[]{
-                0.00833333283662796,
-                0.4166666567325592,
-                2.450000047683716,
-                2.4749999046325684,
-                4.425000190734863,
-                0.4950000047683716,
-                2.498000144958496,
-                0.49950000643730164
-            }
-            : new Object[]{
+            new Object[]{
                 1.0099999904632568,
                 1.5,
                 2.4800000190734863,
@@ -408,7 +478,7 @@ public class FixedBucketsHistogramQuantileSqlAggregatorTest extends BaseCalciteQ
                               FixedBucketsHistogram.OutlierHandlingMode.IGNORE,
                               false
                           ),
-                          new SelectorDimFilter("dim1", "abc", null)
+                          equality("dim1", "abc", ColumnType.STRING)
                       ),
                       new FilteredAggregatorFactory(
                           new FixedBucketsHistogramAggregatorFactory(
@@ -420,7 +490,7 @@ public class FixedBucketsHistogramQuantileSqlAggregatorTest extends BaseCalciteQ
                               FixedBucketsHistogram.OutlierHandlingMode.IGNORE,
                               false
                           ),
-                          new NotDimFilter(new SelectorDimFilter("dim1", "abc", null))
+                          not(equality("dim1", "abc", ColumnType.STRING))
                       )
                   ))
                   .postAggregators(
@@ -442,12 +512,7 @@ public class FixedBucketsHistogramQuantileSqlAggregatorTest extends BaseCalciteQ
   @Test
   public void testQuantileOnInnerQuery()
   {
-    final List<Object[]> expectedResults;
-    if (NullHandling.replaceWithDefault()) {
-      expectedResults = ImmutableList.of(new Object[]{7.0, 11.940000534057617});
-    } else {
-      expectedResults = ImmutableList.of(new Object[]{5.25, 8.920000076293945});
-    }
+    final List<Object[]> expectedResults = ImmutableList.of(new Object[]{5.25, 8.920000076293945});
 
     testQuery(
         "SELECT AVG(x), APPROX_QUANTILE_FIXED_BUCKETS(x, 0.98, 100, 0.0, 100.0)\n"
@@ -475,7 +540,10 @@ public class FixedBucketsHistogramQuantileSqlAggregatorTest extends BaseCalciteQ
                         .setGranularity(Granularities.ALL)
                         .setAggregatorSpecs(
                             new DoubleSumAggregatorFactory("_a0:sum", "a0"),
-                            new CountAggregatorFactory("_a0:count"),
+                            new FilteredAggregatorFactory(
+                                new CountAggregatorFactory("_a0:count"),
+                                notNull("a0")
+                            ),
                             new FixedBucketsHistogramAggregatorFactory(
                                 "_a1:agg",
                                 "a0",
@@ -521,7 +589,7 @@ public class FixedBucketsHistogramQuantileSqlAggregatorTest extends BaseCalciteQ
                   .dataSource(CalciteTests.DATASOURCE1)
                   .intervals(new MultipleIntervalSegmentSpec(ImmutableList.of(Filtration.eternity())))
                   .granularity(Granularities.ALL)
-                  .filters(bound("dim2", "0", "0", false, false, null, StringComparators.NUMERIC))
+                  .filters(equality("dim2", 0L, ColumnType.LONG))
                   .aggregators(ImmutableList.of(
                       new FixedBucketsHistogramAggregatorFactory(
                           "a0:agg",
@@ -570,7 +638,7 @@ public class FixedBucketsHistogramQuantileSqlAggregatorTest extends BaseCalciteQ
             GroupByQuery.builder()
                         .setDataSource(CalciteTests.DATASOURCE1)
                         .setInterval(querySegmentSpec(Filtration.eternity()))
-                        .setDimFilter(selector("dim2", "a", null))
+                        .setDimFilter(equality("dim2", "a", ColumnType.STRING))
                         .setGranularity(Granularities.ALL)
                         .setVirtualColumns(expressionVirtualColumn("v0", "'a'", ColumnType.STRING))
                         .setDimensions(new DefaultDimensionSpec("v0", "d0", ColumnType.STRING))
@@ -586,7 +654,7 @@ public class FixedBucketsHistogramQuantileSqlAggregatorTest extends BaseCalciteQ
                                         FixedBucketsHistogram.OutlierHandlingMode.IGNORE,
                                         false
                                     ),
-                                    selector("dim1", "nonexistent", null)
+                                    equality("dim1", "nonexistent", ColumnType.STRING)
                                 ),
                                 new FilteredAggregatorFactory(
                                     new FixedBucketsHistogramAggregatorFactory(
@@ -598,7 +666,7 @@ public class FixedBucketsHistogramQuantileSqlAggregatorTest extends BaseCalciteQ
                                         FixedBucketsHistogram.OutlierHandlingMode.IGNORE,
                                         false
                                     ),
-                                    selector("dim1", "nonexistent", null)
+                                    equality("dim1", "nonexistent", ColumnType.STRING)
                                 )
                             )
                         )
@@ -614,6 +682,214 @@ public class FixedBucketsHistogramQuantileSqlAggregatorTest extends BaseCalciteQ
         ImmutableList.of(
             new Object[]{"a", 0.0, 0.0}
         )
+    );
+  }
+
+  @Test
+  public void testQuantileOnStringColumn()
+  {
+    // string columns are implicitly cast to numbers, like testQuantileOnCastedString
+    testQuery(
+        "SELECT APPROX_QUANTILE_FIXED_BUCKETS(dim1, 0.5, 20, 0.0, 10.0) FROM foo",
+        ImmutableList.of(
+            Druids.newTimeseriesQueryBuilder()
+                  .dataSource(CalciteTests.DATASOURCE1)
+                  .intervals(new MultipleIntervalSegmentSpec(ImmutableList.of(Filtration.eternity())))
+                  .granularity(Granularities.ALL)
+                  .virtualColumns(
+                      new ExpressionVirtualColumn(
+                          "v0",
+                          "CAST(\"dim1\", 'DOUBLE')",
+                          ColumnType.FLOAT,
+                          TestExprMacroTable.INSTANCE
+                      )
+                  )
+                  .aggregators(ImmutableList.of(
+                      new FixedBucketsHistogramAggregatorFactory(
+                          "a0:agg",
+                          "v0",
+                          20,
+                          0.0d,
+                          10.0d,
+                          FixedBucketsHistogram.OutlierHandlingMode.IGNORE,
+                          false
+                      )
+                  ))
+                  .postAggregators(
+                      new QuantilePostAggregator("a0", "a0:agg", 0.5f)
+                  )
+                  .context(QUERY_CONTEXT_DEFAULT)
+                  .build()
+        ),
+        ImmutableList.of(
+            new Object[]{1.5}
+        )
+    );
+  }
+
+  @Test
+  public void testQuantileOnNumericStringLiteral()
+  {
+    // string literals that can be parsed as numbers are accepted
+    testQuery(
+        "SELECT APPROX_QUANTILE_FIXED_BUCKETS('1.5', 0.5, 20, 0.0, 10.0) FROM foo",
+        ImmutableList.of(
+            Druids.newTimeseriesQueryBuilder()
+                  .dataSource(CalciteTests.DATASOURCE1)
+                  .intervals(new MultipleIntervalSegmentSpec(ImmutableList.of(Filtration.eternity())))
+                  .granularity(Granularities.ALL)
+                  .virtualColumns(
+                      new ExpressionVirtualColumn(
+                          "v0",
+                          "1.5",
+                          ColumnType.FLOAT,
+                          TestExprMacroTable.INSTANCE
+                      )
+                  )
+                  .aggregators(ImmutableList.of(
+                      new FixedBucketsHistogramAggregatorFactory(
+                          "a0:agg",
+                          "v0",
+                          20,
+                          0.0d,
+                          10.0d,
+                          FixedBucketsHistogram.OutlierHandlingMode.IGNORE,
+                          false
+                      )
+                  ))
+                  .postAggregators(
+                      new QuantilePostAggregator("a0", "a0:agg", 0.5f)
+                  )
+                  .context(QUERY_CONTEXT_DEFAULT)
+                  .build()
+        ),
+        ImmutableList.of(
+            new Object[]{1.75}
+        )
+    );
+  }
+
+  @Test
+  public void testQuantileOnTimeColumn()
+  {
+    // timestamps are used as numbers of milliseconds
+    testQuery(
+        "SELECT APPROX_QUANTILE_FIXED_BUCKETS(__time, 0.5, 20, 946684800000.0, 978393600000.0) FROM foo",
+        ImmutableList.of(
+            Druids.newTimeseriesQueryBuilder()
+                  .dataSource(CalciteTests.DATASOURCE1)
+                  .intervals(new MultipleIntervalSegmentSpec(ImmutableList.of(Filtration.eternity())))
+                  .granularity(Granularities.ALL)
+                  .aggregators(ImmutableList.of(
+                      new FixedBucketsHistogramAggregatorFactory(
+                          "a0:agg",
+                          "__time",
+                          20,
+                          946684800000.0d,
+                          978393600000.0d,
+                          FixedBucketsHistogram.OutlierHandlingMode.IGNORE,
+                          false
+                      )
+                  ))
+                  .postAggregators(
+                      new QuantilePostAggregator("a0", "a0:agg", 0.5f)
+                  )
+                  .context(QUERY_CONTEXT_DEFAULT)
+                  .build()
+        ),
+        ImmutableList.of(
+            new Object[]{947741786112.0}
+        )
+    );
+  }
+
+  @Test
+  public void testQuantileWithNonNumericStringLiteral()
+  {
+    // verify invalid queries return 400 (user error)
+    testQueryThrows(
+        "SELECT APPROX_QUANTILE_FIXED_BUCKETS('m1', 0.99, 20, 0.0, 10.0) FROM foo",
+        invalidSqlContains(
+            "Function [APPROX_QUANTILE_FIXED_BUCKETS] argument [column] must be numeric, got string literal ['m1']."
+            + " If you meant to refer to a column, use double quotes."
+        )
+    );
+  }
+
+  @Test
+  public void testQuantileOnNull()
+  {
+    // NULL inputs are accepted, the same as before the first operand was type checked
+    testQuery(
+        "SELECT APPROX_QUANTILE_FIXED_BUCKETS(NULL, 0.5, 20, 0.0, 10.0), APPROX_QUANTILE_FIXED_BUCKETS(CAST(NULL AS DOUBLE), 0.5, 20, 0.0, 10.0) FROM foo",
+        ImmutableList.of(
+            Druids.newTimeseriesQueryBuilder()
+                  .dataSource(CalciteTests.DATASOURCE1)
+                  .intervals(new MultipleIntervalSegmentSpec(ImmutableList.of(Filtration.eternity())))
+                  .granularity(Granularities.ALL)
+                  .virtualColumns(
+                      new ExpressionVirtualColumn(
+                          "v0",
+                          "null",
+                          ColumnType.FLOAT,
+                          TestExprMacroTable.INSTANCE
+                      ),
+                      new ExpressionVirtualColumn(
+                          "v1",
+                          "null",
+                          ColumnType.FLOAT,
+                          TestExprMacroTable.INSTANCE
+                      )
+                  )
+                  .aggregators(ImmutableList.of(
+                      new FixedBucketsHistogramAggregatorFactory(
+                          "a0:agg",
+                          "v0",
+                          20,
+                          0.0d,
+                          10.0d,
+                          FixedBucketsHistogram.OutlierHandlingMode.IGNORE,
+                          false
+                      ),
+                      new FixedBucketsHistogramAggregatorFactory(
+                          "a1:agg",
+                          "v1",
+                          20,
+                          0.0d,
+                          10.0d,
+                          FixedBucketsHistogram.OutlierHandlingMode.IGNORE,
+                          false
+                      )
+                  ))
+                  .postAggregators(
+                      new QuantilePostAggregator("a0", "a0:agg", 0.5f),
+                      new QuantilePostAggregator("a1", "a1:agg", 0.5f)
+                  )
+                  .context(QUERY_CONTEXT_DEFAULT)
+                  .build()
+        ),
+        ImmutableList.of(
+            new Object[]{0.0, 0.0}
+        )
+    );
+  }
+
+  @Test
+  public void testQuantileWithNonNumericInputTypes()
+  {
+    // verify invalid queries return 400 (user error)
+    final String expectedMessage = "Cannot apply 'APPROX_QUANTILE_FIXED_BUCKETS'";
+    testQueryThrows(
+        "SELECT APPROX_QUANTILE_FIXED_BUCKETS(m1 > 1, 0.99, 20, 0.0, 10.0) FROM foo",
+        invalidSqlContains(expectedMessage)
+    );
+    testQueryThrows(
+        "SELECT APPROX_QUANTILE_FIXED_BUCKETS(ARRAY[1.0, 2.0], 0.99, 20, 0.0, 10.0) FROM foo",
+        invalidSqlContains(expectedMessage)
+    );
+    testQueryThrows(
+        "SELECT APPROX_QUANTILE_FIXED_BUCKETS(PARSE_JSON('1'), 0.99, 20, 0.0, 10.0) FROM foo",
+        invalidSqlContains(expectedMessage)
     );
   }
 }

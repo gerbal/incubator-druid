@@ -20,10 +20,10 @@
 package org.apache.druid.indexing.worker.executor;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Pattern;
 import org.apache.druid.java.util.common.ISE;
 
-import javax.validation.constraints.NotNull;
-import javax.validation.constraints.Pattern;
 import java.io.File;
 import java.io.InputStream;
 
@@ -38,10 +38,6 @@ public class ExecutorLifecycleConfig
   @JsonProperty
   @NotNull
   private File statusFile = null;
-
-  @JsonProperty
-  @NotNull
-  private File lockFile = null;
 
   @JsonProperty
   @Pattern(regexp = "\\{stdin}")
@@ -76,17 +72,6 @@ public class ExecutorLifecycleConfig
   public ExecutorLifecycleConfig setStatusFile(File statusFile)
   {
     this.statusFile = statusFile;
-    return this;
-  }
-
-  public File getLockFile()
-  {
-    return lockFile;
-  }
-
-  public ExecutorLifecycleConfig setLockFile(File lockFile)
-  {
-    this.lockFile = lockFile;
     return this;
   }
 

@@ -22,7 +22,6 @@ package org.apache.druid.server;
 import com.fasterxml.jackson.databind.InjectableValues;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
@@ -37,6 +36,7 @@ import org.apache.druid.guice.JsonConfigurator;
 import org.apache.druid.guice.annotations.Global;
 import org.apache.druid.guice.annotations.Json;
 import org.apache.druid.java.util.common.concurrent.Execs;
+import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.guava.BaseSequence;
 import org.apache.druid.java.util.common.guava.LazySequence;
 import org.apache.druid.java.util.common.guava.Sequence;
@@ -46,29 +46,42 @@ import org.apache.druid.java.util.common.guava.Yielder;
 import org.apache.druid.java.util.common.guava.Yielders;
 import org.apache.druid.java.util.emitter.core.NoopEmitter;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
+import org.apache.druid.query.FluentQueryRunner;
 import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryCapacityExceededException;
+import org.apache.druid.query.QueryContext;
 import org.apache.druid.query.QueryPlus;
+import org.apache.druid.query.QueryRunnerFactory;
+import org.apache.druid.query.QueryToolChest;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
+import org.apache.druid.query.context.QueryContextParameters;
+import org.apache.druid.query.dimension.DefaultDimensionSpec;
+import org.apache.druid.query.groupby.GroupByQuery;
+import org.apache.druid.query.groupby.GroupByQueryConfig;
+import org.apache.druid.query.groupby.GroupByQueryRunnerTestHelper;
+import org.apache.druid.query.groupby.ResultRow;
+import org.apache.druid.query.groupby.having.HavingSpec;
 import org.apache.druid.query.topn.TopNQuery;
 import org.apache.druid.query.topn.TopNQueryBuilder;
 import org.apache.druid.server.initialization.ServerConfig;
 import org.apache.druid.server.scheduling.HiLoQueryLaningStrategy;
 import org.apache.druid.server.scheduling.ManualQueryPrioritizationStrategy;
 import org.apache.druid.server.scheduling.NoQueryLaningStrategy;
+import org.apache.druid.server.scheduling.WeightedQueryLaningStrategy;
+import org.assertj.core.api.AssertionsForClassTypes;
 import org.easymock.EasyMock;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
@@ -80,14 +93,13 @@ public class QuerySchedulerTest
   private static final int NUM_ROWS = 10000;
   private static final int TEST_HI_CAPACITY = 5;
   private static final int TEST_LO_CAPACITY = 2;
-
-  @Rule
-  public ExpectedException expected = ExpectedException.none();
+  private static final ServerConfig SERVER_CONFIG_WITHOUT_TOTAL = new ServerConfig();
+  private static final ServerConfig SERVER_CONFIG_WITH_TOTAL = new ServerConfig(false);
 
   private ListeningExecutorService executorService;
   private ObservableQueryScheduler scheduler;
 
-  @Before
+  @BeforeEach
   public void setup()
   {
     executorService = MoreExecutors.listeningDecorator(
@@ -97,11 +109,12 @@ public class QuerySchedulerTest
         TEST_HI_CAPACITY,
         ManualQueryPrioritizationStrategy.INSTANCE,
         new HiLoQueryLaningStrategy(40),
-        new ServerConfig()
+        // Test with total laning turned on
+        SERVER_CONFIG_WITH_TOTAL
     );
   }
 
-  @After
+  @AfterEach
   public void teardown()
   {
     executorService.shutdownNow();
@@ -115,7 +128,7 @@ public class QuerySchedulerTest
       try {
         Query<?> scheduled = scheduler.prioritizeAndLaneQuery(QueryPlus.wrap(interactive), ImmutableSet.of());
 
-        Assert.assertNotNull(scheduled);
+        Assertions.assertNotNull(scheduled);
 
         Sequence<Integer> underlyingSequence = makeSequence(10);
         underlyingSequence = Sequences.wrap(underlyingSequence, new SequenceWrapper()
@@ -123,22 +136,22 @@ public class QuerySchedulerTest
           @Override
           public void before()
           {
-            Assert.assertEquals(4, scheduler.getTotalAvailableCapacity());
-            Assert.assertEquals(2, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
+            Assertions.assertEquals(4, scheduler.getTotalAvailableCapacity());
+            Assertions.assertEquals(2, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
           }
         });
         Sequence<Integer> results = scheduler.run(scheduled, underlyingSequence);
         int rowCount = consumeAndCloseSequence(results);
 
-        Assert.assertEquals(10, rowCount);
+        Assertions.assertEquals(10, rowCount);
       }
       catch (IOException ex) {
         throw new RuntimeException(ex);
       }
     });
     future.get();
-    Assert.assertEquals(TEST_HI_CAPACITY, scheduler.getTotalAvailableCapacity());
-    Assert.assertEquals(QueryScheduler.UNAVAILABLE, scheduler.getLaneAvailableCapacity("non-existent"));
+    Assertions.assertEquals(TEST_HI_CAPACITY, scheduler.getTotalAvailableCapacity());
+    Assertions.assertEquals(QueryScheduler.UNAVAILABLE, scheduler.getLaneAvailableCapacity("non-existent"));
   }
 
   @Test
@@ -148,8 +161,8 @@ public class QuerySchedulerTest
     ListenableFuture<?> future = executorService.submit(() -> {
       try {
         Query<?> scheduledReport = scheduler.prioritizeAndLaneQuery(QueryPlus.wrap(report), ImmutableSet.of());
-        Assert.assertNotNull(scheduledReport);
-        Assert.assertEquals(HiLoQueryLaningStrategy.LOW, scheduledReport.context().getLane());
+        Assertions.assertNotNull(scheduledReport);
+        Assertions.assertEquals(HiLoQueryLaningStrategy.LOW, scheduledReport.context().getLane());
 
         Sequence<Integer> underlyingSequence = makeSequence(10);
         underlyingSequence = Sequences.wrap(underlyingSequence, new SequenceWrapper()
@@ -157,14 +170,14 @@ public class QuerySchedulerTest
           @Override
           public void before()
           {
-            Assert.assertEquals(4, scheduler.getTotalAvailableCapacity());
-            Assert.assertEquals(1, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
+            Assertions.assertEquals(4, scheduler.getTotalAvailableCapacity());
+            Assertions.assertEquals(1, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
           }
         });
         Sequence<Integer> results = scheduler.run(scheduledReport, underlyingSequence);
 
         int rowCount = consumeAndCloseSequence(results);
-        Assert.assertEquals(10, rowCount);
+        Assertions.assertEquals(10, rowCount);
       }
       catch (IOException ex) {
         throw new RuntimeException(ex);
@@ -172,20 +185,18 @@ public class QuerySchedulerTest
     });
     future.get();
     assertHiLoHasAllCapacity(TEST_HI_CAPACITY, TEST_LO_CAPACITY);
-    Assert.assertEquals(QueryScheduler.UNAVAILABLE, scheduler.getLaneAvailableCapacity("non-existent"));
+    Assertions.assertEquals(QueryScheduler.UNAVAILABLE, scheduler.getLaneAvailableCapacity("non-existent"));
   }
 
   @Test
-  public void testHiLoReleaseLaneWhenSequenceExplodes() throws Exception
+  public void testHiLoReleaseLaneWhenSequenceExplodes()
   {
-    expected.expectMessage("exploded");
-    expected.expect(ExecutionException.class);
     TopNQuery interactive = makeInteractiveQuery();
     ListenableFuture<?> future = executorService.submit(() -> {
       try {
         Query<?> scheduled = scheduler.prioritizeAndLaneQuery(QueryPlus.wrap(interactive), ImmutableSet.of());
 
-        Assert.assertNotNull(scheduled);
+        Assertions.assertNotNull(scheduled);
 
         Sequence<Integer> underlyingSequence = makeExplodingSequence(10);
         underlyingSequence = Sequences.wrap(underlyingSequence, new SequenceWrapper()
@@ -193,7 +204,7 @@ public class QuerySchedulerTest
           @Override
           public void before()
           {
-            Assert.assertEquals(4, scheduler.getTotalAvailableCapacity());
+            Assertions.assertEquals(4, scheduler.getTotalAvailableCapacity());
           }
         });
         Sequence<Integer> results = scheduler.run(scheduled, underlyingSequence);
@@ -204,71 +215,91 @@ public class QuerySchedulerTest
         throw new RuntimeException(ex);
       }
     });
-    future.get();
+    Throwable t = Assertions.assertThrows(ExecutionException.class, future::get);
+    Assertions.assertEquals("java.lang.RuntimeException: exploded", t.getMessage());
+    Assertions.assertEquals(5, scheduler.getTotalAvailableCapacity());
   }
 
   @Test
   public void testHiLoFailsWhenOutOfLaneCapacity()
   {
-    expected.expectMessage(
-        QueryCapacityExceededException.makeLaneErrorMessage(HiLoQueryLaningStrategy.LOW, TEST_LO_CAPACITY)
-    );
-    expected.expect(QueryCapacityExceededException.class);
-
     Query<?> report1 = scheduler.prioritizeAndLaneQuery(QueryPlus.wrap(makeReportQuery()), ImmutableSet.of());
-    scheduler.run(report1, Sequences.empty());
-    Assert.assertNotNull(report1);
-    Assert.assertEquals(4, scheduler.getTotalAvailableCapacity());
-    Assert.assertEquals(1, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
+    Sequence<?> sequence = scheduler.run(report1, Sequences.empty());
+    // making the sequence doesn't count, only running it does
+    Assertions.assertEquals(5, scheduler.getTotalAvailableCapacity());
+    // this counts though since we are doing stuff
+    Yielders.each(sequence);
+    Assertions.assertNotNull(report1);
+    Assertions.assertEquals(4, scheduler.getTotalAvailableCapacity());
+    Assertions.assertEquals(1, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
 
     Query<?> report2 = scheduler.prioritizeAndLaneQuery(QueryPlus.wrap(makeReportQuery()), ImmutableSet.of());
-    scheduler.run(report2, Sequences.empty());
-    Assert.assertNotNull(report2);
-    Assert.assertEquals(3, scheduler.getTotalAvailableCapacity());
-    Assert.assertEquals(0, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
+    Yielders.each(scheduler.run(report2, Sequences.empty()));
+    Assertions.assertNotNull(report2);
+    Assertions.assertEquals(3, scheduler.getTotalAvailableCapacity());
+    Assertions.assertEquals(0, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
 
     // too many reports
-    scheduler.run(
-        scheduler.prioritizeAndLaneQuery(QueryPlus.wrap(makeReportQuery()), ImmutableSet.of()), Sequences.empty()
+    Throwable t = Assertions.assertThrows(
+        QueryCapacityExceededException.class,
+        () -> Yielders.each(
+            scheduler.run(
+                scheduler.prioritizeAndLaneQuery(QueryPlus.wrap(makeReportQuery()), ImmutableSet.of()),
+                Sequences.empty()
+            )
+        )
+    );
+    Assertions.assertEquals(
+        "Too many concurrent queries for lane 'low', query capacity of 2 exceeded. Please try your query again later.",
+        t.getMessage()
     );
   }
 
   @Test
   public void testHiLoFailsWhenOutOfTotalCapacity()
   {
-    expected.expectMessage(QueryCapacityExceededException.makeTotalErrorMessage(TEST_HI_CAPACITY));
-    expected.expect(QueryCapacityExceededException.class);
-
     Query<?> interactive1 = scheduler.prioritizeAndLaneQuery(QueryPlus.wrap(makeInteractiveQuery()), ImmutableSet.of());
-    scheduler.run(interactive1, Sequences.empty());
-    Assert.assertNotNull(interactive1);
-    Assert.assertEquals(4, scheduler.getTotalAvailableCapacity());
+    Sequence<?> sequence = scheduler.run(interactive1, Sequences.empty());
+    // making the sequence doesn't count, only running it does
+    Assertions.assertEquals(5, scheduler.getTotalAvailableCapacity());
+    // this counts tho
+    Yielders.each(sequence);
+    Assertions.assertNotNull(interactive1);
+    Assertions.assertEquals(4, scheduler.getTotalAvailableCapacity());
 
     Query<?> report1 = scheduler.prioritizeAndLaneQuery(QueryPlus.wrap(makeReportQuery()), ImmutableSet.of());
-    scheduler.run(report1, Sequences.empty());
-    Assert.assertNotNull(report1);
-    Assert.assertEquals(3, scheduler.getTotalAvailableCapacity());
-    Assert.assertEquals(1, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
+    Yielders.each(scheduler.run(report1, Sequences.empty()));
+    Assertions.assertNotNull(report1);
+    Assertions.assertEquals(3, scheduler.getTotalAvailableCapacity());
+    Assertions.assertEquals(1, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
 
     Query<?> interactive2 = scheduler.prioritizeAndLaneQuery(QueryPlus.wrap(makeInteractiveQuery()), ImmutableSet.of());
-    scheduler.run(interactive2, Sequences.empty());
-    Assert.assertNotNull(interactive2);
-    Assert.assertEquals(2, scheduler.getTotalAvailableCapacity());
+    Yielders.each(scheduler.run(interactive2, Sequences.empty()));
+    Assertions.assertNotNull(interactive2);
+    Assertions.assertEquals(2, scheduler.getTotalAvailableCapacity());
 
     Query<?> report2 = scheduler.prioritizeAndLaneQuery(QueryPlus.wrap(makeReportQuery()), ImmutableSet.of());
-    scheduler.run(report2, Sequences.empty());
-    Assert.assertNotNull(report2);
-    Assert.assertEquals(1, scheduler.getTotalAvailableCapacity());
-    Assert.assertEquals(0, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
+    Yielders.each(scheduler.run(report2, Sequences.empty()));
+    Assertions.assertNotNull(report2);
+    Assertions.assertEquals(1, scheduler.getTotalAvailableCapacity());
+    Assertions.assertEquals(0, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
 
     Query<?> interactive3 = scheduler.prioritizeAndLaneQuery(QueryPlus.wrap(makeInteractiveQuery()), ImmutableSet.of());
-    scheduler.run(interactive3, Sequences.empty());
-    Assert.assertNotNull(interactive3);
-    Assert.assertEquals(0, scheduler.getTotalAvailableCapacity());
+    Yielders.each(scheduler.run(interactive3, Sequences.empty()));
+    Assertions.assertNotNull(interactive3);
+    Assertions.assertEquals(0, scheduler.getTotalAvailableCapacity());
 
     // one too many
-    scheduler.run(
-        scheduler.prioritizeAndLaneQuery(QueryPlus.wrap(makeInteractiveQuery()), ImmutableSet.of()), Sequences.empty()
+    Throwable t = Assertions.assertThrows(
+        QueryCapacityExceededException.class,
+        () -> Yielders.each(scheduler.run(
+            scheduler.prioritizeAndLaneQuery(QueryPlus.wrap(makeInteractiveQuery()), ImmutableSet.of()),
+            Sequences.empty()
+        ))
+    );
+    Assertions.assertEquals(
+        "Too many concurrent queries, total query capacity of 5 exceeded. Please try your query again later.",
+        t.getMessage()
     );
   }
 
@@ -315,13 +346,102 @@ public class QuerySchedulerTest
         0,
         ManualQueryPrioritizationStrategy.INSTANCE,
         new NoQueryLaningStrategy(),
-        new ServerConfig()
+        SERVER_CONFIG_WITHOUT_TOTAL
     );
     List<Future<?>> futures = new ArrayList<>(NUM_QUERIES);
     for (int i = 0; i < NUM_QUERIES; i++) {
       futures.add(makeQueryFuture(executorService, scheduler, makeInteractiveQuery(), NUM_ROWS));
     }
     getFuturesAndAssertAftermathIsChill(futures, scheduler, true, true);
+  }
+
+  @Test
+  public void testTotalLimitWithoutQueryQueuing()
+  {
+    ServerConfig serverConfig = SERVER_CONFIG_WITH_TOTAL;
+    QueryScheduler queryScheduler = new QueryScheduler(
+        serverConfig.getNumThreads() - 1,
+        ManualQueryPrioritizationStrategy.INSTANCE,
+        new NoQueryLaningStrategy(),
+        serverConfig
+    );
+    Assertions.assertEquals(serverConfig.getNumThreads() - 1, queryScheduler.getTotalAvailableCapacity());
+  }
+
+  @Test
+  public void testTotalLimitWithQueryQueuing()
+  {
+    ServerConfig serverConfig = SERVER_CONFIG_WITHOUT_TOTAL;
+    QueryScheduler queryScheduler = new QueryScheduler(
+        serverConfig.getNumThreads() - 1,
+        ManualQueryPrioritizationStrategy.INSTANCE,
+        new NoQueryLaningStrategy(),
+        serverConfig
+    );
+    Assertions.assertEquals(-1, queryScheduler.getTotalAvailableCapacity());
+  }
+
+  @Test
+  public void testExplodingWrapperDoesNotLeakLocks()
+  {
+    scheduler = new ObservableQueryScheduler(
+        5,
+        ManualQueryPrioritizationStrategy.INSTANCE,
+        new NoQueryLaningStrategy(),
+        SERVER_CONFIG_WITH_TOTAL
+    );
+
+    QueryRunnerFactory factory = GroupByQueryRunnerTestHelper.makeQueryRunnerFactory(
+        new GroupByQueryConfig()
+        {
+
+          @Override
+          public String toString()
+          {
+            return "v2";
+          }
+        }
+    );
+    Future<?> f = makeMergingQueryFuture(
+        executorService,
+        scheduler,
+        GroupByQuery.builder()
+                    .setDataSource("foo")
+                    .setInterval("2020-01-01/2020-01-02")
+                    .setDimensions(DefaultDimensionSpec.of("bar"))
+                    .setAggregatorSpecs(new CountAggregatorFactory("chocula"))
+                    .setGranularity(Granularities.ALL)
+                    .setHavingSpec(
+                        new HavingSpec()
+                        {
+                          @Override
+                          public void setQuery(GroupByQuery query)
+                          {
+                            throw new RuntimeException("exploded");
+                          }
+
+                          @Override
+                          public boolean eval(ResultRow row)
+                          {
+                            return false;
+                          }
+
+                          @Override
+                          public byte[] getCacheKey()
+                          {
+                            return new byte[0];
+                          }
+                        }
+                    )
+                    .build(),
+        factory.getToolchest(),
+        NUM_ROWS
+    );
+
+    Assertions.assertEquals(5, scheduler.getTotalAvailableCapacity());
+    Throwable t = Assertions.assertThrows(Throwable.class, f::get);
+    Assertions.assertEquals("java.lang.RuntimeException: exploded", t.getMessage());
+    Assertions.assertEquals(5, scheduler.getTotalAvailableCapacity());
   }
 
   @Test
@@ -336,10 +456,10 @@ public class QuerySchedulerTest
     final Properties properties = new Properties();
     properties.setProperty(propertyPrefix + ".numThreads", "10");
     provider.inject(properties, injector.getInstance(JsonConfigurator.class));
-    final QueryScheduler scheduler = provider.get().get().get();
-    Assert.assertEquals(10, scheduler.getTotalAvailableCapacity());
-    Assert.assertEquals(QueryScheduler.UNAVAILABLE, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
-    Assert.assertEquals(QueryScheduler.UNAVAILABLE, scheduler.getLaneAvailableCapacity("non-existent"));
+    final QueryScheduler scheduler = provider.get().get();
+    Assertions.assertEquals(10, scheduler.getTotalAvailableCapacity());
+    Assertions.assertEquals(QueryScheduler.UNAVAILABLE, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
+    Assertions.assertEquals(QueryScheduler.UNAVAILABLE, scheduler.getLaneAvailableCapacity("non-existent"));
   }
 
   @Test
@@ -357,17 +477,16 @@ public class QuerySchedulerTest
     properties.setProperty(propertyPrefix + ".laning.maxLowPercent", "20");
 
     provider.inject(properties, injector.getInstance(JsonConfigurator.class));
-    final QueryScheduler scheduler = provider.get().get().get();
-    Assert.assertEquals(10, scheduler.getTotalAvailableCapacity());
-    Assert.assertEquals(2, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
-    Assert.assertEquals(QueryScheduler.UNAVAILABLE, scheduler.getLaneAvailableCapacity("non-existent"));
+    final QueryScheduler scheduler = provider.get().get();
+    Assertions.assertEquals(10, scheduler.getTotalAvailableCapacity());
+    Assertions.assertEquals(2, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
+    Assertions.assertEquals(QueryScheduler.UNAVAILABLE, scheduler.getLaneAvailableCapacity("non-existent"));
   }
 
 
   @Test
   public void testMisConfigHiLo()
   {
-    expected.expect(ProvisionException.class);
     final Injector injector = createInjector();
     final String propertyPrefix = "druid.query.scheduler";
     final JsonConfigProvider<QuerySchedulerProvider> provider = JsonConfigProvider.of(
@@ -377,9 +496,6 @@ public class QuerySchedulerTest
     final Properties properties = new Properties();
     properties.setProperty(propertyPrefix + ".laning.strategy", "hilo");
     provider.inject(properties, injector.getInstance(JsonConfigurator.class));
-    final QueryScheduler scheduler = provider.get().get().get();
-    Assert.assertEquals(10, scheduler.getTotalAvailableCapacity());
-    Assert.assertEquals(2, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
   }
 
   @Test
@@ -399,10 +515,10 @@ public class QuerySchedulerTest
     properties.setProperty(propertyPrefix + ".prioritization.adjustment", "5");
     properties.setProperty(propertyPrefix + ".prioritization.segmentCountThreshold", "1");
     provider.inject(properties, injector.getInstance(JsonConfigurator.class));
-    final QueryScheduler scheduler = provider.get().get().get();
-    Assert.assertEquals(10, scheduler.getTotalAvailableCapacity());
-    Assert.assertEquals(2, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
-    Assert.assertEquals(QueryScheduler.UNAVAILABLE, scheduler.getLaneAvailableCapacity("non-existent"));
+    final QueryScheduler scheduler = provider.get().get();
+    Assertions.assertEquals(10, scheduler.getTotalAvailableCapacity());
+    Assertions.assertEquals(2, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
+    Assertions.assertEquals(QueryScheduler.UNAVAILABLE, scheduler.getLaneAvailableCapacity("non-existent"));
 
     Query<?> query = scheduler.prioritizeAndLaneQuery(
         QueryPlus.wrap(makeDefaultQuery()),
@@ -411,14 +527,13 @@ public class QuerySchedulerTest
             EasyMock.createMock(SegmentServerSelector.class)
         )
     );
-    Assert.assertEquals(-5, query.context().getPriority());
-    Assert.assertEquals(HiLoQueryLaningStrategy.LOW, query.context().getLane());
+    Assertions.assertEquals(-5, query.context().getPriority());
+    Assertions.assertEquals(HiLoQueryLaningStrategy.LOW, query.context().getLane());
   }
 
   @Test
   public void testMisConfigThreshold()
   {
-    expected.expect(ProvisionException.class);
     final Injector injector = createInjector();
     final String propertyPrefix = "druid.query.scheduler";
     final JsonConfigProvider<QuerySchedulerProvider> provider = JsonConfigProvider.of(
@@ -428,9 +543,11 @@ public class QuerySchedulerTest
     final Properties properties = new Properties();
     properties.setProperty(propertyPrefix + ".prioritization.strategy", "threshold");
     provider.inject(properties, injector.getInstance(JsonConfigurator.class));
-    final QueryScheduler scheduler = provider.get().get().get();
-    Assert.assertEquals(10, scheduler.getTotalAvailableCapacity());
-    Assert.assertEquals(2, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
+    Throwable t = Assertions.assertThrows(ProvisionException.class, () -> provider.get().get());
+    AssertionsForClassTypes.assertThat(t.getMessage()).containsSubsequence(
+        "Problem parsing object at prefix[druid.query.scheduler]:",
+        "problem: periodThreshold, durationThreshold, segmentCountThreshold or segmentRangeThreshold must be set"
+    );
   }
 
 
@@ -449,11 +566,11 @@ public class QuerySchedulerTest
     properties.put(propertyPrefix + ".laning.lanes.one", "1");
     properties.put(propertyPrefix + ".laning.lanes.two", "2");
     provider.inject(properties, injector.getInstance(JsonConfigurator.class));
-    final QueryScheduler scheduler = provider.get().get().get();
-    Assert.assertEquals(10, scheduler.getTotalAvailableCapacity());
-    Assert.assertEquals(1, scheduler.getLaneAvailableCapacity("one"));
-    Assert.assertEquals(2, scheduler.getLaneAvailableCapacity("two"));
-    Assert.assertEquals(QueryScheduler.UNAVAILABLE, scheduler.getLaneAvailableCapacity("non-existent"));
+    final QueryScheduler scheduler = provider.get().get();
+    Assertions.assertEquals(10, scheduler.getTotalAvailableCapacity());
+    Assertions.assertEquals(1, scheduler.getLaneAvailableCapacity("one"));
+    Assertions.assertEquals(2, scheduler.getLaneAvailableCapacity("two"));
+    Assertions.assertEquals(QueryScheduler.UNAVAILABLE, scheduler.getLaneAvailableCapacity("non-existent"));
   }
 
   @Test
@@ -472,11 +589,108 @@ public class QuerySchedulerTest
     properties.put(propertyPrefix + ".laning.lanes.one", "1");
     properties.put(propertyPrefix + ".laning.lanes.twenty", "20");
     provider.inject(properties, injector.getInstance(JsonConfigurator.class));
-    final QueryScheduler scheduler = provider.get().get().get();
-    Assert.assertEquals(10, scheduler.getTotalAvailableCapacity());
-    Assert.assertEquals(1, scheduler.getLaneAvailableCapacity("one"));
-    Assert.assertEquals(2, scheduler.getLaneAvailableCapacity("twenty"));
-    Assert.assertEquals(QueryScheduler.UNAVAILABLE, scheduler.getLaneAvailableCapacity("non-existent"));
+    final QueryScheduler scheduler = provider.get().get();
+    Assertions.assertEquals(10, scheduler.getTotalAvailableCapacity());
+    Assertions.assertEquals(1, scheduler.getLaneAvailableCapacity("one"));
+    Assertions.assertEquals(2, scheduler.getLaneAvailableCapacity("twenty"));
+    Assertions.assertEquals(QueryScheduler.UNAVAILABLE, scheduler.getLaneAvailableCapacity("non-existent"));
+  }
+
+  @Test
+  public void testConfigWeighted()
+  {
+    final Injector injector = createInjector();
+    final String propertyPrefix = "druid.query.scheduler";
+    final JsonConfigProvider<QuerySchedulerProvider> provider = JsonConfigProvider.of(
+        propertyPrefix,
+        QuerySchedulerProvider.class
+    );
+    final Properties properties = new Properties();
+    properties.setProperty(propertyPrefix + ".numThreads", "10");
+    properties.setProperty(propertyPrefix + ".laning.strategy", "weighted");
+    properties.setProperty(propertyPrefix + ".laning.segmentCountThreshold", "1");
+    properties.setProperty(propertyPrefix + ".laning.lanes", "{\"low\": {\"minCost\": 1, \"maxPercent\": 30}}");
+    provider.inject(properties, injector.getInstance(JsonConfigurator.class));
+    final QueryScheduler scheduler = provider.get().get();
+    Assertions.assertEquals(10, scheduler.getTotalAvailableCapacity());
+    Assertions.assertEquals(3, scheduler.getLaneAvailableCapacity("low"));
+    Assertions.assertEquals(QueryScheduler.UNAVAILABLE, scheduler.getLaneAvailableCapacity("non-existent"));
+  }
+
+  @Test
+  public void testWeightedLaneAssignment()
+  {
+    ObservableQueryScheduler weightedScheduler = new ObservableQueryScheduler(
+        TEST_HI_CAPACITY,
+        ManualQueryPrioritizationStrategy.INSTANCE,
+        new WeightedQueryLaningStrategy(
+            null,
+            null,
+            1,
+            null,
+            Map.of("low", new WeightedQueryLaningStrategy.LaneConfig(1, 40))
+        ),
+        SERVER_CONFIG_WITH_TOTAL
+    );
+
+    // Query with 2 segments exceeds segmentCountThreshold=1 → "low" lane
+    Query<?> query = weightedScheduler.prioritizeAndLaneQuery(
+        QueryPlus.wrap(makeDefaultQuery()),
+        Set.of(
+            EasyMock.createMock(SegmentServerSelector.class),
+            EasyMock.createMock(SegmentServerSelector.class)
+        )
+    );
+    Assertions.assertEquals("low", query.context().getLane());
+
+    // Query with 0 segments → no lane
+    Query<?> noLaneQuery = weightedScheduler.prioritizeAndLaneQuery(
+        QueryPlus.wrap(makeDefaultQuery()),
+        Set.of()
+    );
+    Assertions.assertNull(noLaneQuery.context().getLane());
+  }
+
+  @Test
+  public void testWeightedFailsWhenOutOfLaneCapacity()
+  {
+    ObservableQueryScheduler weightedScheduler = new ObservableQueryScheduler(
+        TEST_HI_CAPACITY,
+        ManualQueryPrioritizationStrategy.INSTANCE,
+        new WeightedQueryLaningStrategy(
+            null,
+            null,
+            1,
+            null,
+            Map.of("low", new WeightedQueryLaningStrategy.LaneConfig(1, 40))
+        ),
+        SERVER_CONFIG_WITH_TOTAL
+    );
+
+    Set<SegmentServerSelector> manySegments = Set.of(
+        EasyMock.createMock(SegmentServerSelector.class),
+        EasyMock.createMock(SegmentServerSelector.class)
+    );
+
+    // Fill the low lane (capacity = ceil(5 * 40/100) = 2)
+    Query<?> q1 = weightedScheduler.prioritizeAndLaneQuery(QueryPlus.wrap(makeDefaultQuery()), manySegments);
+    Yielders.each(weightedScheduler.run(q1, Sequences.empty()));
+    Assertions.assertEquals(1, weightedScheduler.getLaneAvailableCapacity("low"));
+
+    Query<?> q2 = weightedScheduler.prioritizeAndLaneQuery(QueryPlus.wrap(makeDefaultQuery()), manySegments);
+    Yielders.each(weightedScheduler.run(q2, Sequences.empty()));
+    Assertions.assertEquals(0, weightedScheduler.getLaneAvailableCapacity("low"));
+
+    // Third should fail with 429
+    Assertions.assertThrows(
+        QueryCapacityExceededException.class,
+        () -> Yielders.each(
+            weightedScheduler.run(
+                weightedScheduler.prioritizeAndLaneQuery(QueryPlus.wrap(makeDefaultQuery()), manySegments),
+                Sequences.empty()
+            )
+        )
+    );
   }
 
   private void maybeDelayNextIteration(int i) throws InterruptedException
@@ -494,20 +708,31 @@ public class QuerySchedulerTest
   private TopNQuery makeDefaultQuery()
   {
     return makeBaseBuilder()
-        .context(ImmutableMap.of("queryId", "default-" + UUID.randomUUID()))
+        .context(QueryContext.ofMap(QueryContextParameters.QUERY_ID, "default-" + UUID.randomUUID()))
         .build();
   }
+
   private TopNQuery makeInteractiveQuery()
   {
     return makeBaseBuilder()
-        .context(ImmutableMap.of("priority", 10, "queryId", "high-" + UUID.randomUUID()))
+        .context(QueryContext.ofMap(
+            QueryContextParameters.PRIORITY,
+            10,
+            QueryContextParameters.QUERY_ID,
+            "high-" + UUID.randomUUID()
+        ))
         .build();
   }
 
   private TopNQuery makeReportQuery()
   {
     return makeBaseBuilder()
-        .context(ImmutableMap.of("priority", -1, "queryId", "low-" + UUID.randomUUID()))
+        .context(QueryContext.ofMap(
+            QueryContextParameters.PRIORITY,
+            -1,
+            QueryContextParameters.QUERY_ID,
+            "low-" + UUID.randomUUID()
+        ))
         .build();
   }
 
@@ -536,14 +761,13 @@ public class QuerySchedulerTest
 
   private Sequence<Integer> makeSequence(int count)
   {
-    return new LazySequence<>(() -> {
-      return new BaseSequence<>(
+    return new LazySequence<>(() -> new BaseSequence<>(
           new BaseSequence.IteratorMaker<Integer, Iterator<Integer>>()
           {
             @Override
             public Iterator<Integer> make()
             {
-              return new Iterator<Integer>()
+              return new Iterator<>()
               {
                 int rowCounter = 0;
 
@@ -568,20 +792,19 @@ public class QuerySchedulerTest
               // nothing to cleanup
             }
           }
-      );
-    });
+      ));
   }
 
   private Sequence<Integer> makeExplodingSequence(int explodeAfter)
   {
     final int explodeAt = explodeAfter + 1;
     return new BaseSequence<>(
-        new BaseSequence.IteratorMaker<Integer, Iterator<Integer>>()
+        new BaseSequence.IteratorMaker<>()
         {
           @Override
           public Iterator<Integer> make()
           {
-            return new Iterator<Integer>()
+            return new Iterator<>()
             {
               int rowCounter = 0;
 
@@ -624,13 +847,52 @@ public class QuerySchedulerTest
       try {
         Query<?> scheduled = scheduler.prioritizeAndLaneQuery(QueryPlus.wrap(query), ImmutableSet.of());
 
-        Assert.assertNotNull(scheduled);
+        Assertions.assertNotNull(scheduled);
 
         Sequence<Integer> underlyingSequence = makeSequence(numRows);
         Sequence<Integer> results = scheduler.run(scheduled, underlyingSequence);
 
         final int actualNumRows = consumeAndCloseSequence(results);
-        Assert.assertEquals(actualNumRows, numRows);
+        Assertions.assertEquals(actualNumRows, numRows);
+      }
+      catch (IOException ex) {
+        throw new RuntimeException(ex);
+      }
+    });
+  }
+
+  @SuppressWarnings({"rawtypes", "unchecked"})
+  private ListenableFuture<?> makeMergingQueryFuture(
+      ListeningExecutorService executorService,
+      QueryScheduler scheduler,
+      Query<?> query,
+      QueryToolChest toolChest,
+      int numRows
+  )
+  {
+    return executorService.submit(() -> {
+      try {
+        Query<?> scheduled = scheduler.prioritizeAndLaneQuery(QueryPlus.wrap(query), ImmutableSet.of());
+
+        Assertions.assertNotNull(scheduled);
+
+        FluentQueryRunner runner = FluentQueryRunner
+            .create(
+                (queryPlus, responseContext) -> {
+                  Sequence<Integer> underlyingSequence = makeSequence(numRows);
+                  Sequence<Integer> results = scheduler.run(scheduled, underlyingSequence);
+                  return (Sequence) results;
+                },
+                toolChest
+            )
+            .applyPreMergeDecoration()
+            .mergeResults(true)
+            .applyPostMergeDecoration();
+
+        final int actualNumRows = consumeAndCloseSequence(
+            runner.run(QueryPlus.wrap(GroupByQueryRunnerTestHelper.populateResourceId(query)))
+        );
+        Assertions.assertEquals(actualNumRows, numRows);
       }
       catch (IOException ex) {
         throw new RuntimeException(ex);
@@ -665,21 +927,21 @@ public class QuerySchedulerTest
         other++;
       }
     }
-    Assert.assertEquals(0, other);
+    Assertions.assertEquals(0, other);
     if (expectNoneLimited) {
-      Assert.assertEquals(0, denied);
-      Assert.assertEquals(NUM_QUERIES, success);
-      Assert.assertEquals(0, scheduler.getTotalAcquired().get());
-      Assert.assertEquals(0, scheduler.getLaneAcquired().get());
+      Assertions.assertEquals(0, denied);
+      Assertions.assertEquals(NUM_QUERIES, success);
+      Assertions.assertEquals(0, scheduler.getTotalAcquired().get());
+      Assertions.assertEquals(0, scheduler.getLaneAcquired().get());
     } else {
-      Assert.assertTrue(denied > 0);
+      Assertions.assertTrue(denied > 0);
       if (successEqualsTotal) {
-        Assert.assertEquals(success, scheduler.getTotalAcquired().get());
+        Assertions.assertEquals(success, scheduler.getTotalAcquired().get());
       } else {
-        Assert.assertTrue(success > 0 && success <= scheduler.getTotalAcquired().get());
+        Assertions.assertTrue(success > 0 && success <= scheduler.getTotalAcquired().get());
       }
-      Assert.assertEquals(scheduler.getTotalReleased().get(), scheduler.getTotalAcquired().get());
-      Assert.assertEquals(
+      Assertions.assertEquals(scheduler.getTotalReleased().get(), scheduler.getTotalAcquired().get());
+      Assertions.assertEquals(
           scheduler.getLaneReleased().get(),
           scheduler.getLaneAcquired().get() + scheduler.getLaneNotAcquired().get()
       );
@@ -688,8 +950,8 @@ public class QuerySchedulerTest
 
   private void assertHiLoHasAllCapacity(int hi, int lo)
   {
-    Assert.assertEquals(lo, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
-    Assert.assertEquals(hi, scheduler.getTotalAvailableCapacity());
+    Assertions.assertEquals(lo, scheduler.getLaneAvailableCapacity(HiLoQueryLaningStrategy.LOW));
+    Assertions.assertEquals(hi, scheduler.getTotalAvailableCapacity());
   }
 
   private Injector createInjector()
@@ -697,7 +959,7 @@ public class QuerySchedulerTest
     Injector injector = GuiceInjectors.makeStartupInjectorWithModules(
         ImmutableList.of(
             binder -> {
-              binder.bind(ServerConfig.class).toInstance(new ServerConfig());
+              binder.bind(ServerConfig.class).toInstance(SERVER_CONFIG_WITH_TOTAL);
               binder.bind(ServiceEmitter.class).toInstance(new ServiceEmitter("test", "localhost", new NoopEmitter()));
               JsonConfigProvider.bind(binder, "druid.query.scheduler", QuerySchedulerProvider.class, Global.class);
             }

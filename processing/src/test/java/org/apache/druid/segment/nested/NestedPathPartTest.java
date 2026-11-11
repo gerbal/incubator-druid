@@ -24,24 +24,22 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import nl.jqno.equalsverifier.EqualsVerifier;
 import org.apache.druid.jackson.DefaultObjectMapper;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
 public class NestedPathPartTest
 {
   private static final ObjectMapper JSON_MAPPER = new DefaultObjectMapper();
-  private static final TypeReference<List<NestedPathPart>> TYPE_REF = new TypeReference<List<NestedPathPart>>()
-  {
-  };
+  private static final TypeReference<List<NestedPathPart>> TYPE_REF = new TypeReference<>() {};
 
   @Test
   public void testMapFieldSerde() throws JsonProcessingException
   {
     NestedPathPart fieldPart = new NestedPathField("x");
     String json = JSON_MAPPER.writeValueAsString(fieldPart);
-    Assert.assertEquals(fieldPart, JSON_MAPPER.readValue(json, NestedPathPart.class));
+    Assertions.assertEquals(fieldPart, JSON_MAPPER.readValue(json, NestedPathPart.class));
   }
 
   @Test
@@ -49,7 +47,7 @@ public class NestedPathPartTest
   {
     NestedPathPart arrayElementPart = new NestedPathArrayElement(1);
     String json = JSON_MAPPER.writeValueAsString(arrayElementPart);
-    Assert.assertEquals(arrayElementPart, JSON_MAPPER.readValue(json, NestedPathPart.class));
+    Assertions.assertEquals(arrayElementPart, JSON_MAPPER.readValue(json, NestedPathPart.class));
   }
 
   @Test

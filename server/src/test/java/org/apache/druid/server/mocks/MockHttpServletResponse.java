@@ -21,19 +21,21 @@ package org.apache.druid.server.mocks;
 
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Multimaps;
+import jakarta.validation.constraints.NotNull;
 
 import javax.annotation.Nullable;
 import javax.servlet.ServletOutputStream;
 import javax.servlet.WriteListener;
 import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletResponse;
-import javax.validation.constraints.NotNull;
 import java.io.ByteArrayOutputStream;
 import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * A fake HttpServletResponse used in tests.  A lot of methods are implemented as
@@ -59,11 +61,15 @@ public class MockHttpServletResponse implements HttpServletResponse
       new LinkedHashMap<>(), ArrayList::new
   );
 
+  private Supplier<Map<String, String>> trailerSupplier;
+
   public final ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
   private int statusCode;
   private String contentType;
   private String characterEncoding;
+  @Nullable
+  private String errorMessage;
 
   @Override
   public void reset()
@@ -118,13 +124,24 @@ public class MockHttpServletResponse implements HttpServletResponse
   @Override
   public void sendError(int sc, String msg)
   {
-    throw new UnsupportedOperationException();
+    statusCode = sc;
+    errorMessage = msg;
   }
 
   @Override
   public void sendError(int sc)
   {
-    throw new UnsupportedOperationException();
+    sendError(sc, null);
+  }
+
+  /**
+   * The message passed to the most recent {@link #sendError} call, or null if {@link #sendError} hasn't been
+   * called or was called without a message.
+   */
+  @Nullable
+  public String getErrorMessage()
+  {
+    return errorMessage;
   }
 
   @Override
@@ -148,6 +165,8 @@ public class MockHttpServletResponse implements HttpServletResponse
   @Override
   public void setHeader(String name, String value)
   {
+    // HttpServletResponse 4.0.1 spec dictates that setHeader  overwrites existing values.
+    headers.removeAll(name);
     headers.put(name, value);
   }
 
@@ -336,5 +355,17 @@ public class MockHttpServletResponse implements HttpServletResponse
   public Locale getLocale()
   {
     throw new UnsupportedOperationException();
+  }
+
+  @Override
+  public void setTrailerFields(Supplier<Map<String, String>> supplier)
+  {
+    this.trailerSupplier = supplier;
+  }
+
+  @Override
+  public Supplier<Map<String, String>> getTrailerFields()
+  {
+    return trailerSupplier;
   }
 }

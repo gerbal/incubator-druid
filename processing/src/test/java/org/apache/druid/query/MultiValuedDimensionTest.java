@@ -23,19 +23,23 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import org.apache.druid.collections.CloseableStupidPool;
-import org.apache.druid.common.config.NullHandling;
-import org.apache.druid.data.input.impl.CSVParseSpec;
+import org.apache.druid.data.input.ColumnsFilter;
+import org.apache.druid.data.input.InputRow;
+import org.apache.druid.data.input.InputRowSchema;
+import org.apache.druid.data.input.impl.CsvInputFormat;
 import org.apache.druid.data.input.impl.DimensionsSpec;
-import org.apache.druid.data.input.impl.JSONParseSpec;
-import org.apache.druid.data.input.impl.StringInputRowParser;
+import org.apache.druid.data.input.impl.InlineInputSource;
+import org.apache.druid.data.input.impl.JsonInputFormat;
 import org.apache.druid.data.input.impl.TimestampSpec;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.guava.Sequence;
+import org.apache.druid.java.util.common.parsers.CloseableIterator;
 import org.apache.druid.math.expr.ExpressionProcessing;
 import org.apache.druid.query.aggregation.AggregationTestHelper;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.dimension.DefaultDimensionSpec;
 import org.apache.druid.query.dimension.ListFilteredDimensionSpec;
 import org.apache.druid.query.dimension.RegexFilteredDimensionSpec;
@@ -49,7 +53,6 @@ import org.apache.druid.query.groupby.GroupByQueryRunnerTestHelper;
 import org.apache.druid.query.groupby.ResultRow;
 import org.apache.druid.query.groupby.orderby.DefaultLimitSpec;
 import org.apache.druid.query.groupby.orderby.OrderByColumnSpec;
-import org.apache.druid.query.groupby.strategy.GroupByStrategySelector;
 import org.apache.druid.query.spec.LegacySegmentSpec;
 import org.apache.druid.query.topn.TopNQuery;
 import org.apache.druid.query.topn.TopNQueryBuilder;
@@ -70,14 +73,14 @@ import org.apache.druid.segment.writeout.OffHeapMemorySegmentWriteOutMediumFacto
 import org.apache.druid.segment.writeout.SegmentWriteOutMediumFactory;
 import org.apache.druid.segment.writeout.TmpFileSegmentWriteOutMediumFactory;
 import org.apache.druid.testing.InitializedNullHandlingTest;
+import org.apache.druid.testing.TemporaryFolderExtension;
 import org.apache.druid.timeline.SegmentId;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.File;
 import java.io.IOException;
@@ -92,10 +95,10 @@ import java.util.Map;
 
 /**
  */
-@RunWith(Parameterized.class)
+@ParameterizedClass
+@MethodSource("constructorFeeder")
 public class MultiValuedDimensionTest extends InitializedNullHandlingTest
 {
-  @Parameterized.Parameters(name = "groupby: {0} forceHashAggregation: {2} ({1})")
   public static Collection<?> constructorFeeder()
   {
     final List<Object[]> constructors = new ArrayList<>();
@@ -120,27 +123,22 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
   private File persistedSegmentDirNullSampler;
 
   private final GroupByQueryConfig config;
-  private final ImmutableMap<String, Object> context;
-
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
+  private final Map<String, Object> context;
 
   public MultiValuedDimensionTest(final GroupByQueryConfig config, SegmentWriteOutMediumFactory segmentWriteOutMediumFactory, boolean forceHashAggregation)
   {
     helper = AggregationTestHelper.createGroupByQueryAggregationTestHelper(
         ImmutableList.of(),
         config,
-        null
+        (TemporaryFolderExtension) null
     );
     this.config = config;
     this.segmentWriteOutMediumFactory = segmentWriteOutMediumFactory;
 
-    this.context = config.getDefaultStrategy().equals(GroupByStrategySelector.STRATEGY_V1)
-                   ? ImmutableMap.of()
-                   : ImmutableMap.of("forceHashAggregation", forceHashAggregation);
+    this.context = QueryContext.ofMap(QueryContextParameters.FORCE_HASH_AGGREGATION, forceHashAggregation);
   }
 
-  @Before
+  @BeforeEach
   public void setup() throws Exception
   {
     incrementalIndex = new OnheapIncrementalIndex.Builder()
@@ -148,16 +146,18 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
         .setMaxRowCount(5000)
         .build();
 
-    StringInputRowParser parser = new StringInputRowParser(
-        new CSVParseSpec(
-            new TimestampSpec("timestamp", "iso", null),
-            new DimensionsSpec(DimensionsSpec.getDefaultSchemas(ImmutableList.of("product", "tags", "othertags"))),
-            "\t",
-            ImmutableList.of("timestamp", "product", "tags", "othertags"),
-            false,
-            0
-        ),
-        "UTF-8"
+    InputRowSchema csvSchema = new InputRowSchema(
+        new TimestampSpec("timestamp", "iso", null),
+        new DimensionsSpec(DimensionsSpec.getDefaultSchemas(List.of("product", "tags", "othertags"))),
+        ColumnsFilter.all()
+    );
+    CsvInputFormat csvFormat = new CsvInputFormat(
+        List.of("timestamp", "product", "tags", "othertags"),
+        "\t",
+        null,
+        false,
+        0,
+        null
     );
 
     String[] rows = new String[]{
@@ -167,24 +167,27 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
         "2011-01-14T00:00:00.000Z,product_4,\"\",u2"
     };
 
-    for (String row : rows) {
-      incrementalIndex.add(parser.parse(row));
+    try (CloseableIterator<InputRow> iter = new InlineInputSource(String.join("\n", rows))
+        .reader(csvSchema, csvFormat, null)
+        .read()) {
+      while (iter.hasNext()) {
+        incrementalIndex.add(iter.next());
+      }
     }
 
 
     persistedSegmentDir = FileUtils.createTempDir();
     TestHelper.getTestIndexMergerV9(segmentWriteOutMediumFactory)
-              .persist(incrementalIndex, persistedSegmentDir, new IndexSpec(), null);
+              .persist(incrementalIndex, persistedSegmentDir, IndexSpec.getDefault(), null);
     queryableIndex = TestHelper.getTestIndexIO().loadIndex(persistedSegmentDir);
 
 
-    StringInputRowParser parserNullSampler = new StringInputRowParser(
-        new JSONParseSpec(
-            new TimestampSpec("time", "iso", null),
-            new DimensionsSpec(DimensionsSpec.getDefaultSchemas(ImmutableList.of("product", "tags", "othertags")))
-        ),
-        "UTF-8"
+    InputRowSchema jsonSchema = new InputRowSchema(
+        new TimestampSpec("time", "iso", null),
+        new DimensionsSpec(DimensionsSpec.getDefaultSchemas(List.of("product", "tags", "othertags"))),
+        ColumnsFilter.all()
     );
+    JsonInputFormat jsonFormat = new JsonInputFormat(null, null, null, null, null);
 
     incrementalIndexNullSampler = new OnheapIncrementalIndex.Builder()
         .setSimpleTestingIndexSchema(new CountAggregatorFactory("count"))
@@ -202,17 +205,21 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
         "{\"time\":\"2011-01-16T00:00:00.000Z\",\"product\":\"product_8\",\"tags\":[\"\"],\"othertags\":[]}"
     };
 
-    for (String row : rowsNullSampler) {
-      incrementalIndexNullSampler.add(parserNullSampler.parse(row));
+    try (CloseableIterator<InputRow> iter = new InlineInputSource(String.join("\n", rowsNullSampler))
+        .reader(jsonSchema, jsonFormat, null)
+        .read()) {
+      while (iter.hasNext()) {
+        incrementalIndexNullSampler.add(iter.next());
+      }
     }
     persistedSegmentDirNullSampler = FileUtils.createTempDir();
     TestHelper.getTestIndexMergerV9(segmentWriteOutMediumFactory)
-              .persist(incrementalIndexNullSampler, persistedSegmentDirNullSampler, new IndexSpec(), null);
+              .persist(incrementalIndexNullSampler, persistedSegmentDirNullSampler, IndexSpec.getDefault(), null);
 
     queryableIndexNullSampler = TestHelper.getTestIndexIO().loadIndex(persistedSegmentDirNullSampler);
   }
 
-  @After
+  @AfterEach
   public void teardown() throws IOException
   {
     helper.close();
@@ -243,7 +250,7 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
             query,
             "1970",
             "tags",
-            NullHandling.replaceWithDefault() ? null : "",
+            "",
             "count",
             2L
         ),
@@ -345,22 +352,10 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
         query
     );
 
-    List<ResultRow> expectedResults;
-    // an empty row e.g. [], or group by 'missing' value, is grouped with the default string value, "" or null
-    // grouping input is filtered to [], null, [""]
-    if (NullHandling.replaceWithDefault()) {
-      // when sql compatible null handling is disabled, the inputs are effectively [], null, [null] and
-      // are all grouped as null
-      expectedResults = Collections.singletonList(
-          GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970-01-01T00:00:00.000Z", "tags", null, "count", 6L)
-      );
-    } else {
-      // with sql compatible null handling, null and [] = null, but [""] = ""
-      expectedResults = ImmutableList.of(
-          GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970-01-01T00:00:00.000Z", "tags", null, "count", 4L),
-          GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970-01-01T00:00:00.000Z", "tags", "", "count", 2L)
-      );
-    }
+    List<ResultRow> expectedResults = ImmutableList.of(
+        GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970-01-01T00:00:00.000Z", "tags", null, "count", 4L),
+        GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970-01-01T00:00:00.000Z", "tags", "", "count", 2L)
+    );
 
     TestHelper.assertExpectedObjects(expectedResults, result.toList(), "filter-nullish");
   }
@@ -397,10 +392,6 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
   @Test
   public void testGroupByExpression()
   {
-    if (config.getDefaultStrategy().equals(GroupByStrategySelector.STRATEGY_V1)) {
-      expectedException.expect(RuntimeException.class);
-      expectedException.expectMessage("GroupBy v1 does not support dimension selectors with unknown cardinality.");
-    }
     GroupByQuery query = GroupByQuery
         .builder()
         .setDataSource("xx")
@@ -432,7 +423,7 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
             query,
             "1970",
             "texpr",
-            NullHandling.sqlCompatible() ? "foo" : null,
+            "foo",
             "count",
             2L
         ),
@@ -451,10 +442,6 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
   @Test
   public void testGroupByExpressionMultiMulti()
   {
-    if (config.getDefaultStrategy().equals(GroupByStrategySelector.STRATEGY_V1)) {
-      expectedException.expect(RuntimeException.class);
-      expectedException.expectMessage("GroupBy v1 does not support dimension selectors with unknown cardinality.");
-    }
     GroupByQuery query = GroupByQuery
         .builder()
         .setDataSource("xx")
@@ -484,20 +471,12 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
 
     List<ResultRow>
         expectedResults =
-        NullHandling.sqlCompatible() ?
         Arrays.asList(
             GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "texpr", "t1u1", "count", 2L),
             GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "texpr", "t1u2", "count", 2L),
             GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "texpr", "t2u1", "count", 2L),
             GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "texpr", "t2u2", "count", 2L),
             GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "texpr", "t3u1", "count", 2L)
-        ) :
-        Arrays.asList(
-            GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "texpr", null, "count", 2L),
-            GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "texpr", "t1u1", "count", 2L),
-            GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "texpr", "t1u2", "count", 2L),
-            GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "texpr", "t2u1", "count", 2L),
-            GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "texpr", "t2u2", "count", 2L)
         );
 
     TestHelper.assertExpectedObjects(expectedResults, result.toList(), "expr-multi-multi");
@@ -508,10 +487,6 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
   {
     try {
       ExpressionProcessing.initializeForHomogenizeNullMultiValueStrings();
-      if (config.getDefaultStrategy().equals(GroupByStrategySelector.STRATEGY_V1)) {
-        expectedException.expect(RuntimeException.class);
-        expectedException.expectMessage("GroupBy v1 does not support dimension selectors with unknown cardinality.");
-      }
       GroupByQuery query = GroupByQuery
           .builder()
           .setDataSource("xx")
@@ -557,10 +532,6 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
   @Test
   public void testGroupByExpressionMultiMultiAuto()
   {
-    if (config.getDefaultStrategy().equals(GroupByStrategySelector.STRATEGY_V1)) {
-      expectedException.expect(RuntimeException.class);
-      expectedException.expectMessage("GroupBy v1 does not support dimension selectors with unknown cardinality.");
-    }
     GroupByQuery query = GroupByQuery
         .builder()
         .setDataSource("xx")
@@ -602,10 +573,6 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
   @Test
   public void testGroupByExpressionMultiMultiAutoAuto()
   {
-    if (config.getDefaultStrategy().equals(GroupByStrategySelector.STRATEGY_V1)) {
-      expectedException.expect(RuntimeException.class);
-      expectedException.expectMessage("GroupBy v1 does not support dimension selectors with unknown cardinality.");
-    }
     GroupByQuery query = GroupByQuery
         .builder()
         .setDataSource("xx")
@@ -681,7 +648,7 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
             query,
             "1970",
             "texpr",
-            NullHandling.emptyToNullIfNeeded(""),
+            "",
             "count",
             2L
         ),
@@ -695,10 +662,6 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
   @Test
   public void testGroupByExpressionMultiMultiAutoAutoWithFilter()
   {
-    if (config.getDefaultStrategy().equals(GroupByStrategySelector.STRATEGY_V1)) {
-      expectedException.expect(RuntimeException.class);
-      expectedException.expectMessage("GroupBy v1 does not support dimension selectors with unknown cardinality.");
-    }
     GroupByQuery query = GroupByQuery
         .builder()
         .setDataSource("xx")
@@ -786,10 +749,6 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
   @Test
   public void testGroupByExpressionArrayExpressionFilter()
   {
-    if (config.getDefaultStrategy().equals(GroupByStrategySelector.STRATEGY_V1)) {
-      expectedException.expect(RuntimeException.class);
-      expectedException.expectMessage("GroupBy v1 only supports dimensions with an outputType of STRING.");
-    }
     GroupByQuery query = GroupByQuery
         .builder()
         .setDataSource("xx")
@@ -816,19 +775,10 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
         query
     );
 
-    List<ResultRow> expectedResults;
-    if (NullHandling.replaceWithDefault()) {
-      expectedResults = Arrays.asList(
-          GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "tt", -1L, "count", 4L),
-          GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "tt", 0L, "count", 2L),
-          GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "tt", 1L, "count", 2L)
-      );
-    } else {
-      expectedResults = Arrays.asList(
-          GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "tt", null, "count", 6L),
-          GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "tt", 1L, "count", 2L)
-      );
-    }
+    List<ResultRow> expectedResults = Arrays.asList(
+        GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "tt", null, "count", 6L),
+        GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "tt", 1L, "count", 2L)
+    );
 
     TestHelper.assertExpectedObjects(expectedResults, result.toList(), "expr-auto");
   }
@@ -836,10 +786,6 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
   @Test
   public void testGroupByExpressionArrayFnArg()
   {
-    if (config.getDefaultStrategy().equals(GroupByStrategySelector.STRATEGY_V1)) {
-      expectedException.expect(RuntimeException.class);
-      expectedException.expectMessage("GroupBy v1 does not support dimension selectors with unknown cardinality.");
-    }
     GroupByQuery query = GroupByQuery
         .builder()
         .setDataSource("xx")
@@ -867,7 +813,7 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
     );
 
     List<ResultRow> expectedResults = Arrays.asList(
-        GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "tt", NullHandling.replaceWithDefault() ? null : "foo", "count", 2L),
+        GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "tt", "foo", "count", 2L),
         GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "tt", "foot1, foot2, foot3", "count", 2L),
         GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "tt", "foot3, foot4, foot5", "count", 2L),
         GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "tt", "foot5, foot6, foot7", "count", 2L)
@@ -879,10 +825,6 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
   @Test
   public void testGroupByExpressionAutoArrayFnArg()
   {
-    if (config.getDefaultStrategy().equals(GroupByStrategySelector.STRATEGY_V1)) {
-      expectedException.expect(RuntimeException.class);
-      expectedException.expectMessage("GroupBy v1 does not support dimension selectors with unknown cardinality.");
-    }
     GroupByQuery query = GroupByQuery
         .builder()
         .setDataSource("xx")
@@ -922,10 +864,6 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
   @Test
   public void testGroupByExpressionFoldArrayToString()
   {
-    if (config.getDefaultStrategy().equals(GroupByStrategySelector.STRATEGY_V1)) {
-      expectedException.expect(RuntimeException.class);
-      expectedException.expectMessage("GroupBy v1 does not support dimension selectors with unknown cardinality.");
-    }
     GroupByQuery query = GroupByQuery
         .builder()
         .setDataSource("xx")
@@ -958,7 +896,7 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
             query,
             "1970-01-01T00:00:00.000Z",
             "tt",
-            NullHandling.replaceWithDefault() ? null : "",
+            "",
             "count",
             2L
         ),
@@ -973,10 +911,6 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
   @Test
   public void testGroupByExpressionFoldArrayToStringWithConcats()
   {
-    if (config.getDefaultStrategy().equals(GroupByStrategySelector.STRATEGY_V1)) {
-      expectedException.expect(RuntimeException.class);
-      expectedException.expectMessage("GroupBy v1 does not support dimension selectors with unknown cardinality.");
-    }
     GroupByQuery query = GroupByQuery
         .builder()
         .setDataSource("xx")
@@ -1004,7 +938,7 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
     );
 
     List<ResultRow> expectedResults = Arrays.asList(
-        GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "tt", NullHandling.replaceWithDefault() ? null : "foo", "count", 2L),
+        GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "tt", "foo", "count", 2L),
         GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "tt", "foot1, foot2, foot3", "count", 2L),
         GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "tt", "foot3, foot4, foot5", "count", 2L),
         GroupByQueryRunnerTestHelper.createExpectedRow(query, "1970", "tt", "foot5, foot6, foot7", "count", 2L)
@@ -1017,11 +951,7 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
   @Test
   public void testGroupByExpressionMultiConflicting()
   {
-    expectedException.expect(RuntimeException.class);
-    expectedException.expectMessage(
-        "Invalid expression: (concat [(cartesian_map ([x, othertags] -> (concat [x, othertags])), [tags, othertags]), tags]); [tags] used as both scalar and array variables"
-    );
-    GroupByQuery query = GroupByQuery
+    final GroupByQuery query = GroupByQuery
         .builder()
         .setDataSource("xx")
         .setQuerySegmentSpec(new LegacySegmentSpec("1970/3000"))
@@ -1040,23 +970,28 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
         .setContext(context)
         .build();
 
-    helper.runQueryOnSegmentsObjs(
-        ImmutableList.of(
-            new QueryableIndexSegment(queryableIndex, SegmentId.dummy("sid1")),
-            new IncrementalIndexSegment(incrementalIndex, SegmentId.dummy("sid2"))
-        ),
-        query
-    ).toList();
+    final RuntimeException exception = Assertions.assertThrows(
+        RuntimeException.class,
+        () -> helper.runQueryOnSegmentsObjs(
+            ImmutableList.of(
+                new QueryableIndexSegment(queryableIndex, SegmentId.dummy("sid1")),
+                new IncrementalIndexSegment(incrementalIndex, SegmentId.dummy("sid2"))
+            ),
+            query
+        ).toList()
+    );
+    Assertions.assertTrue(
+        exception.getMessage().contains(
+            "Invalid expression: (concat [(cartesian_map ([x, othertags] -> (concat [x, othertags])), [tags, othertags]), tags]);"
+            + " [tags] used as both scalar and array variables"
+        )
+    );
   }
 
   @Test
   public void testGroupByExpressionMultiConflictingAlso()
   {
-    expectedException.expect(RuntimeException.class);
-    expectedException.expectMessage(
-        "Invalid expression: (array_concat [tags, (array_append [othertags, tags])]); [tags] used as both scalar and array variables"
-    );
-    GroupByQuery query = GroupByQuery
+    final GroupByQuery query = GroupByQuery
         .builder()
         .setDataSource("xx")
         .setQuerySegmentSpec(new LegacySegmentSpec("1970/3000"))
@@ -1075,13 +1010,22 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
         .setContext(context)
         .build();
 
-    helper.runQueryOnSegmentsObjs(
-        ImmutableList.of(
-            new QueryableIndexSegment(queryableIndex, SegmentId.dummy("sid1")),
-            new IncrementalIndexSegment(incrementalIndex, SegmentId.dummy("sid2"))
-        ),
-        query
-    ).toList();
+    final RuntimeException exception = Assertions.assertThrows(
+        RuntimeException.class,
+        () -> helper.runQueryOnSegmentsObjs(
+            ImmutableList.of(
+                new QueryableIndexSegment(queryableIndex, SegmentId.dummy("sid1")),
+                new IncrementalIndexSegment(incrementalIndex, SegmentId.dummy("sid2"))
+            ),
+            query
+        ).toList()
+    );
+    Assertions.assertTrue(
+        exception.getMessage().contains(
+            "Invalid expression: (array_concat [tags, (array_append [othertags, tags])]);"
+            + " [tags] used as both scalar and array variables"
+        )
+    );
   }
 
   @Test
@@ -1115,9 +1059,9 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
       );
       Sequence<Result<TopNResultValue>> result = runner.run(QueryPlus.wrap(query));
       List<Result<TopNResultValue>> expectedResults = Collections.singletonList(
-          new Result<TopNResultValue>(
+          new Result<>(
               DateTimes.of("2011-01-12T00:00:00.000Z"),
-              new TopNResultValue(
+              TopNResultValue.create(
                   Collections.<Map<String, Object>>singletonList(
                       ImmutableMap.of(
                           "tags", "t3",
@@ -1164,19 +1108,16 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
           null
       );
       Sequence<Result<TopNResultValue>> result = runner.run(QueryPlus.wrap(query));
+
+      final Map<String, Object> thirdMap = new HashMap<>();
+      thirdMap.put("texpr", "foo");
+      thirdMap.put("count", 1L);
+
       List<Map<String, Object>> expected =
           ImmutableList.<Map<String, Object>>builder()
                        .add(ImmutableMap.of("texpr", "t3foo", "count", 2L))
                        .add(ImmutableMap.of("texpr", "t5foo", "count", 2L))
-                       .add(
-                           new HashMap<String, Object>()
-                           {
-                             {
-                               put("texpr", NullHandling.sqlCompatible() ? "foo" : null);
-                               put("count", 1L);
-                             }
-                           }
-                       )
+                       .add(thirdMap)
                        .add(ImmutableMap.of("texpr", "t1foo", "count", 1L))
                        .add(ImmutableMap.of("texpr", "t2foo", "count", 1L))
                        .add(ImmutableMap.of("texpr", "t4foo", "count", 1L))
@@ -1185,9 +1126,9 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
                        .build();
 
       List<Result<TopNResultValue>> expectedResults = Collections.singletonList(
-          new Result<TopNResultValue>(
+          new Result<>(
               DateTimes.of("2011-01-12T00:00:00.000Z"),
-              new TopNResultValue(
+              TopNResultValue.create(
                   expected
               )
           )
@@ -1243,9 +1184,9 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
               .build();
 
       List<Result<TopNResultValue>> expectedResults = Collections.singletonList(
-          new Result<TopNResultValue>(
+          new Result<>(
               DateTimes.of("2011-01-12T00:00:00.000Z"),
-              new TopNResultValue(
+              TopNResultValue.create(
                   expected
               )
           )
@@ -1254,7 +1195,7 @@ public class MultiValuedDimensionTest extends InitializedNullHandlingTest
     }
   }
 
-  @After
+  @AfterEach
   public void cleanup() throws Exception
   {
     queryableIndex.close();

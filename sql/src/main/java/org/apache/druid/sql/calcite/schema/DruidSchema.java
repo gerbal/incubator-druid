@@ -19,54 +19,88 @@
 
 package org.apache.druid.sql.calcite.schema;
 
+import com.google.common.base.Preconditions;
 import org.apache.calcite.schema.Table;
+import org.apache.druid.server.security.AuthenticationResult;
+import org.apache.druid.server.security.AuthorizerMapper;
+import org.apache.druid.server.security.ResourceType;
+import org.apache.druid.sql.calcite.planner.CatalogResolver;
 import org.apache.druid.sql.calcite.table.DatasourceTable;
-
-import javax.inject.Inject;
+import org.apache.druid.sql.calcite.table.DruidTable;
 
 import java.util.Set;
 
 public class DruidSchema extends AbstractTableSchema
 {
-  private final SegmentMetadataCache segmentCache;
+  private final BrokerSegmentMetadataCache segmentMetadataCache;
   private final DruidSchemaManager druidSchemaManager;
+  private final CatalogResolver catalogResolver;
+  private final AuthorizerMapper authorizerMapper;
+  private final AuthenticationResult authenticationResult;
+  private final boolean authorizeTableVisibility;
 
-  @Inject
   public DruidSchema(
-      SegmentMetadataCache segmentCache,
-      final DruidSchemaManager druidSchemaManager)
+      final BrokerSegmentMetadataCache segmentMetadataCache,
+      final DruidSchemaManager druidSchemaManager,
+      final CatalogResolver catalogResolver,
+      final AuthorizerMapper authorizerMapper,
+      final AuthenticationResult authenticationResult,
+      final boolean authorizeTableVisibility
+  )
   {
-    this.segmentCache = segmentCache;
+    this.segmentMetadataCache = segmentMetadataCache;
+    this.catalogResolver = catalogResolver;
     if (druidSchemaManager != null && !(druidSchemaManager instanceof NoopDruidSchemaManager)) {
       this.druidSchemaManager = druidSchemaManager;
     } else {
       this.druidSchemaManager = null;
     }
-  }
-
-  protected SegmentMetadataCache cache()
-  {
-    return segmentCache;
+    this.authorizerMapper = authorizerMapper;
+    this.authenticationResult = Preconditions.checkNotNull(authenticationResult, "authenticationResult");
+    this.authorizeTableVisibility = authorizeTableVisibility;
   }
 
   @Override
   public Table getTable(String name)
   {
-    if (druidSchemaManager != null) {
-      return druidSchemaManager.getTable(name);
+    if (authorizeTableVisibility
+        && !SchemaUtils.isTableVisible(authorizerMapper, authenticationResult, name, ResourceType.DATASOURCE)) {
+      // Do not return tables that are not supposed to be visible in this schema.
+      return null;
+    }
+
+    DruidTable schemaMgrTable = null;
+    DruidTable catalogTable = catalogResolver.resolveDatasource(name, null);
+    if (catalogTable == null && druidSchemaManager != null) {
+      schemaMgrTable = druidSchemaManager.getTable(name, segmentMetadataCache);
+    }
+    if (schemaMgrTable == null) {
+      DatasourceTable.PhysicalDatasourceMetadata dsMetadata = segmentMetadataCache.getDatasource(name);
+      return catalogResolver.resolveDatasource(name, dsMetadata);
     } else {
-      DatasourceTable.PhysicalDatasourceMetadata dsMetadata = segmentCache.getDatasource(name);
-      return dsMetadata == null ? null : new DatasourceTable(dsMetadata);
+      return schemaMgrTable;
     }
   }
 
   @Override
   public Set<String> getTableNames()
   {
+    final Set<String> allTableNames;
     if (druidSchemaManager != null) {
-      return druidSchemaManager.getTableNames();
+      allTableNames = druidSchemaManager.getTableNames(segmentMetadataCache);
     } else {
-      return segmentCache.getDatasourceNames();
+      allTableNames = catalogResolver.getTableNames(segmentMetadataCache.getDatasourceNames());
+    }
+
+    if (authorizeTableVisibility) {
+      return SchemaUtils.filterVisibleTables(
+          authorizerMapper,
+          authenticationResult,
+          allTableNames,
+          ResourceType.DATASOURCE
+      );
+    } else {
+      return allTableNames;
     }
   }
 }

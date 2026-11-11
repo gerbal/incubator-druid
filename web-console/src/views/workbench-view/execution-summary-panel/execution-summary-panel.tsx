@@ -16,18 +16,31 @@
  * limitations under the License.
  */
 
-import { Button, ButtonGroup, Menu, MenuDivider, MenuItem, Position } from '@blueprintjs/core';
+import { Button, ButtonGroup, Menu, MenuDivider, MenuItem, PopoverNext } from '@blueprintjs/core';
 import { IconNames } from '@blueprintjs/icons';
-import { Popover2 } from '@blueprintjs/popover2';
-import React from 'react';
+import type { JSX } from 'react';
+import React, { useState } from 'react';
 
 import type { Execution } from '../../../druid-models';
-import { downloadQueryResults, formatDurationHybrid, pluralIfNeeded } from '../../../utils';
+import type { FileFormat } from '../../../utils';
+import {
+  copyAndAlert,
+  copyQueryResultsToClipboard,
+  downloadQueryResults,
+  FILE_FORMAT_TO_LABEL,
+  FILE_FORMATS,
+  formatDurationHybrid,
+  formatInteger,
+  oneOf,
+  pluralIfNeeded,
+} from '../../../utils';
+import { DestinationPagesDialog } from '../destination-pages-dialog/destination-pages-dialog';
 
 import './execution-summary-panel.scss';
 
 export interface ExecutionSummaryPanelProps {
   execution: Execution | undefined;
+  queryErrorDuration: number | undefined;
   onExecutionDetail(): void;
   onReset?: () => void;
 }
@@ -35,29 +48,50 @@ export interface ExecutionSummaryPanelProps {
 export const ExecutionSummaryPanel = React.memo(function ExecutionSummaryPanel(
   props: ExecutionSummaryPanelProps,
 ) {
-  const { execution, onExecutionDetail, onReset } = props;
+  const { execution, queryErrorDuration, onExecutionDetail, onReset } = props;
+  const [showDestinationPages, setShowDestinationPages] = useState(false);
   const queryResult = execution?.result;
 
   const buttons: JSX.Element[] = [];
 
+  if (typeof queryErrorDuration === 'number') {
+    buttons.push(
+      <Button
+        key="timing"
+        variant="minimal"
+        text={`Error after ${formatDurationHybrid(queryErrorDuration)}`}
+      />,
+    );
+  }
+
   if (queryResult) {
     const wrapQueryLimit = queryResult.getSqlOuterLimit();
-    const hasMoreResults = queryResult.getNumResults() === wrapQueryLimit;
+    let resultCount: string;
+    const numTotalRows = execution?.destination?.numTotalRows;
+    if (typeof wrapQueryLimit === 'undefined' && typeof numTotalRows === 'number') {
+      resultCount = pluralIfNeeded(numTotalRows, 'result');
+    } else {
+      const hasMoreResults = queryResult.getNumResults() === wrapQueryLimit;
 
-    const resultCount = hasMoreResults
-      ? `${queryResult.getNumResults() - 1}+ results`
-      : pluralIfNeeded(queryResult.getNumResults(), 'result');
+      resultCount = hasMoreResults
+        ? `${formatInteger(queryResult.getNumResults() - 1)}+ results`
+        : pluralIfNeeded(queryResult.getNumResults(), 'result');
+    }
 
     const warningCount = execution?.stages?.getWarningCount();
 
-    const handleDownload = (format: string) => {
+    const handleDownload = (format: FileFormat) => {
       downloadQueryResults(queryResult, `results-${execution.id}.${format}`, format);
+    };
+
+    const handleCopy = (format: FileFormat) => {
+      copyQueryResultsToClipboard(queryResult, format);
     };
 
     buttons.push(
       <Button
         key="results"
-        minimal
+        variant="minimal"
         text={
           resultCount +
           (warningCount ? ` and ${pluralIfNeeded(warningCount, 'warning')}` : '') +
@@ -65,36 +99,81 @@ export const ExecutionSummaryPanel = React.memo(function ExecutionSummaryPanel(
         }
         onClick={() => {
           if (!execution) return;
-          if (execution.engine === 'sql-msq-task') {
+          if (oneOf(execution.engine, 'sql-msq-task', 'sql-msq-dart')) {
             onExecutionDetail();
+          } else {
+            copyAndAlert(execution.id, `Query ID (${execution.id}) copied to clipboard`);
           }
         }}
+        data-tooltip={
+          execution &&
+          (oneOf(execution.engine, 'sql-msq-task', 'sql-msq-dart')
+            ? `Open details for\n${execution.id}`
+            : `Query ID\n${execution.id}\n(click to copy)`)
+        }
       />,
-      <Popover2
+      <PopoverNext
         key="download"
         className="download-button"
+        placement="bottom-end"
         content={
           <Menu>
-            <MenuDivider title="Download results as..." />
-            <MenuItem text="CSV" onClick={() => handleDownload('csv')} />
-            <MenuItem text="TSV" onClick={() => handleDownload('tsv')} />
-            <MenuItem text="JSON (new line delimited)" onClick={() => handleDownload('json')} />
+            {execution.destinationPages && (
+              <>
+                <MenuDivider title="Download in bulk" />
+                <MenuItem text="Show result pages" onClick={() => setShowDestinationPages(true)} />
+                <MenuDivider title="Download data in view" />
+              </>
+            )}
+            <MenuItem text="Download results as...">
+              {FILE_FORMATS.map(fileFormat => (
+                <MenuItem
+                  key={fileFormat}
+                  text={FILE_FORMAT_TO_LABEL[fileFormat]}
+                  onClick={() => handleDownload(fileFormat)}
+                />
+              ))}
+            </MenuItem>
+            <MenuItem text="Copy to clipboard as...">
+              {FILE_FORMATS.map(fileFormat => (
+                <MenuItem
+                  key={fileFormat}
+                  text={FILE_FORMAT_TO_LABEL[fileFormat]}
+                  onClick={() => handleCopy(fileFormat)}
+                />
+              ))}
+            </MenuItem>
           </Menu>
         }
-        position={Position.BOTTOM_RIGHT}
+        lazy
+        shouldReturnFocusOnClose={false}
       >
-        <Button icon={IconNames.DOWNLOAD} minimal />
-      </Popover2>,
+        <Button icon={IconNames.DOWNLOAD} data-tooltip="Download" variant="minimal" />
+      </PopoverNext>,
     );
   }
 
   if (onReset) {
-    buttons.push(<Button key="reset" icon={IconNames.CROSS} minimal onClick={onReset} />);
+    buttons.push(
+      <Button
+        key="reset"
+        icon={IconNames.CROSS}
+        data-tooltip="Clear output"
+        variant="minimal"
+        onClick={onReset}
+      />,
+    );
   }
 
   return (
-    <ButtonGroup className="execution-summary-panel" minimal>
+    <ButtonGroup className="execution-summary-panel" variant="minimal">
       {buttons}
+      {showDestinationPages && execution && (
+        <DestinationPagesDialog
+          execution={execution}
+          onClose={() => setShowDestinationPages(false)}
+        />
+      )}
     </ButtonGroup>
   );
 });

@@ -26,7 +26,7 @@ import com.google.inject.Injector;
 import com.sun.jersey.spi.container.ResourceFilter;
 import org.apache.druid.indexing.common.task.NoopTask;
 import org.apache.druid.indexing.common.task.Task;
-import org.apache.druid.indexing.overlord.TaskStorageQueryAdapter;
+import org.apache.druid.indexing.overlord.TaskQueryTool;
 import org.apache.druid.indexing.overlord.http.OverlordResource;
 import org.apache.druid.indexing.overlord.supervisor.Supervisor;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorManager;
@@ -39,28 +39,29 @@ import org.apache.druid.server.http.security.ResourceFilterTestHelper;
 import org.apache.druid.server.security.AuthorizerMapper;
 import org.apache.druid.server.security.ForbiddenException;
 import org.easymock.EasyMock;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.Collection;
 import java.util.List;
 import java.util.regex.Pattern;
 
-@RunWith(Parameterized.class)
+@ParameterizedClass(name = "{index}: requestPath={0}, requestMethod={1}, resourceFilter={2}")
+@MethodSource("data")
 public class OverlordSecurityResourceFilterTest extends ResourceFilterTestHelper
 {
   private static final Pattern WORD = Pattern.compile("\\w+");
 
-  @Parameterized.Parameters(name = "{index}: requestPath={0}, requestMethod={1}, resourceFilter={2}")
   public static Collection<Object[]> data()
   {
     return ImmutableList.copyOf(
         Iterables.concat(
             getRequestPaths(OverlordResource.class, ImmutableList.of(
-                TaskStorageQueryAdapter.class,
+                TaskQueryTool.class,
                 AuthorizerMapper.class
                             )
             ),
@@ -84,7 +85,7 @@ public class OverlordSecurityResourceFilterTest extends ResourceFilterTestHelper
 
   private static boolean mockedOnceTsqa;
   private static boolean mockedOnceSM;
-  private TaskStorageQueryAdapter tsqa;
+  private TaskQueryTool tsqa;
   private SupervisorManager supervisorManager;
 
   public OverlordSecurityResourceFilterTest(
@@ -100,14 +101,14 @@ public class OverlordSecurityResourceFilterTest extends ResourceFilterTestHelper
     this.injector = injector;
   }
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
     if (resourceFilter instanceof TaskResourceFilter && !mockedOnceTsqa) {
       // Since we are creating the mocked tsqa object only once and getting that object from Guice here therefore
       // if the mockedOnce check is not done then we will call EasyMock.expect and EasyMock.replay on the mocked object
       // multiple times and it will throw exceptions
-      tsqa = injector.getInstance(TaskStorageQueryAdapter.class);
+      tsqa = injector.getInstance(TaskQueryTool.class);
       EasyMock.expect(tsqa.getTask(EasyMock.anyString())).andReturn(Optional.of(noopTask)).anyTimes();
       EasyMock.replay(tsqa);
       mockedOnceTsqa = true;
@@ -169,6 +170,7 @@ public class OverlordSecurityResourceFilterTest extends ResourceFilterTestHelper
         {
           return null;
         }
+
       };
       EasyMock.expect(supervisorManager.getSupervisorSpec(EasyMock.anyString()))
               .andReturn(Optional.of(supervisorSpec))
@@ -191,18 +193,13 @@ public class OverlordSecurityResourceFilterTest extends ResourceFilterTestHelper
     resourceFilter.getRequestFilter().filter(request);
   }
 
-  @Test(expected = ForbiddenException.class)
+  @Test
   public void testDatasourcesResourcesFilteringNoAccess()
   {
     setUpMockExpectations(requestPath, false, requestMethod);
     EasyMock.expect(request.getEntity(Task.class)).andReturn(noopTask).anyTimes();
     EasyMock.replay(req, request, authorizerMapper);
-    try {
-      resourceFilter.getRequestFilter().filter(request);
-    }
-    catch (ForbiddenException e) {
-      throw e;
-    }
+    Assertions.assertThrows(ForbiddenException.class, () -> resourceFilter.getRequestFilter().filter(request));
   }
 
   @Test
@@ -213,7 +210,7 @@ public class OverlordSecurityResourceFilterTest extends ResourceFilterTestHelper
     EasyMock.replay(req, request, authorizerMapper);
   }
 
-  @After
+  @AfterEach
   public void tearDown()
   {
     EasyMock.verify(req, request, authorizerMapper);

@@ -20,20 +20,31 @@
 package org.apache.druid.timeline;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.druid.data.input.impl.AggregateProjectionSpec;
+import org.apache.druid.data.input.impl.BaseTableProjectionSpec;
 import org.apache.druid.data.input.impl.DimensionsSpec;
+import org.apache.druid.indexer.granularity.GranularitySpec;
+import org.apache.druid.indexer.granularity.SegmentGranularitySpec;
 import org.apache.druid.indexer.partitions.PartitionsSpec;
+import org.apache.druid.query.aggregation.AggregatorFactory;
+import org.apache.druid.segment.IndexSpec;
+import org.apache.druid.segment.transform.CompactionTransformSpec;
 
+import javax.annotation.Nullable;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * This class describes what compaction task spec was used to create a given segment.
  * The compaction task is a task that reads Druid segments and overwrites them with new ones. Since this task always
  * reads segments in the same order, the same task spec will always create the same set of segments
  * (not same segment ID, but same content).
- *
+ * <p>
  * Note that this class doesn't include all fields in the compaction task spec. Only the configurations that can
  * affect the content of segment should be included.
  *
@@ -43,27 +54,28 @@ public class CompactionState
 {
   private final PartitionsSpec partitionsSpec;
   private final DimensionsSpec dimensionsSpec;
-  // org.apache.druid.segment.transform.TransformSpec cannot be used here because it's in the 'processing' module which
-  // has a dependency on the 'core' module where this class is.
-  private final Map<String, Object> transformSpec;
-  // org.apache.druid.segment.IndexSpec cannot be used here because it's in the 'processing' module which
-  // has a dependency on the 'core' module where this class is.
-  private final Map<String, Object> indexSpec;
-  // org.apache.druid.segment.indexing.granularity.GranularitySpec cannot be used here because it's in the
-  // 'server' module which has a dependency on the 'core' module where this class is.
-  private final Map<String, Object> granularitySpec;
-  // org.apache.druid.query.aggregation.AggregatorFactory cannot be used here because it's in the 'processing' module which
-  // has a dependency on the 'core' module where this class is.
-  private final List<Object> metricsSpec;
+  private final CompactionTransformSpec transformSpec;
+  private final IndexSpec indexSpec;
+  private final GranularitySpec granularitySpec;
+  private final List<AggregatorFactory> metricsSpec;
+  @Nullable
+  private final List<AggregateProjectionSpec> projections;
+  @Nullable
+  private final SegmentGranularitySpec segmentGranularitySpec;
+  @Nullable
+  private final BaseTableProjectionSpec baseTable;
 
   @JsonCreator
   public CompactionState(
       @JsonProperty("partitionsSpec") PartitionsSpec partitionsSpec,
       @JsonProperty("dimensionsSpec") DimensionsSpec dimensionsSpec,
-      @JsonProperty("metricsSpec") List<Object> metricsSpec,
-      @JsonProperty("transformSpec") Map<String, Object> transformSpec,
-      @JsonProperty("indexSpec") Map<String, Object> indexSpec,
-      @JsonProperty("granularitySpec") Map<String, Object> granularitySpec
+      @JsonProperty("metricsSpec") List<AggregatorFactory> metricsSpec,
+      @JsonProperty("transformSpec") CompactionTransformSpec transformSpec,
+      @JsonProperty("indexSpec") IndexSpec indexSpec,
+      @JsonProperty("granularitySpec") GranularitySpec granularitySpec,
+      @JsonProperty("segmentGranularitySpec") @Nullable SegmentGranularitySpec segmentGranularitySpec,
+      @JsonProperty("baseTable") @Nullable BaseTableProjectionSpec baseTable,
+      @JsonProperty("projections") @Nullable List<AggregateProjectionSpec> projections
   )
   {
     this.partitionsSpec = partitionsSpec;
@@ -72,6 +84,9 @@ public class CompactionState
     this.transformSpec = transformSpec;
     this.indexSpec = indexSpec;
     this.granularitySpec = granularitySpec;
+    this.projections = projections;
+    this.segmentGranularitySpec = segmentGranularitySpec;
+    this.baseTable = baseTable;
   }
 
   @JsonProperty
@@ -87,27 +102,51 @@ public class CompactionState
   }
 
   @JsonProperty
-  public List<Object> getMetricsSpec()
+  public List<AggregatorFactory> getMetricsSpec()
   {
     return metricsSpec;
   }
 
   @JsonProperty
-  public Map<String, Object> getTransformSpec()
+  public CompactionTransformSpec getTransformSpec()
   {
     return transformSpec;
   }
 
   @JsonProperty
-  public Map<String, Object> getIndexSpec()
+  public IndexSpec getIndexSpec()
   {
     return indexSpec;
   }
 
   @JsonProperty
-  public Map<String, Object> getGranularitySpec()
+  public GranularitySpec getGranularitySpec()
   {
     return granularitySpec;
+  }
+
+  @JsonProperty
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  @Nullable
+  public List<AggregateProjectionSpec> getProjections()
+  {
+    return projections;
+  }
+
+  @JsonProperty
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  @Nullable
+  public SegmentGranularitySpec getSegmentGranularitySpec()
+  {
+    return segmentGranularitySpec;
+  }
+
+  @JsonProperty
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  @Nullable
+  public BaseTableProjectionSpec getBaseTable()
+  {
+    return baseTable;
   }
 
   @Override
@@ -125,13 +164,26 @@ public class CompactionState
            Objects.equals(transformSpec, that.transformSpec) &&
            Objects.equals(indexSpec, that.indexSpec) &&
            Objects.equals(granularitySpec, that.granularitySpec) &&
-           Objects.equals(metricsSpec, that.metricsSpec);
+           Objects.equals(metricsSpec, that.metricsSpec) &&
+           Objects.equals(projections, that.projections) &&
+           Objects.equals(segmentGranularitySpec, that.segmentGranularitySpec) &&
+           Objects.equals(baseTable, that.baseTable);
   }
 
   @Override
   public int hashCode()
   {
-    return Objects.hash(partitionsSpec, dimensionsSpec, transformSpec, indexSpec, granularitySpec, metricsSpec);
+    return Objects.hash(
+        partitionsSpec,
+        dimensionsSpec,
+        transformSpec,
+        indexSpec,
+        granularitySpec,
+        metricsSpec,
+        projections,
+        segmentGranularitySpec,
+        baseTable
+    );
   }
 
   @Override
@@ -144,6 +196,163 @@ public class CompactionState
            ", indexSpec=" + indexSpec +
            ", granularitySpec=" + granularitySpec +
            ", metricsSpec=" + metricsSpec +
+           ", segmentGranularitySpec=" + segmentGranularitySpec +
+           ", baseTable=" + baseTable +
+           ", projections=" + projections +
            '}';
+  }
+
+  public static Function<Set<DataSegment>, Set<DataSegment>> addCompactionStateToSegments(
+      PartitionsSpec partitionsSpec,
+      DimensionsSpec dimensionsSpec,
+      List<AggregatorFactory> metricsSpec,
+      CompactionTransformSpec transformSpec,
+      IndexSpec indexSpec,
+      GranularitySpec granularitySpec,
+      @Nullable SegmentGranularitySpec segmentGranularitySpec,
+      @Nullable BaseTableProjectionSpec baseTable,
+      @Nullable List<AggregateProjectionSpec> projections
+  )
+  {
+    IndexSpec effectiveIndexSpec = indexSpec.getEffectiveSpec();
+    DimensionsSpec effectiveDimensions =
+        DimensionsSpec.builder(dimensionsSpec)
+                      .setDimensions(
+                          dimensionsSpec.getDimensions()
+                                        .stream()
+                                        .map(dim -> dim.getEffectiveSchema(effectiveIndexSpec))
+                                        .collect(Collectors.toList())
+                      )
+                      .build();
+
+    CompactionState compactionState = new CompactionState(
+        partitionsSpec,
+        effectiveDimensions,
+        metricsSpec,
+        transformSpec,
+        effectiveIndexSpec,
+        granularitySpec,
+        segmentGranularitySpec,
+        baseTable,
+        projections
+    );
+
+    return segments -> segments
+        .stream()
+        .map(s -> s.withLastCompactionState(compactionState))
+        .collect(Collectors.toSet());
+  }
+
+
+  public static Builder builder()
+  {
+    return new Builder();
+  }
+
+  public Builder toBuilder()
+  {
+    return new Builder(this);
+  }
+
+  public static class Builder
+  {
+    private PartitionsSpec partitionsSpec;
+    private DimensionsSpec dimensionsSpec;
+    private CompactionTransformSpec transformSpec;
+    private IndexSpec indexSpec;
+    private GranularitySpec granularitySpec;
+    private List<AggregatorFactory> metricsSpec;
+    @Nullable
+    private List<AggregateProjectionSpec> projections;
+    @Nullable
+    private SegmentGranularitySpec segmentGranularitySpec;
+    @Nullable
+    private BaseTableProjectionSpec baseTable;
+
+    Builder()
+    {
+    }
+
+    private Builder(CompactionState compactionState)
+    {
+      this.partitionsSpec = compactionState.partitionsSpec;
+      this.dimensionsSpec = compactionState.dimensionsSpec;
+      this.transformSpec = compactionState.transformSpec;
+      this.indexSpec = compactionState.indexSpec;
+      this.granularitySpec = compactionState.granularitySpec;
+      this.metricsSpec = compactionState.metricsSpec;
+      this.projections = compactionState.projections;
+      this.segmentGranularitySpec = compactionState.segmentGranularitySpec;
+      this.baseTable = compactionState.baseTable;
+    }
+
+    public Builder partitionsSpec(PartitionsSpec partitionsSpec)
+    {
+      this.partitionsSpec = partitionsSpec;
+      return this;
+    }
+
+    public Builder dimensionsSpec(DimensionsSpec dimensionsSpec)
+    {
+      this.dimensionsSpec = dimensionsSpec;
+      return this;
+    }
+
+    public Builder transformSpec(CompactionTransformSpec transformSpec)
+    {
+      this.transformSpec = transformSpec;
+      return this;
+    }
+
+    public Builder indexSpec(IndexSpec indexSpec)
+    {
+      this.indexSpec = indexSpec;
+      return this;
+    }
+
+    public Builder granularitySpec(GranularitySpec granularitySpec)
+    {
+      this.granularitySpec = granularitySpec;
+      return this;
+    }
+
+    public Builder metricsSpec(List<AggregatorFactory> metricsSpec)
+    {
+      this.metricsSpec = metricsSpec;
+      return this;
+    }
+
+    public Builder projections(@Nullable List<AggregateProjectionSpec> projections)
+    {
+      this.projections = projections;
+      return this;
+    }
+
+    public Builder segmentGranularitySpec(@Nullable SegmentGranularitySpec segmentGranularitySpec)
+    {
+      this.segmentGranularitySpec = segmentGranularitySpec;
+      return this;
+    }
+
+    public Builder baseTable(@Nullable BaseTableProjectionSpec baseTable)
+    {
+      this.baseTable = baseTable;
+      return this;
+    }
+
+    public CompactionState build()
+    {
+      return new CompactionState(
+          partitionsSpec,
+          dimensionsSpec,
+          metricsSpec,
+          transformSpec,
+          indexSpec,
+          granularitySpec,
+          segmentGranularitySpec,
+          baseTable,
+          projections
+      );
+    }
   }
 }

@@ -41,8 +41,8 @@ public class ApproximateHistogram
   // max size of the histogram (number of bincount/position pairs)
   int size;
 
-  public float[] positions;
-  public long[] bins;
+  protected float[] positions;
+  protected long[] bins;
 
   // used bincount
   int binCount;
@@ -626,6 +626,8 @@ public class ApproximateHistogram
     // use preallocated arrays if passed
     if (mergedPositions == null) {
       mergedPositions = new float[this.size];
+    }
+    if (mergedBins == null) {
       mergedBins = new long[this.size];
     }
 
@@ -747,17 +749,15 @@ public class ApproximateHistogram
 
     // if there are values below the lower limit, fill in array position 1
     // else array position 0
-    while (j != leftBinCount || k != rightBinCount) {
+    if (j != leftBinCount || k != rightBinCount) {
       if (j != leftBinCount && (k == rightBinCount || leftPositions[j] < rightPositions[k])) {
         mergedPositions[pos] = leftPositions[j];
         mergedBins[pos] = leftBins[j];
         ++j;
-        break;
       } else {
         mergedPositions[pos] = rightPositions[k];
         mergedBins[pos] = rightBins[k];
         ++k;
-        break;
       }
     }
 
@@ -1659,7 +1659,7 @@ public class ApproximateHistogram
 
     final float cutoff = 0.1f;
 
-    final ArrayList<Float> breaks = new ArrayList<Float>();
+    final ArrayList<Float> breaks = new ArrayList<>();
 
     // to deal with left inclusivity when the min is the same as a break
     final float bottomBreak = minFloor - bucketSize;

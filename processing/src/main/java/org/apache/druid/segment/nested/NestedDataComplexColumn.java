@@ -20,92 +20,30 @@
 
 package org.apache.druid.segment.nested;
 
-import org.apache.druid.query.extraction.ExtractionFn;
-import org.apache.druid.segment.ColumnValueSelector;
-import org.apache.druid.segment.DimensionSelector;
-import org.apache.druid.segment.column.ColumnHolder;
-import org.apache.druid.segment.column.ColumnIndexSupplier;
-import org.apache.druid.segment.column.ColumnType;
+import org.apache.druid.segment.column.BaseColumnHolder;
 import org.apache.druid.segment.column.ComplexColumn;
-import org.apache.druid.segment.data.ReadableOffset;
-import org.apache.druid.segment.vector.ReadableVectorOffset;
-import org.apache.druid.segment.vector.SingleValueDimensionVectorSelector;
-import org.apache.druid.segment.vector.VectorObjectSelector;
-import org.apache.druid.segment.vector.VectorValueSelector;
 
 import javax.annotation.Nullable;
 import java.util.List;
-import java.util.Set;
 
 /**
  * Describes the basic shape for any 'nested data' ({@link StructuredData}) {@link ComplexColumn} implementation along
- * with basic facilities for caching any columns created and methods for retrieving selectors for nested literal field
- * columns.
+ * with basic facilities for caching any columns created and methods for retrieving selectors for nested field columns.
+ * <p>
+ * {@link org.apache.druid.segment.virtual.NestedFieldVirtualColumn} allows query time use of the nested fields.
  */
-public abstract class NestedDataComplexColumn implements ComplexColumn
+public abstract class NestedDataComplexColumn implements
+    ComplexColumn,
+    NestedColumnTypeInspector,
+    NestedColumnIndexSupplier,
+    NestedColumnSelectorFactory,
+    NestedVectorColumnSelectorFactory
 {
   /**
-   * Make a {@link DimensionSelector} for a nested literal field column associated with this nested
-   * complex column specified by a sequence of {@link NestedPathPart}.
-   */
-  public abstract DimensionSelector makeDimensionSelector(
-      List<NestedPathPart> path,
-      ReadableOffset readableOffset,
-      ExtractionFn fn
-  );
-
-  /**
-   * Make a {@link ColumnValueSelector} for a nested literal field column associated with this nested
-   * complex column specified by a sequence of {@link NestedPathPart}.
-   */
-  public abstract ColumnValueSelector<?> makeColumnValueSelector(
-      List<NestedPathPart> path,
-      ReadableOffset readableOffset
-  );
-
-  /**
-   * Make a {@link SingleValueDimensionVectorSelector} for a nested literal field column associated with this nested
-   * complex column specified by a sequence of {@link NestedPathPart}.
-   */
-  public abstract SingleValueDimensionVectorSelector makeSingleValueDimensionVectorSelector(
-      List<NestedPathPart> path,
-      ReadableVectorOffset readableOffset
-  );
-
-  /**
-   * Make a {@link VectorObjectSelector} for a nested literal field column associated with this nested
-   * complex column located at the 'path' represented as a sequence of {@link NestedPathPart}.
-   */
-  public abstract VectorObjectSelector makeVectorObjectSelector(
-      List<NestedPathPart> path,
-      ReadableVectorOffset readableOffset
-  );
-
-  /**
-   * Make a {@link VectorValueSelector} for a nested literal field column associated with this nested
-   * complex column located at the 'path' represented as a sequence of {@link NestedPathPart}.
-   */
-  public abstract VectorValueSelector makeVectorValueSelector(
-      List<NestedPathPart> path,
-      ReadableVectorOffset readableOffset
-  );
-
-  public abstract List<List<NestedPathPart>> getNestedFields();
-
-  @Nullable
-  public abstract Set<ColumnType> getColumnTypes(List<NestedPathPart> path);
-
-  @Nullable
-  public abstract ColumnHolder getColumnHolder(List<NestedPathPart> path);
-
-  /**
-   * Make a {@link ColumnIndexSupplier} for a nested literal field column associated with this nested
-   * complex column located at the 'path' represented as a sequence of {@link NestedPathPart}.
+   * Get a {@link BaseColumnHolder} for a nested field column to retrieve metadata, the column itself, or indexes.
    */
   @Nullable
-  public abstract ColumnIndexSupplier getColumnIndexSupplier(List<NestedPathPart> path);
-
-  public abstract boolean isNumeric(List<NestedPathPart> path);
+  public abstract BaseColumnHolder getColumnHolder(List<NestedPathPart> path);
 
   @Override
   public Class<?> getClazz()
@@ -117,5 +55,19 @@ public abstract class NestedDataComplexColumn implements ComplexColumn
   public String getTypeName()
   {
     return NestedDataComplexTypeSerde.TYPE_NAME;
+  }
+
+  @Override
+  @Nullable
+  public <T> T as(Class<T> clazz)
+  {
+    if (NestedColumnTypeInspector.class.equals(clazz)
+        || NestedColumnIndexSupplier.class.equals(clazz)
+        || NestedColumnSelectorFactory.class.equals(clazz)
+        || NestedVectorColumnSelectorFactory.class.equals(clazz)) {
+      return (T) this;
+    } else {
+      return null;
+    }
   }
 }

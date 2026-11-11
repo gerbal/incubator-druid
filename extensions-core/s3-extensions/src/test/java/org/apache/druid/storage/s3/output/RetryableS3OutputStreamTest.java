@@ -19,30 +19,34 @@
 
 package org.apache.druid.storage.s3.output;
 
-import com.amazonaws.AmazonClientException;
-import com.amazonaws.SdkClientException;
-import com.amazonaws.services.s3.AmazonS3;
-import com.amazonaws.services.s3.model.AbortMultipartUploadRequest;
-import com.amazonaws.services.s3.model.CompleteMultipartUploadRequest;
-import com.amazonaws.services.s3.model.CompleteMultipartUploadResult;
-import com.amazonaws.services.s3.model.InitiateMultipartUploadRequest;
-import com.amazonaws.services.s3.model.InitiateMultipartUploadResult;
-import com.amazonaws.services.s3.model.PartETag;
-import com.amazonaws.services.s3.model.UploadPartRequest;
-import com.amazonaws.services.s3.model.UploadPartResult;
+import com.google.common.collect.ImmutableList;
+import org.apache.druid.error.DruidException;
+import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.common.HumanReadableBytes;
 import org.apache.druid.java.util.common.IOE;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.metrics.StubServiceEmitter;
+import org.apache.druid.query.DruidProcessingConfigTest;
 import org.apache.druid.storage.s3.NoopServerSideEncryption;
+import org.apache.druid.storage.s3.S3TransferConfig;
 import org.apache.druid.storage.s3.ServerSideEncryptingAmazonS3;
 import org.easymock.EasyMock;
-import org.hamcrest.CoreMatchers;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
-import org.junit.rules.TemporaryFolder;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import software.amazon.awssdk.core.exception.SdkClientException;
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.AbortMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CompleteMultipartUploadResponse;
+import software.amazon.awssdk.services.s3.model.CompletedPart;
+import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CreateMultipartUploadResponse;
+import software.amazon.awssdk.services.s3.model.PutObjectResponse;
+import software.amazon.awssdk.services.s3.model.UploadPartRequest;
+import software.amazon.awssdk.services.s3.model.UploadPartResponse;
 
 import javax.annotation.Nullable;
 import java.io.File;
@@ -50,35 +54,33 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public class RetryableS3OutputStreamTest
 {
-  @Rule
-  public TemporaryFolder temporaryFolder = new TemporaryFolder();
-
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
+  @TempDir
+  public File temporaryFolder;
 
   private final TestAmazonS3 s3 = new TestAmazonS3(0);
   private final String path = "resultId";
 
-
   private S3OutputConfig config;
-  private long maxResultsSize;
   private long chunkSize;
 
-  @Before
+  private S3UploadManager s3UploadManager;
+
+
+  @BeforeEach
   public void setup() throws IOException
   {
-    final File tempDir = temporaryFolder.newFolder();
+    final File tempDir = FileUtils.createTempDirInLocation(temporaryFolder.toPath(), "s3output");
     chunkSize = 10L;
     config = new S3OutputConfig(
         "TEST",
         "TEST",
         tempDir,
         HumanReadableBytes.valueOf(chunkSize),
-        HumanReadableBytes.valueOf(maxResultsSize),
         2,
         false
     )
@@ -96,31 +98,26 @@ public class RetryableS3OutputStreamTest
       }
 
       @Override
-      public long getMaxResultsSize()
-      {
-        return maxResultsSize;
-      }
-
-      @Override
       public int getMaxRetry()
       {
         return 2;
       }
     };
+
+    s3UploadManager = new S3UploadManager(
+        new S3OutputConfig("bucket", "prefix", EasyMock.mock(File.class), new HumanReadableBytes("5MiB"), 1),
+        new S3ExportConfig("tempDir", new HumanReadableBytes("5MiB"), 1, null),
+        new DruidProcessingConfigTest.MockRuntimeInfo(10, 0, 0),
+        new StubServiceEmitter());
   }
 
   @Test
   public void testWriteAndHappy() throws IOException
   {
-    maxResultsSize = 1000;
     chunkSize = 10;
     ByteBuffer bb = ByteBuffer.allocate(Integer.BYTES);
-    try (RetryableS3OutputStream out = new RetryableS3OutputStream(
-        config,
-        s3,
-        path,
-        false
-    )) {
+    try (RetryableS3OutputStream out =
+             new RetryableS3OutputStream(config, s3, path, s3UploadManager)) {
       for (int i = 0; i < 25; i++) {
         bb.clear();
         bb.putInt(i);
@@ -128,22 +125,17 @@ public class RetryableS3OutputStreamTest
       }
     }
     // each chunk is 10 bytes, so there should be 10 chunks.
-    Assert.assertEquals(10, s3.partRequests.size());
-    s3.assertCompleted(chunkSize, Integer.BYTES * 25);
+    Assertions.assertEquals(10, s3.partRequests.size());
+    s3.assertCompleted(chunkSize, Integer.BYTES * 25L);
   }
 
   @Test
   public void testWriteSizeLargerThanConfiguredMaxChunkSizeShouldSucceed() throws IOException
   {
-    maxResultsSize = 1000;
     chunkSize = 10;
     ByteBuffer bb = ByteBuffer.allocate(Integer.BYTES * 3);
-    try (RetryableS3OutputStream out = new RetryableS3OutputStream(
-        config,
-        s3,
-        path,
-        false
-    )) {
+    try (RetryableS3OutputStream out =
+             new RetryableS3OutputStream(config, s3, path, s3UploadManager)) {
       bb.clear();
       bb.putInt(1);
       bb.putInt(2);
@@ -151,59 +143,39 @@ public class RetryableS3OutputStreamTest
       out.write(bb.array());
     }
     // each chunk 10 bytes, so there should be 2 chunks.
-    Assert.assertEquals(2, s3.partRequests.size());
-    s3.assertCompleted(chunkSize, Integer.BYTES * 3);
+    Assertions.assertEquals(2, s3.partRequests.size());
+    s3.assertCompleted(chunkSize, Integer.BYTES * 3L);
   }
 
   @Test
   public void testWriteSmallBufferShouldSucceed() throws IOException
   {
-    maxResultsSize = 1000;
     chunkSize = 128;
-    try (RetryableS3OutputStream out = new RetryableS3OutputStream(
-        config,
-        s3,
-        path,
-        false
-    )) {
+    try (RetryableS3OutputStream out =
+             new RetryableS3OutputStream(config, s3, path, s3UploadManager)) {
       for (int i = 0; i < 600; i++) {
         out.write(i);
       }
     }
     // each chunk 128 bytes, so there should be 5 chunks.
-    Assert.assertEquals(5, s3.partRequests.size());
+    Assertions.assertEquals(5, s3.partRequests.size());
     s3.assertCompleted(chunkSize, 600);
   }
 
   @Test
-  public void testHitResultsSizeLimit() throws IOException
+  public void testWriteSmallBufferExactChunkSizeShouldSucceed() throws IOException
   {
-    maxResultsSize = 50;
-    ByteBuffer bb = ByteBuffer.allocate(Integer.BYTES);
-    try (RetryableS3OutputStream out = new RetryableS3OutputStream(
-        config,
-        s3,
-        path,
-        false
-    )) {
-      for (int i = 0; i < 14; i++) {
-        bb.clear();
-        bb.putInt(i);
-        out.write(bb.array());
+    chunkSize = 128;
+    final int fileSize = 128 * 5;
+    try (RetryableS3OutputStream out =
+             new RetryableS3OutputStream(config, s3, path, s3UploadManager)) {
+      for (int i = 0; i < fileSize; i++) {
+        out.write(i);
       }
-
-      Assert.assertThrows(
-          "Exceeded max results size [50]",
-          IOException.class,
-          () -> {
-            bb.clear();
-            bb.putInt(14);
-            out.write(bb.array());
-          }
-      );
     }
-
-    s3.assertCancelled();
+    // each chunk 128 bytes, so there should be 5 chunks.
+    Assertions.assertEquals(5, s3.partRequests.size());
+    s3.assertCompleted(chunkSize, fileSize);
   }
 
   @Test
@@ -211,15 +183,10 @@ public class RetryableS3OutputStreamTest
   {
     final TestAmazonS3 s3 = new TestAmazonS3(1);
 
-    maxResultsSize = 1000;
     chunkSize = 10;
     ByteBuffer bb = ByteBuffer.allocate(Integer.BYTES);
-    try (RetryableS3OutputStream out = new RetryableS3OutputStream(
-        config,
-        s3,
-        path,
-        false
-    )) {
+    try (RetryableS3OutputStream out =
+             new RetryableS3OutputStream(config, s3, path, s3UploadManager)) {
       for (int i = 0; i < 25; i++) {
         bb.clear();
         bb.putInt(i);
@@ -227,126 +194,215 @@ public class RetryableS3OutputStreamTest
       }
     }
     // each chunk is 10 bytes, so there should be 10 chunks.
-    Assert.assertEquals(10, s3.partRequests.size());
-    s3.assertCompleted(chunkSize, Integer.BYTES * 25);
+    Assertions.assertEquals(10, s3.partRequests.size());
+    s3.assertCompleted(chunkSize, Integer.BYTES * 25L);
   }
 
+  /**
+   * A part that fails every retry leaves the multipart upload aborted and no object at the key, so close() must report
+   * it. Returning normally would tell the caller its bytes are readable back when they no longer exist anywhere.
+   */
   @Test
-  public void testFailToUploadAfterRetries() throws IOException
+  public void testFailToUploadAfterRetries()
   {
     final TestAmazonS3 s3 = new TestAmazonS3(3);
 
-    maxResultsSize = 1000;
     ByteBuffer bb = ByteBuffer.allocate(Integer.BYTES);
-    try (RetryableS3OutputStream out = new RetryableS3OutputStream(
-        config,
-        s3,
-        path,
-        false
-    )) {
-      for (int i = 0; i < 2; i++) {
+    final DruidException e = Assertions.assertThrows(DruidException.class, () -> {
+      try (RetryableS3OutputStream out =
+               new RetryableS3OutputStream(config, s3, path, s3UploadManager)) {
+        for (int i = 0; i < 2; i++) {
+          bb.clear();
+          bb.putInt(i);
+          out.write(bb.array());
+        }
+
+        bb.clear();
+        bb.putInt(3);
+        out.write(bb.array());
+      }
+    });
+
+    Assertions.assertTrue(e.getMessage().contains("no object was written"), e.getMessage());
+    Assertions.assertTrue(e.getMessage().contains(path), e.getMessage());
+    Assertions.assertNotNull(e.getCause());
+    // An aborted upload means S3 rejected the parts, which an operator can act on, rather than a Druid defect.
+    Assertions.assertEquals(DruidException.Persona.OPERATOR, e.getTargetPersona());
+    Assertions.assertEquals(DruidException.Category.RUNTIME_FAILURE, e.getCategory());
+    s3.assertCancelled();
+  }
+
+  /**
+   * A multipart upload costs three S3 requests at minimum — create, upload part, complete — so a stream small enough
+   * to need only one part should not use one. A task writes one object per output partition, and every request lands
+   * on the same key prefix, so the per-object floor sets the burst rate against that prefix.
+   */
+  @Test
+  public void testStreamFittingInOneChunkIsUploadedWithASinglePut() throws IOException
+  {
+    chunkSize = 10;
+    ByteBuffer bb = ByteBuffer.allocate(Integer.BYTES);
+    try (RetryableS3OutputStream out =
+             new RetryableS3OutputStream(config, s3, path, s3UploadManager)) {
+      bb.putInt(1);
+      out.write(bb.array());
+    }
+
+    Assertions.assertEquals(0, s3.createMultipartUploadCount);
+    Assertions.assertEquals(0, s3.partRequests.size());
+    Assertions.assertNull(s3.completeRequest);
+    Assertions.assertEquals(ImmutableList.of((long) Integer.BYTES), s3.putObjectContentLengths);
+  }
+
+  /**
+   * Once a stream outgrows a single chunk it must use multipart, costing one create, one request per part, and one
+   * complete.
+   */
+  @Test
+  public void testStreamSpanningMultipleChunksUsesMultipartUpload() throws IOException
+  {
+    chunkSize = 10;
+    ByteBuffer bb = ByteBuffer.allocate(Integer.BYTES);
+    try (RetryableS3OutputStream out =
+             new RetryableS3OutputStream(config, s3, path, s3UploadManager)) {
+      for (int i = 0; i < 25; i++) {
         bb.clear();
         bb.putInt(i);
         out.write(bb.array());
       }
-
-      expectedException.expect(RuntimeException.class);
-      expectedException.expectCause(CoreMatchers.instanceOf(AmazonClientException.class));
-      expectedException.expectMessage("Upload failure test. Remaining failures [1]");
-      bb.clear();
-      bb.putInt(3);
-      out.write(bb.array());
     }
 
-    s3.assertCancelled();
+    Assertions.assertEquals(1, s3.createMultipartUploadCount);
+    Assertions.assertEquals(10, s3.partRequests.size());
+    Assertions.assertEquals(0, s3.putObjectContentLengths.size());
+    s3.assertCompleted(chunkSize, Integer.BYTES * 25);
+  }
+
+  /**
+   * A stream closed without any bytes written produces no object, and should reach S3 not at all to do so.
+   */
+  @Test
+  public void testClosingWithoutWritingCreatesNoObject() throws IOException
+  {
+    chunkSize = 10;
+    new RetryableS3OutputStream(config, s3, path, s3UploadManager).close();
+
+    s3.assertNoRequestsIssued();
   }
 
   private static class TestAmazonS3 extends ServerSideEncryptingAmazonS3
   {
     private final List<UploadPartRequest> partRequests = new ArrayList<>();
+    private final List<Long> putObjectContentLengths = new ArrayList<>();
 
     private int uploadFailuresLeft;
+    private int createMultipartUploadCount = 0;
     private boolean cancelled = false;
     @Nullable
     private CompleteMultipartUploadRequest completeRequest;
 
     private TestAmazonS3(int totalUploadFailures)
     {
-      super(EasyMock.createMock(AmazonS3.class), new NoopServerSideEncryption());
+      super(EasyMock.createMock(S3Client.class), null, new NoopServerSideEncryption(), new S3TransferConfig());
       this.uploadFailuresLeft = totalUploadFailures;
     }
 
     @Override
-    public InitiateMultipartUploadResult initiateMultipartUpload(InitiateMultipartUploadRequest request)
+    public CreateMultipartUploadResponse createMultipartUpload(CreateMultipartUploadRequest.Builder requestBuilder)
         throws SdkClientException
     {
-      InitiateMultipartUploadResult result = new InitiateMultipartUploadResult();
-      result.setUploadId("uploadId");
-      return result;
+      ++createMultipartUploadCount;
+      return CreateMultipartUploadResponse.builder()
+          .uploadId("uploadId")
+          .build();
     }
 
     @Override
-    public UploadPartResult uploadPart(UploadPartRequest request) throws SdkClientException
+    public PutObjectResponse putObject(String bucket, String key, File file)
+    {
+      putObjectContentLengths.add(file.length());
+      return PutObjectResponse.builder().build();
+    }
+
+    private void assertNoRequestsIssued()
+    {
+      Assertions.assertEquals(0, createMultipartUploadCount);
+      Assertions.assertEquals(0, putObjectContentLengths.size());
+      Assertions.assertEquals(0, partRequests.size());
+      Assertions.assertNull(completeRequest);
+      Assertions.assertFalse(cancelled);
+    }
+
+    @Override
+    public UploadPartResponse uploadPart(UploadPartRequest.Builder requestBuilder, RequestBody requestBody)
+        throws SdkClientException
     {
       if (uploadFailuresLeft > 0) {
-        throw new AmazonClientException(
-            new IOE("Upload failure test. Remaining failures [%s]", --uploadFailuresLeft)
-        );
+        throw SdkClientException.builder()
+            .cause(new IOE("Upload failure test. Remaining failures [%s]", --uploadFailuresLeft))
+            .build();
       }
-      partRequests.add(request);
-      UploadPartResult result = new UploadPartResult();
-      result.setETag(StringUtils.format("%s", request.getPartNumber()));
-      result.setPartNumber(request.getPartNumber());
-      return result;
+      UploadPartRequest request = requestBuilder.build();
+      synchronized (partRequests) {
+        partRequests.add(request);
+      }
+      return UploadPartResponse.builder()
+          .eTag(StringUtils.format("etag-%s", request.partNumber()))
+          .build();
     }
 
     @Override
-    public void cancelMultiPartUpload(AbortMultipartUploadRequest request) throws SdkClientException
+    public void abortMultipartUpload(AbortMultipartUploadRequest request)
     {
       cancelled = true;
     }
 
     @Override
-    public CompleteMultipartUploadResult completeMultipartUpload(CompleteMultipartUploadRequest request)
+    public CompleteMultipartUploadResponse completeMultipartUpload(CompleteMultipartUploadRequest request)
         throws SdkClientException
     {
       completeRequest = request;
-      return new CompleteMultipartUploadResult();
+      return CompleteMultipartUploadResponse.builder().build();
     }
 
     private void assertCompleted(long chunkSize, long expectedFileSize)
     {
-      Assert.assertNotNull(completeRequest);
-      Assert.assertFalse(cancelled);
+      Assertions.assertNotNull(completeRequest);
+      Assertions.assertFalse(cancelled);
 
-      for (int i = 0; i < partRequests.size(); i++) {
-        Assert.assertEquals(i + 1, partRequests.get(i).getPartNumber());
-        if (i < partRequests.size() - 1) {
-          Assert.assertEquals(chunkSize, partRequests.get(i).getPartSize());
-        } else {
-          Assert.assertTrue(chunkSize >= partRequests.get(i).getPartSize());
+      Set<Integer> partNumbersFromRequest = partRequests.stream().map(UploadPartRequest::partNumber).collect(Collectors.toSet());
+      Assertions.assertEquals(partRequests.size(), partNumbersFromRequest.size());
+
+      // Verify sizes of uploaded chunks
+      int numSmallerChunks = 0;
+      for (UploadPartRequest part : partRequests) {
+        Assertions.assertTrue(part.contentLength() <= chunkSize);
+        if (part.contentLength() < chunkSize) {
+          ++numSmallerChunks;
         }
       }
-      final List<PartETag> eTags = completeRequest.getPartETags();
-      Assert.assertEquals(partRequests.size(), eTags.size());
-      Assert.assertEquals(
-          partRequests.stream().map(UploadPartRequest::getPartNumber).collect(Collectors.toList()),
-          eTags.stream().map(PartETag::getPartNumber).collect(Collectors.toList())
+      Assertions.assertTrue(numSmallerChunks <= 1);
+
+      final List<CompletedPart> completedParts = completeRequest.multipartUpload().parts();
+      Assertions.assertEquals(partRequests.size(), completedParts.size());
+      Assertions.assertEquals(
+          partNumbersFromRequest,
+          completedParts.stream().map(CompletedPart::partNumber).collect(Collectors.toSet())
       );
-      Assert.assertEquals(
-          partRequests.stream().map(UploadPartRequest::getPartNumber).collect(Collectors.toList()),
-          eTags.stream().map(tag -> Integer.parseInt(tag.getETag())).collect(Collectors.toList())
+      Assertions.assertEquals(
+          partNumbersFromRequest.stream().map(partNumber -> "etag-" + partNumber).collect(Collectors.toSet()),
+          completedParts.stream().map(CompletedPart::eTag).collect(Collectors.toSet())
       );
-      Assert.assertEquals(
+      Assertions.assertEquals(
           expectedFileSize,
-          partRequests.stream().mapToLong(UploadPartRequest::getPartSize).sum()
+          partRequests.stream().mapToLong(UploadPartRequest::contentLength).sum()
       );
     }
 
     private void assertCancelled()
     {
-      Assert.assertTrue(cancelled);
-      Assert.assertNull(completeRequest);
+      Assertions.assertTrue(cancelled);
+      Assertions.assertNull(completeRequest);
     }
   }
 }

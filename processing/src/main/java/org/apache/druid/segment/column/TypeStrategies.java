@@ -19,23 +19,31 @@
 
 package org.apache.druid.segment.column;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Ordering;
 import com.google.common.primitives.Floats;
 import com.google.common.primitives.Longs;
-import org.apache.druid.common.config.NullHandling;
+import org.apache.druid.error.DruidException;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.segment.nested.StructuredData;
+import org.apache.druid.segment.serde.ColumnSerializerUtils;
 
 import javax.annotation.Nullable;
+import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class TypeStrategies
 {
+  public static final byte IS_NULL_BYTE = (byte) 1;
+  public static final byte IS_NOT_NULL_BYTE = (byte) 0;
+
   public static final int VALUE_OFFSET = Byte.BYTES;
   public static final int NULLABLE_LONG_SIZE = Byte.BYTES + Long.BYTES;
   public static final int NULLABLE_DOUBLE_SIZE = Byte.BYTES + Double.BYTES;
@@ -45,6 +53,7 @@ public class TypeStrategies
   public static final FloatTypeStrategy FLOAT = new FloatTypeStrategy();
   public static final DoubleTypeStrategy DOUBLE = new DoubleTypeStrategy();
   public static final StringTypeStrategy STRING = new StringTypeStrategy();
+  public static final NestedDataTypeStrategy NESTED = new NestedDataTypeStrategy();
   public static final ConcurrentHashMap<String, TypeStrategy<?>> COMPLEX_STRATEGIES = new ConcurrentHashMap<>();
 
   /**
@@ -53,14 +62,17 @@ public class TypeStrategies
   @Nullable
   public static TypeStrategy<?> getComplex(String typeName)
   {
+    if (typeName == null) {
+      return null;
+    }
     return COMPLEX_STRATEGIES.get(typeName);
   }
 
   /**
    * hmm... this might look familiar... (see ComplexMetrics)
-   *
+   * <p>
    * Register a complex type name -> {@link TypeStrategy} mapping.
-   *
+   * <p>
    * If the specified type name is already used and the supplied {@link TypeStrategy} is not of the
    * same type as the existing value in the map for said key, an {@link ISE} is thrown.
    *
@@ -88,45 +100,45 @@ public class TypeStrategies
   }
 
   /**
-   * Clear and set the 'null' byte of a nullable value to {@link NullHandling#IS_NULL_BYTE} to a {@link ByteBuffer} at
+   * Clear and set the 'null' byte of a nullable value to {@link TypeStrategies#IS_NULL_BYTE} to a {@link ByteBuffer} at
    * the supplied position. This method does not change the buffer position, limit, or mark, because it does not expect
    * to own the buffer given to it (i.e. buffer aggs)
-   *
+   * <p>
    * Nullable types are stored with a leading byte to indicate if the value is null, followed by the value bytes
    * (if not null)
-   *
+   * <p>
    * layout: | null (byte) | value |
    *
    * @return number of bytes written (always 1)
    */
   public static int writeNull(ByteBuffer buffer, int offset)
   {
-    buffer.put(offset, NullHandling.IS_NULL_BYTE);
+    buffer.put(offset, IS_NULL_BYTE);
     return 1;
   }
 
   /**
-   * Checks if a 'nullable' value's null byte is set to {@link NullHandling#IS_NULL_BYTE}. This method will mask the
+   * Checks if a 'nullable' value's null byte is set to {@link TypeStrategies#IS_NULL_BYTE}. This method will mask the
    * value of the null byte to only check if the null bit is set, meaning that the higher bits can be utilized for
    * flags as necessary (e.g. using high bits to indicate if the value has been set or not for aggregators).
-   *
+   * <p>
    * Note that writing nullable values with the methods of {@link Types} will always clear and set the null byte to
-   * either {@link NullHandling#IS_NULL_BYTE} or {@link NullHandling#IS_NOT_NULL_BYTE}, losing any flag bits.
-   *
+   * either {@link TypeStrategies#IS_NULL_BYTE} or {@link TypeStrategies#IS_NOT_NULL_BYTE}, losing any flag bits.
+   * <p>
    * layout: | null (byte) | value |
    */
   public static boolean isNullableNull(ByteBuffer buffer, int offset)
   {
     // use & so that callers can use the high bits of the null byte to pack additional information if necessary
-    return (buffer.get(offset) & NullHandling.IS_NULL_BYTE) == NullHandling.IS_NULL_BYTE;
+    return (buffer.get(offset) & IS_NULL_BYTE) == IS_NULL_BYTE;
   }
 
   /**
    * Write a non-null long value to a {@link ByteBuffer} at the supplied offset. The first byte is always cleared and
-   * set to {@link NullHandling#IS_NOT_NULL_BYTE}, the long value is written in the next 8 bytes.
-   *
+   * set to {@link TypeStrategies#IS_NOT_NULL_BYTE}, the long value is written in the next 8 bytes.
+   * <p>
    * layout: | null (byte) | long |
-   *
+   * <p>
    * This method does not change the buffer position, limit, or mark, because it does not expect to own the buffer
    * given to it (i.e. buffer aggs)
    *
@@ -134,7 +146,7 @@ public class TypeStrategies
    */
   public static int writeNotNullNullableLong(ByteBuffer buffer, int offset, long value)
   {
-    buffer.put(offset++, NullHandling.IS_NOT_NULL_BYTE);
+    buffer.put(offset++, IS_NOT_NULL_BYTE);
     buffer.putLong(offset, value);
     return NULLABLE_LONG_SIZE;
   }
@@ -142,9 +154,9 @@ public class TypeStrategies
   /**
    * Reads a non-null long value from a {@link ByteBuffer} at the supplied offset. This method should only be called
    * if and only if {@link #isNullableNull} for the same offset returns false.
-   *
+   * <p>
    * layout: | null (byte) | long |
-   *
+   * <p>
    * This method does not change the buffer position, limit, or mark, because it does not expect  to own the buffer
    * given to it (i.e. buffer aggs)
    */
@@ -155,10 +167,10 @@ public class TypeStrategies
 
   /**
    * Write a non-null double value to a {@link ByteBuffer} at the supplied offset. The first byte is always cleared and
-   * set to {@link NullHandling#IS_NOT_NULL_BYTE}, the double value is written in the next 8 bytes.
-   *
+   * set to {@link TypeStrategies#IS_NOT_NULL_BYTE}, the double value is written in the next 8 bytes.
+   * <p>
    * layout: | null (byte) | double |
-   *
+   * <p>
    * This method does not change the buffer position, limit, or mark, because it does not expect to own the buffer
    * given to it (i.e. buffer aggs)
    *
@@ -166,7 +178,7 @@ public class TypeStrategies
    */
   public static int writeNotNullNullableDouble(ByteBuffer buffer, int offset, double value)
   {
-    buffer.put(offset++, NullHandling.IS_NOT_NULL_BYTE);
+    buffer.put(offset++, IS_NOT_NULL_BYTE);
     buffer.putDouble(offset, value);
     return NULLABLE_DOUBLE_SIZE;
   }
@@ -174,9 +186,9 @@ public class TypeStrategies
   /**
    * Reads a non-null double value from a {@link ByteBuffer} at the supplied offset. This method should only be called
    * if and only if {@link #isNullableNull} for the same offset returns false.
-   *
+   * <p>
    * layout: | null (byte) | double |
-   *
+   * <p>
    * This method does not change the buffer position, limit, or mark, because it does not expect to own the buffer
    * given to it (i.e. buffer aggs)
    */
@@ -187,10 +199,10 @@ public class TypeStrategies
 
   /**
    * Write a non-null float value to a {@link ByteBuffer} at the supplied offset. The first byte is always cleared and
-   * set to {@link NullHandling#IS_NOT_NULL_BYTE}, the float value is written in the next 4 bytes.
-   *
+   * set to {@link TypeStrategies#IS_NOT_NULL_BYTE}, the float value is written in the next 4 bytes.
+   * <p>
    * layout: | null (byte) | float |
-   *
+   * <p>
    * This method does not change the buffer position, limit, or mark, because it does not expect to own the buffer
    * given to it (i.e. buffer aggs)
    *
@@ -198,7 +210,7 @@ public class TypeStrategies
    */
   public static int writeNotNullNullableFloat(ByteBuffer buffer, int offset, float value)
   {
-    buffer.put(offset++, NullHandling.IS_NOT_NULL_BYTE);
+    buffer.put(offset++, IS_NOT_NULL_BYTE);
     buffer.putFloat(offset, value);
     return NULLABLE_FLOAT_SIZE;
   }
@@ -206,9 +218,9 @@ public class TypeStrategies
   /**
    * Reads a non-null float value from a {@link ByteBuffer} at the supplied offset. This method should only be called
    * if and only if {@link #isNullableNull} for the same offset returns false.
-   *
+   * <p>
    * layout: | null (byte) | float |
-   *
+   * <p>
    * This method does not change the buffer position, limit, or mark, because it does not expect to own the buffer
    * given to it (i.e. buffer aggs)
    */
@@ -255,6 +267,12 @@ public class TypeStrategies
     }
 
     @Override
+    public boolean groupable()
+    {
+      return true;
+    }
+
+    @Override
     public boolean readRetainsBufferReference()
     {
       return false;
@@ -277,6 +295,24 @@ public class TypeStrategies
     public int compare(Object o1, Object o2)
     {
       return Longs.compare(((Number) o1).longValue(), ((Number) o2).longValue());
+    }
+
+    @Override
+    public int hashCode(Long o)
+    {
+      return o.hashCode();
+    }
+
+    @Override
+    public boolean equals(Long a, Long b)
+    {
+      return a.equals(b);
+    }
+
+    @Override
+    public Class<?> getClazz()
+    {
+      return Long.class;
     }
   }
 
@@ -306,6 +342,12 @@ public class TypeStrategies
     }
 
     @Override
+    public boolean groupable()
+    {
+      return true;
+    }
+
+    @Override
     public boolean readRetainsBufferReference()
     {
       return false;
@@ -328,6 +370,24 @@ public class TypeStrategies
     public int compare(Object o1, Object o2)
     {
       return Floats.compare(((Number) o1).floatValue(), ((Number) o2).floatValue());
+    }
+
+    @Override
+    public int hashCode(Float o)
+    {
+      return o.hashCode();
+    }
+
+    @Override
+    public boolean equals(Float a, Float b)
+    {
+      return a.equals(b);
+    }
+
+    @Override
+    public Class<?> getClazz()
+    {
+      return Float.class;
     }
   }
 
@@ -358,6 +418,12 @@ public class TypeStrategies
     }
 
     @Override
+    public boolean groupable()
+    {
+      return true;
+    }
+
+    @Override
     public boolean readRetainsBufferReference()
     {
       return false;
@@ -381,12 +447,30 @@ public class TypeStrategies
     {
       return Double.compare(((Number) o1).doubleValue(), ((Number) o2).doubleValue());
     }
+
+    @Override
+    public int hashCode(Double o)
+    {
+      return o.hashCode();
+    }
+
+    @Override
+    public boolean equals(Double a, Double b)
+    {
+      return a.equals(b);
+    }
+
+    @Override
+    public Class<?> getClazz()
+    {
+      return Double.class;
+    }
   }
 
   /**
    * Read and write non-null UTF8 encoded String values. Encodes the length in bytes as an integer prefix followed by
    * the actual encoded value bytes.
-   *
+   * <p>
    * format: | length (int) | bytes |
    */
   public static final class StringTypeStrategy implements TypeStrategy<String>
@@ -432,6 +516,12 @@ public class TypeStrategies
     }
 
     @Override
+    public boolean groupable()
+    {
+      return true;
+    }
+
+    @Override
     public int compare(Object s, Object s2)
     {
       // copy of lexicographical string comparator in druid processing
@@ -444,13 +534,31 @@ public class TypeStrategies
 
       return ORDERING.compare((String) s, (String) s2);
     }
+
+    @Override
+    public int hashCode(String o)
+    {
+      return o.hashCode();
+    }
+
+    @Override
+    public boolean equals(String a, String b)
+    {
+      return a.equals(b);
+    }
+
+    @Override
+    public Class<?> getClazz()
+    {
+      return String.class;
+    }
   }
 
   /**
    * Read and write a non-null ARRAY which is permitted to have null elements (all elements are always read and written
    * with a {@link NullableTypeStrategy} wrapper on the {@link TypeStrategy} of the
    * {@link TypeSignature#getElementType()}.
-   *
+   * <p>
    * Encodes the number of elements in the array as an integer prefix followed by the actual encoded value bytes of
    * each element serially.
    */
@@ -516,6 +624,12 @@ public class TypeStrategies
     }
 
     @Override
+    public boolean groupable()
+    {
+      return elementStrategy.groupable();
+    }
+
+    @Override
     public int compare(@Nullable Object o1Obj, @Nullable Object o2Obj)
     {
       Object[] o1 = (Object[]) o1Obj;
@@ -540,6 +654,152 @@ public class TypeStrategies
         return cmp;
       }
       return Integer.compare(o1.length, o2.length);
+    }
+
+    /**
+     * Implements {@link Arrays#hashCode(Object[])} but the element hashing uses the element's type strategy
+     */
+    @Override
+    public int hashCode(Object[] o)
+    {
+      if (o == null) {
+        return 0;
+      } else {
+        int result = 1;
+        for (Object element : o) {
+          result = 31 * result + (element == null ? 0 : elementStrategy.hashCode(element));
+        }
+        return result;
+      }
+    }
+
+    /**
+     * Implements {@link Arrays#equals} but the element equality uses the element's type strategy
+     */
+    @Override
+    public boolean equals(@Nullable Object[] a, @Nullable Object[] b)
+    {
+      //noinspection ArrayEquality
+      if (a == b) {
+        return true;
+      } else if (a != null && b != null) {
+        int length = a.length;
+        if (b.length != length) {
+          return false;
+        } else {
+          for (int i = 0; i < length; ++i) {
+            if (!elementStrategy.equals(a[i], b[i])) {
+              return false;
+            }
+          }
+          return true;
+        }
+      } else {
+        return false;
+      }
+    }
+
+    @Override
+    public Class<?> getClazz()
+    {
+      return Object[].class;
+    }
+  }
+
+  public static final class NestedDataTypeStrategy implements TypeStrategy<Object>
+  {
+    @Override
+    public int estimateSizeBytes(Object value)
+    {
+      return Objects.requireNonNull(StructuredData.wrap(value)).getSizeEstimate();
+    }
+
+    @Override
+    public Object read(ByteBuffer buffer)
+    {
+      final int len = buffer.getInt();
+      return fromByteBuffer(buffer, len);
+    }
+
+    @Nullable
+    public StructuredData fromByteBuffer(ByteBuffer buffer, int numBytes)
+    {
+      if (numBytes == 0) {
+        return null;
+      }
+
+      final byte[] bytes = new byte[numBytes];
+      buffer.get(bytes, 0, numBytes);
+      try {
+        return ColumnSerializerUtils.SMILE_MAPPER.readValue(bytes, 0, bytes.length, StructuredData.class);
+      }
+      catch (IOException e) {
+        throw DruidException.defensive(e, "Unable to deserialize value");
+      }
+    }
+
+    @Override
+    public boolean readRetainsBufferReference()
+    {
+      return false;
+    }
+
+    @Override
+    public int write(ByteBuffer buffer, Object value, int maxSizeBytes)
+    {
+      TypeStrategies.checkMaxSize(buffer.remaining(), maxSizeBytes, ColumnType.NESTED_DATA);
+      final byte[] bytes = toBytes(value);
+      final int sizeBytes = Integer.BYTES + bytes.length;
+      if (sizeBytes > maxSizeBytes) {
+        return maxSizeBytes - sizeBytes;
+      }
+      buffer.putInt(bytes.length);
+      buffer.put(bytes);
+      return sizeBytes;
+    }
+
+    @Nullable
+    public byte[] toBytes(@Nullable Object val)
+    {
+      if (val == null) {
+        return new byte[0];
+      }
+      try {
+        return ColumnSerializerUtils.SMILE_MAPPER.writeValueAsBytes(val);
+      }
+      catch (JsonProcessingException e) {
+        throw DruidException.defensive(e, "Unable to serialize value [%s]", val);
+      }
+    }
+
+    @Override
+    public int compare(Object o1, Object o2)
+    {
+      return StructuredData.COMPARATOR.compare(StructuredData.wrap(o1), StructuredData.wrap(o2));
+    }
+
+    @Override
+    public boolean groupable()
+    {
+      return true;
+    }
+
+    @Override
+    public int hashCode(Object o)
+    {
+      return Objects.hashCode(StructuredData.wrap(o));
+    }
+
+    @Override
+    public boolean equals(Object a, Object b)
+    {
+      return Objects.equals(StructuredData.wrap(a), StructuredData.wrap(b));
+    }
+
+    @Override
+    public Class<?> getClazz()
+    {
+      return StructuredData.class;
     }
   }
 }

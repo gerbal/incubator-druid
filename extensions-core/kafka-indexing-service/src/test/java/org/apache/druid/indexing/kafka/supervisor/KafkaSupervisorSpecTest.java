@@ -20,28 +20,50 @@
 package org.apache.druid.indexing.kafka.supervisor;
 
 import com.fasterxml.jackson.databind.InjectableValues;
-import com.fasterxml.jackson.databind.Module;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.druid.data.input.impl.TimestampSpec;
+import org.apache.druid.error.DruidException;
+import org.apache.druid.indexer.granularity.UniformGranularitySpec;
 import org.apache.druid.indexing.kafka.KafkaIndexTaskClientFactory;
 import org.apache.druid.indexing.kafka.KafkaIndexTaskModule;
 import org.apache.druid.indexing.overlord.IndexerMetadataStorageCoordinator;
 import org.apache.druid.indexing.overlord.TaskMaster;
 import org.apache.druid.indexing.overlord.TaskStorage;
+import org.apache.druid.indexing.overlord.supervisor.SupervisorSpec;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorStateManagerConfig;
+import org.apache.druid.indexing.seekablestream.supervisor.BoundedStreamConfig;
+import org.apache.druid.indexing.seekablestream.supervisor.LagAggregator;
+import org.apache.druid.indexing.seekablestream.supervisor.autoscaler.CostBasedAutoScalerConfig;
 import org.apache.druid.jackson.DefaultObjectMapper;
+import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
+import org.apache.druid.java.util.metrics.DruidMonitorSchedulerConfig;
 import org.apache.druid.math.expr.ExprMacroTable;
+import org.apache.druid.metadata.TestSupervisorSpec;
+import org.apache.druid.query.aggregation.CountAggregatorFactory;
 import org.apache.druid.query.expression.LookupEnabledTestExprMacroTable;
 import org.apache.druid.segment.incremental.RowIngestionMetersFactory;
-import org.apache.druid.server.metrics.DruidMonitorSchedulerConfig;
 import org.apache.druid.server.metrics.NoopServiceEmitter;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.Map;
+import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class KafkaSupervisorSpecTest
 {
+  private static void assertInvalidInputException(DruidException exception, String message)
+  {
+    Assertions.assertEquals(DruidException.Persona.USER, exception.getTargetPersona());
+    Assertions.assertEquals(DruidException.Category.INVALID_INPUT, exception.getCategory());
+    Assertions.assertEquals("invalidInput", exception.getErrorCode());
+    Assertions.assertEquals(message, exception.getMessage());
+  }
+
   private final ObjectMapper mapper;
 
   public KafkaSupervisorSpecTest()
@@ -60,32 +82,26 @@ public class KafkaSupervisorSpecTest
             .addValue(SupervisorStateManagerConfig.class, null)
             .addValue(ExprMacroTable.class.getName(), LookupEnabledTestExprMacroTable.INSTANCE)
     );
-    mapper.registerModules((Iterable<Module>) new KafkaIndexTaskModule().getJacksonModules());
+    mapper.registerModules(new KafkaIndexTaskModule().getJacksonModules());
   }
 
   @Test
-  public void testSerde() throws IOException
+  public void testSerdeWithTopicPattern() throws IOException
   {
     String json = "{\n"
                   + "  \"type\": \"kafka\",\n"
                   + "  \"dataSchema\": {\n"
                   + "    \"dataSource\": \"metrics-kafka\",\n"
-                  + "    \"parser\": {\n"
-                  + "      \"type\": \"string\",\n"
-                  + "      \"parseSpec\": {\n"
-                  + "        \"format\": \"json\",\n"
-                  + "        \"timestampSpec\": {\n"
-                  + "          \"column\": \"timestamp\",\n"
-                  + "          \"format\": \"auto\"\n"
-                  + "        },\n"
-                  + "        \"dimensionsSpec\": {\n"
-                  + "          \"dimensions\": [],\n"
-                  + "          \"dimensionExclusions\": [\n"
-                  + "            \"timestamp\",\n"
-                  + "            \"value\"\n"
-                  + "          ]\n"
-                  + "        }\n"
-                  + "      }\n"
+                  + "    \"timestampSpec\": {\n"
+                  + "      \"column\": \"timestamp\",\n"
+                  + "      \"format\": \"auto\"\n"
+                  + "    },\n"
+                  + "    \"dimensionsSpec\": {\n"
+                  + "      \"dimensions\": [],\n"
+                  + "      \"dimensionExclusions\": [\n"
+                  + "        \"timestamp\",\n"
+                  + "        \"value\"\n"
+                  + "      ]\n"
                   + "    },\n"
                   + "    \"metricsSpec\": [\n"
                   + "      {\n"
@@ -115,7 +131,15 @@ public class KafkaSupervisorSpecTest
                   + "    }\n"
                   + "  },\n"
                   + "  \"ioConfig\": {\n"
-                  + "    \"topic\": \"metrics\",\n"
+                  + "    \"topicPattern\": \"metrics.*\",\n"
+                  + "    \"inputFormat\": {\n"
+                  + "      \"type\": \"json\",\n"
+                  + "      \"flattenSpec\": {\n"
+                  + "        \"useFieldDiscovery\": true,\n"
+                  + "        \"fields\": []\n"
+                  + "      },\n"
+                  + "      \"featureSpec\": {}\n"
+                  + "    },"
                   + "    \"consumerProperties\": {\n"
                   + "      \"bootstrap.servers\": \"localhost:9092\"\n"
                   + "    },\n"
@@ -124,29 +148,24 @@ public class KafkaSupervisorSpecTest
                   + "}";
     KafkaSupervisorSpec spec = mapper.readValue(json, KafkaSupervisorSpec.class);
 
-    Assert.assertNotNull(spec);
-    Assert.assertNotNull(spec.getDataSchema());
-    Assert.assertEquals(4, spec.getDataSchema().getAggregators().length);
-    Assert.assertNotNull(spec.getIoConfig());
-    Assert.assertEquals("metrics", spec.getIoConfig().getTopic());
-    Assert.assertNotNull(spec.getTuningConfig());
-    Assert.assertNull(spec.getContext());
-    Assert.assertFalse(spec.isSuspended());
+    Assertions.assertNotNull(spec);
+    Assertions.assertNotNull(spec.getDataSchema());
+    Assertions.assertEquals("metrics.*", spec.getIoConfig().getTopicPattern());
+    Assertions.assertNull(spec.getIoConfig().getTopic());
+    Assertions.assertNotNull(spec.getTuningConfig());
+    Assertions.assertNull(spec.getContext());
     String serialized = mapper.writeValueAsString(spec);
 
     // expect default values populated in reserialized string
-    Assert.assertTrue(serialized.contains("\"tuningConfig\":{"));
-    Assert.assertTrue(serialized.contains("\"indexSpec\":{"));
-    Assert.assertTrue(serialized.contains("\"suspended\":false"));
-    Assert.assertTrue(serialized.contains("\"parser\":{"));
+    Assertions.assertTrue(serialized.contains("\"topicPattern\":\"metrics.*\""));
+    Assertions.assertTrue(serialized.contains("\"topic\":null"), serialized);
 
     KafkaSupervisorSpec spec2 = mapper.readValue(serialized, KafkaSupervisorSpec.class);
 
     String stable = mapper.writeValueAsString(spec2);
 
-    Assert.assertEquals(serialized, stable);
+    Assertions.assertEquals(serialized, stable);
   }
-
   @Test
   public void testSerdeWithInputFormat() throws IOException
   {
@@ -210,113 +229,28 @@ public class KafkaSupervisorSpecTest
                   + "}";
     KafkaSupervisorSpec spec = mapper.readValue(json, KafkaSupervisorSpec.class);
 
-    Assert.assertNotNull(spec);
-    Assert.assertNotNull(spec.getDataSchema());
-    Assert.assertEquals(4, spec.getDataSchema().getAggregators().length);
-    Assert.assertNotNull(spec.getIoConfig());
-    Assert.assertEquals("metrics", spec.getIoConfig().getTopic());
-    Assert.assertNotNull(spec.getTuningConfig());
-    Assert.assertNull(spec.getContext());
-    Assert.assertFalse(spec.isSuspended());
+    Assertions.assertNotNull(spec);
+    Assertions.assertNotNull(spec.getDataSchema());
+    Assertions.assertEquals(4, spec.getDataSchema().getAggregators().length);
+    Assertions.assertNotNull(spec.getIoConfig());
+    Assertions.assertEquals("metrics", spec.getIoConfig().getTopic());
+    Assertions.assertNull(spec.getIoConfig().getTopicPattern());
+    Assertions.assertNotNull(spec.getTuningConfig());
+    Assertions.assertNull(spec.getContext());
+    Assertions.assertFalse(spec.isSuspended());
     String serialized = mapper.writeValueAsString(spec);
 
     // expect default values populated in reserialized string
-    Assert.assertTrue(serialized.contains("\"tuningConfig\":{"));
-    Assert.assertTrue(serialized.contains("\"indexSpec\":{"));
-    Assert.assertTrue(serialized.contains("\"suspended\":false"));
-    Assert.assertTrue(serialized.contains("\"inputFormat\":{"));
+    Assertions.assertTrue(serialized.contains("\"tuningConfig\":{"));
+    Assertions.assertTrue(serialized.contains("\"indexSpec\":{"));
+    Assertions.assertTrue(serialized.contains("\"suspended\":false"));
+    Assertions.assertTrue(serialized.contains("\"inputFormat\":{"));
 
     KafkaSupervisorSpec spec2 = mapper.readValue(serialized, KafkaSupervisorSpec.class);
 
     String stable = mapper.writeValueAsString(spec2);
 
-    Assert.assertEquals(serialized, stable);
-  }
-
-  @Test
-  public void testSerdeWithSpec() throws IOException
-  {
-    String json = "{\n"
-                  + "  \"type\": \"kafka\",\n"
-                  + "  \"spec\": {\n"
-                  + "  \"dataSchema\": {\n"
-                  + "    \"dataSource\": \"metrics-kafka\",\n"
-                  + "    \"parser\": {\n"
-                  + "      \"type\": \"string\",\n"
-                  + "      \"parseSpec\": {\n"
-                  + "        \"format\": \"json\",\n"
-                  + "        \"timestampSpec\": {\n"
-                  + "          \"column\": \"timestamp\",\n"
-                  + "          \"format\": \"auto\"\n"
-                  + "        },\n"
-                  + "        \"dimensionsSpec\": {\n"
-                  + "          \"dimensions\": [],\n"
-                  + "          \"dimensionExclusions\": [\n"
-                  + "            \"timestamp\",\n"
-                  + "            \"value\"\n"
-                  + "          ]\n"
-                  + "        }\n"
-                  + "      }\n"
-                  + "    },\n"
-                  + "    \"metricsSpec\": [\n"
-                  + "      {\n"
-                  + "        \"name\": \"count\",\n"
-                  + "        \"type\": \"count\"\n"
-                  + "      },\n"
-                  + "      {\n"
-                  + "        \"name\": \"value_sum\",\n"
-                  + "        \"fieldName\": \"value\",\n"
-                  + "        \"type\": \"doubleSum\"\n"
-                  + "      },\n"
-                  + "      {\n"
-                  + "        \"name\": \"value_min\",\n"
-                  + "        \"fieldName\": \"value\",\n"
-                  + "        \"type\": \"doubleMin\"\n"
-                  + "      },\n"
-                  + "      {\n"
-                  + "        \"name\": \"value_max\",\n"
-                  + "        \"fieldName\": \"value\",\n"
-                  + "        \"type\": \"doubleMax\"\n"
-                  + "      }\n"
-                  + "    ],\n"
-                  + "    \"granularitySpec\": {\n"
-                  + "      \"type\": \"uniform\",\n"
-                  + "      \"segmentGranularity\": \"HOUR\",\n"
-                  + "      \"queryGranularity\": \"NONE\"\n"
-                  + "    }\n"
-                  + "  },\n"
-                  + "  \"ioConfig\": {\n"
-                  + "    \"topic\": \"metrics\",\n"
-                  + "    \"consumerProperties\": {\n"
-                  + "      \"bootstrap.servers\": \"localhost:9092\"\n"
-                  + "    },\n"
-                  + "    \"taskCount\": 1\n"
-                  + "  }\n"
-                  + "  }\n"
-                  + "}";
-    KafkaSupervisorSpec spec = mapper.readValue(json, KafkaSupervisorSpec.class);
-
-    Assert.assertNotNull(spec);
-    Assert.assertNotNull(spec.getDataSchema());
-    Assert.assertEquals(4, spec.getDataSchema().getAggregators().length);
-    Assert.assertNotNull(spec.getIoConfig());
-    Assert.assertEquals("metrics", spec.getIoConfig().getTopic());
-    Assert.assertNotNull(spec.getTuningConfig());
-    Assert.assertNull(spec.getContext());
-    Assert.assertFalse(spec.isSuspended());
-    String serialized = mapper.writeValueAsString(spec);
-
-    // expect default values populated in reserialized string
-    Assert.assertTrue(serialized.contains("\"tuningConfig\":{"));
-    Assert.assertTrue(serialized.contains("\"indexSpec\":{"));
-    Assert.assertTrue(serialized.contains("\"suspended\":false"));
-    Assert.assertTrue(serialized.contains("\"parser\":{"));
-
-    KafkaSupervisorSpec spec2 = mapper.readValue(serialized, KafkaSupervisorSpec.class);
-
-    String stable = mapper.writeValueAsString(spec2);
-
-    Assert.assertEquals(serialized, stable);
+    Assertions.assertEquals(serialized, stable);
   }
 
   @Test
@@ -384,27 +318,28 @@ public class KafkaSupervisorSpecTest
                   + "}";
     KafkaSupervisorSpec spec = mapper.readValue(json, KafkaSupervisorSpec.class);
 
-    Assert.assertNotNull(spec);
-    Assert.assertNotNull(spec.getDataSchema());
-    Assert.assertEquals(4, spec.getDataSchema().getAggregators().length);
-    Assert.assertNotNull(spec.getIoConfig());
-    Assert.assertEquals("metrics", spec.getIoConfig().getTopic());
-    Assert.assertNotNull(spec.getTuningConfig());
-    Assert.assertNull(spec.getContext());
-    Assert.assertFalse(spec.isSuspended());
+    Assertions.assertNotNull(spec);
+    Assertions.assertNotNull(spec.getDataSchema());
+    Assertions.assertEquals(4, spec.getDataSchema().getAggregators().length);
+    Assertions.assertNotNull(spec.getIoConfig());
+    Assertions.assertEquals("metrics", spec.getIoConfig().getTopic());
+    Assertions.assertNull(spec.getIoConfig().getTopicPattern());
+    Assertions.assertNotNull(spec.getTuningConfig());
+    Assertions.assertNull(spec.getContext());
+    Assertions.assertFalse(spec.isSuspended());
     String serialized = mapper.writeValueAsString(spec);
 
     // expect default values populated in reserialized string
-    Assert.assertTrue(serialized.contains("\"tuningConfig\":{"));
-    Assert.assertTrue(serialized.contains("\"indexSpec\":{"));
-    Assert.assertTrue(serialized.contains("\"suspended\":false"));
-    Assert.assertTrue(serialized.contains("\"inputFormat\":{"));
+    Assertions.assertTrue(serialized.contains("\"tuningConfig\":{"));
+    Assertions.assertTrue(serialized.contains("\"indexSpec\":{"));
+    Assertions.assertTrue(serialized.contains("\"suspended\":false"));
+    Assertions.assertTrue(serialized.contains("\"inputFormat\":{"));
 
     KafkaSupervisorSpec spec2 = mapper.readValue(serialized, KafkaSupervisorSpec.class);
 
     String stable = mapper.writeValueAsString(spec2);
 
-    Assert.assertEquals(serialized, stable);
+    Assertions.assertEquals(serialized, stable);
   }
 
   @Test
@@ -414,22 +349,16 @@ public class KafkaSupervisorSpecTest
                   + "  \"type\": \"kafka\",\n"
                   + "  \"dataSchema\": {\n"
                   + "    \"dataSource\": \"metrics-kafka\",\n"
-                  + "    \"parser\": {\n"
-                  + "      \"type\": \"string\",\n"
-                  + "      \"parseSpec\": {\n"
-                  + "        \"format\": \"json\",\n"
-                  + "        \"timestampSpec\": {\n"
-                  + "          \"column\": \"timestamp\",\n"
-                  + "          \"format\": \"auto\"\n"
-                  + "        },\n"
-                  + "        \"dimensionsSpec\": {\n"
-                  + "          \"dimensions\": [],\n"
-                  + "          \"dimensionExclusions\": [\n"
-                  + "            \"timestamp\",\n"
-                  + "            \"value\"\n"
-                  + "          ]\n"
-                  + "        }\n"
-                  + "      }\n"
+                  + "    \"timestampSpec\": {\n"
+                  + "      \"column\": \"timestamp\",\n"
+                  + "      \"format\": \"auto\"\n"
+                  + "    },\n"
+                  + "    \"dimensionsSpec\": {\n"
+                  + "      \"dimensions\": [],\n"
+                  + "      \"dimensionExclusions\": [\n"
+                  + "        \"timestamp\",\n"
+                  + "        \"value\"\n"
+                  + "      ]\n"
                   + "    },\n"
                   + "    \"metricsSpec\": [\n"
                   + "      {\n"
@@ -460,6 +389,14 @@ public class KafkaSupervisorSpecTest
                   + "  },\n"
                   + "  \"ioConfig\": {\n"
                   + "    \"topic\": \"metrics\",\n"
+                  + "    \"inputFormat\": {\n"
+                  + "      \"type\": \"json\",\n"
+                  + "      \"flattenSpec\": {\n"
+                  + "        \"useFieldDiscovery\": true,\n"
+                  + "        \"fields\": []\n"
+                  + "      },\n"
+                  + "      \"featureSpec\": {}\n"
+                  + "    },"
                   + "    \"consumerProperties\": {\n"
                   + "      \"bootstrap.servers\": \"localhost:9092\"\n"
                   + "    },\n"
@@ -468,30 +405,225 @@ public class KafkaSupervisorSpecTest
                   + "}";
     KafkaSupervisorSpec spec = mapper.readValue(json, KafkaSupervisorSpec.class);
 
-    Assert.assertNotNull(spec);
-    Assert.assertNotNull(spec.getDataSchema());
-    Assert.assertEquals(4, spec.getDataSchema().getAggregators().length);
-    Assert.assertNotNull(spec.getIoConfig());
-    Assert.assertEquals("metrics", spec.getIoConfig().getTopic());
-    Assert.assertNotNull(spec.getTuningConfig());
-    Assert.assertNull(spec.getContext());
-    Assert.assertFalse(spec.isSuspended());
+    Assertions.assertNotNull(spec);
+    Assertions.assertNotNull(spec.getDataSchema());
+    Assertions.assertEquals(4, spec.getDataSchema().getAggregators().length);
+    Assertions.assertNotNull(spec.getIoConfig());
+    Assertions.assertEquals("metrics", spec.getIoConfig().getTopic());
+    Assertions.assertNull(spec.getIoConfig().getTopicPattern());
+    Assertions.assertNotNull(spec.getTuningConfig());
+    Assertions.assertNull(spec.getContext());
+    Assertions.assertFalse(spec.isSuspended());
 
     String suspendedSerialized = mapper.writeValueAsString(spec.createSuspendedSpec());
 
     // expect default values populated in reserialized string
-    Assert.assertTrue(suspendedSerialized.contains("\"tuningConfig\":{"));
-    Assert.assertTrue(suspendedSerialized.contains("\"indexSpec\":{"));
-    Assert.assertTrue(suspendedSerialized.contains("\"suspended\":true"));
+    Assertions.assertTrue(suspendedSerialized.contains("\"tuningConfig\":{"));
+    Assertions.assertTrue(suspendedSerialized.contains("\"indexSpec\":{"));
+    Assertions.assertTrue(suspendedSerialized.contains("\"suspended\":true"));
 
     KafkaSupervisorSpec suspendedSpec = mapper.readValue(suspendedSerialized, KafkaSupervisorSpec.class);
 
-    Assert.assertTrue(suspendedSpec.isSuspended());
+    Assertions.assertTrue(suspendedSpec.isSuspended());
 
     String runningSerialized = mapper.writeValueAsString(spec.createRunningSpec());
 
     KafkaSupervisorSpec runningSpec = mapper.readValue(runningSerialized, KafkaSupervisorSpec.class);
 
-    Assert.assertFalse(runningSpec.isSuspended());
+    Assertions.assertFalse(runningSpec.isSuspended());
+  }
+
+  @Test
+  public void testTaskCountSerdeRoundTrip() throws IOException
+  {
+    // A persisted taskCount must survive a serialize/deserialize round-trip even when
+    // autoScalerConfig.taskCountStart is set.
+    final CostBasedAutoScalerConfig autoScalerConfig =
+        CostBasedAutoScalerConfig.builder()
+            .enableTaskAutoScaler(true)
+            .taskCountMin(1)
+            .taskCountMax(100)
+            .taskCountStart(25)
+            .build();
+
+    final KafkaSupervisorSpec spec = new KafkaSupervisorSpecBuilder()
+        .withDataSchema(
+            schema -> schema
+                .withTimestamp(TimestampSpec.DEFAULT)
+                .withAggregators(new CountAggregatorFactory("rows"))
+                .withGranularity(new UniformGranularitySpec(Granularities.DAY, Granularities.NONE, null))
+        )
+        .withIoConfig(
+            ioConfig -> ioConfig
+                .withJsonInputFormat()
+                .withConsumerProperties(Map.of("bootstrap.servers", "localhost:9092"))
+                .withTaskCount(25)
+                .withAutoScalerConfig(autoScalerConfig)
+                .withLagAggregator(LagAggregator.DEFAULT)
+        )
+        .build("testDs", "metrics");
+
+    // Mutate taskCount the same way SeekableStreamSupervisor.changeTaskCountInIOConfig does,
+    // and verify that the mutation is picked up by serialization.
+    spec.getIoConfig().setTaskCount(50);
+    final byte[] payload = mapper.writeValueAsBytes(spec);
+    final KafkaSupervisorSpec roundTripped =
+        (KafkaSupervisorSpec) mapper.readValue(payload, SupervisorSpec.class);
+    Assertions.assertEquals(50, roundTripped.getIoConfig().getTaskCount());
+    Assertions.assertTrue(roundTripped.getIoConfig().isTaskCountExplicit());
+  }
+
+  @Test
+  public void test_validateSpecUpdateTo()
+  {
+    KafkaSupervisorSpec sourceSpec = getSpec("metrics", null);
+
+    // Proposed spec being non-kafka is not allowed
+    TestSupervisorSpec otherSpec = new TestSupervisorSpec("test", new Object());
+    assertInvalidInputException(
+        assertThrows(DruidException.class, () -> sourceSpec.validateSpecUpdateTo(otherSpec)),
+        StringUtils.format(
+            "Cannot change spec from type[%s] to type[%s]",
+            sourceSpec.getClass().getSimpleName(),
+            otherSpec.getClass().getSimpleName()
+        )
+    );
+
+    KafkaSupervisorSpec multiTopicProposedSpec = getSpec(null, "metrics-.*");
+    assertInvalidInputException(
+        assertThrows(DruidException.class, () -> sourceSpec.validateSpecUpdateTo(multiTopicProposedSpec)),
+        "Update of the input source stream from [(single-topic) metrics] to [(multi-topic) metrics-.*] is not supported for a running supervisor."
+        + "\nTo perform the update safely, follow these steps:"
+        + "\n(1) Suspend this supervisor, reset its offsets and then terminate it. "
+        + "\n(2) Create a new supervisor with the new input source stream."
+        + "\nNote that doing the reset can cause data duplication or loss if any topic used in the old supervisor is included in the new one too."
+    );
+
+    KafkaSupervisorSpec singleTopicNewStreamProposedSpec = getSpec("metricsNew", null);
+    assertInvalidInputException(
+        assertThrows(DruidException.class, () -> sourceSpec.validateSpecUpdateTo(singleTopicNewStreamProposedSpec)),
+        "Update of the input source stream from [metrics] to [metricsNew] is not supported for a running supervisor."
+        + "\nTo perform the update safely, follow these steps:"
+        + "\n(1) Suspend this supervisor, reset its offsets and then terminate it. "
+        + "\n(2) Create a new supervisor with the new input source stream."
+        + "\nNote that doing the reset can cause data duplication or loss if any topic used in the old supervisor is included in the new one too."
+    );
+
+    KafkaSupervisorSpec multiTopicMatchingSourceString = getSpec(null, "metrics");
+    assertInvalidInputException(
+        assertThrows(DruidException.class, () -> sourceSpec.validateSpecUpdateTo(multiTopicMatchingSourceString)),
+        "Update of the input source stream from [(single-topic) metrics] to [(multi-topic) metrics] is not supported for a running supervisor."
+        + "\nTo perform the update safely, follow these steps:"
+        + "\n(1) Suspend this supervisor, reset its offsets and then terminate it. "
+        + "\n(2) Create a new supervisor with the new input source stream."
+        + "\nNote that doing the reset can cause data duplication or loss if any topic used in the old supervisor is included in the new one too."
+    );
+
+    // test the inverse as well
+    assertInvalidInputException(
+        assertThrows(DruidException.class, () -> multiTopicMatchingSourceString.validateSpecUpdateTo(sourceSpec)),
+        "Update of the input source stream from [(multi-topic) metrics] to [(single-topic) metrics] is not supported for a running supervisor."
+        + "\nTo perform the update safely, follow these steps:"
+        + "\n(1) Suspend this supervisor, reset its offsets and then terminate it. "
+        + "\n(2) Create a new supervisor with the new input source stream."
+        + "\nNote that doing the reset can cause data duplication or loss if any topic used in the old supervisor is included in the new one too."
+    );
+
+    // Test valid spec update. This spec changes context vs the sourceSpec
+    KafkaSupervisorSpec validDestSpec = new KafkaSupervisorSpecBuilder()
+        .withDataSchema(
+            schema -> schema
+                .withTimestamp(TimestampSpec.DEFAULT)
+                .withAggregators(new CountAggregatorFactory("rows"))
+                .withGranularity(new UniformGranularitySpec(Granularities.DAY, Granularities.NONE, null))
+        )
+        .withIoConfig(
+            ioConfig -> ioConfig
+                .withJsonInputFormat()
+                .withConsumerProperties(Map.of("bootstrap.servers", "localhost:9092"))
+        )
+        .build("testDs", "metrics");
+    sourceSpec.validateSpecUpdateTo(validDestSpec);
+  }
+
+  @Test
+  public void testCreateBackfillSpec()
+  {
+    KafkaSupervisorSpec spec = new KafkaSupervisorSpecBuilder()
+        .withDataSchema(
+            schema -> schema
+                .withTimestamp(TimestampSpec.DEFAULT)
+                .withAggregators(new CountAggregatorFactory("rows"))
+                .withGranularity(new UniformGranularitySpec(Granularities.HOUR, Granularities.NONE, null))
+        )
+        .withIoConfig(
+            ioConfig -> ioConfig
+                .withJsonInputFormat()
+                .withConsumerProperties(Map.of("bootstrap.servers", "localhost:9092"))
+                .withTaskCount(3)
+        )
+        .build("testDs", "metrics");
+
+    BoundedStreamConfig boundedStreamConfig = new BoundedStreamConfig(
+        Map.of("0", 100L, "1", 200L),
+        Map.of("0", 500L, "1", 600L)
+    );
+
+    KafkaSupervisorSpec backfill = (KafkaSupervisorSpec) spec.createBackfillSpec("backfill-id", boundedStreamConfig, 2);
+
+    Assertions.assertEquals("backfill-id", backfill.getId());
+    Assertions.assertEquals("testDs", backfill.getSpec().getDataSchema().getDataSource());
+    Assertions.assertEquals("metrics", backfill.getSpec().getIOConfig().getTopic());
+    Assertions.assertEquals(2, backfill.getSpec().getIOConfig().getTaskCount());
+    Assertions.assertEquals(boundedStreamConfig, backfill.getSpec().getIOConfig().getBoundedStreamConfig());
+  }
+
+  @Test
+  public void testCreateBackfillSpecDropsPartitionSelection()
+  {
+    final KafkaSupervisorSpec spec = new KafkaSupervisorSpecBuilder()
+        .withDataSchema(
+            schema -> schema
+                .withTimestamp(TimestampSpec.DEFAULT)
+                .withAggregators(new CountAggregatorFactory("rows"))
+                .withGranularity(new UniformGranularitySpec(Granularities.HOUR, Granularities.NONE, null))
+        )
+        .withIoConfig(
+            ioConfig -> ioConfig
+                .withJsonInputFormat()
+                .withConsumerProperties(Map.of("bootstrap.servers", "localhost:9092"))
+                .withPartitionIds(Set.of(0))
+        )
+        .build("testDs", "metrics");
+    final BoundedStreamConfig boundedStreamConfig = new BoundedStreamConfig(Map.of("0", 100L), Map.of("0", 500L));
+
+    final KafkaSupervisorSpec backfill = spec.createBackfillSpec("backfill-id", boundedStreamConfig, 1);
+
+    // The bounded backfill reads its own range, so it must not inherit the selection.
+    Assertions.assertNull(backfill.getSpec().getIOConfig().getPartitionIds());
+    Assertions.assertEquals(boundedStreamConfig, backfill.getSpec().getIOConfig().getBoundedStreamConfig());
+
+    // The source spec keeps its selection.
+    Assertions.assertEquals(Set.of(0), spec.getSpec().getIOConfig().getPartitionIds());
+  }
+
+  private KafkaSupervisorSpec getSpec(String topic, String topicPattern)
+  {
+    KafkaSupervisorSpecBuilder builder = new KafkaSupervisorSpecBuilder()
+        .withDataSchema(
+            schema -> schema
+                .withTimestamp(TimestampSpec.DEFAULT)
+                .withAggregators(new CountAggregatorFactory("rows"))
+                .withGranularity(new UniformGranularitySpec(Granularities.DAY, Granularities.NONE, null))
+        )
+        .withIoConfig(
+            ioConfig -> ioConfig
+                .withJsonInputFormat()
+                .withConsumerProperties(Map.of("bootstrap.servers", "localhost:9092"))
+        );
+
+    return topic == null
+           ? builder.buildWithTopicPattern("testDs", topicPattern)
+           : builder.build("testDs", topic);
   }
 }

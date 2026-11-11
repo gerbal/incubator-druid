@@ -28,12 +28,22 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 
 public final class ConnectionUriUtils
 {
   private static final String MARIADB_EXTRAS = "nonMappedOptions";
+  private static final Set<String> MARIADB_3X_EXCLUDED_FIELDS = Set.of(
+      "database",
+      "haMode",
+      "$jacocoData",
+      "addresses",
+      "initialUrl",
+      "codecs"
+  );
   // Note: MySQL JDBC connector 8 supports 7 other protocols than just `jdbc:mysql:`
   // (https://dev.mysql.com/doc/connector-j/8.0/en/connector-j-reference-jdbc-url-format.html).
   // We should consider either expanding recognized mysql protocols or restricting allowed protocols to
@@ -43,7 +53,8 @@ public final class ConnectionUriUtils
   public static final String MARIADB_PREFIX = "jdbc:mariadb:";
 
   public static final String POSTGRES_DRIVER = "org.postgresql.Driver";
-  public static final String MYSQL_NON_REGISTERING_DRIVER = "com.mysql.jdbc.NonRegisteringDriver";
+  public static final String MYSQL_CONNECTION_URL = "com.mysql.cj.conf.ConnectionUrl";
+  public static final String MYSQL_HOST_INFO = "com.mysql.cj.conf.HostInfo";
 
   /**
    * This method checks {@param actualProperties} against {@param allowedProperties} if they are not system properties.
@@ -76,13 +87,12 @@ public final class ConnectionUriUtils
    * parameter whitelist validation.
    * <p>
    * uris starting with {@link #MYSQL_PREFIX} will first try to use the MySQL Connector/J driver (5.x), then fallback
-   * to MariaDB Connector/J (version 2.x) which also accepts jdbc:mysql uris. This method does not attempt to use
-   * MariaDB Connector/J 3.x alpha driver (at the time of these javadocs, it only handles the jdbc:mariadb prefix)
+   * to MariaDB Connector/J (version 2.x, or 3.x and later) which also accepts jdbc:mysql uris.
    * <p>
    * uris starting with {@link #POSTGRES_PREFIX} will use the postgresql driver to parse the uri
    * <p>
    * uris starting with {@link #MARIADB_PREFIX} will first try to use MariaDB Connector/J driver (2.x) then fallback to
-   * MariaDB Connector/J 3.x driver.
+   * MariaDB Connector/J 3.x or later driver.
    * <p>
    * If the uri does not match any of these schemes, this method will return an empty set if unknown uris are allowed,
    * or throw an exception if not.
@@ -98,10 +108,21 @@ public final class ConnectionUriUtils
           return tryParseMariaDb2xConnectionUri(connectionUri);
         }
         catch (ClassNotFoundException notFoundMaria2x) {
-          throw new RuntimeException(
-              "Failed to find MySQL driver class. Please check the MySQL connector version 5.1.49 is in the classpath",
-              notFoundMysql
-          );
+          try {
+            return tryParseMariaDb3xConnectionUri(connectionUri);
+          }
+          catch (ClassNotFoundException notFoundMaria3x) {
+            throw new RuntimeException(
+                "Failed to find MySQL driver class. Please check the MySQL connector version 8.2.0 is in the classpath",
+                notFoundMysql
+            );
+          }
+          catch (IllegalArgumentException iaeMaria3x) {
+            throw iaeMaria3x;
+          }
+          catch (Throwable otherMaria3x) {
+            throw new RuntimeException(otherMaria3x);
+          }
         }
         catch (IllegalArgumentException iaeMaria2x) {
           throw iaeMaria2x;
@@ -126,7 +147,7 @@ public final class ConnectionUriUtils
         }
         catch (ClassNotFoundException notFoundMaria3x) {
           throw new RuntimeException(
-              "Failed to find MariaDB driver class. Please check the MariaDB connector version 2.7.3 is in the classpath",
+              "Failed to find MariaDB driver class. Please check the MariaDB connector is in the classpath",
               notFoundMaria2x
           );
         }
@@ -177,21 +198,66 @@ public final class ConnectionUriUtils
   }
 
   public static Set<String> tryParseMySqlConnectionUri(String connectionUri)
-      throws ClassNotFoundException, NoSuchMethodException, InstantiationException, IllegalAccessException,
+      throws ClassNotFoundException, NoSuchMethodException, IllegalAccessException,
              InvocationTargetException
   {
-    Class<?> driverClass = Class.forName(MYSQL_NON_REGISTERING_DRIVER);
-    Method parseUrl = driverClass.getMethod("parseURL", String.class, Properties.class);
-    // almost the same as postgres, but is an instance level method
-    Properties properties = (Properties) parseUrl.invoke(
-        driverClass.getConstructor().newInstance(),
-        connectionUri,
-        null
-    );
-
-    if (properties == null) {
+    Class<?> connectionUrlClass = Class.forName(MYSQL_CONNECTION_URL);
+    Method isConnectionStringSupported = connectionUrlClass.getMethod("acceptsUrl", String.class);
+    if (!(boolean) isConnectionStringSupported.invoke(connectionUrlClass, connectionUri)) {
       throw new IAE("Invalid URL format for MySQL: [%s]", connectionUri);
     }
+    Method getConnectionUrlInstanceMethod = connectionUrlClass.getMethod("getConnectionUrlInstance", String.class, Properties.class);
+    Object conUrl = getConnectionUrlInstanceMethod.invoke(connectionUrlClass, connectionUri, null);
+    Method getHostsList = connectionUrlClass.getMethod("getHostsList");
+    return getKeysFromOptions(getPropertiesFromHosts((List<?>) getHostsList.invoke(conUrl)));
+  }
+
+  private static Properties getPropertiesFromHosts(List<?> hostsList)
+      throws NoSuchMethodException, InvocationTargetException, IllegalAccessException, ClassNotFoundException
+  {
+    Properties properties = new Properties();
+    Class<?> hostInfoClass = Class.forName(MYSQL_HOST_INFO);
+    for (Object host : hostsList) {
+      Method getHostMethod = hostInfoClass.getMethod("getHost");
+      String hostName = (String) getHostMethod.invoke(host);
+      if (hostName != null) {
+        properties.setProperty("HOST", hostName);
+      }
+
+      Method getPortMethod = hostInfoClass.getMethod("getPort");
+      Integer port = (Integer) getPortMethod.invoke(host);
+      if (port != null) {
+        properties.setProperty("PORT", String.valueOf(port));
+      }
+
+      Method getUserMethod = hostInfoClass.getMethod("getUser");
+      String user = (String) getUserMethod.invoke(host);
+      if (user != null) {
+        properties.setProperty("user", user);
+      }
+
+      Method getPasswordMethod = hostInfoClass.getMethod("getPassword");
+      String password = (String) getPasswordMethod.invoke(host);
+      if (password != null) {
+        properties.setProperty("password", password);
+      }
+
+      Method getHostPropertiesMethod = hostInfoClass.getMethod("getHostProperties");
+      Map<String, String> hostProperties =
+          (Map<String, String>) getHostPropertiesMethod.invoke(host);
+      if (hostProperties != null) {
+        for (Map.Entry<String, String> entry : hostProperties.entrySet()) {
+          if (entry.getKey() != null && entry.getValue() != null) {
+            properties.setProperty(entry.getKey(), entry.getValue());
+          }
+        }
+      }
+    }
+    return properties;
+  }
+
+  private static Set<String> getKeysFromOptions(Properties properties)
+  {
     Set<String> keys = Sets.newHashSetWithExpectedSize(properties.size());
     properties.forEach((k, v) -> keys.add((String) k));
     return keys;
@@ -262,7 +328,7 @@ public final class ConnectionUriUtils
 
     Object defaultConfiguration = buildMethod.invoke(configurationBuilderClass.getConstructor().newInstance());
     for (Field field : fields) {
-      if (field.getName().equals(MARIADB_EXTRAS)) {
+      if (field.getName().equals(MARIADB_EXTRAS) || MARIADB_3X_EXCLUDED_FIELDS.contains(field.getName())) {
         continue;
       }
       try {

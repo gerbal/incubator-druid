@@ -1,0 +1,225 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.druid.sql.calcite.parser;
+
+import org.apache.calcite.sql.SqlLiteral;
+import org.apache.calcite.sql.SqlNode;
+import org.apache.calcite.sql.parser.SqlParserPos;
+import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.calcite.util.DateString;
+import org.apache.calcite.util.TimestampString;
+import org.apache.druid.error.DruidException;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+public class DruidSqlParserTest
+{
+  @Test
+  public void test_sqlLiteralToContextValue_null()
+  {
+    final SqlLiteral literal = SqlLiteral.createNull(SqlParserPos.ZERO);
+    Assertions.assertNull(DruidSqlParser.sqlLiteralToContextValue(literal));
+  }
+
+  @Test
+  public void test_sqlLiteralToContextValue_string()
+  {
+    final SqlLiteral literal = SqlLiteral.createCharString("abc", SqlParserPos.ZERO);
+    Assertions.assertEquals("abc", DruidSqlParser.sqlLiteralToContextValue(literal));
+  }
+
+  @Test
+  public void test_sqlLiteralToContextValue_stringWithSpecialChars()
+  {
+    final SqlLiteral literal = SqlLiteral.createCharString("hello\nworld\t\"test\"", SqlParserPos.ZERO);
+    Assertions.assertEquals("hello\nworld\t\"test\"", DruidSqlParser.sqlLiteralToContextValue(literal));
+  }
+
+  @Test
+  public void test_sqlLiteralToContextValue_integer()
+  {
+    // Numbers within Long range are converted to Long.
+    final SqlLiteral literal = SqlLiteral.createExactNumeric("42", SqlParserPos.ZERO);
+    Assertions.assertEquals(42L, DruidSqlParser.sqlLiteralToContextValue(literal));
+  }
+
+  @Test
+  public void test_sqlLiteralToContextValue_negativeInteger()
+  {
+    final SqlLiteral literal = SqlLiteral.createExactNumeric("-123", SqlParserPos.ZERO);
+    Assertions.assertEquals(-123L, DruidSqlParser.sqlLiteralToContextValue(literal));
+  }
+
+  @Test
+  public void test_sqlLiteralToContextValue_decimal()
+  {
+    // Decimals are converted to Double.
+    final SqlLiteral literal = SqlLiteral.createExactNumeric("3.14159", SqlParserPos.ZERO);
+    Assertions.assertEquals(3.14159, DruidSqlParser.sqlLiteralToContextValue(literal));
+  }
+
+  @Test
+  public void test_sqlLiteralToContextValue_largeNumber()
+  {
+    // Integers outside Long range are retained as strings.
+    final SqlLiteral literal = SqlLiteral.createExactNumeric("123456789012345678901234567890", SqlParserPos.ZERO);
+    Assertions.assertEquals("123456789012345678901234567890", DruidSqlParser.sqlLiteralToContextValue(literal));
+  }
+
+  @Test
+  public void test_sqlLiteralToContextValue_approximateNumeric()
+  {
+    final SqlLiteral literal = SqlLiteral.createApproxNumeric("1.23E10", SqlParserPos.ZERO);
+    Assertions.assertEquals(1.23E10, DruidSqlParser.sqlLiteralToContextValue(literal));
+  }
+
+  @Test
+  public void test_sqlLiteralToContextValue_booleanTrue()
+  {
+    final SqlLiteral literal = SqlLiteral.createBoolean(true, SqlParserPos.ZERO);
+    Assertions.assertEquals(true, DruidSqlParser.sqlLiteralToContextValue(literal));
+  }
+
+  @Test
+  public void test_sqlLiteralToContextValue_booleanFalse()
+  {
+    final SqlLiteral literal = SqlLiteral.createBoolean(false, SqlParserPos.ZERO);
+    Assertions.assertEquals(false, DruidSqlParser.sqlLiteralToContextValue(literal));
+  }
+
+  @Test
+  public void test_sqlLiteralToContextValue_timestamp()
+  {
+    // Timestamps are returned as strings in ISO8601 format
+    final TimestampString timestampString = new TimestampString("2023-01-15 14:30:00");
+    final SqlLiteral literal =
+        SqlLiteral.createTimestamp(SqlTypeName.TIMESTAMP, timestampString, 0, SqlParserPos.ZERO);
+    Assertions.assertEquals("2023-01-15T14:30:00.000Z", DruidSqlParser.sqlLiteralToContextValue(literal));
+  }
+
+  @Test
+  public void test_sqlLiteralToContextValue_timestampWithFractionalSeconds()
+  {
+    final TimestampString timestampString = new TimestampString("2023-01-15 14:30:00.123");
+    final SqlLiteral literal =
+        SqlLiteral.createTimestamp(SqlTypeName.TIMESTAMP, timestampString, 3, SqlParserPos.ZERO);
+    Assertions.assertEquals("2023-01-15T14:30:00.123Z", DruidSqlParser.sqlLiteralToContextValue(literal));
+  }
+
+  @Test
+  public void test_sqlLiteralToContextValue_date()
+  {
+    final DateString dateString = new DateString("2023-01-15");
+    final SqlLiteral literal = SqlLiteral.createDate(dateString, SqlParserPos.ZERO);
+    Assertions.assertEquals("2023-01-15T00:00:00.000Z", DruidSqlParser.sqlLiteralToContextValue(literal));
+  }
+
+  @Test
+  public void test_sqlLiteralToContextValue_unsupportedType()
+  {
+    final SqlLiteral literal = SqlLiteral.createSymbol(SqlTypeName.BINARY, SqlParserPos.ZERO);
+    final DruidException exception = Assertions.assertThrows(
+        DruidException.class,
+        () -> DruidSqlParser.sqlLiteralToContextValue(literal)
+    );
+    Assertions.assertTrue(exception.getMessage().contains("Unsupported type for SET"));
+  }
+
+  @Test
+  public void testParse_reservedKeywordIdentifier()
+  {
+    final DruidException exception = Assertions.assertThrows(
+        DruidException.class,
+        () -> DruidSqlParser.parse("SELECT start FROM sys.\"segments\" LIMIT 1", false)
+    );
+
+    Assertions.assertEquals(
+        "Token [start] (line [1], column [8]) is a reserved keyword. "
+        + "To use it as an identifier, quote it as [\"start\"]",
+        exception.getMessage()
+    );
+  }
+
+  @Test
+  public void testParse_reservedKeywordOutsideIdentifierContext()
+  {
+    final DruidException exception = Assertions.assertThrows(
+        DruidException.class,
+        () -> DruidSqlParser.parse("SELECT * FROM foo GROUP ORDER BY x", false)
+    );
+
+    Assertions.assertFalse(exception.getMessage().contains("is a reserved keyword"));
+  }
+
+  @Test
+  public void testParse_expectedReservedKeyword()
+  {
+    final DruidException exception = Assertions.assertThrows(
+        DruidException.class,
+        () -> DruidSqlParser.parse("SELECT a FROM", false)
+    );
+
+    Assertions.assertFalse(exception.getMessage().contains("is a reserved keyword"));
+  }
+
+  @Test
+  public void testParse_reservedKeywordFunctionCall()
+  {
+    // UNNEST is a reserved keyword, but it appears in a function-call context, not as an identifier.
+    final DruidException exception = Assertions.assertThrows(
+        DruidException.class,
+        () -> DruidSqlParser.parse("SELECT strlen(unnest(a_int))", false)
+    );
+
+    Assertions.assertTrue(exception.getMessage().contains("Received an unexpected token"));
+    Assertions.assertFalse(exception.getMessage().contains("is a reserved keyword"));
+  }
+
+  @Test
+  public void testParse_jsonObjectWithColonPaths()
+  {
+    final SqlNode node = DruidSqlParser.parse(
+        "SELECT JSON_OBJECT('a': x:b, 'c', y:d.e, KEY z:f VALUE 1, KEY 'g' VALUE w:['h'][0])",
+        false
+    ).getMainStatement();
+
+    Assertions.assertEquals(
+        "SELECT JSON_OBJECT(KEY 'a' VALUE `x`:`b`, KEY 'c' VALUE `y`:`d`.`e`, "
+        + "KEY `z`:`f` VALUE 1, KEY 'g' VALUE `w`:['h'][0] NULL ON NULL)",
+        node.toString()
+    );
+  }
+
+  @Test
+  public void testParse_jsonObjectWithColonPathInValueInsideName()
+  {
+    // The inner value x:c allows a colon path, but the outer name still ends before ": z".
+    final SqlNode node = DruidSqlParser.parse(
+        "SELECT JSON_OBJECT(JSON_VALUE(JSON_OBJECT('b': x:c), '$.b') || y : z)",
+        false
+    ).getMainStatement();
+
+    Assertions.assertEquals(
+        "SELECT JSON_OBJECT(KEY JSON_VALUE(JSON_OBJECT(KEY 'b' VALUE `x`:`c` NULL ON NULL), '$.b') || `y` "
+        + "VALUE `z` NULL ON NULL)",
+        node.toString()
+    );
+  }
+}

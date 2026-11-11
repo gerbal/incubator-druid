@@ -19,7 +19,6 @@
 
 package org.apache.druid.query.movingaverage;
 
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.data.input.MapBasedRow;
 import org.apache.druid.data.input.Row;
 import org.apache.druid.java.util.common.granularity.Granularities;
@@ -32,9 +31,9 @@ import org.apache.druid.query.spec.MultipleIntervalSegmentSpec;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
 import org.joda.time.chrono.ISOChronology;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -47,11 +46,9 @@ public class PostAveragerAggregatorCalculatorTest
   private Map<String, Object> event;
   private MapBasedRow row;
 
-  @Before
+  @BeforeEach
   public void setup()
   {
-    System.setProperty("druid.generic.useDefaultValueForNull", "true");
-    NullHandling.initializeForTests();
     MovingAverageQuery query = new MovingAverageQuery(
         new TableDataSource("d"),
         new MultipleIntervalSegmentSpec(Collections.singletonList(new Interval(
@@ -90,7 +87,7 @@ public class PostAveragerAggregatorCalculatorTest
 
     Row result = pac.apply(row);
 
-    Assert.assertEquals(10.0f / 12.0f, result.getMetric("avgCountRatio").floatValue(), 0.0);
+    Assertions.assertEquals(10.0f / 12.0f, result.getMetric("avgCountRatio").floatValue(), 0.0);
   }
 
   @Test
@@ -100,7 +97,7 @@ public class PostAveragerAggregatorCalculatorTest
 
     Row result = pac.apply(row);
 
-    Assert.assertEquals(0.0, result.getMetric("avgCountRatio").floatValue(), 0.0);
-    Assert.assertNull(result.getRaw("avgCountRatio"));
+    Assertions.assertNull(result.getMetric("avgCountRatio"));
+    Assertions.assertNull(result.getRaw("avgCountRatio"));
   }
 }

@@ -27,16 +27,23 @@ import org.apache.druid.client.ImmutableDruidServerTests;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
-import org.apache.druid.metadata.MetadataRuleManager;
+import org.apache.druid.metadata.MetadataRuleManagerConfig;
+import org.apache.druid.server.coordinator.duty.BalanceSegments;
 import org.apache.druid.server.coordinator.duty.RunRules;
+import org.apache.druid.server.coordinator.loading.LoadQueuePeon;
+import org.apache.druid.server.coordinator.loading.SegmentLoadQueueManager;
+import org.apache.druid.server.coordinator.loading.TestLoadQueuePeon;
 import org.apache.druid.server.coordinator.rules.PeriodLoadRule;
+import org.apache.druid.server.coordinator.rules.RetentionRulesSnapshot;
 import org.apache.druid.server.coordinator.rules.Rule;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 import org.apache.druid.timeline.partition.NoneShardSpec;
 import org.easymock.EasyMock;
+import org.joda.time.Duration;
 import org.joda.time.Interval;
 import org.joda.time.Period;
-import org.junit.Before;
+import org.junit.jupiter.api.BeforeEach;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -50,24 +57,22 @@ import java.util.Map;
 public class BalanceSegmentsProfiler
 {
   private static final int MAX_SEGMENTS_TO_MOVE = 5;
-  private DruidCoordinator coordinator;
+  private SegmentLoadQueueManager loadQueueManager;
   private ImmutableDruidServer druidServer1;
   private ImmutableDruidServer druidServer2;
   List<DataSegment> segments = new ArrayList<>();
   ServiceEmitter emitter;
-  MetadataRuleManager manager;
-  PeriodLoadRule loadRule = new PeriodLoadRule(new Period("P5000Y"), null, ImmutableMap.of("normal", 3));
+  PeriodLoadRule loadRule = new PeriodLoadRule(new Period("P5000Y"), null, ImmutableMap.of("normal", 3), null);
   List<Rule> rules = ImmutableList.of(loadRule);
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
-    coordinator = EasyMock.createMock(DruidCoordinator.class);
+    loadQueueManager = new SegmentLoadQueueManager(null, null);
     druidServer1 = EasyMock.createMock(ImmutableDruidServer.class);
     druidServer2 = EasyMock.createMock(ImmutableDruidServer.class);
     emitter = EasyMock.createMock(ServiceEmitter.class);
     EmittingLogger.registerEmitter(emitter);
-    manager = EasyMock.createMock(MetadataRuleManager.class);
   }
 
   public void bigProfiler()
@@ -75,37 +80,18 @@ public class BalanceSegmentsProfiler
     Stopwatch watch = Stopwatch.createUnstarted();
     int numSegments = 55000;
     int numServers = 50;
-    EasyMock.expect(manager.getAllRules()).andReturn(ImmutableMap.of("test", rules)).anyTimes();
-    EasyMock.expect(manager.getRules(EasyMock.anyObject())).andReturn(rules).anyTimes();
-    EasyMock.expect(manager.getRulesWithDefault(EasyMock.anyObject())).andReturn(rules).anyTimes();
-    EasyMock.replay(manager);
-
-    coordinator.moveSegment(
-        EasyMock.anyObject(),
-        EasyMock.anyObject(),
-        EasyMock.anyObject(),
-        EasyMock.anyObject(),
-        EasyMock.anyObject()
-    );
-    EasyMock.expectLastCall().anyTimes();
-    EasyMock.replay(coordinator);
-
-    Map<String, LoadQueuePeon> peonMap = new HashMap<>();
     List<ServerHolder> serverHolderList = new ArrayList<>();
     List<DataSegment> segments = new ArrayList<>();
     for (int i = 0; i < numSegments; i++) {
       segments.add(
-          new DataSegment(
-              "datasource" + i,
-              new Interval(DateTimes.of("2012-01-01"), (DateTimes.of("2012-01-01")).plusHours(1)),
-              (DateTimes.of("2012-03-01")).toString(),
-              new HashMap<>(),
-              new ArrayList<>(),
-              new ArrayList<>(),
-              NoneShardSpec.instance(),
-              0,
-              4L
-          )
+          DataSegment.builder(SegmentId.of("datasource" + i, new Interval(DateTimes.of("2012-01-01"), (DateTimes.of("2012-01-01")).plusHours(1)), (DateTimes.of("2012-03-01")).toString(), 0))
+                     .loadSpec(new HashMap<>())
+                     .dimensions(new ArrayList<>())
+                     .metrics(new ArrayList<>())
+                     .shardSpec(NoneShardSpec.instance())
+                     .binaryVersion(0)
+                     .size(4L)
+                     .build()
       );
     }
 
@@ -125,21 +111,24 @@ public class BalanceSegmentsProfiler
       EasyMock.expect(server.getSegment(EasyMock.anyObject())).andReturn(null).anyTimes();
       EasyMock.replay(server);
 
-      LoadQueuePeon peon = new LoadQueuePeonTester();
-      peonMap.put(Integer.toString(i), peon);
+      LoadQueuePeon peon = new TestLoadQueuePeon();
       serverHolderList.add(new ServerHolder(server, peon));
     }
 
-    DruidCluster druidCluster = DruidClusterBuilder
-        .newBuilder()
+    DruidCluster druidCluster = DruidCluster
+        .builder()
         .addTier("normal", serverHolderList.toArray(new ServerHolder[0]))
         .build();
-    DruidCoordinatorRuntimeParams params = CoordinatorRuntimeParamsTestHelpers
-        .newBuilder()
+    DruidCoordinatorRuntimeParams params = DruidCoordinatorRuntimeParams
+        .builder()
         .withDruidCluster(druidCluster)
-        .withSegmentReplicantLookup(SegmentReplicantLookup.make(druidCluster, false))
-        .withLoadManagementPeons(peonMap)
-        .withUsedSegmentsInTest(segments)
+        .withUsedSegments(segments)
+        .withRetentionRulesSnapshot(
+            new RetentionRulesSnapshot(
+                Map.of(MetadataRuleManagerConfig.DEFAULT_RULE_NAME, rules),
+                MetadataRuleManagerConfig.DEFAULT_RULE_NAME
+            )
+        )
         .withDynamicConfigs(
             CoordinatorDynamicConfig
                 .builder()
@@ -148,13 +137,11 @@ public class BalanceSegmentsProfiler
                 .withReplicationThrottleLimit(5)
                 .build()
         )
-        .withEmitter(emitter)
-        .withDatabaseRuleManager(manager)
-        .withReplicationManager(new ReplicationThrottler(2, 500, false))
+        .withSegmentAssignerUsing(loadQueueManager)
         .build();
 
-    BalanceSegmentsTester tester = new BalanceSegmentsTester(coordinator);
-    RunRules runner = new RunRules(coordinator);
+    BalanceSegments tester = new BalanceSegments(Duration.standardMinutes(1));
+    RunRules runner = new RunRules((ds, set) -> set.size());
     watch.start();
     DruidCoordinatorRuntimeParams balanceParams = tester.run(params);
     DruidCoordinatorRuntimeParams assignParams = runner.run(params);
@@ -165,8 +152,8 @@ public class BalanceSegmentsProfiler
   public void profileRun()
   {
     Stopwatch watch = Stopwatch.createUnstarted();
-    LoadQueuePeonTester fromPeon = new LoadQueuePeonTester();
-    LoadQueuePeonTester toPeon = new LoadQueuePeonTester();
+    TestLoadQueuePeon fromPeon = new TestLoadQueuePeon();
+    TestLoadQueuePeon toPeon = new TestLoadQueuePeon();
 
     EasyMock.expect(druidServer1.getName()).andReturn("from").atLeastOnce();
     EasyMock.expect(druidServer1.getCurrSize()).andReturn(30L).atLeastOnce();
@@ -183,21 +170,11 @@ public class BalanceSegmentsProfiler
     EasyMock.expect(druidServer2.getSegment(EasyMock.anyObject())).andReturn(null).anyTimes();
     EasyMock.replay(druidServer2);
 
-    coordinator.moveSegment(
-        EasyMock.anyObject(),
-        EasyMock.anyObject(),
-        EasyMock.anyObject(),
-        EasyMock.anyObject(),
-        EasyMock.anyObject()
-    );
-    EasyMock.expectLastCall().anyTimes();
-    EasyMock.replay(coordinator);
-
-    DruidCoordinatorRuntimeParams params = CoordinatorRuntimeParamsTestHelpers
-        .newBuilder()
+    DruidCoordinatorRuntimeParams params = DruidCoordinatorRuntimeParams
+        .builder()
         .withDruidCluster(
-            DruidClusterBuilder
-                .newBuilder()
+            DruidCluster
+                .builder()
                 .addTier(
                     "normal",
                     new ServerHolder(druidServer1, fromPeon),
@@ -205,11 +182,11 @@ public class BalanceSegmentsProfiler
                 )
                 .build()
         )
-        .withLoadManagementPeons(ImmutableMap.of("from", fromPeon, "to", toPeon))
-        .withUsedSegmentsInTest(segments)
+        .withUsedSegments(segments)
         .withDynamicConfigs(CoordinatorDynamicConfig.builder().withMaxSegmentsToMove(MAX_SEGMENTS_TO_MOVE).build())
+        .withSegmentAssignerUsing(loadQueueManager)
         .build();
-    BalanceSegmentsTester tester = new BalanceSegmentsTester(coordinator);
+    BalanceSegments tester = new BalanceSegments(Duration.standardMinutes(1));
     watch.start();
     DruidCoordinatorRuntimeParams balanceParams = tester.run(params);
     System.out.println(watch.stop());

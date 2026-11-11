@@ -75,6 +75,15 @@ public class HdfsTaskLogs implements TaskLogs
     log.info("Wrote task reports to: %s", path);
   }
 
+  @Override
+  public void pushTaskStatus(String taskId, File statusFile) throws IOException
+  {
+    final Path path = getTaskStatusFileFromId(taskId);
+    log.info("Writing task status to: %s", path);
+    pushTaskFile(path, statusFile);
+    log.info("Wrote task status to: %s", path);
+  }
+
   private void pushTaskFile(Path path, File logFile) throws IOException
   {
     final FileSystem fs = path.getFileSystem(hadoopConfig);
@@ -97,6 +106,13 @@ public class HdfsTaskLogs implements TaskLogs
   public Optional<InputStream> streamTaskReports(String taskId) throws IOException
   {
     final Path path = getTaskReportsFileFromId(taskId);
+    return streamTaskFile(path, 0);
+  }
+
+  @Override
+  public Optional<InputStream> streamTaskStatus(String taskId) throws IOException
+  {
+    final Path path = getTaskStatusFileFromId(taskId);
     return streamTaskFile(path, 0);
   }
 
@@ -139,6 +155,15 @@ public class HdfsTaskLogs implements TaskLogs
     return new Path(mergePaths(config.getDirectory(), taskId.replace(':', '_') + ".reports.json"));
   }
 
+  /**
+   * Due to https://issues.apache.org/jira/browse/HDFS-13 ":" are not allowed in
+   * path names. So we format paths differently for HDFS.
+   */
+  private Path getTaskStatusFileFromId(String taskId)
+  {
+    return new Path(mergePaths(config.getDirectory(), taskId.replace(':', '_') + ".status.json"));
+  }
+
   // some hadoop version Path.mergePaths does not exist
   private static String mergePaths(String path1, String path2)
   {
@@ -160,8 +185,9 @@ public class HdfsTaskLogs implements TaskLogs
     Path taskLogDir = new Path(config.getDirectory());
     FileSystem fs = taskLogDir.getFileSystem(hadoopConfig);
     if (fs.exists(taskLogDir)) {
+      FileStatus taskLogFileStatus = fs.getFileStatus(taskLogDir);
 
-      if (!fs.isDirectory(taskLogDir)) {
+      if (!taskLogFileStatus.isDirectory()) {
         throw new IOE("taskLogDir [%s] must be a directory.", taskLogDir);
       }
 
@@ -181,6 +207,26 @@ public class HdfsTaskLogs implements TaskLogs
         }
       }
     }
+  }
+
+  @Override
+  public void pushTaskPayload(String taskId, File taskPayloadFile) throws IOException
+  {
+    final Path path = getTaskPayloadFileFromId(taskId);
+    log.info("Pushing payload for task[%s] to location[%s]", taskId, path);
+    pushTaskFile(path, taskPayloadFile);
+  }
+
+  @Override
+  public Optional<InputStream> streamTaskPayload(String taskId) throws IOException
+  {
+    final Path path = getTaskPayloadFileFromId(taskId);
+    return streamTaskFile(path, 0);
+  }
+
+  private Path getTaskPayloadFileFromId(String taskId)
+  {
+    return new Path(mergePaths(config.getDirectory(), taskId.replace(':', '_') + ".payload.json"));
   }
 }
 

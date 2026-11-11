@@ -23,14 +23,14 @@ import com.google.common.base.Optional;
 import org.apache.druid.data.input.HandlingInputRowIterator;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.data.input.MapBasedInputRow;
+import org.apache.druid.indexer.granularity.GranularitySpec;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.parsers.CloseableIterator;
-import org.apache.druid.segment.indexing.granularity.GranularitySpec;
 import org.easymock.EasyMock;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
-import org.junit.Assert;
+import org.junit.jupiter.api.Assertions;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -63,7 +63,7 @@ class IndexTaskInputRowIteratorBuilderTestingFactory
 
   static CloseableIterator<InputRow> createInputRowIterator(InputRow inputRow)
   {
-    return new CloseableIterator<InputRow>()
+    return new CloseableIterator<>()
     {
       @Override
       public void close()
@@ -155,7 +155,7 @@ class IndexTaskInputRowIteratorBuilderTestingFactory
       HandlingInputRowIterator iterator = iteratorBuilder.build();
 
       InputRow nextInputRow = iterator.next();
-      Assert.assertEquals(expectedNextInputRow, nextInputRow);
+      Assertions.assertEquals(expectedNextInputRow, nextInputRow);
 
       return handlerInvocationHistory;
     }

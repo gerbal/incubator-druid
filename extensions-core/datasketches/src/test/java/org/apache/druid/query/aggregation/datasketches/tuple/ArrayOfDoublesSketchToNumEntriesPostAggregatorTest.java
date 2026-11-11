@@ -35,8 +35,8 @@ import org.apache.druid.query.timeseries.TimeseriesQueryQueryToolChest;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.RowSignature;
 import org.easymock.EasyMock;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -50,13 +50,14 @@ public class ArrayOfDoublesSketchToNumEntriesPostAggregatorTest
         new ConstantPostAggregator("", 0)
     );
     DefaultObjectMapper mapper = new DefaultObjectMapper();
-    ArrayOfDoublesSketchToNumEntriesPostAggregator andBackAgain = mapper.readValue(
+    mapper.registerModules(new ArrayOfDoublesSketchModule().getJacksonModules());
+    PostAggregator andBackAgain = mapper.readValue(
         mapper.writeValueAsString(there),
-        ArrayOfDoublesSketchToNumEntriesPostAggregator.class
+        PostAggregator.class
     );
 
-    Assert.assertEquals(there, andBackAgain);
-    Assert.assertArrayEquals(there.getCacheKey(), andBackAgain.getCacheKey());
+    Assertions.assertEquals(there, andBackAgain);
+    Assertions.assertArrayEquals(there.getCacheKey(), andBackAgain.getCacheKey());
   }
 
 
@@ -68,7 +69,7 @@ public class ArrayOfDoublesSketchToNumEntriesPostAggregatorTest
         new ConstantPostAggregator("", 0)
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "ArrayOfDoublesSketchToNumEntriesPostAggregator{name='a', field=ConstantPostAggregator{name='', constantValue=0}}",
         postAgg.toString()
     );
@@ -104,7 +105,7 @@ public class ArrayOfDoublesSketchToNumEntriesPostAggregatorTest
     // computes number of entries per sketch, which is 1 for s1 and 2 for s2
     Integer numEntries1 = postAgg1.compute(ImmutableMap.of());
     Integer numEntries2 = postAgg2.compute(ImmutableMap.of());
-    Assert.assertEquals(-1, postAgg1.getComparator().compare(numEntries1, numEntries2));
+    Assertions.assertEquals(-1, postAgg1.getComparator().compare(numEntries1, numEntries2));
   }
 
   @Test
@@ -135,7 +136,7 @@ public class ArrayOfDoublesSketchToNumEntriesPostAggregatorTest
               )
               .build();
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         RowSignature.builder()
                     .addTimeColumn()
                     .add("count", ColumnType.LONG)

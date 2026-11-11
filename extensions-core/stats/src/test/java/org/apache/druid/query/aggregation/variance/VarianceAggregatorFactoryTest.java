@@ -19,7 +19,6 @@
 
 package org.apache.druid.query.aggregation.variance;
 
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.query.Druids;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
@@ -30,8 +29,8 @@ import org.apache.druid.query.timeseries.TimeseriesQueryQueryToolChest;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.testing.InitializedNullHandlingTest;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 public class VarianceAggregatorFactoryTest extends InitializedNullHandlingTest
 {
@@ -56,7 +55,7 @@ public class VarianceAggregatorFactoryTest extends InitializedNullHandlingTest
               )
               .build();
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         RowSignature.builder()
                     .addTimeColumn()
                     .add("count", ColumnType.LONG)
@@ -76,29 +75,29 @@ public class VarianceAggregatorFactoryTest extends InitializedNullHandlingTest
   {
     VarianceAggregatorFactory target = new VarianceAggregatorFactory("test", "test", null, null);
     VarianceAggregatorCollector v1 = new VarianceAggregatorCollector();
-    Assert.assertEquals(NullHandling.defaultDoubleValue(), target.finalizeComputation(v1));
+    Assertions.assertNull(target.finalizeComputation(v1));
   }
 
   @Test
   public void testFinalizeComputationWithNullShouldReturnNull()
   {
     VarianceAggregatorFactory target = new VarianceAggregatorFactory("test", "test", null, null);
-    Assert.assertEquals(NullHandling.defaultDoubleValue(), target.finalizeComputation(null));
+    Assertions.assertNull(target.finalizeComputation(null));
   }
 
   @Test
   public void testWithName()
   {
     VarianceAggregatorFactory varianceAggregatorFactory = new VarianceAggregatorFactory("variance", "col");
-    Assert.assertEquals(varianceAggregatorFactory, varianceAggregatorFactory.withName("variance"));
-    Assert.assertEquals("newTest", varianceAggregatorFactory.withName("newTest").getName());
+    Assertions.assertEquals(varianceAggregatorFactory, varianceAggregatorFactory.withName("variance"));
+    Assertions.assertEquals("newTest", varianceAggregatorFactory.withName("newTest").getName());
 
     VarianceFoldingAggregatorFactory varianceFoldingAggregatorFactory = new VarianceFoldingAggregatorFactory(
         "varianceFold",
         "col",
         null
     );
-    Assert.assertEquals(varianceFoldingAggregatorFactory, varianceFoldingAggregatorFactory.withName("varianceFold"));
-    Assert.assertEquals("newTest", varianceFoldingAggregatorFactory.withName("newTest").getName());
+    Assertions.assertEquals(varianceFoldingAggregatorFactory, varianceFoldingAggregatorFactory.withName("varianceFold"));
+    Assertions.assertEquals("newTest", varianceFoldingAggregatorFactory.withName("newTest").getName());
   }
 }

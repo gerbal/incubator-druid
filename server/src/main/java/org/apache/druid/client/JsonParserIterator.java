@@ -22,11 +22,14 @@ package org.apache.druid.client;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.core.ObjectCodec;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.druid.error.ErrorResponse;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.logger.Logger;
+import org.apache.druid.java.util.common.parsers.CloseableIterator;
 import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryCapacityExceededException;
 import org.apache.druid.query.QueryException;
@@ -34,20 +37,20 @@ import org.apache.druid.query.QueryInterruptedException;
 import org.apache.druid.query.QueryTimeoutException;
 import org.apache.druid.query.QueryUnsupportedException;
 import org.apache.druid.query.ResourceLimitExceededException;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.utils.CloseableUtils;
 
 import javax.annotation.Nullable;
-import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.Iterator;
+import java.util.Map;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
-public class JsonParserIterator<T> implements Iterator<T>, Closeable
+public class JsonParserIterator<T> implements CloseableIterator<T>
 {
   private static final Logger LOG = new Logger(JsonParserIterator.class);
 
@@ -75,7 +78,7 @@ public class JsonParserIterator<T> implements Iterator<T>, Closeable
     this.future = future;
     this.url = url;
     if (query != null) {
-      this.timeoutAt = query.context().getLong(DirectDruidClient.QUERY_FAIL_TIME, -1L);
+      this.timeoutAt = query.context().getOrDefault(QueryContextParameters.QUERY_FAIL_TIME, -1L);
       this.queryId = query.getId();
     } else {
       this.timeoutAt = -1;
@@ -85,6 +88,16 @@ public class JsonParserIterator<T> implements Iterator<T>, Closeable
     this.host = host;
     this.objectMapper = objectMapper;
     this.hasTimeout = timeoutAt > -1;
+  }
+
+  /**
+   * Bypasses Jackson serialization to prevent materialization of results from the {@code future} in memory at once.
+   * A shortened version of {@link #JsonParserIterator(JavaType, Future, String, Query, String, ObjectMapper)}
+   * where the URL and host parameters, used solely for logging/errors, are not known.
+   */
+  public JsonParserIterator(JavaType typeRef, Future<InputStream> future, ObjectMapper objectMapper)
+  {
+    this(typeRef, future, "", null, "", objectMapper);
   }
 
   @Override
@@ -122,6 +135,14 @@ public class JsonParserIterator<T> implements Iterator<T>, Closeable
       } else {
         throw convertException(e);
       }
+    }
+    catch (QueryException e) {
+      // A QueryException can reach here unwrapped, straight from a InputStream.read() call inside jp.nextToken()/
+      // readValue() above, when DirectDruidClient rethrows a later-chunk failure (e.g. QueryCapacityExceededException
+      // from failIfNonJsonBody) as itself rather than as the cause of an IOException. Route it through the same
+      // convertException as every other error path so it gets this iterator's host instead of whatever host it
+      // happened to carry when the data server (rather than the broker) constructed it.
+      throw convertException(e);
     }
   }
 
@@ -164,7 +185,7 @@ public class JsonParserIterator<T> implements Iterator<T>, Closeable
         InputStream is = hasTimeout ? future.get(timeLeftMillis, TimeUnit.MILLISECONDS) : future.get();
 
         if (is != null) {
-          jp = objectMapper.getFactory().createParser(is);
+          jp = createParser(is);
         } else if (checkTimeout()) {
           throw timeoutQuery();
         } else {
@@ -179,15 +200,24 @@ public class JsonParserIterator<T> implements Iterator<T>, Closeable
           );
         }
 
-        final JsonToken nextToken = jp.nextToken();
+        final JsonToken nextToken = readNextToken();
         if (nextToken == JsonToken.START_ARRAY) {
-          jp.nextToken();
+          readNextToken();
           objectCodec = jp.getCodec();
         } else if (nextToken == JsonToken.START_OBJECT) {
-          throw convertException(jp.getCodec().readValue(jp, QueryException.class));
+          throw readStructuredError();
         } else {
+          String errMsg = jp.getValueAsString();
+          if (errMsg != null) {
+            errMsg = errMsg.substring(0, Math.min(errMsg.length(), 192));
+          }
           throw convertException(
-              new IAE("Next token wasn't a START_ARRAY, was[%s] from url[%s]", jp.getCurrentToken(), url)
+              new IAE(
+                  "Next token wasn't a START_ARRAY, was[%s] from url[%s] with value[%s]",
+                  jp.getCurrentToken(),
+                  url,
+                  errMsg
+              )
           );
         }
       }
@@ -200,6 +230,65 @@ public class JsonParserIterator<T> implements Iterator<T>, Closeable
       catch (TimeoutException e) {
         throw new QueryTimeoutException(StringUtils.nonStrictFormat("Query [%s] timed out!", queryId), host);
       }
+    }
+  }
+
+  /**
+   * Creates the parser for {@code is}, converting a {@link QueryException} that reaches here unwrapped (e.g. a
+   * later-chunk {@link QueryCapacityExceededException} DirectDruidClient rethrows as itself rather than as the
+   * cause of an {@link IOException}, since Jackson's stream bootstrapping can read ahead for encoding detection
+   * before any token is parsed) through {@link #convertException}, same as every other error path. Scoped to just
+   * this call, rather than caught around the whole {@link #init()} try block, so it never re-catches the
+   * QueryExceptions {@link #init()} throws explicitly after already calling {@link #convertException}.
+   */
+  private JsonParser createParser(InputStream is) throws IOException
+  {
+    try {
+      return objectMapper.getFactory().createParser(is);
+    }
+    catch (QueryException e) {
+      throw convertException(e);
+    }
+  }
+
+  /**
+   * Reads a structured error from a data server. Modern DruidException responses must retain their original
+   * persona, category, and error code. Legacy QueryException responses still use the existing conversion logic.
+   *
+   * A QueryException can also arrive directly from the transport while a response body is being read; normalize
+   * those exceptions to this iterator's host, as in the other parser methods.
+   */
+  private RuntimeException readStructuredError() throws IOException
+  {
+    try {
+      final Map<String, Object> error = jp.getCodec().readValue(
+          jp,
+          new TypeReference<Map<String, Object>>()
+          {
+          }
+      );
+      if ("druidException".equals(error.get("error"))) {
+        return ErrorResponse.fromMap(error).getUnderlyingException();
+      }
+      return convertException(objectMapper.convertValue(error, QueryException.class));
+    }
+    catch (QueryException e) {
+      throw convertException(e);
+    }
+  }
+
+  /**
+   * Reads the next {@link JsonToken} from {@link #jp}, with the same unwrapped-{@link QueryException} handling as
+   * {@link #createParser}, for the same reason: a later-chunk failure can surface on any read from the underlying
+   * stream, not only the first.
+   */
+  private JsonToken readNextToken() throws IOException
+  {
+    try {
+      return jp.nextToken();
+    }
+    catch (QueryException e) {
+      throw convertException(e);
     }
   }
 
@@ -220,6 +309,14 @@ public class JsonParserIterator<T> implements Iterator<T>, Closeable
   private QueryException convertException(Throwable cause)
   {
     LOG.warn(cause, "Query [%s] to host [%s] interrupted", queryId, host);
+    // A QueryException thrown on the transport thread (e.g. QueryCapacityExceededException from a later chunk in
+    // DirectDruidClient) can reach here re-wrapped as the cause of a plain RE/IOException rather than as itself, if
+    // it had to cross the boundary between the Netty callback that detected it and the thread reading the response.
+    // Unwrap that one level so its concrete type and error code still make it out instead of falling through to a
+    // generic QueryInterruptedException below.
+    if (!(cause instanceof QueryException) && cause.getCause() instanceof QueryException) {
+      cause = cause.getCause();
+    }
     if (cause instanceof QueryException) {
       final QueryException queryException = (QueryException) cause;
       if (queryException.getErrorCode() == null) {

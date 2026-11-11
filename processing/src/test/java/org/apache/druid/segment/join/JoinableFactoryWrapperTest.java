@@ -22,9 +22,6 @@ package org.apache.druid.segment.join;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Sets;
-import org.apache.druid.common.config.NullHandling;
-import org.apache.druid.common.config.NullHandlingTest;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.Pair;
@@ -36,24 +33,24 @@ import org.apache.druid.query.filter.InDimFilter;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.segment.filter.FalseFilter;
+import org.apache.druid.segment.filter.SelectorFilter;
 import org.apache.druid.segment.join.lookup.LookupJoinable;
 import org.apache.druid.segment.join.table.IndexedTable;
 import org.apache.druid.segment.join.table.IndexedTableJoinable;
 import org.apache.druid.segment.join.table.RowBasedIndexedTable;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
-import org.junit.rules.TemporaryFolder;
+import org.apache.druid.testing.InitializedNullHandlingTest;
+import org.apache.druid.testing.TemporaryFolderExtension;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-public class JoinableFactoryWrapperTest extends NullHandlingTest
+public class JoinableFactoryWrapperTest extends InitializedNullHandlingTest
 {
   public static final JoinableFactoryWrapper NOOP_JOINABLE_FACTORY_WRAPPER = new JoinableFactoryWrapper(
       NoopJoinableFactory.INSTANCE
@@ -69,9 +66,7 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
                   .build();
 
   private static final Set<String> TEST_LOOKUP_KEYS =
-      NullHandling.sqlCompatible()
-      ? TEST_LOOKUP.keySet()
-      : Sets.difference(TEST_LOOKUP.keySet(), Collections.singleton(""));
+      TEST_LOOKUP.keySet();
 
   private static final InlineDataSource INDEXED_TABLE_DS = InlineDataSource.fromIterable(
       ImmutableList.of(
@@ -80,6 +75,29 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
           new Object[]{"El Salvador"},
           new Object[]{"United States"},
           new Object[]{"United States"}
+      ),
+      RowSignature.builder().add("country", ColumnType.STRING).build()
+  );
+
+  private static final InlineDataSource INDEXED_TABLE_DS_THREE_COLS = InlineDataSource.fromIterable(
+      ImmutableList.of(
+          new Object[]{"El Salvador", 1, 1.0},
+          new Object[]{"Mexico", 2, 2.0},
+          new Object[]{"United States", 3, 3.0},
+          new Object[]{"Norway", 4, 4.0},
+          new Object[]{"India", 5, 5.0},
+          new Object[]{"United States", 6, 3.0}
+      ),
+      RowSignature.builder()
+                  .add("country", ColumnType.STRING)
+                  .add("m1", ColumnType.LONG)
+                  .add("m2", ColumnType.DOUBLE)
+                  .build()
+  );
+
+  private static final InlineDataSource INDEXED_TABLE_DS_ONE_ROW = InlineDataSource.fromIterable(
+      ImmutableList.of(
+          new Object[]{"Mexico"}
       ),
       RowSignature.builder().add("country", ColumnType.STRING).build()
   );
@@ -99,6 +117,22 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
       DateTimes.nowUtc().toString()
   );
 
+  private static final IndexedTable TEST_INDEXED_TABLE_THREE_COLS = new RowBasedIndexedTable<>(
+      INDEXED_TABLE_DS_THREE_COLS.getRowsAsList(),
+      INDEXED_TABLE_DS_THREE_COLS.rowAdapter(),
+      INDEXED_TABLE_DS_THREE_COLS.getRowSignature(),
+      ImmutableSet.of("country", "m1", "m2"),
+      DateTimes.nowUtc().toString()
+  );
+
+  private static final IndexedTable TEST_INDEXED_TABLE_ONE_ROW = new RowBasedIndexedTable<>(
+      INDEXED_TABLE_DS_ONE_ROW.getRowsAsList(),
+      INDEXED_TABLE_DS_ONE_ROW.rowAdapter(),
+      INDEXED_TABLE_DS_ONE_ROW.getRowSignature(),
+      ImmutableSet.of("country"),
+      DateTimes.nowUtc().toString()
+  );
+
   private static final IndexedTable TEST_NULL_INDEXED_TABLE = new RowBasedIndexedTable<>(
       NULL_INDEXED_TABLE_DS.getRowsAsList(),
       NULL_INDEXED_TABLE_DS.rowAdapter(),
@@ -107,11 +141,8 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
       DateTimes.nowUtc().toString()
   );
 
-  @Rule
-  public TemporaryFolder temporaryFolder = new TemporaryFolder();
-
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
+  @RegisterExtension
+  public final TemporaryFolderExtension temporaryFolder = TemporaryFolderExtension.testCaseScoped();
 
   @Test
   public void test_checkClausePrefixesForDuplicatesAndShadowing_noConflicts()
@@ -132,24 +163,22 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
   @Test
   public void test_checkClausePrefixesForDuplicatesAndShadowing_duplicate()
   {
-    expectedException.expect(IAE.class);
-    expectedException.expectMessage("Detected duplicate prefix in join clauses: [AA]");
-
     List<String> prefixes = Arrays.asList(
         "AA",
         "AA",
         "ABCD"
     );
 
-    JoinPrefixUtils.checkPrefixesForDuplicatesAndShadowing(prefixes);
+    final IAE exception = Assertions.assertThrows(
+        IAE.class,
+        () -> JoinPrefixUtils.checkPrefixesForDuplicatesAndShadowing(prefixes)
+    );
+    Assertions.assertEquals("Detected duplicate prefix in join clauses: [AA]", exception.getMessage());
   }
 
   @Test
   public void test_checkClausePrefixesForDuplicatesAndShadowing_shadowing()
   {
-    expectedException.expect(IAE.class);
-    expectedException.expectMessage("Detected conflicting prefixes in join clauses: [ABC.DEF, ABC.]");
-
     List<String> prefixes = Arrays.asList(
         "BASE.",
         "BASEBALL",
@@ -159,7 +188,14 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
         "ABC.DEF"
     );
 
-    JoinPrefixUtils.checkPrefixesForDuplicatesAndShadowing(prefixes);
+    final IAE exception = Assertions.assertThrows(
+        IAE.class,
+        () -> JoinPrefixUtils.checkPrefixesForDuplicatesAndShadowing(prefixes)
+    );
+    Assertions.assertEquals(
+        "Detected conflicting prefixes in join clauses: [ABC.DEF, ABC.]",
+        exception.getMessage()
+    );
   }
 
   @Test
@@ -178,7 +214,7 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
         Integer.MAX_VALUE
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Pair.of(
             ImmutableList.of(new InDimFilter("x", TEST_LOOKUP_KEYS)),
             ImmutableList.of()
@@ -202,7 +238,7 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
         Integer.MAX_VALUE
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Pair.of(
             ImmutableList.of(new InDimFilter(
                                  "x",
@@ -211,6 +247,33 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
             ),
             ImmutableList.of(joinableClause)
             // the joinable clause remains intact since we've duplicates in country column
+        ),
+        conversion
+    );
+  }
+
+  @Test
+  public void test_convertJoinsToPartialFiltersWithSelectorFiltersInsteadOfInsForSingleValue()
+  {
+    JoinableClause joinableClause = new JoinableClause(
+        "j.",
+        new IndexedTableJoinable(TEST_INDEXED_TABLE_ONE_ROW),
+        JoinType.INNER,
+        JoinConditionAnalysis.forExpression("x == \"j.country\"", "j.", ExprMacroTable.nil())
+    );
+    final Pair<List<Filter>, List<JoinableClause>> conversion = JoinableFactoryWrapper.convertJoinsToFilters(
+        ImmutableList.of(joinableClause),
+        ImmutableSet.of("x"),
+        Integer.MAX_VALUE
+    );
+
+    // Although the filter created was an In Filter in equijoin (here inFilter = IN (Mexico))
+    // We should receive a SelectorFilter for Filters.toFilter(inFilter) call
+    // and should receive a SelectorFilter with x = Mexico
+    Assertions.assertEquals(
+        Pair.of(
+            ImmutableList.of(new SelectorFilter("x", "Mexico", null)),
+            ImmutableList.of()
         ),
         conversion
     );
@@ -246,7 +309,7 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
         Integer.MAX_VALUE
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Pair.of(
             ImmutableList.of(new InDimFilter("x", TEST_LOOKUP_KEYS), new InDimFilter("x", TEST_LOOKUP_KEYS)),
             ImmutableList.of(clauses.get(2))
@@ -285,7 +348,7 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
         Integer.MAX_VALUE
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Pair.of(
             ImmutableList.of(
                 new InDimFilter("x", TEST_LOOKUP_KEYS),
@@ -318,7 +381,7 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
         2
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Pair.of(
             ImmutableList.of(),
             ImmutableList.of(clause)
@@ -343,7 +406,7 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
         Integer.MAX_VALUE
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Pair.of(
             ImmutableList.of(),
             ImmutableList.of(clause)
@@ -368,7 +431,7 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
         Integer.MAX_VALUE
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Pair.of(
             ImmutableList.of(new InDimFilter("x", TEST_LOOKUP_KEYS)),
             ImmutableList.of(clause)
@@ -393,7 +456,7 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
         Integer.MAX_VALUE
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Pair.of(
             ImmutableList.of(FalseFilter.instance()),
             ImmutableList.of()
@@ -418,7 +481,7 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
         Integer.MAX_VALUE
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Pair.of(
             ImmutableList.of(),
             ImmutableList.of(clause)
@@ -443,7 +506,7 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
         Integer.MAX_VALUE
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Pair.of(
             ImmutableList.of(),
             ImmutableList.of(clause)
@@ -468,7 +531,7 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
         Integer.MAX_VALUE
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Pair.of(
             ImmutableList.of(),
             ImmutableList.of(clause)
@@ -504,7 +567,7 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
         Integer.MAX_VALUE
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Pair.of(
             ImmutableList.of(new InDimFilter("x", TEST_LOOKUP_KEYS)),
             clauses
@@ -543,7 +606,7 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
         Integer.MAX_VALUE
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Pair.of(
             ImmutableList.of(new InDimFilter("x", TEST_LOOKUP_KEYS)),
             clauses
@@ -582,7 +645,7 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
         Integer.MAX_VALUE
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Pair.of(
             ImmutableList.of(new InDimFilter("x", TEST_LOOKUP_KEYS), new InDimFilter("x", TEST_LOOKUP_KEYS)),
             clauses.subList(1, clauses.size())
@@ -617,10 +680,35 @@ public class JoinableFactoryWrapperTest extends NullHandlingTest
         Integer.MAX_VALUE
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Pair.of(
             ImmutableList.of(),
             clauses
+        ),
+        conversion
+    );
+  }
+
+  @Test
+  public void test_convertJoinsToPartialFiltersMultipleCondtions()
+  {
+    JoinableClause joinableClause = new JoinableClause(
+        "j.",
+        new IndexedTableJoinable(TEST_INDEXED_TABLE_THREE_COLS),
+        JoinType.INNER,
+        JoinConditionAnalysis.forExpression("x == \"j.country\" && y == \"j.m1\"", "j.", ExprMacroTable.nil())
+    );
+    final Pair<List<Filter>, List<JoinableClause>> conversion = JoinableFactoryWrapper.convertJoinsToFilters(
+        ImmutableList.of(joinableClause),
+        ImmutableSet.of("x", "y"),
+        Integer.MAX_VALUE
+    );
+
+    // Optimization does not kick in as there are > 1 equijoins
+    Assertions.assertEquals(
+        Pair.of(
+            ImmutableList.of(),
+            ImmutableList.of(joinableClause)
         ),
         conversion
     );

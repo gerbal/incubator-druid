@@ -38,22 +38,21 @@ import org.apache.druid.data.input.s3.S3InputSourceTest;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.storage.s3.S3StorageDruidModule;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import javax.annotation.Nullable;
-
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Test the catalog definition on top of the S3 input source. Here we assume that
@@ -68,8 +67,8 @@ import static org.junit.Assert.assertTrue;
 public class S3InputSourceDefnTest
 {
   private static final List<ColumnSpec> COLUMNS = Arrays.asList(
-      new ColumnSpec("x", Columns.VARCHAR, null),
-      new ColumnSpec("y", Columns.BIGINT, null)
+      new ColumnSpec("x", Columns.STRING, null),
+      new ColumnSpec("y", Columns.LONG, null)
   );
 
   /**
@@ -97,7 +96,8 @@ public class S3InputSourceDefnTest
   /**
    * Finish up Jackson configuration: add the required S3 input source subtype.
    */
-  @Before
+
+  @BeforeEach
   public void setup()
   {
     mapper.registerModules(new S3InputSourceDruidModule().getJacksonModules());
@@ -110,7 +110,7 @@ public class S3InputSourceDefnTest
     TableMetadata table = TableBuilder.external("foo")
         .inputSource(ImmutableMap.of("type", S3StorageDruidModule.SCHEME))
         .inputFormat(CSV_FORMAT)
-        .column("x", Columns.VARCHAR)
+        .column("x", Columns.STRING)
         .build();
     ResolvedTable resolved = registry.resolve(table.spec());
     assertThrows(IAE.class, () -> resolved.validate());
@@ -147,6 +147,7 @@ public class S3InputSourceDefnTest
         CatalogUtils.stringListToUriList(prefixes),
         objects,
         objectGlob,
+        null,
         config,
         null,
         null,
@@ -175,7 +176,7 @@ public class S3InputSourceDefnTest
         Collections.singletonList("s3://foo/bar/file.csv"), null, null, null);
     TableMetadata table = TableBuilder.external("foo")
         .inputSource(toMap(s3InputSource))
-        .column("x", Columns.VARCHAR)
+        .column("x", Columns.STRING)
         .build();
     ResolvedTable resolved = registry.resolve(table.spec());
     assertThrows(IAE.class, () -> resolved.validate());
@@ -214,7 +215,7 @@ public class S3InputSourceDefnTest
     TableMetadata table = TableBuilder.external("foo")
         .inputSource(toMap(s3InputSource))
         .inputFormat(CSV_FORMAT)
-        .column("x", Columns.VARCHAR)
+        .column("x", Columns.STRING)
         .build();
     ResolvedTable resolved = registry.resolve(table.spec());
     resolved.validate();
@@ -227,7 +228,7 @@ public class S3InputSourceDefnTest
         .inputSource(ImmutableMap.of("type", S3StorageDruidModule.SCHEME))
         .inputFormat(CSV_FORMAT)
         .property(S3InputSourceDefn.BUCKET_PROPERTY, "s3://foo.com")
-        .column("x", Columns.VARCHAR)
+        .column("x", Columns.STRING)
         .build();
     ResolvedTable resolved = registry.resolve(table.spec());
     resolved.validate();
@@ -242,7 +243,7 @@ public class S3InputSourceDefnTest
         .inputSource(toMap(s3InputSource))
         .inputFormat(CSV_FORMAT)
         .property(S3InputSourceDefn.BUCKET_PROPERTY, "foo.com")
-        .column("x", Columns.VARCHAR)
+        .column("x", Columns.STRING)
         .build();
     ResolvedTable resolved = registry.resolve(table.spec());
     assertThrows(IAE.class, () -> resolved.validate());
@@ -261,7 +262,7 @@ public class S3InputSourceDefnTest
         .inputSource(toMap(s3InputSource))
         .inputFormat(CSV_FORMAT)
         .property(S3InputSourceDefn.BUCKET_PROPERTY, "foo.com")
-        .column("x", Columns.VARCHAR)
+        .column("x", Columns.STRING)
         .build();
     ResolvedTable resolved = registry.resolve(table.spec());
     assertThrows(IAE.class, () -> resolved.validate());
@@ -280,7 +281,7 @@ public class S3InputSourceDefnTest
         .inputSource(toMap(s3InputSource))
         .inputFormat(CSV_FORMAT)
         .property(S3InputSourceDefn.BUCKET_PROPERTY, "foo.com")
-        .column("x", Columns.VARCHAR)
+        .column("x", Columns.STRING)
         .build();
     ResolvedTable resolved = registry.resolve(table.spec());
     assertThrows(IAE.class, () -> resolved.validate());
@@ -297,7 +298,7 @@ public class S3InputSourceDefnTest
             )
         .inputFormat(CSV_FORMAT)
         .property(S3InputSourceDefn.BUCKET_PROPERTY, "foo.com")
-        .column("x", Columns.VARCHAR)
+        .column("x", Columns.STRING)
         .build();
     ResolvedTable resolved = registry.resolve(table.spec());
     assertThrows(IAE.class, () -> resolved.validate());
@@ -345,6 +346,7 @@ public class S3InputSourceDefnTest
         CatalogUtils.stringListToUriList(uris),
         s3InputSource.getUris()
     );
+    assertEquals(Collections.singleton(S3InputSourceDefn.TYPE_KEY), externSpec.inputSourceTypesSupplier.get());
 
     // But, it fails if there are no columns.
     assertThrows(IAE.class, () -> fn.apply("x", args, Collections.emptyList(), mapper));
@@ -365,6 +367,7 @@ public class S3InputSourceDefnTest
         CatalogUtils.stringListToUriList(uris),
         s3InputSource.getUris()
     );
+    assertEquals(Collections.singleton(S3InputSourceDefn.TYPE_KEY), externSpec.inputSourceTypesSupplier.get());
   }
 
   @Test
@@ -397,6 +400,7 @@ public class S3InputSourceDefnTest
         s3InputSource.getUris()
     );
     assertEquals("*.csv", s3InputSource.getObjectGlob());
+    assertEquals(Collections.singleton(S3InputSourceDefn.TYPE_KEY), externSpec.inputSourceTypesSupplier.get());
   }
 
   @Test
@@ -416,6 +420,7 @@ public class S3InputSourceDefnTest
         CatalogUtils.stringListToUriList(prefixes),
         s3InputSource.getPrefixes()
     );
+    assertEquals(Collections.singleton(S3InputSourceDefn.TYPE_KEY), externSpec.inputSourceTypesSupplier.get());
 
     // But, it fails if there are no columns.
     assertThrows(IAE.class, () -> fn.apply("x", args, Collections.emptyList(), mapper));
@@ -438,6 +443,7 @@ public class S3InputSourceDefnTest
         CatalogUtils.stringListToUriList(prefixes),
         s3InputSource.getPrefixes()
     );
+    assertEquals(Collections.singleton(S3InputSourceDefn.TYPE_KEY), externSpec.inputSourceTypesSupplier.get());
   }
 
   @Test
@@ -457,6 +463,7 @@ public class S3InputSourceDefnTest
     CloudObjectLocation obj = s3InputSource.getObjects().get(0);
     assertEquals("foo.com", obj.getBucket());
     assertEquals("bar/file.csv", obj.getPath());
+    assertEquals(Collections.singleton(S3InputSourceDefn.TYPE_KEY), externSpec.inputSourceTypesSupplier.get());
 
     // But, it fails if there are no columns.
     assertThrows(IAE.class, () -> fn.apply("x", args, Collections.emptyList(), mapper));
@@ -504,6 +511,7 @@ public class S3InputSourceDefnTest
     obj = s3InputSource.getObjects().get(1);
     assertEquals("foo.com", obj.getBucket());
     assertEquals("mumble/file2.csv", obj.getPath());
+    assertEquals(Collections.singleton(S3InputSourceDefn.TYPE_KEY), externSpec.inputSourceTypesSupplier.get());
   }
 
   @Test
@@ -550,14 +558,14 @@ public class S3InputSourceDefnTest
   @Test
   public void testFullTableSpecHappyPath()
   {
-    S3InputSourceConfig config = new S3InputSourceConfig(null, null, "foo", null);
+    S3InputSourceConfig config = new S3InputSourceConfig(null, null, "foo", null, null);
     S3InputSource s3InputSource = s3InputSource(
         Arrays.asList("s3://foo/bar/", "s3://mumble/"), null, null, "*.csv", config);
     TableMetadata table = TableBuilder.external("foo")
         .inputSource(toMap(s3InputSource))
         .inputFormat(CSV_FORMAT)
-        .column("x", Columns.VARCHAR)
-        .column("y", Columns.BIGINT)
+        .column("x", Columns.STRING)
+        .column("y", Columns.LONG)
         .build();
 
     // Check validation
@@ -571,6 +579,7 @@ public class S3InputSourceDefnTest
     ExternalTableDefn externDefn = (ExternalTableDefn) resolved.defn();
     ExternalTableSpec externSpec = externDefn.convert(resolved);
     assertEquals(s3InputSource, externSpec.inputSource);
+    assertEquals(Collections.singleton(S3InputSourceDefn.TYPE_KEY), externSpec.inputSourceTypesSupplier.get());
 
     // Get the partial table function
     TableFunction fn = externDefn.tableFn(resolved);
@@ -579,6 +588,7 @@ public class S3InputSourceDefnTest
     // Convert to an external table.
     externSpec = fn.apply("x", Collections.emptyMap(), Collections.emptyList(), mapper);
     assertEquals(s3InputSource, externSpec.inputSource);
+
 
     // But, it fails columns are provided since the table already has them.
     assertThrows(IAE.class, () -> fn.apply("x", Collections.emptyMap(), COLUMNS, mapper));
@@ -592,8 +602,8 @@ public class S3InputSourceDefnTest
     TableMetadata table = TableBuilder.external("foo")
         .inputSource(toMap(s3InputSource))
         .inputFormat(CSV_FORMAT)
-        .column("x", Columns.VARCHAR)
-        .column("y", Columns.BIGINT)
+        .column("x", Columns.STRING)
+        .column("y", Columns.LONG)
         .build();
 
     // Check validation
@@ -604,6 +614,7 @@ public class S3InputSourceDefnTest
     ExternalTableDefn externDefn = (ExternalTableDefn) resolved.defn();
     ExternalTableSpec externSpec = externDefn.convert(resolved);
     assertEquals(s3InputSource, externSpec.inputSource);
+    assertEquals(Collections.singleton(S3InputSourceDefn.TYPE_KEY), externSpec.inputSourceTypesSupplier.get());
 
     // Get the partial table function
     TableFunction fn = externDefn.tableFn(resolved);
@@ -635,8 +646,8 @@ public class S3InputSourceDefnTest
         .inputSource(ImmutableMap.of("type", S3StorageDruidModule.SCHEME))
         .inputFormat(CSV_FORMAT)
         .property(S3InputSourceDefn.BUCKET_PROPERTY, "foo.com")
-        .column("x", Columns.VARCHAR)
-        .column("y", Columns.BIGINT)
+        .column("x", Columns.STRING)
+        .column("y", Columns.LONG)
         .build();
 
     // Check validation
@@ -662,6 +673,7 @@ public class S3InputSourceDefnTest
     CloudObjectLocation obj = s3InputSource.getObjects().get(0);
     assertEquals("foo.com", obj.getBucket());
     assertEquals("bar/file.csv", obj.getPath());
+    assertEquals(Collections.singleton(S3InputSourceDefn.TYPE_KEY), externSpec.inputSourceTypesSupplier.get());
 
     // But, it fails columns are provided since the table already has them.
     assertThrows(IAE.class, () -> fn.apply("x", args, COLUMNS, mapper));
@@ -703,6 +715,7 @@ public class S3InputSourceDefnTest
     assertEquals("foo.com", obj.getBucket());
     assertEquals("bar/file.csv", obj.getPath());
     assertTrue(externSpec.inputFormat instanceof CsvInputFormat);
+    assertEquals(Collections.singleton(S3InputSourceDefn.TYPE_KEY), externSpec.inputSourceTypesSupplier.get());
 
     // But, it fails columns are not provided since the table does not have them.
     assertThrows(IAE.class, () -> fn.apply("x", args, Collections.emptyList(), mapper));

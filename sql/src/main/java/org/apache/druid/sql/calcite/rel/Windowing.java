@@ -19,6 +19,7 @@
 
 package org.apache.druid.sql.calcite.rel;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
@@ -28,7 +29,6 @@ import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.calcite.rel.core.AggregateCall;
 import org.apache.calcite.rel.core.Project;
 import org.apache.calcite.rel.core.Window;
-import org.apache.calcite.rel.type.RelDataTypeFactory;
 import org.apache.calcite.rex.RexBuilder;
 import org.apache.calcite.rex.RexInputRef;
 import org.apache.calcite.rex.RexLiteral;
@@ -68,9 +68,11 @@ import org.apache.druid.sql.calcite.table.RowSignatures;
 import javax.annotation.Nonnull;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Maps onto a {@link org.apache.druid.query.operator.WindowOperatorQuery}.
@@ -79,34 +81,34 @@ import java.util.List;
  * 1. The support is not yet fully aware of the difference between RANGE and ROWS when evaluating peers. (Note: The
  * built-in functions are all implemented with the correctly defined semantics, so ranking functions that are
  * defined to use RANGE do the right thing)
- * 2. No support for framing last/first functions
- * 3. No nth function
- * 4. No finalization, meaning that aggregators like sketches that rely on finalization might return surprising results
- * 5. No big big test suite of loveliness
+ * 2. No nth function
+ * 3. No finalization, meaning that aggregators like sketches that rely on finalization might return surprising results
+ * 4. No big big test suite of loveliness
  */
 public class Windowing
 {
-  private static final ImmutableMap<String, ProcessorMaker> KNOWN_WINDOW_FNS = ImmutableMap
+  @VisibleForTesting
+  public static final ImmutableMap<String, ProcessorMaker> KNOWN_WINDOW_FNS = ImmutableMap
       .<String, ProcessorMaker>builder()
-      .put("LAG", (agg, typeFactory) ->
-          new WindowOffsetProcessor(agg.getColumn(typeFactory, 0), agg.getOutputName(), -agg.getConstantInt(1)))
-      .put("LEAD", (agg, typeFactory) ->
-          new WindowOffsetProcessor(agg.getColumn(typeFactory, 0), agg.getOutputName(), agg.getConstantInt(1)))
-      .put("FIRST_VALUE", (agg, typeFactory) ->
-          new WindowFirstProcessor(agg.getColumn(typeFactory, 0), agg.getOutputName()))
-      .put("LAST_VALUE", (agg, typeFactory) ->
-          new WindowLastProcessor(agg.getColumn(typeFactory, 0), agg.getOutputName()))
-      .put("CUME_DIST", (agg, typeFactory) ->
+      .put("LAG", (agg) ->
+          new WindowOffsetProcessor(agg.getColumn(0), agg.getOutputName(), -agg.getConstantInt(1, 1)))
+      .put("LEAD", (agg) ->
+          new WindowOffsetProcessor(agg.getColumn(0), agg.getOutputName(), agg.getConstantInt(1, 1)))
+      .put("FIRST_VALUE", (agg) ->
+          new WindowFirstProcessor(agg.getColumn(0), agg.getOutputName(), agg.getGroup().getWindowFrame()))
+      .put("LAST_VALUE", (agg) ->
+          new WindowLastProcessor(agg.getColumn(0), agg.getOutputName(), agg.getGroup().getWindowFrame()))
+      .put("CUME_DIST", (agg) ->
           new WindowCumeDistProcessor(agg.getGroup().getOrderingColumNames(), agg.getOutputName()))
-      .put("DENSE_RANK", (agg, typeFactory) ->
+      .put("DENSE_RANK", (agg) ->
           new WindowDenseRankProcessor(agg.getGroup().getOrderingColumNames(), agg.getOutputName()))
-      .put("NTILE", (agg, typeFactory) ->
+      .put("NTILE", (agg) ->
           new WindowPercentileProcessor(agg.getOutputName(), agg.getConstantInt(0)))
-      .put("PERCENT_RANK", (agg, typeFactory) ->
+      .put("PERCENT_RANK", (agg) ->
           new WindowRankProcessor(agg.getGroup().getOrderingColumNames(), agg.getOutputName(), true))
-      .put("RANK", (agg, typeFactory) ->
+      .put("RANK", (agg) ->
           new WindowRankProcessor(agg.getGroup().getOrderingColumNames(), agg.getOutputName(), false))
-      .put("ROW_NUMBER", (agg, typeFactory) ->
+      .put("ROW_NUMBER", (agg) ->
           new WindowRowNumberProcessor(agg.getOutputName()))
       .build();
   private final List<OperatorFactory> ops;
@@ -116,17 +118,139 @@ public class Windowing
       final PartialDruidQuery partialQuery,
       final PlannerContext plannerContext,
       final RowSignature sourceRowSignature,
-      final RexBuilder rexBuilder
+      final RexBuilder rexBuilder,
+      final VirtualColumnRegistry virtualColumnRegistry
   )
   {
     final Window window = Preconditions.checkNotNull(partialQuery.getWindow(), "window");
 
-    ArrayList<OperatorFactory> ops = new ArrayList<>();
-
+    final List<WindowComputationProcessor> windowGroupProcessors = new ArrayList<>();
     final List<String> windowOutputColumns = new ArrayList<>(sourceRowSignature.getColumnNames());
+
     final String outputNamePrefix = Calcites.findUnusedPrefixForDigits("w", sourceRowSignature.getColumnNames());
     int outputNameCounter = 0;
 
+    for (Window.Group windowGroup : window.groups) {
+      final WindowGroup group = new WindowGroup(window, windowGroup, sourceRowSignature);
+
+      // Add aggregations.
+      final List<AggregateCall> aggregateCalls = group.getAggregateCalls();
+
+      final List<Processor> processors = new ArrayList<>();
+      final List<AggregatorFactory> aggregations = new ArrayList<>();
+
+      for (AggregateCall aggregateCall : aggregateCalls) {
+        final String aggName = outputNamePrefix + outputNameCounter++;
+        windowOutputColumns.add(aggName);
+
+        ProcessorMaker maker = KNOWN_WINDOW_FNS.get(aggregateCall.getAggregation().getName());
+        if (maker == null) {
+
+          final Aggregation aggregation = GroupByRules.translateAggregateCall(
+              plannerContext,
+              sourceRowSignature,
+              virtualColumnRegistry,
+              rexBuilder,
+              InputAccessor.buildFor(
+                  window,
+                  partialQuery.getSelectProject(),
+                  sourceRowSignature
+              ),
+              Collections.emptyList(),
+              aggName,
+              aggregateCall,
+              false // Windowed aggregations finalize later when we write the computed value to result RAC
+          );
+
+          if (aggregation == null
+              || aggregation.getPostAggregator() != null
+              || aggregation.getAggregatorFactories().size() != 1) {
+            plannerContext.setPlanningError("Aggregation [%s] is currently not supported for window functions", aggregateCall.getAggregation().getName());
+            throw new CannotBuildQueryException(window, aggregateCall);
+          }
+
+          aggregations.add(Iterables.getOnlyElement(aggregation.getAggregatorFactories()));
+        } else {
+          processors.add(
+              maker.make(
+                  new WindowAggregate(
+                      aggName,
+                      aggregateCall,
+                      sourceRowSignature,
+                      plannerContext,
+                      rexBuilder,
+                      partialQuery.getSelectProject(),
+                      window.constants,
+                      group
+                  )
+              )
+          );
+        }
+      }
+
+      if (!aggregations.isEmpty()) {
+        processors.add(
+            new WindowFramedAggregateProcessor(
+                group.getWindowFrame(),
+                aggregations.toArray(new AggregatorFactory[0])
+            )
+        );
+      }
+
+      if (processors.isEmpty()) {
+        throw new ISE("No processors from Window[%s], why was this code called?", window);
+      }
+
+      windowGroupProcessors.add(new WindowComputationProcessor(group, new WindowOperatorFactory(
+          processors.size() == 1 ?
+          processors.get(0) : new ComposingProcessor(processors.toArray(new Processor[0]))
+      )));
+    }
+
+    List<OperatorFactory> ops = computeWindowOperations(partialQuery, sourceRowSignature, windowGroupProcessors);
+
+    // Apply windowProject, if present.
+    if (partialQuery.getWindowProject() != null) {
+      // We know windowProject is a mapping due to the isMapping() check in DruidRules.
+      // check anyway as defensive programming.
+      Preconditions.checkArgument(partialQuery.getWindowProject().isMapping());
+      final Mappings.TargetMapping mapping = Preconditions.checkNotNull(
+          Project.getPartialMapping(
+              partialQuery.getWindowProject().getInput().getRowType().getFieldCount(),
+              partialQuery.getWindowProject().getProjects()
+          ),
+          "mapping for windowProject[%s]",
+          partialQuery.getWindowProject()
+      );
+
+      final List<String> windowProjectOutputColumns = new ArrayList<>();
+      for (int i = 0; i < mapping.size(); i++) {
+        windowProjectOutputColumns.add(windowOutputColumns.get(mapping.getSourceOpt(i)));
+      }
+
+      return new Windowing(
+          RowSignatures.fromRelDataType(windowProjectOutputColumns, partialQuery.getWindowProject().getRowType()),
+          ops
+      );
+    } else {
+      // No windowProject.
+      return new Windowing(
+          RowSignatures.fromRelDataType(windowOutputColumns, window.getRowType()),
+          ops
+      );
+    }
+  }
+
+  /**
+   * Computes the list of operators that are to be applied in an optimised order
+   */
+  private static List<OperatorFactory> computeWindowOperations(
+      final PartialDruidQuery partialQuery,
+      final RowSignature sourceRowSignature,
+      List<WindowComputationProcessor> windowGroupProcessors
+  )
+  {
+    final List<OperatorFactory> ops = new ArrayList<>();
     // Track prior partition columns and sort columns group-to-group, so we only insert sorts and repartitions if
     // we really need to.
     List<String> priorPartitionColumns = null;
@@ -139,9 +263,12 @@ public class Windowing
       priorSortColumns = computeSortColumnsFromRelCollation(priorCollation, sourceRowSignature);
     }
 
-    for (int i = 0; i < window.groups.size(); ++i) {
-      final WindowGroup group = new WindowGroup(window, window.groups.get(i), sourceRowSignature);
+    // sort the processors to optimise the order of window operators
+    // currently we are moving the empty groups to the front
+    windowGroupProcessors.sort(WindowComputationProcessor.MOVE_EMPTY_GROUPS_FIRST);
 
+    for (WindowComputationProcessor windowComputationProcessor : windowGroupProcessors) {
+      final WindowGroup group = windowComputationProcessor.getGroup();
       final LinkedHashSet<ColumnWithDirection> sortColumns = new LinkedHashSet<>();
       for (String partitionColumn : group.getPartitionColumns()) {
         sortColumns.add(ColumnWithDirection.ascending(partitionColumn));
@@ -161,99 +288,69 @@ public class Windowing
         priorPartitionColumns = group.getPartitionColumns();
       }
 
-      // Add aggregations.
-      final List<AggregateCall> aggregateCalls = group.getAggregateCalls();
-
-      final List<Processor> processors = new ArrayList<>();
-      final List<AggregatorFactory> aggregations = new ArrayList<>();
-
-      for (AggregateCall aggregateCall : aggregateCalls) {
-        final String aggName = outputNamePrefix + outputNameCounter++;
-        windowOutputColumns.add(aggName);
-
-        ProcessorMaker maker = KNOWN_WINDOW_FNS.get(aggregateCall.getAggregation().getName());
-        if (maker == null) {
-          final Aggregation aggregation = GroupByRules.translateAggregateCall(
-              plannerContext,
-              sourceRowSignature,
-              null,
-              rexBuilder,
-              partialQuery.getSelectProject(),
-              Collections.emptyList(),
-              aggName,
-              aggregateCall,
-              false // Windowed aggregations don't currently finalize.  This means that sketches won't work as expected.
-          );
-
-          if (aggregation == null
-              || aggregation.getPostAggregator() != null
-              || aggregation.getAggregatorFactories().size() != 1) {
-            if (null == plannerContext.getPlanningError()) {
-              plannerContext.setPlanningError("Aggregation [%s] is not supported", aggregateCall);
-            }
-            throw new CannotBuildQueryException(window, aggregateCall);
-          }
-
-          aggregations.add(Iterables.getOnlyElement(aggregation.getAggregatorFactories()));
-        } else {
-          processors.add(maker.make(
-              new WindowAggregate(
-                  aggName,
-                  aggregateCall,
-                  sourceRowSignature,
-                  plannerContext,
-                  partialQuery.getSelectProject(),
-                  window.constants,
-                  group
-              ),
-              rexBuilder.getTypeFactory()
-          ));
-        }
-      }
-
-      if (!aggregations.isEmpty()) {
-        processors.add(
-            new WindowFramedAggregateProcessor(
-                group.getWindowFrame(),
-                aggregations.toArray(new AggregatorFactory[0])
-            )
-        );
-      }
-
-      if (processors.isEmpty()) {
-        throw new ISE("No processors from Window[%s], why was this code called?", window);
-      }
-
-      ops.add(new WindowOperatorFactory(
-          processors.size() == 1 ?
-          processors.get(0) : new ComposingProcessor(processors.toArray(new Processor[0]))
-      ));
+      ops.add(windowComputationProcessor.getProcessorOperatorFactory());
     }
 
-    // Apply windowProject, if present.
-    if (partialQuery.getWindowProject() != null) {
-      // We know windowProject is a mapping due to the isMapping() check in DruidRules. Check for null anyway,
-      // as defensive programming.
-      final Mappings.TargetMapping mapping = Preconditions.checkNotNull(
-          partialQuery.getWindowProject().getMapping(),
-          "mapping for windowProject[%s]", partialQuery.getWindowProject()
-      );
+    return ops;
+  }
 
-      final List<String> windowProjectOutputColumns = new ArrayList<>();
-      for (int i = 0; i < mapping.size(); i++) {
-        windowProjectOutputColumns.add(windowOutputColumns.get(mapping.getSourceOpt(i)));
+  private static class WindowComputationProcessor
+  {
+    private final WindowGroup group;
+    private final OperatorFactory processorOperatorFactory;
+
+    public WindowComputationProcessor(WindowGroup group, OperatorFactory processorOperatorFactory)
+    {
+      this.group = group;
+      this.processorOperatorFactory = processorOperatorFactory;
+    }
+
+    public WindowGroup getGroup()
+    {
+      return group;
+    }
+
+    public OperatorFactory getProcessorOperatorFactory()
+    {
+      return processorOperatorFactory;
+    }
+
+    /**
+     * Comparator to move the empty windows to the front
+     */
+    public static final Comparator<WindowComputationProcessor> MOVE_EMPTY_GROUPS_FIRST = (o1, o2) -> {
+      if (o1.getGroup().getPartitionColumns().isEmpty() && o2.getGroup().getPartitionColumns().isEmpty()) {
+        return 0;
       }
+      if (o1.getGroup().getPartitionColumns().isEmpty()) {
+        return -1;
+      }
+      if (o2.getGroup().getPartitionColumns().isEmpty()) {
+        return 1;
+      }
+      return 0;
+    };
 
-      return new Windowing(
-          RowSignatures.fromRelDataType(windowProjectOutputColumns, partialQuery.getWindowProject().getRowType()),
-          ops
+    @Override
+    public boolean equals(Object o)
+    {
+      if (this == o) {
+        return true;
+      }
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+      WindowComputationProcessor obj = (WindowComputationProcessor) o;
+      return Objects.equals(group, obj.group) && Objects.equals(
+          processorOperatorFactory,
+          obj.processorOperatorFactory
       );
-    } else {
-      // No windowProject.
-      return new Windowing(
-          RowSignatures.fromRelDataType(windowOutputColumns, window.getRowType()),
-          ops
-      );
+    }
+
+    @Override
+    public int hashCode()
+    {
+      return Objects.hash(group, processorOperatorFactory);
     }
   }
 
@@ -280,7 +377,7 @@ public class Windowing
 
   private interface ProcessorMaker
   {
-    Processor make(WindowAggregate agg, RelDataTypeFactory typeFactory);
+    Processor make(WindowAggregate agg);
   }
 
   private static class WindowGroup
@@ -348,21 +445,30 @@ public class Windowing
 
     public WindowFrame getWindowFrame()
     {
-      return new WindowFrame(
-          WindowFrame.PeerType.ROWS,
-          group.lowerBound.isUnbounded(),
-          figureOutOffset(group.lowerBound),
-          group.upperBound.isUnbounded(),
-          figureOutOffset(group.upperBound)
-      );
+      if (group.lowerBound.isUnbounded() && group.upperBound.isUnbounded()) {
+        return WindowFrame.unbounded();
+      }
+      if (group.isRows) {
+        return WindowFrame.rows(getBoundAsInteger(group.lowerBound), getBoundAsInteger(group.upperBound));
+      } else {
+        /* Right now we support GROUPS based framing in the native layer;
+         * but the SQL layer doesn't accept that as of now.
+         */
+        return WindowFrame.groups(getBoundAsInteger(group.lowerBound), getBoundAsInteger(group.upperBound), getOrderingColumNames());
+      }
     }
 
-    private int figureOutOffset(RexWindowBound bound)
+    private Integer getBoundAsInteger(RexWindowBound bound)
     {
-      if (bound.isUnbounded() || bound.isCurrentRow()) {
+      if (bound.isUnbounded()) {
+        return null;
+      }
+      if (bound.isCurrentRow()) {
         return 0;
       }
-      return getConstant(((RexInputRef) bound.getOffset()).getIndex());
+
+      final int value = getConstant(((RexInputRef) bound.getOffset()).getIndex());
+      return bound.isPreceding() ? -value : value;
     }
 
     private int getConstant(int refIndex)
@@ -377,6 +483,7 @@ public class Windowing
     private final AggregateCall call;
     private final RowSignature sig;
     private final PlannerContext context;
+    private final RexBuilder rexBuilder;
     private final Project project;
     private final List<RexLiteral> constants;
     private final WindowGroup group;
@@ -386,6 +493,7 @@ public class Windowing
         AggregateCall call,
         RowSignature sig,
         PlannerContext context,
+        RexBuilder rexBuilder,
         Project project,
         List<RexLiteral> constants,
         WindowGroup group
@@ -395,6 +503,7 @@ public class Windowing
       this.call = call;
       this.sig = sig;
       this.context = context;
+      this.rexBuilder = rexBuilder;
       this.project = project;
       this.constants = constants;
       this.group = group;
@@ -414,10 +523,10 @@ public class Windowing
       return group;
     }
 
-    public String getColumn(final RelDataTypeFactory typeFactory, int argPosition)
+    public String getColumn(int argPosition)
     {
       final RexNode columnArgument =
-          Expressions.fromFieldAccess(typeFactory, sig, project, call.getArgList().get(argPosition));
+          Expressions.fromFieldAccess(rexBuilder.getTypeFactory(), sig, project, call.getArgList().get(argPosition));
       final DruidExpression expression = Expressions.toDruidExpression(context, sig, columnArgument);
       if (expression == null) {
         throw new ISE("Couldn't get an expression from columnArgument[%s]", columnArgument);
@@ -433,6 +542,14 @@ public class Windowing
     public int getConstantInt(int argPosition)
     {
       return ((Number) getConstantArgument(argPosition).getValue()).intValue();
+    }
+
+    public int getConstantInt(int argPosition, int defaultValue)
+    {
+      if (argPosition >= call.getArgList().size()) {
+        return defaultValue;
+      }
+      return getConstantInt(argPosition);
     }
   }
 
@@ -489,10 +606,9 @@ public class Windowing
   )
   {
     final Iterator<ColumnWithDirection> priorIterator = priorSort.iterator();
-    final Iterator<ColumnWithDirection> currentIterator = currentSort.iterator();
 
-    while (currentIterator.hasNext()) {
-      if (!priorIterator.hasNext() || !currentIterator.next().equals(priorIterator.next())) {
+    for (ColumnWithDirection columnWithDirection : currentSort) {
+      if (!priorIterator.hasNext() || !columnWithDirection.equals(priorIterator.next())) {
         return false;
       }
     }

@@ -22,11 +22,9 @@ package org.apache.druid.data.input;
 import org.apache.druid.data.input.HandlingInputRowIterator.InputRowHandler;
 import org.apache.druid.java.util.common.CloseableIterators;
 import org.apache.druid.java.util.common.parsers.CloseableIterator;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.experimental.runners.Enclosed;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import javax.annotation.Nullable;
@@ -41,13 +39,12 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-@RunWith(Enclosed.class)
 public class HandlingInputRowIteratorTest
 {
   public static class AbsentRowTest
   {
     private static final CloseableIterator<InputRow> EMPTY_ITERATOR = CloseableIterators.withEmptyBaggage(
-        new Iterator<InputRow>()
+        new Iterator<>()
         {
           @Override
           public boolean hasNext()
@@ -65,7 +62,7 @@ public class HandlingInputRowIteratorTest
 
     private HandlingInputRowIterator target;
 
-    @Before
+    @BeforeEach
     public void setup()
     {
       target = new HandlingInputRowIterator(EMPTY_ITERATOR, Collections.emptyList());
@@ -74,13 +71,13 @@ public class HandlingInputRowIteratorTest
     @Test
     public void doesNotHaveNext()
     {
-      Assert.assertFalse(target.hasNext());
+      Assertions.assertFalse(target.hasNext());
     }
 
-    @Test(expected = NoSuchElementException.class)
+    @Test
     public void throwsExceptionWhenYieldingNext()
     {
-      target.next();
+      Assertions.assertThrows(NoSuchElementException.class, target::next);
     }
   }
 
@@ -94,7 +91,7 @@ public class HandlingInputRowIteratorTest
     private InputRowHandler successfulHandler;
     private InputRowHandler unsuccessfulHandler;
 
-    @Before
+    @BeforeEach
     public void setup()
     {
       // Construct mock object
@@ -111,7 +108,7 @@ public class HandlingInputRowIteratorTest
     public void hasNext()
     {
       HandlingInputRowIterator target = createInputRowIterator(unsuccessfulHandler, unsuccessfulHandler);
-      Assert.assertTrue(target.hasNext());
+      Assertions.assertTrue(target.hasNext());
       Mockito.verify(unsuccessfulHandler, Mockito.never()).handle(INPUT_ROW1);
     }
 
@@ -119,7 +116,7 @@ public class HandlingInputRowIteratorTest
     public void yieldsNextIfUnhandled()
     {
       HandlingInputRowIterator target = createInputRowIterator(unsuccessfulHandler, unsuccessfulHandler);
-      Assert.assertEquals(INPUT_ROW1, target.next());
+      Assertions.assertEquals(INPUT_ROW1, target.next());
       Mockito.verify(unsuccessfulHandler, Mockito.times(2)).handle(INPUT_ROW1);
     }
 
@@ -127,7 +124,7 @@ public class HandlingInputRowIteratorTest
     public void yieldsNullIfHandledByFirst()
     {
       HandlingInputRowIterator target = createInputRowIterator(successfulHandler, unsuccessfulHandler);
-      Assert.assertNull(target.next());
+      Assertions.assertNull(target.next());
       Mockito.verify(successfulHandler, Mockito.times(1)).handle(INPUT_ROW1);
       Mockito.verify(unsuccessfulHandler, Mockito.never()).handle(INPUT_ROW1);
     }
@@ -136,7 +133,7 @@ public class HandlingInputRowIteratorTest
     public void yieldsNullIfHandledBySecond()
     {
       HandlingInputRowIterator target = createInputRowIterator(unsuccessfulHandler, successfulHandler);
-      Assert.assertNull(target.next());
+      Assertions.assertNull(target.next());
       Mockito.verify(unsuccessfulHandler, Mockito.times(1)).handle(INPUT_ROW1);
       Mockito.verify(successfulHandler, Mockito.times(1)).handle(INPUT_ROW1);
     }
@@ -146,7 +143,7 @@ public class HandlingInputRowIteratorTest
         HandlingInputRowIterator.InputRowHandler secondHandler)
     {
       CloseableIterator<InputRow> iterator = CloseableIterators.withEmptyBaggage(
-          new Iterator<InputRow>()
+          new Iterator<>()
           {
             private final Iterator<InputRow> delegate = INPUT_ROWS.iterator();
 

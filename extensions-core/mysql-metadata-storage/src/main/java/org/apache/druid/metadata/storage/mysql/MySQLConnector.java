@@ -30,6 +30,7 @@ import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.metadata.MetadataStorageConnectorConfig;
 import org.apache.druid.metadata.MetadataStorageTablesConfig;
 import org.apache.druid.metadata.SQLMetadataConnector;
+import org.apache.druid.segment.metadata.CentralizedDatasourceSchemaConfig;
 import org.skife.jdbi.v2.DBI;
 import org.skife.jdbi.v2.Handle;
 import org.skife.jdbi.v2.util.StringMapper;
@@ -46,10 +47,18 @@ public class MySQLConnector extends SQLMetadataConnector
   private static final String SERIAL_TYPE = "BIGINT(20) AUTO_INCREMENT";
   private static final String QUOTE_STRING = "`";
   private static final String COLLATION = "CHARACTER SET utf8mb4 COLLATE utf8mb4_bin";
-  private static final String MYSQL_TRANSIENT_EXCEPTION_CLASS_NAME = "com.mysql.jdbc.exceptions.MySQLTransientException";
+  private static final String MYSQL_TRANSIENT_EXCEPTION_CLASS_NAME
+      = "java.sql.SQLTransientException";
+  private static final String MARIA_DB_PACKET_EXCEPTION_CLASS_NAME
+      = "org.mariadb.jdbc.export.MaxAllowedPacketException";
+  private static final String LEGACY_MARIA_DB_PACKET_EXCEPTION_CLASS_NAME
+      = "org.mariadb.jdbc.internal.util.exceptions.MaxAllowedPacketException";
+  private static final String MYSQL_PACKET_EXCEPTION_CLASS_NAME
+      = "com.mysql.jdbc.PacketTooBigException";
 
   @Nullable
   private final Class<?> myTransientExceptionClass;
+  private final boolean mariaDbDriver;
   private final DBI dbi;
 
   @Inject
@@ -57,12 +66,14 @@ public class MySQLConnector extends SQLMetadataConnector
       Supplier<MetadataStorageConnectorConfig> config,
       Supplier<MetadataStorageTablesConfig> dbTables,
       MySQLConnectorSslConfig connectorSslConfig,
-      MySQLConnectorDriverConfig driverConfig
+      MySQLConnectorDriverConfig driverConfig,
+      CentralizedDatasourceSchemaConfig centralizedDatasourceSchemaConfig
   )
   {
-    super(config, dbTables);
+    super(config, dbTables, centralizedDatasourceSchemaConfig);
     log.info("Loading MySQL metadata connector driver %s", driverConfig.getDriverClassName());
     tryLoadDriverClass(driverConfig.getDriverClassName(), true);
+    mariaDbDriver = MySQLConnectorDriverConfig.MARIA_DB_DRIVER.equals(driverConfig.getDriverClassName());
 
     if (driverConfig.getDriverClassName().contains("mysql")) {
       myTransientExceptionClass = tryLoadDriverClass(MYSQL_TRANSIENT_EXCEPTION_CLASS_NAME, false);
@@ -173,6 +184,13 @@ public class MySQLConnector extends SQLMetadataConnector
   @Override
   public int getStreamingFetchSize()
   {
+    if (mariaDbDriver) {
+      // MariaDB Connector/J 2.7.3 had a compatibility branch in
+      // Statement.setFetchSize(Integer.MIN_VALUE) that stored fetchSize=1, while 3.x requires non-negative values.
+      // Source: https://github.com/mariadb-corporation/mariadb-connector-j/blob/2.7.3/src/main/java/org/mariadb/jdbc/MariaDbStatement.java#L1296-L1305
+      return 1;
+    }
+
     // this is MySQL's way of indicating you want results streamed back
     // see http://dev.mysql.com/doc/connector-j/5.1/en/connector-j-reference-implementation-notes.html
     return Integer.MIN_VALUE;
@@ -182,6 +200,13 @@ public class MySQLConnector extends SQLMetadataConnector
   public String limitClause(int limit)
   {
     return String.format(Locale.ENGLISH, "LIMIT %d", limit);
+  }
+
+  @Override
+  protected String getDropIndexStatement(String indexName, String tableName)
+  {
+    // MySQL requires the target table in a DROP INDEX statement.
+    return StringUtils.format("DROP INDEX %s ON %s", indexName, tableName);
   }
 
   @Override
@@ -219,6 +244,20 @@ public class MySQLConnector extends SQLMetadataConnector
   }
 
   @Override
+  protected boolean isRootCausePacketTooBigException(Throwable t)
+  {
+    if (t == null) {
+      return false;
+    }
+
+    final String className = t.getClass().getName();
+    return MARIA_DB_PACKET_EXCEPTION_CLASS_NAME.equals(className)
+           || LEGACY_MARIA_DB_PACKET_EXCEPTION_CLASS_NAME.equals(className)
+           || MYSQL_PACKET_EXCEPTION_CLASS_NAME.equals(className)
+           || isRootCausePacketTooBigException(t.getCause());
+  }
+
+  @Override
   public Void insertOrUpdate(
       final String tableName,
       final String keyColumn,
@@ -251,6 +290,25 @@ public class MySQLConnector extends SQLMetadataConnector
     return dbi;
   }
 
+  @Override
+  public boolean isUniqueConstraintViolation(Throwable t)
+  {
+    Throwable cause = t;
+    while (cause != null) {
+      if (cause instanceof SQLException) {
+        SQLException sqlException = (SQLException) cause;
+        String sqlState = sqlException.getSQLState();
+
+        // SQL standard unique constraint violation code is 23000 for MySQL
+        if ("23000".equals(sqlState)) {
+          return true;
+        }
+      }
+      cause = cause.getCause();
+    }
+    return false;
+  }
+
   @Nullable
   private Class<?> tryLoadDriverClass(String className, boolean failIfNotFound)
   {
@@ -261,7 +319,7 @@ public class MySQLConnector extends SQLMetadataConnector
       if (failIfNotFound) {
         throw new ISE(e, "Could not find %s on the classpath. The MySQL Connector library is not included in the Druid "
                          + "distribution but is required to use MySQL. Please download a compatible library (for example "
-                         + "'mysql-connector-java-5.1.49.jar') and place it under 'extensions/mysql-metadata-storage/'. See "
+                         + "'mysql-connector-j-8.2.0.jar') and place it under 'extensions/mysql-metadata-storage/'. See "
                          + "https://druid.apache.org/downloads for more details.",
                       className
         );

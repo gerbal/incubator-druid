@@ -21,14 +21,22 @@ package org.apache.druid.query;
 
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
-import org.apache.druid.query.planning.DataSourceAnalysis;
+import org.apache.druid.java.util.common.Cacheable;
+import org.apache.druid.query.filter.DimFilter;
+import org.apache.druid.query.filter.SegmentPruner;
+import org.apache.druid.query.planning.ExecutionVertex;
 import org.apache.druid.query.planning.PreJoinableClause;
-import org.apache.druid.segment.SegmentReference;
+import org.apache.druid.query.policy.Policy;
+import org.apache.druid.query.policy.PolicyEnforcer;
+import org.apache.druid.segment.SegmentMapFunction;
+import org.apache.druid.segment.VirtualColumns;
 
+import javax.annotation.Nullable;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * Represents a source... of data... for a query. Analogous to the "FROM" clause in SQL.
@@ -42,10 +50,17 @@ import java.util.function.Function;
     @JsonSubTypes.Type(value = LookupDataSource.class, name = "lookup"),
     @JsonSubTypes.Type(value = InlineDataSource.class, name = "inline"),
     @JsonSubTypes.Type(value = GlobalTableDataSource.class, name = "globalTable"),
-    @JsonSubTypes.Type(value = UnnestDataSource.class, name = "unnest")
+    @JsonSubTypes.Type(value = UnnestDataSource.class, name = "unnest"),
+    @JsonSubTypes.Type(value = FilteredDataSource.class, name = "filter"),
+    @JsonSubTypes.Type(value = ProjectDataSource.class, name = "project"),
+    @JsonSubTypes.Type(value = RestrictedDataSource.class, name = "restrict")
 })
-public interface DataSource
+public interface DataSource extends Cacheable
 {
+  byte JOIN_OPERATION_CACHE_ID = 0x1;
+  byte TABLE_DATA_SOURCE_CACHE_ID = 0x2;
+  byte NOOP_CACHE_ID = 0x71;
+
   /**
    * Returns the names of all table datasources involved in this query. Does not include names for non-tables, like
    * lookups or inline datasources.
@@ -71,45 +86,98 @@ public interface DataSource
   boolean isCacheable(boolean isBroker);
 
   /**
-   * Returns true if all servers have a full copy of this datasource. True for things like inline, lookup, etc, or
-   * for queries of those.
+   * Decides if this datasource can be accessed globally.
    * <p>
-   * Currently this is coupled with joinability - if this returns true then the query engine expects there exists a
-   * {@link org.apache.druid.segment.join.JoinableFactory} which might build a
-   * {@link org.apache.druid.segment.join.Joinable} for this datasource directly. If a subquery 'inline' join is
-   * required to join this datasource on the right hand side, then this value must be false for now.
+   * This means that all servers have a full copy of this datasource.
    * <p>
-   * In the future, instead of directly using this method, the query planner and engine should consider
-   * {@link org.apache.druid.segment.join.JoinableFactory#isDirectlyJoinable(DataSource)} when determining if the
-   * right hand side is directly joinable, which would allow decoupling this property from joins.
+   * Examples: inline table, lookup.
    */
   boolean isGlobal();
 
   /**
-   * Returns true if this datasource represents concrete data that can be scanned via a
-   * {@link org.apache.druid.segment.Segment} adapter of some kind. True for e.g. 'table' but not for 'query' or 'join'.
-   *
-   * @see DataSourceAnalysis#isConcreteBased() which uses this
-   * @see DataSourceAnalysis#isConcreteTableBased() which uses this
+   * Communicates that this {@link DataSource} can be directly used to run a {@link Query}.
+   * <p>
+   * A Processable datasource must pack the necessary logic into the {@link DataSource#createSegmentMapFunction(Query)}.
+   * <p>
+   * Processable examples are: {@link TableDataSource}, {@link InlineDataSource}, {@link FilteredDataSource}.
+   * Non-processable ones are those which need further pre-processing before running them.
+   * examples are: {@link QueryDataSource} and join which are not supported directly.
    */
-  boolean isConcrete();
+  boolean isProcessable();
 
   /**
    * Returns a segment function on to how to segment should be modified.
    *
-   * @param query      the input query
-   * @param cpuTimeAcc the cpu time accumulator
-   * @return the segment function
+   * <p>Datasources with children must apply their children's functions to the incoming segment before doing any work
+   * of their own. {@link ExecutionVertex#splitUnionSegmentMapFunctions} relies on this.
+   *
+   * <p>Throws for {@link UnionDataSource}, since its arms read different segments. Callers that read unions should
+   * split them by arm first; see {@link ExecutionVertex#splitUnion()}.
    */
-  Function<SegmentReference, SegmentReference> createSegmentMapFunction(Query query, AtomicLong cpuTimeAcc);
+  SegmentMapFunction createSegmentMapFunction(Query query);
 
   /**
-   * Returns an updated datasource based on the specified new source.
+   * Returns a {@link SegmentPruner} for the segments backing this datasource, given a filter and virtual columns
+   * that are defined on top of the datasource. Returns null if no pruning can be performed.
    *
-   * @param newSource the new datasource to be used to update an existing query
-   * @return the updated datasource to be used
+   * <p>Throws for {@link UnionDataSource}, since its arms read different segments. Callers that read unions
+   * should split them by arm first; see {@link ExecutionVertex#splitUnion()}.
+   *
+   * @param filter         filter on the columns this datasource presents, or null for none
+   * @param virtualColumns virtual columns that {@code filter} may read, layered on top of the columns this datasource
+   *                       presents
    */
-  DataSource withUpdatedDataSource(DataSource newSource);
+  @Nullable
+  default SegmentPruner createSegmentPruner(@Nullable DimFilter filter, VirtualColumns virtualColumns)
+  {
+    return null;
+  }
+
+  /**
+   * Returns the names of columns that are to be avoided for generated virtual columns placed on top of this
+   * datasource (such as by the SQL planner). This method is implemented by datasources with
+   * {@link SegmentMapFunction} that evaluate or populate columns as part of doing their work, in the
+   * same namespace that virtual columns on top of this datasource would be placed in.
+   *
+   * <p>For {@link UnionDataSource}, which has no {@link SegmentMapFunction} and which is split by arm
+   * before segments are mapped, this returns the reserved column names from all arms.
+   */
+  Set<String> getReservedColumns();
+
+  /**
+   * Whether reading this datasource may filter out rows from the underlying table. Returning false means this
+   * datasource definitely does not filter rows. Returning true means this datasource *may*, but does not
+   * necessarily, filter rows.
+   */
+  default boolean mayFilterRows()
+  {
+    return true;
+  }
+
+  /**
+   * Returns an updated datasource based on the policy restrictions on tables.
+   * <p>
+   * If this datasource contains no table, no changes should occur.
+   *
+   * @param policyMap      a mapping of table names to policy restrictions. A missing key is different from an empty value:
+   *                       <ul>
+   *                         <li> a missing key means the table has never been permission checked.
+   *                         <li> an empty value indicates the table doesn't have any policy restrictions, it has been permission checked.
+   *                       </ul>
+   * @param policyEnforcer the policy enforcer to enforce the result datasource complies
+   * @return the updated datasource, with restrictions applied in the datasource tree
+   * @throws IllegalStateException when mapping a RestrictedDataSource, unless the table has a NoRestrictionPolicy in
+   *                               the policyMap (used by druid-internal). Missing policy or adding a
+   *                               non-NoRestrictionPolicy to RestrictedDataSource would throw.
+   */
+  default DataSource withPolicies(Map<String, Optional<Policy>> policyMap, PolicyEnforcer policyEnforcer)
+  {
+    List<DataSource> children = this.getChildren()
+                                    .stream()
+                                    .map(child -> child.withPolicies(policyMap, policyEnforcer))
+                                    .collect(Collectors.toList());
+    return this.withChildren(children);
+  }
 
   /**
    * Compute a cache key prefix for a data source. This includes the data sources that participate in the RHS of a
@@ -122,12 +190,7 @@ public interface DataSource
    *
    * @return the cache key to be used as part of query cache key
    */
+  @Override
+  @Nullable
   byte[] getCacheKey();
-
-  /**
-   * Get the analysis for a data source
-   *
-   * @return The {@link DataSourceAnalysis} object for the callee data source
-   */
-  DataSourceAnalysis getAnalysis();
 }

@@ -1,7 +1,7 @@
 ---
 id: tutorial-retention
-title: "Tutorial: Configuring data retention"
-sidebar_label: "Configuring data retention"
+title: Configure data retention
+sidebar_label: Configure data retention
 ---
 
 <!--
@@ -26,19 +26,21 @@ sidebar_label: "Configuring data retention"
 
 This tutorial demonstrates how to configure retention rules on a datasource to set the time intervals of data that will be retained or dropped.
 
-For this tutorial, we'll assume you've already downloaded Apache Druid as described in
+For this tutorial, we'll assume you've already downloaded Apache&circledR; Druid as described in
 the [single-machine quickstart](index.md) and have it running on your local machine.
 
-It will also be helpful to have finished [Tutorial: Loading a file](../tutorials/tutorial-batch.md) and [Tutorial: Querying data](../tutorials/tutorial-query.md).
+It will also be helpful to have finished [Load a file](../tutorials/tutorial-batch.md) and [Query data](../tutorials/tutorial-query.md) tutorials.
 
 ## Load the example data
 
 For this tutorial, we'll be using the Wikipedia edits sample data, with an ingestion task spec that will create a separate segment for each hour in the input data.
 
-The ingestion spec can be found at `quickstart/tutorial/retention-index.json`. Let's submit that spec, which will create a datasource called `retention-tutorial`:
+The ingestion spec can be found at `quickstart/tutorial/retention-index.json`. Let's submit that spec by calling Druid Overlord, which will create a datasource called `retention-tutorial`:
 
 ```bash
-bin/post-index-task --file quickstart/tutorial/retention-index.json --url http://localhost:8081
+curl -X POST http://localhost:8081/druid/indexer/v1/task \
+  -H "Content-Type: application/json" \
+  -d @quickstart/tutorial/retention-index.json
 ```
 
 After the ingestion completes, go to [http://localhost:8888/unified-console.html#datasources](http://localhost:8888/unified-console.html#datasources) in a browser to access the web console's datasource view.

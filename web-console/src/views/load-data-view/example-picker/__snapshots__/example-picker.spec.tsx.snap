@@ -1,23 +1,23 @@
-// Jest Snapshot v1, https://goo.gl/fbAQLP
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
 
 exports[`ExamplePicker matches snapshot 1`] = `
 <div
-  class="bp4-form-group"
+  class="bp6-form-group"
 >
   <label
-    class="bp4-label"
+    class="bp6-label"
   >
     Select example dataset
      
     <span
-      class="bp4-text-muted"
+      class="bp6-text-muted"
     />
   </label>
   <div
-    class="bp4-form-content"
+    class="bp6-form-content"
   >
     <div
-      class="bp4-html-select bp4-fill"
+      class="bp6-html-select bp6-fill"
     >
       <select>
         <option
@@ -32,27 +32,11 @@ exports[`ExamplePicker matches snapshot 1`] = `
         </option>
       </select>
       <span
-        class="bp4-icon bp4-icon-double-caret-vertical"
-        icon="double-caret-vertical"
+        class="bp6-icon bp6-icon-double-caret-vertical"
       >
         <svg
-          aria-labelledby="iconTitle-0"
           data-icon="double-caret-vertical"
-          height="16"
-          role="img"
-          viewBox="0 0 16 16"
-          width="16"
-        >
-          <title
-            id="iconTitle-0"
-          >
-            Open dropdown
-          </title>
-          <path
-            d="M5 7h6a1.003 1.003 0 00.71-1.71l-3-3C8.53 2.11 8.28 2 8 2s-.53.11-.71.29l-3 3A1.003 1.003 0 005 7zm6 2H5a1.003 1.003 0 00-.71 1.71l3 3c.18.18.43.29.71.29s.53-.11.71-.29l3-3A1.003 1.003 0 0011 9z"
-            fill-rule="evenodd"
-          />
-        </svg>
+        />
       </span>
     </div>
   </div>

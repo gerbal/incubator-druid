@@ -22,16 +22,17 @@ package org.apache.druid.query.metadata.metadata;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.druid.segment.TestHelper;
 import org.apache.druid.segment.column.ColumnType;
-import org.junit.Assert;
-import org.junit.Test;
+import org.apache.druid.testing.InitializedNullHandlingTest;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
-public class ColumnAnalysisTest
+public class ColumnAnalysisTest extends InitializedNullHandlingTest
 {
   private final ObjectMapper MAPPER = TestHelper.makeJsonMapper();
 
   private void assertSerDe(ColumnAnalysis analysis) throws Exception
   {
-    Assert.assertEquals(analysis, MAPPER.readValue(MAPPER.writeValueAsString(analysis), ColumnAnalysis.class));
+    Assertions.assertEquals(analysis, MAPPER.readValue(MAPPER.writeValueAsString(analysis), ColumnAnalysis.class));
   }
 
   @Test
@@ -77,8 +78,8 @@ public class ColumnAnalysisTest
 
     ColumnAnalysis fold1 = analysis1.fold(analysis2);
     ColumnAnalysis fold2 = analysis2.fold(analysis1);
-    Assert.assertEquals(expected, fold1);
-    Assert.assertEquals(expected, fold2);
+    Assertions.assertEquals(expected, fold1);
+    Assertions.assertEquals(expected, fold2);
 
     assertSerDe(fold1);
     assertSerDe(fold2);
@@ -98,7 +99,7 @@ public class ColumnAnalysisTest
         null,
         null
     );
-    Assert.assertEquals(analysis1, analysis1.fold(null));
+    Assertions.assertEquals(analysis1, analysis1.fold(null));
     assertSerDe(analysis1);
   }
 
@@ -145,8 +146,8 @@ public class ColumnAnalysisTest
 
     ColumnAnalysis fold1 = analysis1.fold(analysis2);
     ColumnAnalysis fold2 = analysis2.fold(analysis1);
-    Assert.assertEquals(expected, fold1);
-    Assert.assertEquals(expected, fold2);
+    Assertions.assertEquals(expected, fold1);
+    Assertions.assertEquals(expected, fold2);
 
     assertSerDe(fold1);
     assertSerDe(fold2);
@@ -185,8 +186,8 @@ public class ColumnAnalysisTest
     final ColumnAnalysis expected2 = ColumnAnalysis.error("cannot_merge_diff_types: [COMPLEX] and [hyperUnique]");
     ColumnAnalysis fold1 = analysis1.fold(analysis2);
     ColumnAnalysis fold2 = analysis2.fold(analysis1);
-    Assert.assertEquals(expected, fold1);
-    Assert.assertEquals(expected2, fold2);
+    Assertions.assertEquals(expected, fold1);
+    Assertions.assertEquals(expected2, fold2);
 
     assertSerDe(fold1);
     assertSerDe(fold2);
@@ -230,8 +231,8 @@ public class ColumnAnalysisTest
     );
     ColumnAnalysis fold1 = analysis1.fold(analysis2);
     ColumnAnalysis fold2 = analysis2.fold(analysis1);
-    Assert.assertEquals(expected, fold1);
-    Assert.assertEquals(expected2, fold2);
+    Assertions.assertEquals(expected, fold1);
+    Assertions.assertEquals(expected2, fold2);
 
     assertSerDe(fold1);
     assertSerDe(fold2);
@@ -259,8 +260,8 @@ public class ColumnAnalysisTest
     );
     ColumnAnalysis fold1 = analysis1.fold(analysis2);
     ColumnAnalysis fold2 = analysis2.fold(analysis1);
-    Assert.assertEquals(expected, fold1);
-    Assert.assertEquals(expected, fold2);
+    Assertions.assertEquals(expected, fold1);
+    Assertions.assertEquals(expected, fold2);
 
     assertSerDe(fold1);
     assertSerDe(fold2);
@@ -298,8 +299,8 @@ public class ColumnAnalysisTest
     );
     ColumnAnalysis fold1 = analysis1.fold(analysis2);
     ColumnAnalysis fold2 = analysis2.fold(analysis1);
-    Assert.assertEquals(expected, fold1);
-    Assert.assertEquals(expected, fold2);
+    Assertions.assertEquals(expected, fold1);
+    Assertions.assertEquals(expected, fold2);
 
     assertSerDe(fold1);
     assertSerDe(fold2);
@@ -327,8 +328,8 @@ public class ColumnAnalysisTest
     );
     ColumnAnalysis fold1 = analysis1.fold(analysis2);
     ColumnAnalysis fold2 = analysis2.fold(analysis1);
-    Assert.assertEquals(expected, fold1);
-    Assert.assertEquals(expected, fold2);
+    Assertions.assertEquals(expected, fold1);
+    Assertions.assertEquals(expected, fold2);
 
     assertSerDe(fold1);
     assertSerDe(fold2);

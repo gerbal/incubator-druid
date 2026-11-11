@@ -23,32 +23,32 @@ title: "Build from source"
   -->
 
 
-You can build Apache Druid directly from source. Use the version of this page
+You can build Apache&circledR; Druid directly from source. Use the version of this page
 that matches the version you want to build.
 For building the latest code in master, follow the latest version of this page
 [here](https://github.com/apache/druid/blob/master/docs/development/build.md):
 make sure it has `/master/` in the URL.
 
-#### Prerequisites
+## Prerequisites
 
-##### Installing Java and Maven
+### Installing Java and Maven
 
-- JDK 8, 8u92+ or JDK 11. See our [Java documentation](../operations/java.md) for information about obtaining a JDK.
-- [Maven version 3.x](http://maven.apache.org/download.cgi)
+- See the [Java documentation](../operations/java.md) for information about obtaining a supported JDK
+- [Maven version 3.9 or later](http://maven.apache.org/download.cgi), or use the Maven wrapper (`./mvnw`) in the repository root, which downloads the Maven version that CI uses
 
-##### Other dependencies
+### Other Dependencies
 
 - Distribution builds require Python 3.x and the `pyyaml` module.
 - Integration tests require `pyyaml` version 5.1 or later.
 
-##### Downloading the source
+## Downloading the Source Code
 
 ```bash
 git clone git@github.com:apache/druid.git
 cd druid
 ```
 
-#### Building from source
+## Building from Source
 
 The basic command to build Druid from source is:
 
@@ -56,7 +56,7 @@ The basic command to build Druid from source is:
 mvn clean install
 ```
 
-This will run static analysis, unit tests, compile classes, and package the projects into JARs. It will _not_ generate the source or binary distribution tarball.
+This will run static analysis, unit tests, compile classes, and package the projects into JARs. It will _not_ generate the source or binary distribution tarball. Note that this build may take some time to complete.
 
 In addition to the basic stages, you may also want to add the following profiles and properties:
 
@@ -72,27 +72,25 @@ Putting these together, if you wish to build the source and binary distributions
 mvn clean install -Papache-release,dist,rat -DskipTests
 ```
 
-### Building hadoop 3 distribution
+### Building for Development
 
-By default, druid ships hadoop 2.x.x jars along with the distribution. Exact version can be found in the
-main [pom](https://github.com/apache/druid/blob/master/pom.xml). To build druid with hadoop 3.x.x jars, hadoop3 profile
-needs to be activated.
-
-To generate build with hadoop 3 dependencies, run:
+For development, use only the dist profile and skip the Apache release and Apache rat profiles.
 
 ```bash
-mvn clean install -Phadoop3
+mvn clean install -Pdist -DskipTests
 ```
 
-To generate distribution with hadoop3 dependencies, run :
+If you want to speed up the build even more, you can enable parallel building with the `-T1C` option and skip some static analysis checks.
 
 ```bash
-mvn clean install -Papache-release,dist-hadoop3,rat,hadoop3 -DskipTests
+mvn clean install -Pdist -T1C -DskipTests -Dforbiddenapis.skip=true -Dcheckstyle.skip=true -Dpmd.skip=true -Dmaven.javadoc.skip=true -Denforcer.skip=true
 ```
 
-#### Potential issues
+You will expect to find your distribution tar file under the `distribution/target` directory.
 
-##### Missing `pyyaml`
+## Potential issues
+
+### Missing `pyyaml`
 
 You are building Druid from source following the instructions on this page but you get
 ```

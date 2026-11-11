@@ -31,20 +31,27 @@ import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.server.security.Action;
 import org.apache.druid.server.security.Resource;
 import org.apache.druid.server.security.ResourceAction;
-import org.apache.druid.server.security.ResourceType;
 import org.apache.druid.sql.calcite.expression.AuthorizableOperator;
+import org.apache.druid.sql.calcite.schema.NamedLookupSchema;
+import org.apache.druid.sql.calcite.view.ViewManager;
 
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
 /**
- * Walks an {@link SqlNode} to collect a set of {@link Resource} for {@link ResourceType#DATASOURCE} and
- * {@link ResourceType#VIEW} to use for authorization during query planning.
+ * Walks an {@link SqlNode} to collect a set of {@link Resource} to use for authorization during query planning.
+ * Two mechanisms are used to gather resources:
  *
- * It works by looking for {@link SqlIdentifier} which corespond to a {@link IdentifierNamespace}, where
+ * <p>First, look for {@link SqlIdentifier} which correspond to a {@link IdentifierNamespace}, where
  * {@link SqlValidatorNamespace} is calcite-speak for sources of data and {@link IdentifierNamespace} specifically are
- * namespaces which are identified by a single variable, e.g. table names.
+ * namespaces which are identified by a single variable, e.g. table names. These are translated into resources
+ * using {@link PlannerContext#getSchemaResource}.
+ *
+ * <p>Second, look for {@link AuthorizableOperator} and call {@link AuthorizableOperator#computeResources}.
+ *
+ * <p>Resources are collected prior to view expansion, which makes views a security boundary. Resources accessed
+ * solely through views are exempt from authorization. See {@link ViewManager} for details on the security model.
  */
 public class SqlResourceCollectorShuttle extends SqlShuttle
 {
@@ -63,7 +70,10 @@ public class SqlResourceCollectorShuttle extends SqlShuttle
   public SqlNode visit(SqlCall call)
   {
     if (call.getOperator() instanceof AuthorizableOperator) {
-      resourceActions.addAll(((AuthorizableOperator) call.getOperator()).computeResources(call));
+      resourceActions.addAll(((AuthorizableOperator) call.getOperator()).computeResources(
+          call,
+          plannerContext.getPlannerToolbox().getAuthConfig().isEnableInputSourceSecurity()
+      ));
     }
 
     return super.visit(call);
@@ -84,13 +94,19 @@ public class SqlResourceCollectorShuttle extends SqlShuttle
         if (qualifiedNameParts.size() == 2) {
           final String schema = qualifiedNameParts.get(0);
           final String resourceName = qualifiedNameParts.get(1);
-          final String resourceType = plannerContext.getSchemaResourceType(schema, resourceName);
-          if (resourceType != null) {
-            resourceActions.add(new ResourceAction(new Resource(resourceName, resourceType), Action.READ));
+
+          // Add the lookup name to the set of lookups to selectively load.
+          if (schema.equals(NamedLookupSchema.NAME)) {
+            plannerContext.addLookupToLoad(resourceName);
+          }
+
+          final Resource resource = plannerContext.getSchemaResource(schema, resourceName);
+          if (resource != null) {
+            resourceActions.add(new ResourceAction(resource, Action.READ));
           }
         } else if (qualifiedNameParts.size() > 2) {
           // Don't expect to see more than 2 names (catalog?).
-          throw new ISE("Cannot analyze table idetifier %s", qualifiedNameParts);
+          throw new ISE("Cannot analyze table identifier %s", qualifiedNameParts);
         }
       }
     }

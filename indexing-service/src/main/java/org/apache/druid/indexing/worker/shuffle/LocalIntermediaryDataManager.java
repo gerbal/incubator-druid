@@ -20,7 +20,6 @@
 package org.apache.druid.indexing.worker.shuffle;
 
 import com.google.common.base.Throwables;
-import com.google.common.collect.Iterators;
 import com.google.common.io.ByteSource;
 import com.google.common.io.Files;
 import com.google.inject.Inject;
@@ -29,7 +28,6 @@ import org.apache.druid.common.guava.FutureUtils;
 import org.apache.druid.common.utils.IdUtils;
 import org.apache.druid.guice.ManageLifecycle;
 import org.apache.druid.indexer.TaskStatus;
-import org.apache.druid.indexing.common.TaskStorageDirTracker;
 import org.apache.druid.indexing.common.TaskToolbox;
 import org.apache.druid.indexing.common.config.TaskConfig;
 import org.apache.druid.indexing.common.task.batch.parallel.GenericPartitionStat;
@@ -46,6 +44,8 @@ import org.apache.druid.java.util.common.lifecycle.LifecycleStop;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.rpc.indexing.OverlordClient;
 import org.apache.druid.segment.SegmentUtils;
+import org.apache.druid.segment.loading.CacheEntry;
+import org.apache.druid.segment.loading.CacheEntryIdentifier;
 import org.apache.druid.segment.loading.StorageLocation;
 import org.apache.druid.timeline.DataSegment;
 import org.apache.druid.timeline.partition.BucketNumberedShardSpec;
@@ -58,20 +58,19 @@ import org.joda.time.Period;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
-import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
 /**
  * In native parallel indexing, this class store segment files of phase 1 tasks in local storage of middleManagers (or indexer)
@@ -91,6 +90,7 @@ public class LocalIntermediaryDataManager implements IntermediaryDataManager
   private final long intermediaryPartitionDiscoveryPeriodSec;
   private final long intermediaryPartitionCleanupPeriodSec;
   private final Period intermediaryPartitionTimeout;
+  private final TaskConfig taskConfig;
   private final List<StorageLocation> shuffleDataLocations;
   private final OverlordClient overlordClient;
 
@@ -99,8 +99,8 @@ public class LocalIntermediaryDataManager implements IntermediaryDataManager
   // the supervisor.
   private final ConcurrentHashMap<String, DateTime> supervisorTaskCheckTimes = new ConcurrentHashMap<>();
 
-  // supervisorTaskId -> cyclic iterator of storage locations
-  private final Map<String, Iterator<StorageLocation>> locationIterators = new HashMap<>();
+  // supervisorTaskId -> atomic round-robin cursor into shuffleDataLocations
+  private final ConcurrentHashMap<String, AtomicInteger> locationCursors = new ConcurrentHashMap<>();
 
   // The overlord is supposed to send a cleanup request as soon as the supervisorTask is finished in parallel indexing,
   // but middleManager or indexer could miss the request. This executor is to automatically clean up unused intermediary
@@ -109,26 +109,23 @@ public class LocalIntermediaryDataManager implements IntermediaryDataManager
   @MonotonicNonNull
   private ScheduledExecutorService supervisorTaskChecker;
 
-  private final TaskStorageDirTracker dirTracker;
-
   @Inject
   public LocalIntermediaryDataManager(
       WorkerConfig workerConfig,
       TaskConfig taskConfig,
-      OverlordClient overlordClient,
-      TaskStorageDirTracker dirTracker
+      OverlordClient overlordClient
   )
   {
     this.intermediaryPartitionDiscoveryPeriodSec = workerConfig.getIntermediaryPartitionDiscoveryPeriodSec();
     this.intermediaryPartitionCleanupPeriodSec = workerConfig.getIntermediaryPartitionCleanupPeriodSec();
     this.intermediaryPartitionTimeout = workerConfig.getIntermediaryPartitionTimeout();
+    this.taskConfig = taskConfig;
     this.shuffleDataLocations = taskConfig
         .getShuffleDataLocations()
         .stream()
         .map(config -> new StorageLocation(config.getPath(), config.getMaxSize(), config.getFreeSpacePercent()))
         .collect(Collectors.toList());
     this.overlordClient = overlordClient;
-    this.dirTracker = dirTracker;
   }
 
   @Override
@@ -204,12 +201,7 @@ public class LocalIntermediaryDataManager implements IntermediaryDataManager
                       .toString();
                   // StorageLocation keeps track of how much storage capacity is being used.
                   // Newly found files should be known to the StorageLocation to keep it up to date.
-                  final File reservedFile = location.reserve(
-                      relativeSegmentPath,
-                      eachFile.getName(),
-                      eachFile.length()
-                  );
-                  if (reservedFile == null) {
+                  if (!location.reserve(new FileNameCacheEntry(relativeSegmentPath, eachFile.length()))) {
                     LOG.warn("Can't add a discovered partition[%s]", eachFile.getAbsolutePath());
                   }
                 }
@@ -282,20 +274,13 @@ public class LocalIntermediaryDataManager implements IntermediaryDataManager
   public DataSegment addSegment(String supervisorTaskId, String subTaskId, DataSegment segment, File segmentDir)
       throws IOException
   {
-    // Get or create the location iterator for supervisorTask.
-    final Iterator<StorageLocation> iterator = locationIterators.computeIfAbsent(
+    final AtomicInteger cursor = locationCursors.computeIfAbsent(
         supervisorTaskId,
-        k -> {
-          final Iterator<StorageLocation> cyclicIterator = Iterators.cycle(shuffleDataLocations);
-          // Random start of the iterator
-          final int random = ThreadLocalRandom.current().nextInt(shuffleDataLocations.size());
-          IntStream.range(0, random).forEach(i -> cyclicIterator.next());
-          return cyclicIterator;
-        }
+        k -> new AtomicInteger(ThreadLocalRandom.current().nextInt(shuffleDataLocations.size()))
     );
 
     // Create a zipped segment in a temp directory.
-    final File taskTempDir = dirTracker.getTaskTempDir(subTaskId);
+    final File taskTempDir = taskConfig.getTaskTempDir(subTaskId);
     final Closer closer = Closer.create();
     closer.register(() -> {
       try {
@@ -316,7 +301,7 @@ public class LocalIntermediaryDataManager implements IntermediaryDataManager
     final BucketNumberedShardSpec<?> bucketNumberedShardSpec = (BucketNumberedShardSpec<?>) segment.getShardSpec();
 
     //noinspection unused
-    try (final Closer resourceCloser = closer) {
+    try (final Closer ignoredCloser = closer) {
       FileUtils.mkdirp(taskTempDir);
 
       // Temporary compressed file. Will be removed when taskTempDir is deleted.
@@ -331,16 +316,19 @@ public class LocalIntermediaryDataManager implements IntermediaryDataManager
 
       // Try copying the zipped segment to one of storage locations
       for (int i = 0; i < shuffleDataLocations.size(); i++) {
-        final StorageLocation location = iterator.next();
+        final StorageLocation location = shuffleDataLocations.get(
+            Math.floorMod(cursor.getAndIncrement(), shuffleDataLocations.size())
+        );
         final String partitionFilePath = getPartitionFilePath(
             supervisorTaskId,
             subTaskId,
             segment.getInterval(),
             bucketNumberedShardSpec.getBucketId() // we must use the bucket ID instead of partition ID
         );
-        final File destFile = location.reserve(partitionFilePath, segment.getId().toString(), tempZippedFile.length());
-        if (destFile != null) {
+        File destFile = null;
+        if (location.reserve(new FileNameCacheEntry(partitionFilePath, tempZippedFile.length()))) {
           try {
+            destFile = new File(location.getPath(), partitionFilePath);
             FileUtils.mkdirp(destFile.getParentFile());
             FileUtils.writeAtomically(
                 destFile,
@@ -355,7 +343,7 @@ public class LocalIntermediaryDataManager implements IntermediaryDataManager
             return segment.withSize(unzippedSizeBytes).withBinaryVersion(SegmentUtils.getVersionFromDir(segmentDir));
           }
           catch (Exception e) {
-            location.release(partitionFilePath, tempZippedFile.length());
+            location.release(new FileNameCacheEntry(partitionFilePath, tempZippedFile.length()));
             org.apache.commons.io.FileUtils.deleteQuietly(destFile);
             LOG.warn(
                 e,
@@ -418,11 +406,84 @@ public class LocalIntermediaryDataManager implements IntermediaryDataManager
       if (supervisorTaskPath.exists()) {
         LOG.info("Cleaning up [%s]", supervisorTaskPath);
         for (File eachFile : org.apache.commons.io.FileUtils.listFiles(supervisorTaskPath, null, true)) {
-          location.removeFile(eachFile);
+          final String relativeSegmentPath = location.getPath()
+                                                     .toPath()
+                                                     .toAbsolutePath()
+                                                     .relativize(eachFile.toPath().toAbsolutePath())
+                                                     .toString();
+          location.release(new FileNameCacheEntry(relativeSegmentPath, eachFile.length()));
         }
         org.apache.commons.io.FileUtils.forceDelete(supervisorTaskPath);
       }
     }
     supervisorTaskCheckTimes.remove(supervisorTaskId);
+  }
+
+  private static class FileNameCacheEntry implements CacheEntry
+  {
+    private final FileNameCacheEntryIdentifier name;
+    private final long size;
+
+    private FileNameCacheEntry(String file, long size)
+    {
+      this.name = new FileNameCacheEntryIdentifier(file);
+      this.size = size;
+    }
+
+    @Override
+    public FileNameCacheEntryIdentifier getId()
+    {
+      return name;
+    }
+
+    @Override
+    public long getSize()
+    {
+      return size;
+    }
+
+    @Override
+    public boolean isMounted()
+    {
+      return true;
+    }
+
+    @Override
+    public void mount(StorageLocation location)
+    {
+      // do nothing, since we are just using StorageLocation as an accountant
+    }
+
+    @Override
+    public void unmount()
+    {
+      // do nothing, since we are just using StorageLocation as an accountant
+    }
+  }
+
+  private static final class FileNameCacheEntryIdentifier implements CacheEntryIdentifier
+  {
+    private final String name;
+
+    private FileNameCacheEntryIdentifier(String name)
+    {
+      this.name = name;
+    }
+
+    @Override
+    public boolean equals(Object o)
+    {
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+      FileNameCacheEntryIdentifier that = (FileNameCacheEntryIdentifier) o;
+      return Objects.equals(name, that.name);
+    }
+
+    @Override
+    public int hashCode()
+    {
+      return Objects.hashCode(name);
+    }
   }
 }

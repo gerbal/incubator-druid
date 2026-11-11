@@ -1,7 +1,7 @@
 ---
 id: tutorial-msq-extern
-title: "Tutorial: Load files with SQL-based ingestion"
-sidebar_label: "Load files using SQL 🆕"
+title: Load files with SQL-based ingestion
+sidebar_label: Load files using SQL
 description: How to generate a query that references externally hosted data
 ---
 
@@ -24,9 +24,10 @@ description: How to generate a query that references externally hosted data
   ~ under the License.
   -->
 
-> This page describes SQL-based batch ingestion using the [`druid-multi-stage-query`](../multi-stage-query/index.md)
-> extension, new in Druid 24.0. Refer to the [ingestion methods](../ingestion/index.md#batch) table to determine which
-> ingestion method is right for you.
+:::info
+ This page describes SQL-based batch ingestion using the [multi-stage query (MSQ) task engine](../multi-stage-query/index.md).
+ Refer to the [ingestion methods](../ingestion/index.md#batch) table to determine which ingestion method is right for you.
+:::
 
 This tutorial demonstrates how to generate a query that references externally hosted data using the **Connect external data** wizard.
 
@@ -44,7 +45,8 @@ To generate a query from external data, do the following:
    - Customize how Druid handles the data by selecting the **Input format** and its related options, such as adding **JSON parser features** for JSON files.
 5. When you're ready, click **Done**. You're returned to the **Query** view where you can see the starter query that will insert the data from the external source into a table named `wikipedia`.
 
-   <details><summary>Show the query</summary>
+   <details>
+   <summary>Show the query</summary>
 
    ```sql
    REPLACE INTO "wikipedia" OVERWRITE ALL
@@ -120,7 +122,8 @@ ORDER BY COUNT(*) DESC
 
 With the EXTERN function, you could run the same query on the external data directly without ingesting it first:
 
-<details><summary>Show the query</summary>
+<details>
+<summary>Show the query</summary>
 
 ```sql
 SELECT

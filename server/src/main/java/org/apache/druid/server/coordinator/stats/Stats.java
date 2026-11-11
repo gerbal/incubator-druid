@@ -1,0 +1,275 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.druid.server.coordinator.stats;
+
+/**
+ * List of Coordinator stats.
+ */
+public class Stats
+{
+  public static class Segments
+  {
+    // Decisions taken in a run
+    public static final CoordinatorStat ASSIGNED
+        = CoordinatorStat.toDebugAndEmit("assigned", "segment/assigned/count");
+    public static final CoordinatorStat DROPPED
+        = CoordinatorStat.toDebugAndEmit("dropped", "segment/dropped/count");
+    public static final CoordinatorStat DELETED
+        = CoordinatorStat.toDebugAndEmit("deleted", "segment/deleted/count");
+    public static final CoordinatorStat MOVED
+        = CoordinatorStat.toDebugAndEmit("moved", "segment/moved/count");
+
+    // Skipped decisions in a run
+    public static final CoordinatorStat ASSIGN_SKIPPED
+        = CoordinatorStat.toDebugAndEmit("assignSkip", "segment/assignSkipped/count");
+    public static final CoordinatorStat DROP_SKIPPED
+        = CoordinatorStat.toDebugAndEmit("dropSkip", "segment/dropSkipped/count");
+    public static final CoordinatorStat MOVE_SKIPPED
+        = CoordinatorStat.toDebugAndEmit("moveSkip", "segment/moveSkipped/count");
+
+    // Current state of segments of a datasource
+    public static final CoordinatorStat USED
+        = CoordinatorStat.toDebugAndEmit("usedSegments", "segment/count");
+    public static final CoordinatorStat USED_BYTES
+        = CoordinatorStat.toDebugAndEmit("usedSegmentBytes", "segment/size");
+    public static final CoordinatorStat UNDER_REPLICATED
+        = CoordinatorStat.toDebugAndEmit("underreplicated", "segment/underReplicated/count");
+    public static final CoordinatorStat UNAVAILABLE
+        = CoordinatorStat.toDebugAndEmit("unavailable", "segment/unavailable/count");
+    public static final CoordinatorStat DEEP_STORAGE_ONLY
+            = CoordinatorStat.toDebugAndEmit("deepStorageOnly", "segment/availableDeepStorageOnly/count");
+    public static final CoordinatorStat UNNEEDED
+        = CoordinatorStat.toDebugAndEmit("unneeded", "segment/unneeded/count");
+    public static final CoordinatorStat OVERSHADOWED
+        = CoordinatorStat.toDebugAndEmit("overshadowed", "segment/overshadowed/count");
+    public static final CoordinatorStat UNNEEDED_ETERNITY_TOMBSTONE
+        = CoordinatorStat.toDebugAndEmit("unneededEternityTombstone", "segment/unneededEternityTombstone/count");
+
+    // Values computed in a run
+    public static final CoordinatorStat REPLICATION_THROTTLE_LIMIT
+        = CoordinatorStat.toDebugOnly("replicationThrottleLimit");
+
+    // Cloned segments in a run
+    public static final CoordinatorStat ASSIGNED_TO_CLONE
+        = CoordinatorStat.toDebugAndEmit("cloneLoad", "segment/clone/assigned/count");
+    public static final CoordinatorStat DROPPED_FROM_CLONE
+        = CoordinatorStat.toDebugAndEmit("cloneDrop", "segment/clone/dropped/count");
+    public static final CoordinatorStat PENDING_SYNC_ON_CLONE
+        = CoordinatorStat.toDebugAndEmit("clonePendingSync", "segment/clone/pendingSync/count");
+
+    // Partial-load reconciliation in a run
+    public static final CoordinatorStat PARTIAL_ASSIGNED
+        = CoordinatorStat.toDebugAndEmit("partialAssigned", "segment/partial/assigned/count");
+    public static final CoordinatorStat PARTIAL_STALE_DROPPED
+        = CoordinatorStat.toDebugAndEmit("partialStaleDropped", "segment/partial/staleDropped/count");
+    public static final CoordinatorStat PARTIAL_STALE_CANCELLED
+        = CoordinatorStat.toDebugAndEmit("partialStaleCancelled", "segment/partial/staleCancelled/count");
+    public static final CoordinatorStat PARTIAL_RULE_REVERTED
+        = CoordinatorStat.toDebugAndEmit("partialRuleReverted", "segment/partial/ruleReverted/count");
+  }
+
+  public static class SegmentQueue
+  {
+    public static final CoordinatorStat NUM_TO_LOAD
+        = CoordinatorStat.toDebugAndEmit("numToLoad", "segment/loadQueue/count");
+    public static final CoordinatorStat BYTES_TO_LOAD
+        = CoordinatorStat.toDebugAndEmit("bytesToLoad", "segment/loadQueue/size");
+    public static final CoordinatorStat NUM_TO_DROP
+        = CoordinatorStat.toDebugAndEmit("numToDrop", "segment/dropQueue/count");
+    public static final CoordinatorStat LOAD_RATE_KBPS
+        = CoordinatorStat.toDebugAndEmit("loadRateKbps", "segment/loading/rateKbps");
+
+    public static final CoordinatorStat ASSIGNED_ACTIONS
+        = CoordinatorStat.toDebugAndEmit("assignedActions", "segment/loadQueue/assigned");
+    public static final CoordinatorStat COMPLETED_ACTIONS
+        = CoordinatorStat.toDebugAndEmit("successActions", "segment/loadQueue/success");
+    public static final CoordinatorStat FAILED_ACTIONS
+        = CoordinatorStat.toLogAndEmit("failedActions", "segment/loadQueue/failed", CoordinatorStat.Level.ERROR);
+    public static final CoordinatorStat CANCELLED_ACTIONS
+        = CoordinatorStat.toDebugAndEmit("cancelledActions", "segment/loadQueue/cancelled");
+  }
+
+  public static class Tier
+  {
+    // Segment storage of a tier, denominated in full segment size. These are the assignment ledger: REQUIRED_STORAGE
+    // is the demand the rules place on the tier, STORAGE_CAPACITY the supply it advertises. Under virtual storage a
+    // tier can address more storage than it has disk, so both may exceed CACHE_CAPACITY.
+
+    /**
+     * The demand the rules place on the tier to full load all segments.
+     */
+    public static final CoordinatorStat REQUIRED_STORAGE
+        = CoordinatorStat.toDebugAndEmit("reqdStorage", "tier/storage/required");
+    /**
+     * The total storage the tier advertises for assignment, defined by summing the configured max size of all servers
+     * in the tier.
+     */
+    public static final CoordinatorStat STORAGE_CAPACITY
+        = CoordinatorStat.toDebugAndEmit("storageCap", "tier/storage/capacity");
+    /**
+     * Superseded by {@link #REQUIRED_STORAGE}, which carries the same value under a name that groups it with the
+     * storage capacity it should be compared against. Still emitted so existing dashboards keep working; remove
+     * after deprecation.
+     */
+    @Deprecated
+    public static final CoordinatorStat REQUIRED_CAPACITY
+        = CoordinatorStat.toDebugAndEmit("reqdCap", "tier/required/capacity");
+    /**
+     * Superseded by {@link #STORAGE_CAPACITY}, which carries the same value under a name that groups it with the
+     * required storage it should be compared against. Still emitted so existing dashboards keep working; remove after
+     * deprecation.
+     */
+    @Deprecated
+    public static final CoordinatorStat TOTAL_CAPACITY
+        = CoordinatorStat.toDebugAndEmit("totalCap", "tier/total/capacity");
+
+    // Physical segment cache of a tier: the size of the segment cache locations configured on its historicals and the
+    // bytes actually occupied on them. Named for druid.segmentCache.locations, which is what these measure.
+
+    /**
+     * Aggregate physical disk capacity of the tier's segment cache locations.
+     */
+    public static final CoordinatorStat CACHE_CAPACITY
+        = CoordinatorStat.toDebugAndEmit("cacheCap", "tier/segmentCache/capacity");
+    /**
+     * Actual physical disk consumed by the tier. Only reports realized bytes on disk, so partial loads when using
+     * virtual storage report their true loaded size, which can be less than the full segment size.
+     */
+    public static final CoordinatorStat CACHE_USED
+        = CoordinatorStat.toDebugAndEmit("cacheUsed", "tier/segmentCache/used");
+    /**
+     * {@link #CACHE_USED} as a whole-number percentage of {@link #CACHE_CAPACITY}.
+     */
+    public static final CoordinatorStat CACHE_UTILIZATION
+        = CoordinatorStat.toDebugAndEmit("cacheUtil", "tier/segmentCache/utilization");
+    /**
+     * Segment cache utilization of all tiers under a tier alias, as a whole-number percentage of their combined
+     * capacity.
+     */
+    public static final CoordinatorStat ALIAS_CACHE_UTILIZATION
+        = CoordinatorStat.toDebugAndEmit("aliasCacheUtil", "tierAlias/segmentCache/utilization");
+    public static final CoordinatorStat REPLICATION_FACTOR
+        = CoordinatorStat.toDebugAndEmit("maxRepFactor", "tier/replication/factor");
+    public static final CoordinatorStat HISTORICAL_COUNT
+        = CoordinatorStat.toDebugAndEmit("numHistorical", "tier/historical/count");
+    public static final CoordinatorStat CLONE_COUNT
+        = CoordinatorStat.toDebugAndEmit("numClones", "tier/historical/clone/count");
+    public static final CoordinatorStat CLONE_SYNCED
+        = CoordinatorStat.toDebugAndEmit("cloneSynced", "tier/historical/clone/synced");
+  }
+
+  public static class Compaction
+  {
+    public static final CoordinatorStat JOB_CREATION_TIME
+        = CoordinatorStat.toDebugAndEmit("jobCreationTime", "compact/createJobs/time");
+    public static final CoordinatorStat CREATED_JOBS
+        = CoordinatorStat.toDebugAndEmit("jobQueueSize", "compact/createJobs/count");
+    public static final CoordinatorStat SCHEDULER_RUN_TIME
+        = CoordinatorStat.toDebugAndEmit("schedulerRunTime", "compact/runScheduler/time");
+
+    public static final CoordinatorStat SUBMITTED_TASKS
+        = CoordinatorStat.toDebugAndEmit("compactTasks", "compact/task/count");
+    public static final CoordinatorStat CANCELLED_TASKS
+        = CoordinatorStat.toDebugAndEmit("compactCancelled", "compactTask/cancelled/count");
+    public static final CoordinatorStat MAX_SLOTS
+        = CoordinatorStat.toDebugAndEmit("compactMaxSlots", "compactTask/maxSlot/count");
+    public static final CoordinatorStat AVAILABLE_SLOTS
+        = CoordinatorStat.toDebugAndEmit("compactAvlSlots", "compactTask/availableSlot/count");
+
+    public static final CoordinatorStat PENDING_BYTES
+        = CoordinatorStat.toDebugAndEmit("compactPendingBytes", "segment/waitCompact/bytes");
+    public static final CoordinatorStat COMPACTED_BYTES
+        = CoordinatorStat.toDebugAndEmit("compactedBytes", "segment/compacted/bytes");
+    public static final CoordinatorStat SKIPPED_BYTES
+        = CoordinatorStat.toDebugAndEmit("compactSkipBytes", "segment/skipCompact/bytes");
+
+    public static final CoordinatorStat PENDING_SEGMENTS
+        = CoordinatorStat.toDebugAndEmit("compactPendingSeg", "segment/waitCompact/count");
+    public static final CoordinatorStat COMPACTED_SEGMENTS
+        = CoordinatorStat.toDebugAndEmit("compactedSeg", "segment/compacted/count");
+    public static final CoordinatorStat SKIPPED_SEGMENTS
+        = CoordinatorStat.toDebugAndEmit("compactSkipSeg", "segment/skipCompact/count");
+
+    public static final CoordinatorStat PENDING_INTERVALS
+        = CoordinatorStat.toDebugAndEmit("compactPendingIntv", "interval/waitCompact/count");
+    public static final CoordinatorStat COMPACTED_INTERVALS
+        = CoordinatorStat.toDebugAndEmit("compactedIntv", "interval/compacted/count");
+    public static final CoordinatorStat SKIPPED_INTERVALS
+        = CoordinatorStat.toDebugAndEmit("compactSkipIntv", "interval/skipCompact/count");
+  }
+
+  public static class CoordinatorRun
+  {
+    public static final CoordinatorStat DUTY_RUN_TIME
+        = CoordinatorStat.toDebugAndEmit("dutyRunTime", "coordinator/time");
+    public static final CoordinatorStat GROUP_RUN_TIME
+        = CoordinatorStat.toDebugAndEmit("groupRunTime", "coordinator/global/time");
+  }
+
+  public static class Kill
+  {
+    public static final CoordinatorStat COMPACTION_CONFIGS
+        = CoordinatorStat.toDebugAndEmit("killedCompactConfigs", "metadata/kill/compaction/count");
+    public static final CoordinatorStat SUPERVISOR_SPECS
+        = CoordinatorStat.toDebugAndEmit("killedSupervisorSpecs", "metadata/kill/supervisor/count");
+    public static final CoordinatorStat RULES
+        = CoordinatorStat.toDebugAndEmit("killedRules", "metadata/kill/rule/count");
+    public static final CoordinatorStat SEGMENT_SCHEMA
+        = CoordinatorStat.toDebugAndEmit("killSchemas", "metadata/kill/segmentSchema/count");
+    public static final CoordinatorStat AUDIT_LOGS
+        = CoordinatorStat.toDebugAndEmit("killedAuditLogs", "metadata/kill/audit/count");
+    public static final CoordinatorStat DATASOURCES
+        = CoordinatorStat.toDebugAndEmit("killedDatasources", "metadata/kill/datasource/count");
+    public static final CoordinatorStat AVAILABLE_SLOTS
+        = CoordinatorStat.toDebugAndEmit("killAvailSlots", "killTask/availableSlot/count");
+    public static final CoordinatorStat MAX_SLOTS
+        = CoordinatorStat.toDebugAndEmit("killMaxSlots", "killTask/maxSlot/count");
+    public static final CoordinatorStat SUBMITTED_TASKS
+        = CoordinatorStat.toDebugAndEmit("killTasks", "kill/task/count");
+    public static final CoordinatorStat ELIGIBLE_UNUSED_SEGMENTS
+        = CoordinatorStat.toDebugAndEmit("killEligibleUnusedSegs", "kill/eligibleUnusedSegments/count");
+    public static final CoordinatorStat PENDING_SEGMENTS
+        = CoordinatorStat.toDebugAndEmit("killPendingSegs", "kill/pendingSegments/count");
+  }
+
+  public static class Balancer
+  {
+    public static final CoordinatorStat COMPUTATION_ERRORS = CoordinatorStat.toLogAndEmit(
+        "costComputeError",
+        "segment/balancer/compute/error",
+        CoordinatorStat.Level.ERROR
+    );
+    public static final CoordinatorStat COMPUTATION_TIME = CoordinatorStat.toDebugOnly("costComputeTime");
+    public static final CoordinatorStat COMPUTATION_COUNT = CoordinatorStat.toDebugOnly("costComputeCount");
+
+    public static final CoordinatorStat COMPUTE_THREADS = CoordinatorStat.toDebugOnly("balancerComputeThreads");
+    public static final CoordinatorStat MAX_TO_MOVE = CoordinatorStat.toDebugOnly("maxToMove");
+  }
+
+  public static class Configuration
+  {
+    public static final CoordinatorStat BROKER_SYNC_TIME
+        = CoordinatorStat.toDebugAndEmit("brokerSyncTime", "config/brokerSync/time");
+    public static final CoordinatorStat TOTAL_SYNC_TIME
+        = CoordinatorStat.toDebugAndEmit("totalBrokerSyncTime", "config/brokerSync/total/time");
+    public static final CoordinatorStat BROKER_SYNC_ERROR
+        = CoordinatorStat.toDebugAndEmit("configSyncFailure", "config/brokerSync/error");
+  }
+}

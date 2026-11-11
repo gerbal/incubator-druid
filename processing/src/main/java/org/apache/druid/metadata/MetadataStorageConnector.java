@@ -63,19 +63,13 @@ public interface MetadataStorageConnector
     throw new UnsupportedOperationException("compareAndSwap is not implemented.");
   }
 
-  default void exportTable(
-      String tableName,
-      String outputPath
-  )
-  {
-    throw new UnsupportedOperationException("exportTable is not implemented.");
-  }
-
   void createDataSourceTable();
 
   void createPendingSegmentsTable();
 
   void createSegmentTable();
+
+  void createUpgradeSegmentsTable();
 
   void createRulesTable();
 
@@ -88,4 +82,17 @@ public interface MetadataStorageConnector
   void createSupervisorsTable();
 
   void deleteAllRecords(String tableName);
+
+  /**
+   * SegmentSchema table is created only when CentralizedDatasourceSchema feature is enabled.
+   */
+  void createSegmentSchemasTable();
+
+  /**
+   * This table stores {@link org.apache.druid.timeline.CompactionState} objects.
+   * <p>
+   * Multiple segments can refer to the same compaction state via its unique fingerprint
+   * </p>
+   */
+  void createIndexingStatesTable();
 }

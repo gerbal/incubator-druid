@@ -25,10 +25,9 @@ import com.google.inject.Key;
 import com.google.inject.TypeLiteral;
 import org.apache.druid.sql.calcite.aggregation.builtin.CountSqlAggregator;
 import org.apache.druid.sql.calcite.util.CalciteTestBase;
-import org.hamcrest.CoreMatchers;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.Comparator;
 import java.util.List;
@@ -40,7 +39,7 @@ public class SqlAggregationModuleTest extends CalciteTestBase
   private SqlAggregationModule target;
   private Injector injector;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
     target = new SqlAggregationModule();
@@ -50,15 +49,15 @@ public class SqlAggregationModuleTest extends CalciteTestBase
   @Test
   public void testDefaultSqlAggregatorsAreBound()
   {
-    Set<SqlAggregator> sqlAggregators = injector.getInstance(Key.get(new TypeLiteral<Set<SqlAggregator>>() {}));
-    Assert.assertNotNull(sqlAggregators);
-    Assert.assertEquals(2, sqlAggregators.size());
+    Set<SqlAggregator> sqlAggregators = injector.getInstance(Key.get(new TypeLiteral<>() {}));
+    Assertions.assertNotNull(sqlAggregators);
+    Assertions.assertEquals(2, sqlAggregators.size());
 
     final List<SqlAggregator> aggregators = sqlAggregators.stream()
                                                           .sorted(Comparator.comparing(o -> o.getClass().getName()))
                                                           .collect(Collectors.toList());
 
-    Assert.assertThat(aggregators.get(0), CoreMatchers.instanceOf(ApproxCountDistinctSqlAggregator.class));
-    Assert.assertThat(aggregators.get(1), CoreMatchers.instanceOf(CountSqlAggregator.class));
+    Assertions.assertInstanceOf(ApproxCountDistinctSqlAggregator.class, aggregators.get(0));
+    Assertions.assertInstanceOf(CountSqlAggregator.class, aggregators.get(1));
   }
 }

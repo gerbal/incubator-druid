@@ -27,6 +27,7 @@ import './snitch-dialog.scss';
 
 export interface SnitchDialogProps {
   title: string;
+  children?: React.ReactNode;
   className?: string;
   onSave: (comment: string) => void | Promise<void>;
   saveDisabled?: boolean;
@@ -99,7 +100,7 @@ export class SnitchDialog extends React.PureComponent<SnitchDialogProps, SnitchD
         <div className={`dialog-body ${Classes.DIALOG_BODY}`}>
           <FormGroup label="Why are you making this change?" className="comment">
             <InputGroup
-              large
+              size="large"
               value={comment}
               placeholder="Enter description here"
               onChange={(e: any) => this.handleCommentChange(e.target.value)}
@@ -111,7 +112,7 @@ export class SnitchDialog extends React.PureComponent<SnitchDialogProps, SnitchD
     );
   }
 
-  renderHistoryDialog(): JSX.Element | null {
+  renderHistoryDialog() {
     const { title, historyRecords } = this.props;
     if (!historyRecords) return null;
 
@@ -133,7 +134,7 @@ export class SnitchDialog extends React.PureComponent<SnitchDialogProps, SnitchD
         {!showFinalStep && historyRecords && (
           <Button
             className="left-align-button"
-            minimal
+            variant="minimal"
             text="History"
             onClick={this.handleGoToHistory}
           />
@@ -154,23 +155,23 @@ export class SnitchDialog extends React.PureComponent<SnitchDialogProps, SnitchD
             disabled={saveDisabled}
             text="Save"
             onClick={this.save}
-            intent={Intent.PRIMARY as any}
-            rightIcon={IconNames.TICK}
+            intent={Intent.PRIMARY}
+            endIcon={IconNames.TICK}
           />
         ) : (
           <Button
             disabled={saveDisabled}
             text="Next"
             onClick={this.goToFinalStep}
-            intent={Intent.PRIMARY as any}
-            rightIcon={IconNames.ARROW_RIGHT}
+            intent={Intent.PRIMARY}
+            endIcon={IconNames.ARROW_RIGHT}
           />
         )}
       </div>
     );
   }
 
-  render(): JSX.Element | null {
+  render() {
     const { children, saveDisabled } = this.props;
     const { showFinalStep, showHistory } = this.state;
 

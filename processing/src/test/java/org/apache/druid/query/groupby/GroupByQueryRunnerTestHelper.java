@@ -19,17 +19,27 @@
 
 package org.apache.druid.query.groupby;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Suppliers;
+import com.google.common.collect.ImmutableList;
 import org.apache.druid.java.util.common.DateTimes;
+import org.apache.druid.java.util.common.HumanReadableBytes;
+import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
+import org.apache.druid.query.DruidProcessingConfig;
 import org.apache.druid.query.FinalizeResultsQueryRunner;
 import org.apache.druid.query.MetricsEmittingQueryRunner;
 import org.apache.druid.query.Query;
+import org.apache.druid.query.QueryContext;
 import org.apache.druid.query.QueryPlus;
 import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QueryRunnerFactory;
+import org.apache.druid.query.QueryRunnerTestHelper;
 import org.apache.druid.query.QueryToolChest;
+import org.apache.druid.query.context.QueryContextParameters;
+import org.apache.druid.segment.TestHelper;
 import org.apache.druid.segment.column.ColumnHolder;
 import org.joda.time.DateTime;
 import org.joda.time.chrono.ISOChronology;
@@ -37,22 +47,199 @@ import org.joda.time.chrono.ISOChronology;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
 /**
  *
  */
 public class GroupByQueryRunnerTestHelper
 {
+  public static final DruidProcessingConfig DEFAULT_PROCESSING_CONFIG = new DruidProcessingConfig()
+  {
+    @Override
+    public String getFormatString()
+    {
+      return null;
+    }
+
+    @Override
+    public int intermediateComputeSizeBytes()
+    {
+      return 10 * 1024 * 1024;
+    }
+
+    @Override
+    public int getNumMergeBuffers()
+    {
+      return 4;
+    }
+
+    @Override
+    public int getNumThreads()
+    {
+      return 2;
+    }
+  };
+
+  private static final GroupByQueryConfig V2_CONFIG = new GroupByQueryConfig()
+  {
+    @Override
+    public int getBufferGrouperInitialBuckets()
+    {
+      return 4;
+    }
+
+    @Override
+    public String toString()
+    {
+      return "v2";
+    }
+  };
+
+  private static final GroupByQueryConfig V2_SMALL_BUFFER_CONFIG = new GroupByQueryConfig()
+  {
+    @Override
+    public int getBufferGrouperMaxSize()
+    {
+      return 2;
+    }
+
+    @Override
+    public HumanReadableBytes getMaxOnDiskStorage()
+    {
+      return HumanReadableBytes.valueOf(10L * 1024 * 1024);
+    }
+
+    @Override
+    public String toString()
+    {
+      return "v2SmallBuffer";
+    }
+  };
+
+  private static final GroupByQueryConfig V2_SMALL_DICTIONARY_CONFIG = new GroupByQueryConfig()
+  {
+    @Override
+    public long getConfiguredMaxSelectorDictionarySize()
+    {
+      return 20;
+    }
+
+    @Override
+    public long getConfiguredMaxMergingDictionarySize()
+    {
+      return 400;
+    }
+
+    @Override
+    public HumanReadableBytes getMaxOnDiskStorage()
+    {
+      return HumanReadableBytes.valueOf(10L * 1024 * 1024);
+    }
+
+    @Override
+    public String toString()
+    {
+      return "v2SmallDictionary";
+    }
+  };
+
+  private static final GroupByQueryConfig V2_PARALLEL_COMBINE_CONFIG = new GroupByQueryConfig()
+  {
+    @Override
+    public int getNumParallelCombineThreads()
+    {
+      return DEFAULT_PROCESSING_CONFIG.getNumThreads();
+    }
+
+    @Override
+    public String toString()
+    {
+      return "v2ParallelCombine";
+    }
+  };
+
+  public static List<GroupByQueryConfig> testConfigs()
+  {
+    return ImmutableList.of(
+        V2_CONFIG,
+        V2_SMALL_BUFFER_CONFIG,
+        V2_SMALL_DICTIONARY_CONFIG,
+        V2_PARALLEL_COMBINE_CONFIG
+    );
+  }
+
+  public static GroupByQueryRunnerFactory makeQueryRunnerFactory(final GroupByQueryConfig config)
+  {
+    return makeQueryRunnerFactory(
+        TestHelper.makeSmileMapper(),
+        config,
+        TestGroupByBuffers.createDefault()
+    );
+  }
+
+  public static GroupByQueryRunnerFactory makeQueryRunnerFactory(
+      final ObjectMapper mapper,
+      final GroupByQueryConfig config,
+      final TestGroupByBuffers bufferPools
+  )
+  {
+    return makeQueryRunnerFactory(mapper, config, bufferPools, DEFAULT_PROCESSING_CONFIG);
+  }
+
+  public static GroupByQueryRunnerFactory makeQueryRunnerFactory(
+      final ObjectMapper mapper,
+      final GroupByQueryConfig config,
+      final TestGroupByBuffers bufferPools,
+      final DruidProcessingConfig processingConfig
+  )
+  {
+    if (bufferPools.getBufferSize() != processingConfig.intermediateComputeSizeBytes()) {
+      throw new ISE(
+          "Provided buffer size [%,d] does not match configured size [%,d]",
+          bufferPools.getBufferSize(),
+          processingConfig.intermediateComputeSizeBytes()
+      );
+    }
+    if (bufferPools.getNumMergeBuffers() != processingConfig.getNumMergeBuffers()) {
+      throw new ISE(
+          "Provided merge buffer count [%,d] does not match configured count [%,d]",
+          bufferPools.getNumMergeBuffers(),
+          processingConfig.getNumMergeBuffers()
+      );
+    }
+    final GroupByStatsProvider statsProvider = new GroupByStatsProvider();
+    final GroupByResourcesReservationPool groupByResourcesReservationPool =
+        new GroupByResourcesReservationPool(bufferPools.getMergePool(), config);
+    final GroupingEngine groupingEngine = new GroupingEngine(
+        processingConfig,
+        Suppliers.ofInstance(config),
+        groupByResourcesReservationPool,
+        mapper,
+        mapper,
+        QueryRunnerTestHelper.NOOP_QUERYWATCHER,
+        statsProvider
+    );
+    final GroupByQueryQueryToolChest toolChest = new GroupByQueryQueryToolChest(
+        groupingEngine,
+        () -> config,
+        DefaultGroupByQueryMetricsFactory.instance(),
+        groupByResourcesReservationPool,
+        statsProvider
+    );
+    return new GroupByQueryRunnerFactory(groupingEngine, toolChest, bufferPools.getProcessingPool());
+  }
+
   public static <T> Iterable<T> runQuery(QueryRunnerFactory factory, QueryRunner runner, Query<T> query)
   {
-
     QueryToolChest toolChest = factory.getToolchest();
     QueryRunner<T> theRunner = new FinalizeResultsQueryRunner<>(
         toolChest.mergeResults(toolChest.preMergeQueryDecoration(runner)),
         toolChest
     );
 
-    Sequence<T> queryResult = theRunner.run(QueryPlus.wrap(query));
+    Sequence<T> queryResult = theRunner.run(QueryPlus.wrap(populateResourceId(query)));
     return queryResult.toList();
   }
 
@@ -77,7 +264,7 @@ public class GroupByQueryRunnerTestHelper
         toolChest
     );
 
-    return theRunner.run(QueryPlus.wrap(query)).toList();
+    return theRunner.run(QueryPlus.wrap(populateResourceId(query))).toList();
   }
 
   public static ResultRow createExpectedRow(final GroupByQuery query, final String timestamp, Object... vals)
@@ -137,4 +324,18 @@ public class GroupByQueryRunnerTestHelper
     return expected;
   }
 
+  public static <T> QueryPlus<T> populateResourceId(QueryPlus<T> queryPlus)
+  {
+    return queryPlus.withQuery(populateResourceId(queryPlus.getQuery()));
+  }
+
+  public static <T> Query<T> populateResourceId(Query<T> query)
+  {
+    return query.withOverriddenContext(defaultResourceIdMap());
+  }
+
+  public static Map<String, Object> defaultResourceIdMap()
+  {
+    return QueryContext.ofMap(QueryContextParameters.QUERY_RESOURCE_ID, UUID.randomUUID().toString());
+  }
 }

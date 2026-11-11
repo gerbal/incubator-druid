@@ -20,6 +20,7 @@
 package org.apache.druid.jackson;
 
 import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonGenerator;
 import com.fasterxml.jackson.databind.DeserializationContext;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JavaType;
@@ -35,7 +36,6 @@ import com.google.common.annotations.VisibleForTesting;
 import org.apache.druid.java.util.common.StringUtils;
 
 import javax.annotation.Nullable;
-
 import java.io.IOException;
 
 /**
@@ -46,12 +46,12 @@ public class DefaultObjectMapper extends ObjectMapper
 
   public DefaultObjectMapper()
   {
-    this((JsonFactory) null, null);
+    this(null, null);
   }
 
   public DefaultObjectMapper(String serviceName)
   {
-    this((JsonFactory) null, serviceName);
+    this(null, serviceName);
   }
 
   public DefaultObjectMapper(DefaultObjectMapper mapper)
@@ -80,6 +80,14 @@ public class DefaultObjectMapper extends ObjectMapper
     configure(MapperFeature.ALLOW_FINAL_FIELDS_AS_MUTATORS, false);
     configure(SerializationFeature.INDENT_OUTPUT, false);
     configure(SerializationFeature.FLUSH_AFTER_WRITE_VALUE, false);
+
+    // Disable automatic JSON termination, so readers can detect truncated responses when a JsonGenerator is
+    // closed after an exception is thrown while writing.
+    configure(JsonGenerator.Feature.AUTO_CLOSE_JSON_CONTENT, false);
+
+    // Bumping Jakarta version to 2.18.4 as part of https://github.com/apache/druid/pull/18013/ seems to fix IGNORE_DUPLICATE_MODULE_REGISTRATIONS.
+    // Disabling this feature in case multiple modules are registered with the same name.
+    configure(MapperFeature.IGNORE_DUPLICATE_MODULE_REGISTRATIONS, false);
 
     addHandler(new DefaultDeserializationProblemHandler(serviceName));
   }

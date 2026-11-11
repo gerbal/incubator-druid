@@ -33,18 +33,16 @@ import org.apache.druid.query.timeseries.TimeseriesQuery;
 import org.apache.druid.query.timeseries.TimeseriesQueryQueryToolChest;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.RowSignature;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 public class DoublesSketchToQuantilesPostAggregatorTest
 {
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
 
   @Test
   public void testSerde() throws JsonProcessingException
@@ -55,13 +53,14 @@ public class DoublesSketchToQuantilesPostAggregatorTest
         new double[] {0, 0.5, 1}
     );
     DefaultObjectMapper mapper = new DefaultObjectMapper();
-    DoublesSketchToQuantilesPostAggregator andBackAgain = mapper.readValue(
+    mapper.registerModules(new DoublesSketchModule().getJacksonModules());
+    PostAggregator andBackAgain = mapper.readValue(
         mapper.writeValueAsString(there),
-        DoublesSketchToQuantilesPostAggregator.class
+        PostAggregator.class
     );
 
-    Assert.assertEquals(there, andBackAgain);
-    Assert.assertArrayEquals(there.getCacheKey(), andBackAgain.getCacheKey());
+    Assertions.assertEquals(there, andBackAgain);
+    Assertions.assertArrayEquals(there.getCacheKey(), andBackAgain.getCacheKey());
   }
 
   @Test
@@ -73,7 +72,7 @@ public class DoublesSketchToQuantilesPostAggregatorTest
         new double[] {0, 0.5, 1}
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "DoublesSketchToQuantilesPostAggregator{name='post', field=FieldAccessPostAggregator{name='field1', fieldName='sketch'}, fractions=[0.0, 0.5, 1.0]}",
         postAgg.toString()
     );
@@ -82,14 +81,15 @@ public class DoublesSketchToQuantilesPostAggregatorTest
   @Test
   public void testComparator()
   {
-    expectedException.expect(IAE.class);
-    expectedException.expectMessage("Comparing arrays of quantiles is not supported");
-    final PostAggregator postAgg = new DoublesSketchToQuantilesPostAggregator(
-        "post",
-        new FieldAccessPostAggregator("field1", "sketch"),
-        new double[] {0, 0.5, 1}
-    );
-    postAgg.getComparator();
+    Throwable exception = Assertions.assertThrows(IAE.class, () -> {
+      final PostAggregator postAgg = new DoublesSketchToQuantilesPostAggregator(
+          "post",
+          new FieldAccessPostAggregator("field1", "sketch"),
+          new double[]{0, 0.5, 1}
+      );
+      postAgg.getComparator();
+    });
+    assertTrue(exception.getMessage().contains("Comparing arrays of quantiles is not supported"));
   }
 
   @Test
@@ -117,11 +117,11 @@ public class DoublesSketchToQuantilesPostAggregatorTest
     );
 
     final double[] quantiles = (double[]) postAgg.compute(fields);
-    Assert.assertNotNull(quantiles);
-    Assert.assertEquals(3, quantiles.length);
-    Assert.assertTrue(Double.isNaN(quantiles[0]));
-    Assert.assertTrue(Double.isNaN(quantiles[1]));
-    Assert.assertTrue(Double.isNaN(quantiles[2]));
+    Assertions.assertNotNull(quantiles);
+    Assertions.assertEquals(3, quantiles.length);
+    Assertions.assertTrue(Double.isNaN(quantiles[0]));
+    Assertions.assertTrue(Double.isNaN(quantiles[1]));
+    Assertions.assertTrue(Double.isNaN(quantiles[2]));
   }
 
   @Test
@@ -147,11 +147,11 @@ public class DoublesSketchToQuantilesPostAggregatorTest
     );
 
     final double[] quantiles = (double[]) postAgg.compute(fields);
-    Assert.assertNotNull(quantiles);
-    Assert.assertEquals(3, quantiles.length);
-    Assert.assertEquals(1.0, quantiles[0], 0);
-    Assert.assertEquals(3.0, quantiles[1], 0);
-    Assert.assertEquals(5.0, quantiles[2], 0);
+    Assertions.assertNotNull(quantiles);
+    Assertions.assertEquals(3, quantiles.length);
+    Assertions.assertEquals(1.0, quantiles[0], 0);
+    Assertions.assertEquals(3.0, quantiles[1], 0);
+    Assertions.assertEquals(5.0, quantiles[2], 0);
   }
 
   @Test
@@ -174,7 +174,7 @@ public class DoublesSketchToQuantilesPostAggregatorTest
               )
               .build();
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         RowSignature.builder()
                     .addTimeColumn()
                     .add("sketch", null)

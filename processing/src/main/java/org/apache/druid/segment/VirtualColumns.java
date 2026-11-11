@@ -24,19 +24,25 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonValue;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
+import com.google.common.base.Supplier;
+import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
 import org.apache.druid.java.util.common.Cacheable;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.Pair;
-import org.apache.druid.query.Query;
 import org.apache.druid.query.cache.CacheKeyBuilder;
 import org.apache.druid.query.dimension.DimensionSpec;
+import org.apache.druid.query.filter.ColumnIndexSelector;
 import org.apache.druid.segment.column.ColumnCapabilities;
 import org.apache.druid.segment.column.ColumnHolder;
 import org.apache.druid.segment.column.ColumnIndexSupplier;
+import org.apache.druid.segment.column.ColumnType;
+import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.segment.data.ReadableOffset;
+import org.apache.druid.segment.serde.NoIndexesColumnIndexSupplier;
 import org.apache.druid.segment.vector.MultiValueDimensionVectorSelector;
 import org.apache.druid.segment.vector.ReadableVectorOffset;
 import org.apache.druid.segment.vector.SingleValueDimensionVectorSelector;
@@ -47,10 +53,13 @@ import org.apache.druid.segment.virtual.VirtualizedColumnInspector;
 import org.apache.druid.segment.virtual.VirtualizedColumnSelectorFactory;
 
 import javax.annotation.Nullable;
-
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -83,11 +92,21 @@ public class VirtualColumns implements Cacheable
   }
 
   @JsonCreator
-  public static VirtualColumns create(List<VirtualColumn> virtualColumns)
+  public static VirtualColumns create(@Nullable Collection<VirtualColumn> virtualColumns)
   {
     if (virtualColumns == null || virtualColumns.isEmpty()) {
       return EMPTY;
     }
+    return fromIterable(virtualColumns);
+  }
+
+  public static VirtualColumns create(VirtualColumn... virtualColumns)
+  {
+    return create(Arrays.asList(virtualColumns));
+  }
+
+  public static VirtualColumns fromIterable(Iterable<VirtualColumn> virtualColumns)
+  {
     Map<String, VirtualColumn> withDotSupport = new HashMap<>();
     Map<String, VirtualColumn> withoutDotSupport = new HashMap<>();
     for (VirtualColumn vc : virtualColumns) {
@@ -117,14 +136,18 @@ public class VirtualColumns implements Cacheable
     return virtualColumns == null ? EMPTY : virtualColumns;
   }
 
-  public static boolean shouldVectorize(Query<?> query, VirtualColumns virtualColumns, ColumnInspector inspector)
-  {
-    if (virtualColumns.getVirtualColumns().length > 0) {
-      return query.context().getVectorizeVirtualColumns().shouldVectorize(virtualColumns.canVectorize(inspector));
-    } else {
-      return true;
-    }
-  }
+  // For equals, hashCode, toString, and serialization:
+  private final List<VirtualColumn> virtualColumns;
+  private final List<String> virtualColumnNames;
+  // For equivalence
+  private final Supplier<Map<VirtualColumn.EquivalenceKey, VirtualColumn>> equivalence;
+  // For getNode
+  private final Supplier<Map<String, Node>> dependencyNodes;
+
+  // For getVirtualColumn:
+  private final Map<String, VirtualColumn> withDotSupport;
+  private final Map<String, VirtualColumn> withoutDotSupport;
+  private final boolean hasNoDotColumns;
 
   private VirtualColumns(
       List<VirtualColumn> virtualColumns,
@@ -135,18 +158,49 @@ public class VirtualColumns implements Cacheable
     this.virtualColumns = virtualColumns;
     this.withDotSupport = withDotSupport;
     this.withoutDotSupport = withoutDotSupport;
-
+    this.virtualColumnNames = new ArrayList<>(virtualColumns.size());
+    this.hasNoDotColumns = withDotSupport.isEmpty();
     for (VirtualColumn virtualColumn : virtualColumns) {
       detectCycles(virtualColumn, null);
+      virtualColumnNames.add(virtualColumn.getOutputName());
     }
+    this.equivalence = Suppliers.memoize(() -> {
+      final Map<VirtualColumn.EquivalenceKey, VirtualColumn> equiv =
+          Maps.newHashMapWithExpectedSize(virtualColumns.size());
+      for (VirtualColumn virtualColumn : virtualColumns) {
+        final VirtualColumn.EquivalenceKey key = virtualColumn.getEquivalanceKey();
+        if (key != null) {
+          equiv.putIfAbsent(key, virtualColumn);
+        }
+      }
+      return equiv;
+    });
+    this.dependencyNodes = Suppliers.memoize(() -> {
+      final Map<String, Node> nodes = Maps.newHashMapWithExpectedSize(virtualColumns.size());
+      for (VirtualColumn vc : virtualColumns) {
+        buildNode(vc, nodes);
+      }
+      return nodes;
+    });
   }
 
-  // For equals, hashCode, toString, and serialization:
-  private final List<VirtualColumn> virtualColumns;
-
-  // For getVirtualColumn:
-  private final Map<String, VirtualColumn> withDotSupport;
-  private final Map<String, VirtualColumn> withoutDotSupport;
+  private Node buildNode(VirtualColumn vc, Map<String, Node> nodes)
+  {
+    final Node existing = nodes.get(vc.getOutputName());
+    if (existing != null) {
+      return existing;
+    }
+    final List<Node> deps = new ArrayList<>();
+    for (String required : vc.requiredColumns()) {
+      final VirtualColumn dep = getVirtualColumn(required);
+      if (dep != null) {
+        deps.add(buildNode(dep, nodes));
+      }
+    }
+    final Node node = new Node(vc, deps.isEmpty() ? List.of() : List.copyOf(deps));
+    nodes.put(vc.getOutputName(), node);
+    return node;
+  }
 
   /**
    * Returns true if a virtual column exists with a particular columnName.
@@ -167,228 +221,259 @@ public class VirtualColumns implements Cacheable
     if (vc != null) {
       return vc;
     }
+    if (hasNoDotColumns) {
+      return null;
+    }
     final String baseColumnName = splitColumnName(columnName).lhs;
     return withDotSupport.get(baseColumnName);
   }
 
   /**
-   * Get the {@link ColumnIndexSupplier} of the specified virtual column, with the assistance of a
-   * {@link ColumnSelector} to allow reading things from segments. If the column does not have indexes this method
-   * may return null, or may also return a non-null supplier whose methods may return null values - having a supplier
-   * is no guarantee that the column has indexes.
+   * Returns the {@link Node} for the given virtual column name, providing access to the virtual
+   * column and all of its transitive virtual column dependencies within this instance. Returns null if the
+   * column is not a virtual column in this instance.
    */
   @Nullable
-  public ColumnIndexSupplier getIndexSupplier(String columnName, ColumnSelector columnSelector)
+  public Node getNode(String columnName)
+  {
+    final VirtualColumn vc = getVirtualColumn(columnName);
+    if (vc == null) {
+      return null;
+    }
+    return dependencyNodes.get().get(vc.getOutputName());
+  }
+
+  /**
+   * Check if {@link #virtualColumns} contains a virtual column which is equivalent to the virtual column in the
+   * supplied {@link Node}, ignoring output name, returning it if it exists or null if there is no
+   * equivalent virtual column.
+   * <p>
+   * If the virtual column has virtual column dependencies (indicated by non-empty {@link Node#getDependencies()}),
+   * this method will attempt to locate equivalent entries in {@link #virtualColumns} to build a map of equivalent
+   * output names. Then, we rewrite the inputs of the other virtual column using
+   * {@link VirtualColumn#rewriteRequiredColumns(Map)} so that differently named inputs are normalized prior to testing
+   * for equivalence.
+   */
+  @Nullable
+  public VirtualColumn findEquivalent(Node otherNode)
+  {
+    // check to see if the virtual column refers to other virtual columns to see if we need to normalize it
+    // by rewriting its inputs first to refer to the equivalent virtual columns
+    final Map<String, String> equivalenceRewriteMap = new HashMap<>();
+    for (Node dep : otherNode.getDependencies()) {
+      final VirtualColumn equivalentDependent = findEquivalent(dep);
+      if (equivalentDependent != null) {
+        equivalenceRewriteMap.put(dep.getVirtualColumn().getOutputName(), equivalentDependent.getOutputName());
+      } else {
+        // missing an equivalent dependent, that means we cannot be equivalent so just bail early
+        return null;
+      }
+    }
+
+    final VirtualColumn otherVirtualColumn = otherNode.getVirtualColumn();
+    if (!equivalenceRewriteMap.isEmpty() && !otherVirtualColumn.supportsRequiredRewrite()) {
+      // cannot safely check for equivalence if the rewrite map is not empty and rewrites are not supported
+      return null;
+    }
+
+    final VirtualColumn toCheckForEquivalence;
+    // rewrite if needed
+    if (equivalenceRewriteMap.isEmpty()) {
+      toCheckForEquivalence = otherVirtualColumn;
+    } else {
+      toCheckForEquivalence = otherVirtualColumn.rewriteRequiredColumns(equivalenceRewriteMap);
+    }
+
+    VirtualColumn matched = equivalence.get().get(toCheckForEquivalence.getEquivalanceKey());
+    if (matched != null &&
+        // guardrail check for expression collision when a virtual column shadows the physical column
+        // e.x. otherNode v0 = dim1 and VCs dim1 = dim2 plus q = dim1, q can be treated as equivalent to v0 even though it reads physical column dim2
+        getNode(matched.getOutputName()).getDependencies().size() == otherNode.getDependencies().size()) {
+      return matched;
+    }
+    return null;
+  }
+
+  /**
+   * Get the {@link ColumnIndexSupplier} of the specified virtual column, with the assistance of a
+   * {@link ColumnSelector} to allow reading things from segments. Returns null if the virtual column wants to
+   * act like a missing column. Returns {@link NoIndexesColumnIndexSupplier#getInstance()} if the virtual
+   * column does not support indexes and wants cursor-based filtering.
+   *
+   * @throws IllegalArgumentException if the virtual column does not exist (see {@link #exists(String)}
+   */
+  @Nullable
+  public ColumnIndexSupplier getIndexSupplier(
+      String columnName,
+      ColumnIndexSelector columnIndexSelector
+  )
   {
     final VirtualColumn virtualColumn = getVirtualColumnForSelector(columnName);
-    return virtualColumn.getIndexSupplier(columnName, columnSelector);
+    return virtualColumn.getIndexSupplier(columnName, columnIndexSelector);
   }
 
   /**
    * Create a dimension (string) selector.
    *
-   * @throws IllegalArgumentException if the virtual column does not exist (see {@link #exists(String)}
-   */
-  public DimensionSelector makeDimensionSelector(DimensionSpec dimensionSpec, ColumnSelectorFactory factory)
-  {
-    final VirtualColumn virtualColumn = getVirtualColumnForSelector(dimensionSpec.getDimension());
-    final DimensionSelector selector = virtualColumn.makeDimensionSelector(dimensionSpec, factory);
-    Preconditions.checkNotNull(selector, "selector");
-    return selector;
-  }
-
-  /**
-   * Try to create an optimized dimension (string) selector directly from a {@link ColumnSelector}. If this method
-   * returns null, callers should try to fallback to
-   * {@link #makeDimensionSelector(DimensionSpec, ColumnSelectorFactory)} instead.
+   * @param dimensionSpec   spec the column was referenced with
+   * @param selectorFactory object for fetching underlying selectors.
+   * @param columnSelector  object for fetching underlying columns, if available.
+   * @param offset          offset to use with underlying columns. Must be provided if columnSelector is provided.
    *
    * @throws IllegalArgumentException if the virtual column does not exist (see {@link #exists(String)}
    */
-  @Nullable
   public DimensionSelector makeDimensionSelector(
       DimensionSpec dimensionSpec,
-      ColumnSelector columnSelector,
-      ReadableOffset offset
+      ColumnSelectorFactory selectorFactory,
+      @Nullable ColumnSelector columnSelector,
+      @Nullable ReadableOffset offset
   )
   {
     final VirtualColumn virtualColumn = getVirtualColumnForSelector(dimensionSpec.getDimension());
-    return virtualColumn.makeDimensionSelector(dimensionSpec, columnSelector, offset);
+    final DimensionSelector selector =
+        virtualColumn.makeDimensionSelector(dimensionSpec, selectorFactory, columnSelector, offset);
+    Preconditions.checkNotNull(selector, "selector");
+    return selector;
   }
 
   /**
    * Create a column value selector.
    *
-   * @throws IllegalArgumentException if the virtual column does not exist (see {@link #exists(String)}
-   */
-  public ColumnValueSelector<?> makeColumnValueSelector(String columnName, ColumnSelectorFactory factory)
-  {
-    final VirtualColumn virtualColumn = getVirtualColumnForSelector(columnName);
-    final ColumnValueSelector<?> selector = virtualColumn.makeColumnValueSelector(columnName, factory);
-    Preconditions.checkNotNull(selector, "selector");
-    return selector;
-  }
-
-  /**
-   * Try to create an optimized value selector directly from a {@link ColumnSelector}. If this method returns null,
-   * callers should try to fallback to {@link #makeColumnValueSelector(String, ColumnSelectorFactory)} instead.
+   * @param columnName      name the column was referenced with, which is useful if this column uses dot notation.
+   * @param selectorFactory object for fetching underlying selectors.
+   * @param columnSelector  object for fetching underlying columns, if available.
+   * @param offset          offset to use with underlying columns. Must be provided if columnSelector is provided.
    *
    * @throws IllegalArgumentException if the virtual column does not exist (see {@link #exists(String)}
    */
-  @Nullable
   public ColumnValueSelector<?> makeColumnValueSelector(
       String columnName,
-      ColumnSelector columnSelector,
-      ReadableOffset offset
+      ColumnSelectorFactory selectorFactory,
+      @Nullable ColumnSelector columnSelector,
+      @Nullable ReadableOffset offset
   )
   {
     final VirtualColumn virtualColumn = getVirtualColumnForSelector(columnName);
-    return virtualColumn.makeColumnValueSelector(columnName, columnSelector, offset);
+    final ColumnValueSelector<?> selector =
+        virtualColumn.makeColumnValueSelector(columnName, selectorFactory, columnSelector, offset);
+    Preconditions.checkNotNull(selector, "selector");
+    return selector;
   }
 
   public boolean canVectorize(ColumnInspector columnInspector)
   {
     final ColumnInspector inspector = wrapInspector(columnInspector);
-    return virtualColumns.stream().allMatch(virtualColumn -> virtualColumn.canVectorize(inspector));
+    for (VirtualColumn virtualColumn : virtualColumns) {
+      if (!virtualColumn.canVectorize(inspector)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
    * Create a single value dimension vector (string) selector.
    *
-   * @throws IllegalArgumentException if the virtual column does not exist (see {@link #exists(String)}
-   */
-  public SingleValueDimensionVectorSelector makeSingleValueDimensionVectorSelector(
-      DimensionSpec dimensionSpec,
-      VectorColumnSelectorFactory factory
-  )
-  {
-    final VirtualColumn virtualColumn = getVirtualColumnForSelector(dimensionSpec.getDimension());
-    final SingleValueDimensionVectorSelector selector = virtualColumn.makeSingleValueVectorDimensionSelector(
-        dimensionSpec,
-        factory
-    );
-    Preconditions.checkNotNull(selector, "selector");
-    return selector;
-  }
-
-  /**
-   * Try to create an optimized single value dimension (string) vector selector, directly from a
-   * {@link ColumnSelector}. If this method returns null, callers should try to fallback to
-   * {@link #makeSingleValueDimensionVectorSelector(DimensionSpec, VectorColumnSelectorFactory)}  instead.
+   * @param dimensionSpec  spec the column was referenced with
+   * @param factory        object for fetching underlying selectors
+   * @param columnSelector object for fetching underlying columns
+   * @param offset         offset to use with underlying columns
    *
    * @throws IllegalArgumentException if the virtual column does not exist (see {@link #exists(String)}
    */
-  @Nullable
   public SingleValueDimensionVectorSelector makeSingleValueDimensionVectorSelector(
       DimensionSpec dimensionSpec,
+      VectorColumnSelectorFactory factory,
       ColumnSelector columnSelector,
       ReadableVectorOffset offset
   )
   {
     final VirtualColumn virtualColumn = getVirtualColumnForSelector(dimensionSpec.getDimension());
-    return virtualColumn.makeSingleValueVectorDimensionSelector(dimensionSpec, columnSelector, offset);
+    final SingleValueDimensionVectorSelector selector =
+        virtualColumn.makeSingleValueVectorDimensionSelector(dimensionSpec, factory, columnSelector, offset);
+    Preconditions.checkNotNull(selector, "selector");
+    return selector;
   }
 
   /**
    * Create a multi value dimension vector (string) selector.
    *
-   * @throws IllegalArgumentException if the virtual column does not exist (see {@link #exists(String)}
-   */
-  public MultiValueDimensionVectorSelector makeMultiValueDimensionVectorSelector(
-      DimensionSpec dimensionSpec,
-      VectorColumnSelectorFactory factory
-  )
-  {
-    final VirtualColumn virtualColumn = getVirtualColumnForSelector(dimensionSpec.getDimension());
-    final MultiValueDimensionVectorSelector selector = virtualColumn.makeMultiValueVectorDimensionSelector(
-        dimensionSpec,
-        factory
-    );
-    Preconditions.checkNotNull(selector, "selector");
-    return selector;
-  }
-
-  /**
-   * Try to create an optimized multi value dimension (string) vector selector, directly from a
-   * {@link ColumnSelector}. If this method returns null, callers should try to fallback to
-   * {@link #makeMultiValueDimensionVectorSelector(DimensionSpec, VectorColumnSelectorFactory)}  instead.
+   * @param dimensionSpec  spec the column was referenced with
+   * @param factory        object for fetching underlying selectors
+   * @param columnSelector object for fetching underlying columns
+   * @param offset         offset to use with underlying columns
    *
    * @throws IllegalArgumentException if the virtual column does not exist (see {@link #exists(String)}
    */
-  @Nullable
   public MultiValueDimensionVectorSelector makeMultiValueDimensionVectorSelector(
       DimensionSpec dimensionSpec,
+      VectorColumnSelectorFactory factory,
       ColumnSelector columnSelector,
       ReadableVectorOffset offset
   )
   {
     final VirtualColumn virtualColumn = getVirtualColumnForSelector(dimensionSpec.getDimension());
-    return virtualColumn.makeMultiValueVectorDimensionSelector(dimensionSpec, columnSelector, offset);
+    final MultiValueDimensionVectorSelector selector =
+        virtualColumn.makeMultiValueVectorDimensionSelector(dimensionSpec, factory, columnSelector, offset);
+    Preconditions.checkNotNull(selector, "selector");
+    return selector;
   }
+
 
   /**
    * Create a column vector value selector.
    *
-   * @throws IllegalArgumentException if the virtual column does not exist (see {@link #exists(String)}
-   */
-  public VectorValueSelector makeVectorValueSelector(String columnName, VectorColumnSelectorFactory factory)
-  {
-    final VirtualColumn virtualColumn = getVirtualColumnForSelector(columnName);
-    final VectorValueSelector selector = virtualColumn.makeVectorValueSelector(columnName, factory);
-    Preconditions.checkNotNull(selector, "selector");
-    return selector;
-  }
-
-  /**
-   * Try to create an optimized vector value selector directly from a {@link ColumnSelector}. If this method returns
-   * null, callers should try to fallback to {@link #makeVectorValueSelector(String, VectorColumnSelectorFactory)}
-   * instead.
+   * @param columnName     name the column was referenced with
+   * @param factory        object for fetching underlying selectors
+   * @param columnSelector object for fetching underlying columns
+   * @param offset         offset to use with underlying columns
    *
    * @throws IllegalArgumentException if the virtual column does not exist (see {@link #exists(String)}
    */
-  @Nullable
   public VectorValueSelector makeVectorValueSelector(
       String columnName,
+      VectorColumnSelectorFactory factory,
       ColumnSelector columnSelector,
       ReadableVectorOffset offset
   )
   {
     final VirtualColumn virtualColumn = getVirtualColumnForSelector(columnName);
-    return virtualColumn.makeVectorValueSelector(columnName, columnSelector, offset);
+    final VectorValueSelector selector =
+        virtualColumn.makeVectorValueSelector(columnName, factory, columnSelector, offset);
+    Preconditions.checkNotNull(selector, "selector");
+    return selector;
   }
 
   /**
    * Create a column vector object selector.
    *
-   * @throws IllegalArgumentException if the virtual column does not exist (see {@link #exists(String)}
-   */
-  public VectorObjectSelector makeVectorObjectSelector(String columnName, VectorColumnSelectorFactory factory)
-  {
-    final VirtualColumn virtualColumn = getVirtualColumnForSelector(columnName);
-    final VectorObjectSelector selector = virtualColumn.makeVectorObjectSelector(columnName, factory);
-    Preconditions.checkNotNull(selector, "selector");
-    return selector;
-  }
-
-  /**
-   * Try to create an optimized vector object selector directly from a {@link ColumnSelector}.If this method returns
-   * null, callers should try to fallback to {@link #makeVectorObjectSelector(String, VectorColumnSelectorFactory)}
-   * instead.
+   * @param columnName     name the column was referenced with
+   * @param factory        object for fetching underlying selectors
+   * @param columnSelector object for fetching underlying columns
+   * @param offset         offset to use with underlying columns
    *
    * @throws IllegalArgumentException if the virtual column does not exist (see {@link #exists(String)}
    */
-  @Nullable
   public VectorObjectSelector makeVectorObjectSelector(
       String columnName,
+      VectorColumnSelectorFactory factory,
       ColumnSelector columnSelector,
       ReadableVectorOffset offset
   )
   {
     final VirtualColumn virtualColumn = getVirtualColumnForSelector(columnName);
-    return virtualColumn.makeVectorObjectSelector(columnName, columnSelector, offset);
+    final VectorObjectSelector selector =
+        virtualColumn.makeVectorObjectSelector(columnName, factory, columnSelector, offset);
+    Preconditions.checkNotNull(selector, "selector");
+    return selector;
   }
 
+  /**
+   * Get capabilities for the virtual column "columnName". If columnName is not a virtual column, returns null.
+   * Package-private since production callers want {@link #getColumnCapabilitiesWithFallback(ColumnInspector, String)}.
+   */
   @Nullable
-  public ColumnCapabilities getColumnCapabilities(ColumnInspector inspector, String columnName)
+  ColumnCapabilities getColumnCapabilitiesWithoutFallback(ColumnInspector inspector, String columnName)
   {
     final VirtualColumn virtualColumn = getVirtualColumn(columnName);
     if (virtualColumn != null) {
@@ -398,10 +483,14 @@ public class VirtualColumns implements Cacheable
     }
   }
 
+  /**
+   * Get capabilities for the column "columnName". If columnName is not a virtual column, delegates to the
+   * provided {@link ColumnInspector}.
+   */
   @Nullable
   public ColumnCapabilities getColumnCapabilitiesWithFallback(ColumnInspector inspector, String columnName)
   {
-    final ColumnCapabilities virtualColumnCapabilities = getColumnCapabilities(inspector, columnName);
+    final ColumnCapabilities virtualColumnCapabilities = getColumnCapabilitiesWithoutFallback(inspector, columnName);
     if (virtualColumnCapabilities != null) {
       return virtualColumnCapabilities;
     } else {
@@ -449,6 +538,53 @@ public class VirtualColumns implements Cacheable
     return new CacheKeyBuilder((byte) 0).appendCacheablesIgnoringOrder(virtualColumns).build();
   }
 
+  public boolean isEmpty()
+  {
+    return virtualColumns.isEmpty();
+  }
+
+  public List<String> getColumnNames()
+  {
+    return virtualColumnNames;
+  }
+
+  /**
+   * Returns these virtual columns with the given ones layered on top.
+   */
+  public VirtualColumns plus(final VirtualColumns other)
+  {
+    final List<VirtualColumn> combined = new ArrayList<>();
+    for (final VirtualColumn virtualColumn : virtualColumns) {
+      if (!other.virtualColumnNames.contains(virtualColumn.getOutputName())) {
+        combined.add(virtualColumn);
+      }
+    }
+    combined.addAll(other.virtualColumns);
+    return create(combined);
+  }
+
+  /**
+   * Returns the signature of a base with these virtual columns layered on top: the base's columns, other than those
+   * that these virtual columns shadow, followed by these virtual columns.
+   *
+   * @param baseSignature signature of the base
+   * @param baseInspector inspector for the base, from which the types of these virtual columns are derived
+   */
+  public RowSignature wrappedSignature(final RowSignature baseSignature, final ColumnInspector baseInspector)
+  {
+    final RowSignature.Builder builder = RowSignature.builder();
+    for (int i = 0; i < baseSignature.size(); i++) {
+      final String column = baseSignature.getColumnName(i);
+      if (!exists(column)) {
+        builder.add(column, baseSignature.getColumnType(i).orElse(null));
+      }
+    }
+    for (final String column : virtualColumnNames) {
+      builder.add(column, ColumnType.fromCapabilities(getColumnCapabilitiesWithFallback(baseInspector, column)));
+    }
+    return builder.build();
+  }
+
   private VirtualColumn getVirtualColumnForSelector(String columnName)
   {
     VirtualColumn virtualColumn = getVirtualColumn(columnName);
@@ -458,20 +594,28 @@ public class VirtualColumns implements Cacheable
     return virtualColumn;
   }
 
-  private void detectCycles(VirtualColumn virtualColumn, @Nullable Set<String> columnNames)
+  /**
+   * Detects cycles in the dependencies of a {@link VirtualColumn}.
+   *
+   * @param virtualColumn virtual column to check
+   * @param visited       null on initial call. Internally, this method operates recursively, and uses this parameter
+   *                      to pass down the list of already-visited columns.
+   */
+  private void detectCycles(VirtualColumn virtualColumn, @Nullable Set<String> visited)
   {
-    // Copy columnNames to avoid modifying it
-    final Set<String> nextSet = columnNames == null
-                                ? Sets.newHashSet(virtualColumn.getOutputName())
-                                : Sets.newHashSet(columnNames);
+    // Copy "visited" to avoid modifying it
+    final Set<String> visitedCopy = visited == null
+                                    ? Sets.newHashSet(virtualColumn.getOutputName())
+                                    : Sets.newHashSet(visited);
 
     for (String columnName : virtualColumn.requiredColumns()) {
       final VirtualColumn dependency = getVirtualColumn(columnName);
       if (dependency != null) {
-        if (!nextSet.add(columnName)) {
+        if (!visitedCopy.add(columnName)) {
           throw new IAE("Self-referential column[%s]", columnName);
         }
-        detectCycles(dependency, nextSet);
+        detectCycles(dependency, visitedCopy);
+        visitedCopy.remove(columnName);
       }
     }
   }
@@ -501,6 +645,58 @@ public class VirtualColumns implements Cacheable
   public String toString()
   {
     return virtualColumns.toString();
+  }
+
+  /**
+   * A node in the virtual column dependency tree, capturing a {@link VirtualColumn} and all of its transitive
+   * virtual column dependencies within a {@link VirtualColumns} instance. Leaf virtual columns (those whose
+   * {@link VirtualColumn#requiredColumns()} contain no other virtual columns) have an empty {@link #getDependencies()}
+   * list.
+   *
+   * @see VirtualColumns#getNode(String)
+   */
+  public static final class Node
+  {
+    private final VirtualColumn virtualColumn;
+    private final List<Node> dependencies;
+
+    private Node(VirtualColumn virtualColumn, List<Node> dependencies)
+    {
+      this.virtualColumn = virtualColumn;
+      this.dependencies = dependencies;
+    }
+
+    public VirtualColumn getVirtualColumn()
+    {
+      return virtualColumn;
+    }
+
+    /**
+     * The virtual column nodes that this virtual column directly depends on, containing only dependencies
+     * that are themselves virtual columns. An empty list does not imply {@link VirtualColumn#requiredColumns()}
+     * is empty, as physical column inputs are not represented here.
+     */
+    public List<Node> getDependencies()
+    {
+      return dependencies;
+    }
+
+    @Override
+    public boolean equals(Object o)
+    {
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+      Node that = (Node) o;
+      return Objects.equals(virtualColumn, that.virtualColumn) &&
+             Objects.equals(dependencies, that.dependencies);
+    }
+
+    @Override
+    public int hashCode()
+    {
+      return Objects.hash(virtualColumn, dependencies);
+    }
   }
 
   /**

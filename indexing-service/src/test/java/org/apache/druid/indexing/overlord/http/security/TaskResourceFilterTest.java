@@ -21,13 +21,13 @@ package org.apache.druid.indexing.overlord.http.security;
 
 import com.google.common.base.Optional;
 import com.sun.jersey.spi.container.ContainerRequest;
-import org.apache.druid.indexing.overlord.TaskStorageQueryAdapter;
+import org.apache.druid.indexing.overlord.TaskQueryTool;
 import org.apache.druid.indexing.overlord.supervisor.SupervisorSpec;
 import org.apache.druid.server.security.AuthorizerMapper;
 import org.easymock.EasyMock;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import javax.ws.rs.WebApplicationException;
 import javax.ws.rs.core.MultivaluedMap;
@@ -42,17 +42,17 @@ import static org.easymock.EasyMock.expect;
 public class TaskResourceFilterTest
 {
   private AuthorizerMapper authorizerMapper;
-  private TaskStorageQueryAdapter taskStorageQueryAdapter;
+  private TaskQueryTool taskQueryTool;
   private ContainerRequest containerRequest;
   private TaskResourceFilter resourceFilter;
 
-  @Before
+  @BeforeEach
   public void setup()
   {
     authorizerMapper = EasyMock.createMock(AuthorizerMapper.class);
-    taskStorageQueryAdapter = EasyMock.createMock(TaskStorageQueryAdapter.class);
+    taskQueryTool = EasyMock.createMock(TaskQueryTool.class);
     containerRequest = EasyMock.createMock(ContainerRequest.class);
-    resourceFilter = new TaskResourceFilter(taskStorageQueryAdapter, authorizerMapper);
+    resourceFilter = new TaskResourceFilter(taskQueryTool, authorizerMapper);
   }
 
   @Test
@@ -68,11 +68,11 @@ public class TaskResourceFilterTest
     expect(supervisorSpec.getDataSources())
         .andReturn(Collections.singletonList(taskId))
         .anyTimes();
-    expect(taskStorageQueryAdapter.getTask(taskId))
+    expect(taskQueryTool.getTask(taskId))
         .andReturn(Optional.absent())
         .atLeastOnce();
     EasyMock.replay(containerRequest);
-    EasyMock.replay(taskStorageQueryAdapter);
+    EasyMock.replay(taskQueryTool);
 
     WebApplicationException expected = null;
     try {
@@ -81,10 +81,10 @@ public class TaskResourceFilterTest
     catch (WebApplicationException e) {
       expected = e;
     }
-    Assert.assertNotNull(expected);
-    Assert.assertEquals(expected.getResponse().getStatus(), Response.Status.NOT_FOUND.getStatusCode());
+    Assertions.assertNotNull(expected);
+    Assertions.assertEquals(Response.Status.NOT_FOUND.getStatusCode(), expected.getResponse().getStatus());
     EasyMock.verify(containerRequest);
-    EasyMock.verify(taskStorageQueryAdapter);
+    EasyMock.verify(taskQueryTool);
   }
 
   private List<PathSegment> getPathSegments(String path)

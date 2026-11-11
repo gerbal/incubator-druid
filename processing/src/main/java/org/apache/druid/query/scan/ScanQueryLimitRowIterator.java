@@ -19,17 +19,19 @@
 
 package org.apache.druid.query.scan;
 
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import org.apache.druid.java.util.common.UOE;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.common.guava.Yielder;
 import org.apache.druid.java.util.common.guava.YieldingAccumulator;
 import org.apache.druid.java.util.common.parsers.CloseableIterator;
+import org.apache.druid.query.Order;
 import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryPlus;
 import org.apache.druid.query.QueryRunner;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.context.ResponseContext;
+import org.apache.druid.segment.column.RowSignature;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -37,15 +39,15 @@ import java.util.List;
 
 /**
  * This iterator supports iteration through a Sequence returned by a ScanResultValue QueryRunner.  Its behaviour
- * varies depending on whether the query is returning time-ordered values and whether the CTX_KEY_OUTERMOST flag is
+ * varies depending on whether the query is returning time-ordered values and whether the SCAN_OUTERMOST flag is
  * set as false.
  *
  * Behaviours:
  * 1) No time ordering: expects a Sequence of ScanResultValues which each contain up to query.batchSize events.
  *    The iterator will be "done" when the limit of events is reached.  The final ScanResultValue might contain
  *    fewer than batchSize events so that the limit number of events is returned.
- * 2) Time Ordering, CTX_KEY_OUTERMOST false: Same behaviour as no time ordering
- * 3) Time Ordering, CTX_KEY_OUTERMOST=true or null: The Sequence processed in this case should contain ScanResultValues
+ * 2) Time Ordering, SCAN_OUTERMOST false: Same behaviour as no time ordering
+ * 3) Time Ordering, SCAN_OUTERMOST=true or null: The Sequence processed in this case should contain ScanResultValues
  *    that contain only one event each for the CachingClusteredClient n-way merge.  This iterator will perform
  *    batching according to query batch size until the limit is reached.
  */
@@ -67,16 +69,16 @@ public class ScanQueryLimitRowIterator implements CloseableIterator<ScanResultVa
     this.resultFormat = query.getResultFormat();
     this.limit = query.getScanRowsLimit();
     Query<ScanResultValue> historicalQuery =
-        queryPlus.getQuery().withOverriddenContext(ImmutableMap.of(ScanQuery.CTX_KEY_OUTERMOST, false));
+        queryPlus.getQuery().withOverriddenContext(QueryContextParameters.SCAN_OUTERMOST, false);
     Sequence<ScanResultValue> baseSequence = baseRunner.run(QueryPlus.wrap(historicalQuery), responseContext);
     this.yielder = baseSequence.toYielder(
         null,
-        new YieldingAccumulator<ScanResultValue, ScanResultValue>()
+        new YieldingAccumulator<>()
         {
           @Override
           public ScanResultValue accumulate(ScanResultValue accumulated, ScanResultValue in)
           {
-            yield();
+            this.yield();
             return in;
           }
         }
@@ -98,8 +100,8 @@ public class ScanQueryLimitRowIterator implements CloseableIterator<ScanResultVa
 
     // We want to perform multi-event ScanResultValue limiting if we are not time-ordering or are at the
     // inner-level if we are time-ordering
-    if (query.getTimeOrder() == ScanQuery.Order.NONE ||
-        !query.context().getBoolean(ScanQuery.CTX_KEY_OUTERMOST, true)) {
+    if (query.getTimeOrder() == Order.NONE ||
+        !query.context().getOrDefault(QueryContextParameters.SCAN_OUTERMOST)) {
       ScanResultValue batch = yielder.get();
       List events = (List) batch.getEvents();
       if (events.size() <= limit - count) {
@@ -111,7 +113,12 @@ public class ScanQueryLimitRowIterator implements CloseableIterator<ScanResultVa
         // single batch length is <= Integer.MAX_VALUE, so this should not overflow
         int numLeft = (int) (limit - count);
         count = limit;
-        return new ScanResultValue(batch.getSegmentId(), batch.getColumns(), events.subList(0, numLeft));
+        return new ScanResultValue(
+            batch.getSegmentId(),
+            batch.getColumns(),
+            events.subList(0, numLeft),
+            batch.getRowSignature()
+        );
       }
     } else {
       // Perform single-event ScanResultValue batching at the outer level.  Each scan result value from the yielder
@@ -119,15 +126,17 @@ public class ScanQueryLimitRowIterator implements CloseableIterator<ScanResultVa
       int batchSize = query.getBatchSize();
       List<Object> eventsToAdd = new ArrayList<>(batchSize);
       List<String> columns = new ArrayList<>();
+      RowSignature rowSignature = null;
       while (eventsToAdd.size() < batchSize && !yielder.isDone() && count < limit) {
         ScanResultValue srv = yielder.get();
         // Only replace once using the columns from the first event
         columns = columns.isEmpty() ? srv.getColumns() : columns;
+        rowSignature = rowSignature == null ? srv.getRowSignature() : rowSignature;
         eventsToAdd.add(Iterables.getOnlyElement((List<Object>) srv.getEvents()));
         yielder = yielder.next(null);
         count++;
       }
-      return new ScanResultValue(null, columns, eventsToAdd);
+      return new ScanResultValue(null, columns, eventsToAdd, rowSignature);
     }
   }
 

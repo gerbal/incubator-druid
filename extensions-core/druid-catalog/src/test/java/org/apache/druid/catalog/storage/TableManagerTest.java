@@ -20,61 +20,68 @@
 package org.apache.druid.catalog.storage;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import org.apache.druid.catalog.CatalogException;
 import org.apache.druid.catalog.CatalogException.DuplicateKeyException;
 import org.apache.druid.catalog.CatalogException.NotFoundException;
-import org.apache.druid.catalog.CatalogTest;
 import org.apache.druid.catalog.model.ColumnSpec;
 import org.apache.druid.catalog.model.Columns;
+import org.apache.druid.catalog.model.DatasourceProjectionMetadata;
 import org.apache.druid.catalog.model.TableId;
 import org.apache.druid.catalog.model.TableMetadata;
 import org.apache.druid.catalog.model.TableSpec;
 import org.apache.druid.catalog.model.table.DatasourceDefn;
 import org.apache.druid.catalog.storage.sql.CatalogManager;
 import org.apache.druid.catalog.storage.sql.SQLCatalogManager;
+import org.apache.druid.data.input.impl.AggregateProjectionSpec;
+import org.apache.druid.data.input.impl.StringDimensionSchema;
 import org.apache.druid.jackson.DefaultObjectMapper;
-import org.apache.druid.metadata.TestDerbyConnector;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.experimental.categories.Category;
+import org.apache.druid.java.util.common.granularity.Granularities;
+import org.apache.druid.metadata.JUnit5TestDerbyConnector;
+import org.apache.druid.query.aggregation.CountAggregatorFactory;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Tag;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-@Category(CatalogTest.class)
+@Tag("CatalogTest")
 public class TableManagerTest
 {
   private static final ObjectMapper JSON_MAPPER = new DefaultObjectMapper();
 
-  @Rule
-  public final TestDerbyConnector.DerbyConnectorRule derbyConnectorRule =
-          new TestDerbyConnector.DerbyConnectorRule();
+  @RegisterExtension
+  public static final JUnit5TestDerbyConnector DERBY_CONNECTOR_RULE =
+          new JUnit5TestDerbyConnector();
   private CatalogManager manager;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
     MetadataStorageManager metastoreMgr = new MetadataStorageManager(
         JSON_MAPPER,
-        derbyConnectorRule.getConnector(),
-        () -> derbyConnectorRule.getMetadataConnectorConfig(),
-        derbyConnectorRule.metadataTablesConfigSupplier()
+        DERBY_CONNECTOR_RULE.getConnector(),
+        () -> DERBY_CONNECTOR_RULE.getMetadataConnectorConfig(),
+        DERBY_CONNECTOR_RULE.metadataTablesConfigSupplier()
         );
     manager = new SQLCatalogManager(metastoreMgr);
     manager.start();
   }
 
-  @After
+  @AfterEach
   public void tearDown()
   {
     if (manager != null) {
@@ -85,9 +92,24 @@ public class TableManagerTest
   @Test
   public void testCreate() throws DuplicateKeyException, NotFoundException
   {
+    final DatasourceProjectionMetadata projectionMetadata = new DatasourceProjectionMetadata(
+        AggregateProjectionSpec.builder("projection")
+                               .virtualColumns(
+                                   Granularities.toVirtualColumn(
+                                       Granularities.HOUR,
+                                       Granularities.GRANULARITY_VIRTUAL_COLUMN_NAME
+                                   )
+                               )
+                               .groupingColumns(new StringDimensionSchema("dim"))
+                               .aggregators(new CountAggregatorFactory("count"))
+                               .build()
+    );
+
+    List<Object> jsonProjectionSpec = JSON_MAPPER.convertValue(ImmutableList.of(projectionMetadata), List.class);
     Map<String, Object> props = ImmutableMap.of(
         DatasourceDefn.SEGMENT_GRANULARITY_PROPERTY, "P1D",
-        DatasourceDefn.TARGET_SEGMENT_ROWS_PROPERTY, 1_000_000
+        DatasourceDefn.TARGET_SEGMENT_ROWS_PROPERTY, 1_000_000,
+        DatasourceDefn.PROJECTIONS_KEYS_PROPERTY, jsonProjectionSpec
     );
     TableSpec spec = new TableSpec(DatasourceDefn.TABLE_TYPE, props, null);
     TableMetadata table = TableMetadata.newTable(TableId.datasource("table1"), spec);
@@ -200,6 +222,84 @@ public class TableManagerTest
   }
 
   @Test
+  public void testUpdatePropertiesFailsWhenAnotherWriterCommits() throws CatalogException
+  {
+    final TableSpec spec = new TableSpec(
+        DatasourceDefn.TABLE_TYPE,
+        ImmutableMap.of(DatasourceDefn.SEGMENT_GRANULARITY_PROPERTY, "P1D"),
+        null
+    );
+    final TableMetadata table = TableMetadata.newTable(TableId.datasource("racy"), spec);
+    manager.create(table);
+
+    final AtomicInteger attempts = new AtomicInteger();
+    final CatalogException e = assertThrows(
+        CatalogException.class,
+        () -> manager.updateProperties(table.id(), t -> {
+          if (attempts.getAndIncrement() == 0) {
+            // Another writer lands between this read and its write.
+            try {
+              manager.updateProperties(table.id(), other -> {
+                final Map<String, Object> updated = new HashMap<>(other.spec().properties());
+                updated.put("other", "written");
+                return other.spec().withProperties(updated);
+              });
+            }
+            catch (CatalogException ce) {
+              throw new RuntimeException(ce);
+            }
+          }
+          final Map<String, Object> updated = new HashMap<>(t.spec().properties());
+          updated.put("mine", "written");
+          return t.spec().withProperties(updated);
+        })
+    );
+    assertTrue(e.getMessage().contains("was changed by another update"), e.getMessage());
+
+    // The transform ran once: the loser is reported rather than re-applied.
+    assertEquals(1, attempts.get());
+
+    // The writer that got there first is intact, and the loser wrote nothing.
+    final TableMetadata read = manager.read(table.id());
+    assertEquals("written", read.spec().properties().get("other"));
+    assertNull(read.spec().properties().get("mine"));
+  }
+
+  @Test
+  public void testUpdatePropertiesFailsWhenTableIsDeletedConcurrently() throws CatalogException
+  {
+    final TableSpec spec = new TableSpec(
+        DatasourceDefn.TABLE_TYPE,
+        ImmutableMap.of(DatasourceDefn.SEGMENT_GRANULARITY_PROPERTY, "P1D"),
+        null
+    );
+    final TableMetadata table = TableMetadata.newTable(TableId.datasource("deleting"), spec);
+    manager.create(table);
+
+    // The deletion lands between the edit's read and its write.
+    assertThrows(
+        CatalogException.class,
+        () -> manager.updateProperties(table.id(), t -> {
+          try {
+            manager.markDeleting(table.id());
+          }
+          catch (Exception e) {
+            throw new RuntimeException(e);
+          }
+          final Map<String, Object> updated = new HashMap<>(t.spec().properties());
+          updated.put("mine", "written");
+          return t.spec().withProperties(updated);
+        })
+    );
+
+    // The deleting row was not rewritten, and a fresh edit sees no active table at all.
+    assertThrows(
+        NotFoundException.class,
+        () -> manager.updateProperties(table.id(), t -> t.spec())
+    );
+  }
+
+  @Test
   public void testUpdateColumns() throws CatalogException
   {
     Map<String, Object> props = ImmutableMap.of(
@@ -207,8 +307,8 @@ public class TableManagerTest
         DatasourceDefn.TARGET_SEGMENT_ROWS_PROPERTY, 1_000_000
     );
     List<ColumnSpec> cols = Arrays.asList(
-        new ColumnSpec("a", Columns.VARCHAR, null),
-        new ColumnSpec("b", Columns.BIGINT, null)
+        new ColumnSpec("a", Columns.STRING, null),
+        new ColumnSpec("b", Columns.LONG, null)
     );
     ColumnSpec colC = new ColumnSpec("c", Columns.DOUBLE, null);
 

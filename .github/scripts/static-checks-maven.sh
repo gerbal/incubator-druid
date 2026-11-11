@@ -1,0 +1,39 @@
+#!/bin/bash
+
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -e
+set -x
+
+echo 'Running Maven install...'
+./mvnw -B install -q -ff -pl '!distribution' -P skip-tests -Dweb.console.skip=true -Dmaven.javadoc.skip=true -Dcyclonedx.skip
+
+./mvnw -B checkstyle:checkstyle --fail-at-end
+
+./mvnw -B apache-rat:check -Prat --fail-at-end -Drat.consoleOutput=true
+
+./.github/scripts/analyze_dependencies_script.sh
+
+./mvnw -B animal-sniffer:check --fail-at-end
+
+./mvnw -B enforcer:enforce --fail-at-end
+
+./mvnw -B forbiddenapis:check forbiddenapis:testCheck --fail-at-end
+
+# TODO: consider adding pmd:cpd-check
+./mvnw -B pmd:check --fail-at-end
+
+./mvnw -B spotbugs:check --fail-at-end -pl '!benchmarks'

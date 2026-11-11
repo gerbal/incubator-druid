@@ -23,7 +23,6 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
 import com.google.common.collect.Iterables;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.java.util.common.NonnullPair;
 import org.apache.druid.math.expr.Evals;
 import org.apache.druid.math.expr.Expr;
@@ -74,56 +73,7 @@ public class ExpressionSelectors
   {
     final ColumnValueSelector<ExprEval> baseSelector = makeExprEvalSelector(columnSelectorFactory, expression);
 
-    return new ColumnValueSelector()
-    {
-      @Override
-      public double getDouble()
-      {
-        // No Assert for null handling as baseSelector already have it.
-        return baseSelector.getDouble();
-      }
-
-      @Override
-      public float getFloat()
-      {
-        // No Assert for null handling as baseSelector already have it.
-        return baseSelector.getFloat();
-      }
-
-      @Override
-      public long getLong()
-      {
-        // No Assert for null handling as baseSelector already have it.
-        return baseSelector.getLong();
-      }
-
-      @Override
-      public boolean isNull()
-      {
-        return baseSelector.isNull();
-      }
-
-      @Nullable
-      @Override
-      public Object getObject()
-      {
-        // No need for null check on getObject() since baseSelector impls will never return null.
-        ExprEval eval = baseSelector.getObject();
-        return eval.valueOrDefault();
-      }
-
-      @Override
-      public Class classOfObject()
-      {
-        return Object.class;
-      }
-
-      @Override
-      public void inspectRuntimeShape(RuntimeShapeInspector inspector)
-      {
-        inspector.visit("baseSelector", baseSelector);
-      }
-    };
+    return new EvalUnwrappingColumnValueSelector(baseSelector);
   }
 
   public static ColumnValueSelector makeStringColumnValueSelector(
@@ -133,35 +83,8 @@ public class ExpressionSelectors
   {
     final ColumnValueSelector<ExprEval> baseSelector = makeExprEvalSelector(columnSelectorFactory, expression);
 
-    return new ColumnValueSelector()
+    return new EvalUnwrappingColumnValueSelector(baseSelector)
     {
-      @Override
-      public double getDouble()
-      {
-        // No Assert for null handling as baseSelector already have it.
-        return baseSelector.getDouble();
-      }
-
-      @Override
-      public float getFloat()
-      {
-        // No Assert for null handling as baseSelector already have it.
-        return baseSelector.getFloat();
-      }
-
-      @Override
-      public long getLong()
-      {
-        // No Assert for null handling as baseSelector already have it.
-        return baseSelector.getLong();
-      }
-
-      @Override
-      public boolean isNull()
-      {
-        return baseSelector.isNull();
-      }
-
       @Nullable
       @Override
       public Object getObject()
@@ -170,19 +93,34 @@ public class ExpressionSelectors
         ExprEval eval = baseSelector.getObject();
         return coerceEvalToObjectOrList(eval);
       }
+    };
+  }
 
+  /**
+   * Wrap the output of {@link ColumnValueSelector#getObject()} in {@link ExprEval#ofType(ExpressionType, Object)}
+   * using the supplied delegate type and cast using {@link ExprEval#castTo} to convert to the target type. If the
+   * delegate selector type is null, {@link ExprEval#ofType} falls back to using {@link ExprEval#bestEffortOf}, however
+   * the target type must be not null, or else this method will fail when attempting to convert to an expression type.
+   */
+  public static ColumnValueSelector<?> castColumnValueSelector(
+      RowIdSupplier rowIdSupplier,
+      ColumnValueSelector<?> delegate,
+      @Nullable ColumnType delegateType,
+      ColumnType castToType
+  )
+  {
+    final ExpressionType fromType = ExpressionType.fromColumnType(delegateType);
+    final ExpressionType toType = ExpressionType.fromColumnTypeStrict(castToType);
+    final ColumnValueSelector<ExprEval> cast = new BaseExpressionColumnValueSelector(rowIdSupplier)
+    {
       @Override
-      public Class classOfObject()
+      protected ExprEval<?> eval()
       {
-        return Object.class;
-      }
-
-      @Override
-      public void inspectRuntimeShape(RuntimeShapeInspector inspector)
-      {
-        inspector.visit("baseSelector", baseSelector);
+        return ExprEval.ofType(fromType, delegate.getObject()).castTo(toType);
       }
     };
+
+    return new EvalUnwrappingColumnValueSelector(cast);
   }
 
   /**
@@ -195,17 +133,40 @@ public class ExpressionSelectors
       Expr expression
   )
   {
-    ExpressionPlan plan = ExpressionPlanner.plan(columnSelectorFactory, expression);
+    if (columnSelectorFactory instanceof ExprEvalSelectorCache) {
+      return ((ExprEvalSelectorCache) columnSelectorFactory).getOrCreateExprEvalSelector(expression);
+    }
+    return makeExprEvalSelectorUncached(columnSelectorFactory, expression);
+  }
+
+  /**
+   * Makes an uncached expression selector. Used by {@link ExprEvalSelectorCache} implementations to avoid recursively
+   * calling back into the cache.
+   */
+  public static ColumnValueSelector<ExprEval> makeExprEvalSelectorUncached(
+      ColumnSelectorFactory columnSelectorFactory,
+      Expr expression
+  )
+  {
+    final ExpressionPlan plan = ExpressionPlanner.plan(
+        columnSelectorFactory,
+        Expr.singleThreaded(expression, columnSelectorFactory)
+    );
     final RowIdSupplier rowIdSupplier = columnSelectorFactory.getRowIdSupplier();
 
-    if (plan.is(ExpressionPlan.Trait.SINGLE_INPUT_SCALAR)) {
+    // Non-deterministic expressions must be evaluated for each row, so they cannot use input-value result caches.
+    if (plan.is(ExpressionPlan.Trait.SINGLE_INPUT_SCALAR) && !plan.getAnalysis().isNonDeterministic()) {
       final String column = plan.getSingleInputName();
       final ColumnType inputType = plan.getSingleInputType();
       if (inputType.is(ValueType.LONG)) {
+        // Skip LRU cache when the underlying data is sorted by __time. Note: data is not always sorted by __time; when
+        // forceSegmentSortByTime: false, segments can be written in non-__time order. However, this
+        // information is not currently available here, so we assume the common case, which is __time-sortedness.
+        final boolean useLruCache = !ColumnHolder.TIME_COLUMN_NAME.equals(column);
         return new SingleLongInputCachingExpressionColumnValueSelector(
             columnSelectorFactory.makeColumnValueSelector(column),
             plan.getExpression(),
-            !ColumnHolder.TIME_COLUMN_NAME.equals(column), // __time doesn't need an LRU cache since it is sorted.
+            useLruCache,
             rowIdSupplier
         );
       } else if (inputType.is(ValueType.STRING)) {
@@ -218,8 +179,8 @@ public class ExpressionSelectors
     }
     final Expr.ObjectBinding bindings = createBindings(columnSelectorFactory, plan);
 
-    // Optimization for constant expressions
-    if (bindings.equals(InputBindings.nilBindings())) {
+    // Optimization for constant expressions (but not non-deterministic ones like now())
+    if (bindings.equals(InputBindings.nilBindings()) && !plan.getAnalysis().isNonDeterministic()) {
       return new ConstantExprEvalSelector(plan.getExpression().eval(bindings));
     }
 
@@ -243,7 +204,10 @@ public class ExpressionSelectors
       @Nullable final ExtractionFn extractionFn
   )
   {
-    final ExpressionPlan plan = ExpressionPlanner.plan(columnSelectorFactory, expression);
+    final ExpressionPlan plan = ExpressionPlanner.plan(
+        columnSelectorFactory,
+        Expr.singleThreaded(expression, columnSelectorFactory)
+    );
 
     if (plan.any(ExpressionPlan.Trait.SINGLE_INPUT_SCALAR, ExpressionPlan.Trait.SINGLE_INPUT_MAPPABLE)) {
       final String column = plan.getSingleInputName();
@@ -287,7 +251,6 @@ public class ExpressionSelectors
     }
   }
 
-
   /**
    * Returns whether an expression can be applied to unique values of a particular column (like those in a dictionary)
    * rather than being applied to each row individually.
@@ -300,7 +263,7 @@ public class ExpressionSelectors
    */
   public static boolean canMapOverDictionary(
       final Expr.BindingAnalysis bindingAnalysis,
-      final ColumnCapabilities columnCapabilities
+      @Nullable final ColumnCapabilities columnCapabilities
   )
   {
     Preconditions.checkState(bindingAnalysis.getRequiredBindings().size() == 1, "requiredBindings.size == 1");
@@ -321,7 +284,7 @@ public class ExpressionSelectors
   )
   {
     final List<String> columns = plan.getAnalysis().getRequiredBindingsList();
-    final Map<String, InputBindings.InputSupplier> suppliers = new HashMap<>();
+    final Map<String, InputBindings.InputSupplier<?>> suppliers = new HashMap<>();
     for (String columnName : columns) {
       final ColumnCapabilities capabilities = columnSelectorFactory.getColumnCapabilities(columnName);
       final boolean multiVal = capabilities != null && capabilities.hasMultipleValues().isTrue();
@@ -344,11 +307,16 @@ public class ExpressionSelectors
       final boolean homogenizeNullMultiValueStringArrays =
           plan.is(ExpressionPlan.Trait.NEEDS_APPLIED) || ExpressionProcessing.isHomogenizeNullMultiValueStringArrays();
 
-      if (capabilities == null || capabilities.isArray() || useObjectSupplierForMultiValueStringArray) {
-        // Unknown type, array type, or output array uses an Object selector and see if that gives anything useful
+      if (capabilities == null || useObjectSupplierForMultiValueStringArray) {
+        // Unknown type, or implicitly mapped mvd, use Object selector and see if that gives anything useful
         supplier = supplierFromObjectSelector(
             columnSelectorFactory.makeColumnValueSelector(columnName),
             homogenizeNullMultiValueStringArrays
+        );
+      } else if (capabilities.isArray()) {
+        supplier = supplierFromObjectSelector(
+            columnSelectorFactory.makeColumnValueSelector(columnName),
+            false
         );
       } else if (capabilities.is(ValueType.FLOAT)) {
         ColumnValueSelector<?> selector = columnSelectorFactory.makeColumnValueSelector(columnName);
@@ -404,16 +372,12 @@ public class ExpressionSelectors
       Supplier<T> supplier
   )
   {
-    if (NullHandling.replaceWithDefault()) {
-      return supplier;
-    } else {
-      return () -> {
-        if (selector.isNull()) {
-          return null;
-        }
-        return supplier.get();
-      };
-    }
+    return () -> {
+      if (selector.isNull()) {
+        return null;
+      }
+      return supplier.get();
+    };
   }
 
   /**
@@ -430,17 +394,17 @@ public class ExpressionSelectors
       if (row.size() == 1 && !coerceArray) {
         return selector.lookupName(row.get(0));
       } else {
+        final int size = row.size();
         // column selector factories hate you and use [] and [null] interchangeably for nullish data
-        if (row.size() == 0 || (row.size() == 1 && selector.getObject() == null)) {
+        if (size == 0 || (size == 1 && selector.getObject() == null)) {
           if (homogenize) {
             return new Object[]{null};
           } else {
             return null;
           }
         }
-        final Object[] strings = new Object[row.size()];
-        // noinspection SSBasedInspection
-        for (int i = 0; i < row.size(); i++) {
+        final Object[] strings = new Object[size];
+        for (int i = 0; i < size; i++) {
           strings[i] = selector.lookupName(row.get(i));
         }
         return strings;
@@ -464,15 +428,15 @@ public class ExpressionSelectors
     }
 
     final Class<?> clazz = selector.classOfObject();
-    if (Number.class.isAssignableFrom(clazz) || String.class.isAssignableFrom(clazz)) {
-      // Number, String supported as-is.
+    if (Number.class.isAssignableFrom(clazz) || String.class.isAssignableFrom(clazz) || Object[].class.isAssignableFrom(clazz)) {
+      // Number, String, Arrays supported as-is.
       return selector::getObject;
     } else if (clazz.isAssignableFrom(Number.class) || clazz.isAssignableFrom(String.class)) {
       // Might be Numbers and Strings. Use a selector that double-checks.
       return () -> {
         final Object val = selector.getObject();
         if (val instanceof List) {
-          NonnullPair<ExpressionType, Object[]> coerced = ExprEval.coerceListToArray((List) val, homogenizeMultiValue);
+          NonnullPair<ExpressionType, Object[]> coerced = ExprEval.coerceListToArray((List<?>) val, homogenizeMultiValue);
           if (coerced == null) {
             return null;
           }
@@ -485,7 +449,7 @@ public class ExpressionSelectors
       return () -> {
         final Object val = selector.getObject();
         if (val != null) {
-          NonnullPair<ExpressionType, Object[]> coerced = ExprEval.coerceListToArray((List) val, homogenizeMultiValue);
+          NonnullPair<ExpressionType, Object[]> coerced = ExprEval.coerceListToArray((List<?>) val, homogenizeMultiValue);
           if (coerced == null) {
             return null;
           }
@@ -522,6 +486,65 @@ public class ExpressionSelectors
       }
       return Arrays.stream(asArray).collect(Collectors.toList());
     }
-    return eval.valueOrDefault();
+    return eval.value();
+  }
+
+  /**
+   * Wraps a {@link ColumnValueSelector<ExprEval>} and calls {@link ExprEval#value()} on the output of
+   * {@code baseSelector.getObject()} in {@link #getObject()}.
+   */
+  private static class EvalUnwrappingColumnValueSelector implements ColumnValueSelector
+  {
+    private final ColumnValueSelector<ExprEval> baseSelector;
+
+    public EvalUnwrappingColumnValueSelector(ColumnValueSelector<ExprEval> baseSelector)
+    {
+      this.baseSelector = baseSelector;
+    }
+
+    @Override
+    public double getDouble()
+    {
+      return baseSelector.getDouble();
+    }
+
+    @Override
+    public float getFloat()
+    {
+      return baseSelector.getFloat();
+    }
+
+    @Override
+    public long getLong()
+    {
+      return baseSelector.getLong();
+    }
+
+    @Override
+    public boolean isNull()
+    {
+      return baseSelector.isNull();
+    }
+
+    @Nullable
+    @Override
+    public Object getObject()
+    {
+      // No need for null check on getObject() since baseSelector impls will never return null.
+      ExprEval eval = baseSelector.getObject();
+      return eval.value();
+    }
+
+    @Override
+    public Class classOfObject()
+    {
+      return Object.class;
+    }
+
+    @Override
+    public void inspectRuntimeShape(RuntimeShapeInspector inspector)
+    {
+      inspector.visit("baseSelector", baseSelector);
+    }
   }
 }

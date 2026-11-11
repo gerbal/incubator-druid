@@ -23,6 +23,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.druid.catalog.CatalogException;
 import org.apache.druid.catalog.CatalogException.DuplicateKeyException;
 import org.apache.druid.catalog.CatalogException.NotFoundException;
+import org.apache.druid.catalog.MetadataCatalog;
 import org.apache.druid.catalog.model.ColumnSpec;
 import org.apache.druid.catalog.model.Columns;
 import org.apache.druid.catalog.model.ResolvedTable;
@@ -39,22 +40,22 @@ import org.apache.druid.catalog.storage.CatalogTests;
 import org.apache.druid.data.input.impl.InlineInputSource;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.ISE;
-import org.apache.druid.metadata.TestDerbyConnector;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
+import org.apache.druid.metadata.JUnit5TestDerbyConnector;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Test the catalog synchronization mechanisms: direct (reads from the DB),
@@ -63,22 +64,22 @@ import static org.junit.Assert.assertTrue;
  */
 public class CatalogSyncTest
 {
-  @Rule
-  public final TestDerbyConnector.DerbyConnectorRule derbyConnectorRule = new TestDerbyConnector.DerbyConnectorRule();
+  @RegisterExtension
+  public static final JUnit5TestDerbyConnector DERBY_CONNECTOR_RULE = new JUnit5TestDerbyConnector();
 
   private CatalogTests.DbFixture dbFixture;
   private CatalogStorage storage;
   private ObjectMapper jsonMapper;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
-    dbFixture = new CatalogTests.DbFixture(derbyConnectorRule);
+    dbFixture = new CatalogTests.DbFixture(DERBY_CONNECTOR_RULE);
     storage = dbFixture.storage;
     jsonMapper = new ObjectMapper();
   }
 
-  @After
+  @AfterEach
   public void tearDown()
   {
     CatalogTests.tearDown(dbFixture);
@@ -96,7 +97,7 @@ public class CatalogSyncTest
       TableMetadata table = TableBuilder.external("externTable")
           .inputSource(toMap(new InlineInputSource("a\nc")))
           .inputFormat(BaseExternTableTest.CSV_FORMAT)
-          .column("a", Columns.VARCHAR)
+          .column("a", Columns.STRING)
           .build();
       storage.validate(table);
     }
@@ -114,7 +115,7 @@ public class CatalogSyncTest
     {
       TableMetadata table = TableBuilder.external("externTable")
           .inputSource(toMap(new InlineInputSource("a\nc")))
-           .column("a", Columns.VARCHAR)
+           .column("a", Columns.STRING)
           .build();
       assertThrows(IAE.class, () -> storage.validate(table));
     }
@@ -195,15 +196,15 @@ public class CatalogSyncTest
   {
     TableMetadata table1 = TableBuilder.datasource("table1", "P1D")
         .timeColumn()
-        .column("a", Columns.VARCHAR)
+        .column("a", Columns.STRING)
         .build();
     storage.validate(table1);
     storage.tables().create(table1);
 
     TableMetadata table2 = TableBuilder.datasource("table2", "P1D")
         .timeColumn()
-        .column("dim", Columns.VARCHAR)
-        .column("measure", "BIGINT")
+        .column("dim", Columns.STRING)
+        .column("measure", Columns.LONG)
         .build();
     storage.validate(table2);
     storage.tables().create(table2);
@@ -211,7 +212,7 @@ public class CatalogSyncTest
     TableMetadata table3 = TableBuilder.external("table3")
         .inputFormat(BaseExternTableTest.CSV_FORMAT)
         .inputSource(toMap(new InlineInputSource("a\nc")))
-        .column("a", Columns.VARCHAR)
+        .column("a", Columns.STRING)
         .build();
     storage.validate(table3);
     storage.tables().create(table3);
@@ -230,9 +231,9 @@ public class CatalogSyncTest
       List<ColumnSpec> cols = dsSpec.columns();
       assertEquals(2, cols.size());
       assertEquals(Columns.TIME_COLUMN, cols.get(0).name());
-      assertEquals(Columns.TIMESTAMP, cols.get(0).sqlType());
+      assertEquals(Columns.LONG, cols.get(0).dataType());
       assertEquals("a", cols.get(1).name());
-      assertEquals(Columns.VARCHAR, cols.get(1).sqlType());
+      assertEquals(Columns.STRING, cols.get(1).dataType());
 
       DatasourceFacade ds = new DatasourceFacade(catalog.resolveTable(id));
       assertEquals("P1D", ds.segmentGranularityString());
@@ -249,11 +250,11 @@ public class CatalogSyncTest
       assertEquals(3, cols.size());
       assertEquals("__time", cols.get(0).name());
       assertEquals(Columns.TIME_COLUMN, cols.get(0).name());
-      assertEquals(Columns.TIMESTAMP, cols.get(0).sqlType());
+      assertEquals(Columns.LONG, cols.get(0).dataType());
       assertEquals("dim", cols.get(1).name());
-      assertEquals(Columns.VARCHAR, cols.get(1).sqlType());
+      assertEquals(Columns.STRING, cols.get(1).dataType());
       assertEquals("measure", cols.get(2).name());
-      assertEquals("BIGINT", cols.get(2).sqlType());
+      assertEquals(Columns.LONG, cols.get(2).dataType());
 
       DatasourceFacade ds = new DatasourceFacade(catalog.resolveTable(id));
       assertEquals("P1D", ds.segmentGranularityString());
@@ -273,7 +274,7 @@ public class CatalogSyncTest
       List<ColumnSpec> cols = inputSpec.columns();
       assertEquals(1, cols.size());
       assertEquals("a", cols.get(0).name());
-      assertEquals(Columns.VARCHAR, cols.get(0).sqlType());
+      assertEquals(Columns.STRING, cols.get(0).dataType());
 
       assertNotNull(inputSpec.properties());
     }
@@ -303,7 +304,7 @@ public class CatalogSyncTest
     // Create a table 3
     TableMetadata table3 = TableBuilder.datasource("table3", "P1D")
         .timeColumn()
-        .column("x", "FLOAT")
+        .column("x", Columns.FLOAT)
         .build();
     storage.tables().create(table3);
   }
@@ -320,7 +321,7 @@ public class CatalogSyncTest
       assertEquals(Columns.TIME_COLUMN, cols.get(0).name());
       assertEquals("a", cols.get(1).name());
       assertEquals("b", cols.get(2).name());
-      assertEquals(Columns.DOUBLE, cols.get(2).sqlType());
+      assertEquals(Columns.DOUBLE, cols.get(2).dataType());
     }
     {
       TableId id = TableId.datasource("table3");

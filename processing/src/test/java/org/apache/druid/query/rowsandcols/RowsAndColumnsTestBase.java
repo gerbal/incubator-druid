@@ -20,10 +20,13 @@
 package org.apache.druid.query.rowsandcols;
 
 import com.google.common.collect.Lists;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.java.util.common.ISE;
-import org.junit.Assert;
-import org.junit.Test;
+import org.apache.druid.query.rowsandcols.concrete.ColumnBasedFrameRowsAndColumns;
+import org.apache.druid.query.rowsandcols.concrete.ColumnBasedFrameRowsAndColumnsTest;
+import org.apache.druid.query.rowsandcols.concrete.RowBasedFrameRowsAndColumns;
+import org.apache.druid.query.rowsandcols.concrete.RowBasedFrameRowsAndColumnsTest;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import javax.annotation.Nonnull;
 import java.util.ArrayList;
@@ -48,10 +51,6 @@ import java.util.function.Function;
  */
 public abstract class RowsAndColumnsTestBase
 {
-  static {
-    NullHandling.initializeForTests();
-  }
-
   private final Class<?> expectedClass;
 
   private static final AtomicReference<Iterable<Object[]>> MAKERS = new AtomicReference<>();
@@ -63,7 +62,10 @@ public abstract class RowsAndColumnsTestBase
         new Object[]{MapOfColumnsRowsAndColumns.class, Function.identity()},
         new Object[]{ArrayListRowsAndColumns.class, ArrayListRowsAndColumnsTest.MAKER},
         new Object[]{ConcatRowsAndColumns.class, ConcatRowsAndColumnsTest.MAKER},
-        new Object[]{RearrangedRowsAndColumns.class, RearrangedRowsAndColumnsTest.MAKER}
+        new Object[]{RearrangedRowsAndColumns.class, RearrangedRowsAndColumnsTest.MAKER},
+        new Object[]{ColumnBasedFrameRowsAndColumns.class, ColumnBasedFrameRowsAndColumnsTest.MAKER},
+        new Object[]{CursorFactoryRowsAndColumns.class, CursorFactoryRowsAndColumnsTest.MAKER},
+        new Object[]{RowBasedFrameRowsAndColumns.class, RowBasedFrameRowsAndColumnsTest.MAKER}
     );
   }
 
@@ -108,6 +110,6 @@ public abstract class RowsAndColumnsTestBase
         break;
       }
     }
-    Assert.assertTrue(inList);
+    Assertions.assertTrue(inList);
   }
 }

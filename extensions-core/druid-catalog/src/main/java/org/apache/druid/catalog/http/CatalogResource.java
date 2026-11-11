@@ -21,7 +21,7 @@ package org.apache.druid.catalog.http;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableMap;
-import org.apache.curator.shaded.com.google.common.collect.Lists;
+import com.google.common.collect.Lists;
 import org.apache.druid.catalog.CatalogException;
 import org.apache.druid.catalog.CatalogException.DuplicateKeyException;
 import org.apache.druid.catalog.CatalogException.NotFoundException;
@@ -31,11 +31,12 @@ import org.apache.druid.catalog.model.TableMetadata;
 import org.apache.druid.catalog.model.TableSpec;
 import org.apache.druid.catalog.storage.CatalogStorage;
 import org.apache.druid.common.utils.IdUtils;
+import org.apache.druid.error.DruidException;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.Pair;
 import org.apache.druid.java.util.common.StringUtils;
-import org.apache.druid.server.security.Access;
 import org.apache.druid.server.security.Action;
+import org.apache.druid.server.security.AuthorizationResult;
 import org.apache.druid.server.security.AuthorizationUtils;
 import org.apache.druid.server.security.AuthorizerMapper;
 import org.apache.druid.server.security.ForbiddenException;
@@ -56,10 +57,11 @@ import javax.ws.rs.QueryParam;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
-
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -68,7 +70,7 @@ import java.util.stream.Collectors;
  * etc. Operations occur at the global level (all schemas), the schema level, or the
  * table level.
  *
- * @see {@link CatalogListenerResource} for the broker-side API.
+ * @see CatalogListenerResource for the broker-side API.
  */
 @Path(CatalogResource.ROOT_PATH)
 public class CatalogResource
@@ -79,6 +81,12 @@ public class CatalogResource
   public static final String PATH_FORMAT = "path";
   public static final String METADATA_FORMAT = "metadata";
   public static final String STATUS_FORMAT = "status";
+
+  /**
+   * Actions required for writes to the catalog. Both READ and WRITE are required to match the default
+   * set of actions required for SQL DML.
+   */
+  private static final Set<Action> ACTIONS_FOR_WRITE = EnumSet.of(Action.READ, Action.WRITE);
 
   private final CatalogStorage catalog;
   private final AuthorizerMapper authorizerMapper;
@@ -108,17 +116,17 @@ public class CatalogResource
    * </ul>
    *
    * @param schemaName The name of the Druid schema, which must be writable
-   *        and the user must have at least read access.
-   * @param tableName The name of the table definition to modify. The user must
-   *        have write access to the table.
-   * @param spec The new table definition.
-   * @param version the expected version of an existing table. The version must
-   *        match. If not (or if the table does not exist), returns an error.
-   * @param overwrite if {@code true}, then overwrites any existing table.
-   *        If {@code false}, then the operation fails if the table already exists.
-   *        Ignored if a version is specified.
-   * @param req the HTTP request used for authorization.
-    */
+   *                   and the user must have at least read access.
+   * @param tableName  The name of the table definition to modify. The user must
+   *                   have read and write access to the table.
+   * @param spec       The new table definition.
+   * @param version    the expected version of an existing table. The version must
+   *                   match. If not (or if the table does not exist), returns an error.
+   * @param overwrite  if {@code true}, then overwrites any existing table.
+   *                   If {@code false}, then the operation fails if the table already exists.
+   *                   Ignored if a version is specified.
+   * @param req        the HTTP request used for authorization.
+   */
   @POST
   @Path("/schemas/{schema}/tables/{name}")
   @Consumes(MediaType.APPLICATION_JSON)
@@ -129,20 +137,21 @@ public class CatalogResource
       TableSpec spec,
       @QueryParam("version") long version,
       @QueryParam("overwrite") boolean overwrite,
+      @QueryParam("ifNotExists") boolean ifNotExists,
       @Context final HttpServletRequest req
   )
   {
     try {
       final SchemaSpec schema = validateSchema(schemaName, true);
       validateTableName(tableName);
-      authorizeTable(schema, tableName, Action.WRITE, req);
+      authorizeTable(schema, tableName, ACTIONS_FOR_WRITE, req);
       validateTableSpec(schema, spec);
       final TableMetadata table = TableMetadata.newTable(TableId.of(schemaName, tableName), spec);
       try {
         catalog.validate(table);
       }
-      catch (IAE e) {
-        throw CatalogException.badRequest(e.getMessage());
+      catch (IAE | DruidException e) {
+        throw CatalogException.validationError(e);
       }
 
       long newVersion;
@@ -159,6 +168,9 @@ public class CatalogResource
           if (overwrite) {
             // User wants to overwrite, so do so.
             newVersion = catalog.tables().replace(table);
+          } else if (ifNotExists) {
+            // User asked to leave an existing table alone. Report no change, as the edit operations do.
+            newVersion = 0;
           } else {
             throw e;
           }
@@ -181,9 +193,9 @@ public class CatalogResource
    * the definition is created before the datasource itself.)
    *
    * @param schemaName The Druid schema. The user must have read access.
-   * @param tableName The name of the table within the schema. The user must have
-   *        read access.
-   * @param req the HTTP request used for authorization.
+   * @param tableName  The name of the table within the schema. The user must have
+   *                   read access.
+   * @param req        the HTTP request used for authorization.
    * @return the definition for the table, if any.
    */
   @GET
@@ -197,7 +209,7 @@ public class CatalogResource
   {
     try {
       final SchemaSpec schema = validateSchema(schemaName, false);
-      authorizeTable(schema, tableName, Action.READ, req);
+      authorizeTable(schema, tableName, EnumSet.of(Action.READ), req);
       final TableMetadata table = catalog.tables().read(new TableId(schemaName, tableName));
       return Response.ok().entity(table).build();
     }
@@ -211,8 +223,8 @@ public class CatalogResource
    * for the given schema and table.
    *
    * @param schemaName The name of the schema that holds the table.
-   * @param tableName The name of the table definition to delete. The user must have
-   *             write access.
+   * @param tableName  The name of the table definition to delete. The user must have
+   *                   read and write access.
    */
   @DELETE
   @Path("/schemas/{schema}/tables/{name}")
@@ -225,7 +237,7 @@ public class CatalogResource
   {
     try {
       final SchemaSpec schema = validateSchema(schemaName, true);
-      authorizeTable(schema, tableName, Action.WRITE, req);
+      authorizeTable(schema, tableName, ACTIONS_FOR_WRITE, req);
       catalog.tables().delete(new TableId(schemaName, tableName));
       return ok();
     }
@@ -247,9 +259,9 @@ public class CatalogResource
    * the table spec changed between the time it was retrieve and the edit operation
    * is submitted.
    *
-   * @param schemaName The name of the schema that holds the table.
-   * @param tableName The name of the table definition to delete. The user must have
-   *             write access.
+   * @param schemaName  The name of the schema that holds the table.
+   * @param tableName   The name of the table definition to delete. The user must have
+   *                    read and write access.
    * @param editRequest The operation to perform. See the classes for details.
    */
   @POST
@@ -265,12 +277,16 @@ public class CatalogResource
   {
     try {
       final SchemaSpec schema = validateSchema(schemaName, true);
-      authorizeTable(schema, tableName, Action.WRITE, req);
+      authorizeTable(schema, tableName, ACTIONS_FOR_WRITE, req);
       final long newVersion = new TableEditor(catalog, TableId.of(schemaName, tableName), editRequest).go();
       return okWithVersion(newVersion);
     }
     catch (CatalogException e) {
       return e.toResponse();
+    }
+    catch (IAE | DruidException e) {
+      // Edits merge and re-validate the table spec, so validation failures surface here.
+      return CatalogException.validationError(e).toResponse();
     }
   }
 
@@ -278,11 +294,10 @@ public class CatalogResource
   // Retrieval
 
   /**
-   * Retrieves the list of all Druid schema names, all table names, or
-   * all table metadata.
+   * Retrieves the list of all Druid schema names.
    *
    * @param format the format of the response. See the code for the
-   *        available formats
+   *               available formats
    */
   @GET
   @Path("/schemas")
@@ -297,7 +312,7 @@ public class CatalogResource
       switch (format) {
         case NAME_FORMAT:
           // No good resource to use: we really need finer-grain control.
-          authorizeAccess(ResourceType.STATE, "schemas", Action.READ, req);
+          authorizeResource(new Resource("schemas", ResourceType.STATE), EnumSet.of(Action.READ), req);
           return Response.ok().entity(catalog.schemaRegistry().names()).build();
         case PATH_FORMAT:
           return listTablePaths(req);
@@ -319,9 +334,9 @@ public class CatalogResource
    * the read-only schemas, there will be no table definitions.
    *
    * @param schemaName The name of the Druid schema to query. The user must
-   *        have read access.
-   * @param format the format of the response. See the code for the
-   *        available formats
+   *                   have read access.
+   * @param format     the format of the response. See the code for the
+   *                   available formats
    */
   @GET
   @Path("/schemas/{schema}/tables")
@@ -361,7 +376,7 @@ public class CatalogResource
    * table definitions known to the catalog. Used to prime a cache on first access.
    * After that, the Coordinator will push updates to Brokers. Returns the full
    * list of table details.
-   *
+   * <p>
    * It is expected that the number of table definitions will be of small or moderate
    * size, so no provision is made to handle very large lists.
    */
@@ -468,9 +483,9 @@ public class CatalogResource
     List<Pair<SchemaSpec, TableMetadata>> tables = new ArrayList<>();
     for (SchemaSpec schema : catalog.schemaRegistry().schemas()) {
       tables.addAll(catalog.tables().tablesInSchema(schema.name())
-          .stream()
-          .map(table -> Pair.of(schema, table))
-          .collect(Collectors.toList()));
+                           .stream()
+                           .map(table -> Pair.of(schema, table))
+                           .collect(Collectors.toList()));
 
     }
     Iterable<Pair<SchemaSpec, TableMetadata>> filtered = AuthorizationUtils.filterAuthorizedResources(
@@ -484,9 +499,9 @@ public class CatalogResource
     );
 
     List<TableMetadata> metadata = Lists.newArrayList(filtered)
-        .stream()
-        .map(pair -> pair.rhs)
-        .collect(Collectors.toList());
+                                        .stream()
+                                        .map(pair -> pair.rhs)
+                                        .collect(Collectors.toList());
     return Response.ok().entity(metadata).build();
   }
 
@@ -500,9 +515,9 @@ public class CatalogResource
         req,
         tables,
         name ->
-          Collections.singletonList(
-              resourceAction(schema, name, Action.READ)),
-          authorizerMapper
+            Collections.singletonList(
+                resourceAction(schema, name, Action.READ)),
+        authorizerMapper
     );
     return Response.ok().entity(Lists.newArrayList(filtered)).build();
   }
@@ -526,8 +541,8 @@ public class CatalogResource
     try {
       spec.validate();
     }
-    catch (IAE e) {
-      throw CatalogException.badRequest(e.getMessage());
+    catch (IAE | DruidException e) {
+      throw CatalogException.validationError(e);
     }
 
     if (!schema.accepts(spec.type())) {
@@ -566,35 +581,30 @@ public class CatalogResource
   private void authorizeTable(
       final SchemaSpec schema,
       final String tableName,
-      final Action action,
+      final Set<Action> actions,
       final HttpServletRequest request
   ) throws CatalogException
   {
     if (Strings.isNullOrEmpty(tableName)) {
       throw CatalogException.badRequest("Table name is required");
     }
-    if (action == Action.WRITE && !schema.writable()) {
+    if (actions.contains(Action.WRITE) && !schema.writable()) {
       throw new ForbiddenException(
           "Cannot create table definitions in schema: " + schema.name());
     }
-    authorize(schema.securityResource(), tableName, action, request);
+    authorizeResource(new Resource(tableName, schema.securityResource()), actions, request);
   }
 
-  private void authorize(String resource, String key, Action action, HttpServletRequest request)
+  private void authorizeResource(Resource resource, Set<Action> actions, HttpServletRequest request)
   {
-    final Access authResult = authorizeAccess(resource, key, action, request);
-    if (!authResult.isAllowed()) {
-      throw new ForbiddenException(authResult.toString());
-    }
-  }
-
-  private Access authorizeAccess(String resource, String key, Action action, HttpServletRequest request)
-  {
-    return AuthorizationUtils.authorizeResourceAction(
+    final AuthorizationResult authResult = AuthorizationUtils.authorizeAllResourceActions(
         request,
-        new ResourceAction(new Resource(key, resource), action),
+        actions.stream().map(action -> new ResourceAction(resource, action)).toList(),
         authorizerMapper
     );
+    if (!authResult.allowAccessWithNoRestriction()) {
+      throw new ForbiddenException(authResult.getErrorMessage());
+    }
   }
 
   private static Response okWithVersion(long version)

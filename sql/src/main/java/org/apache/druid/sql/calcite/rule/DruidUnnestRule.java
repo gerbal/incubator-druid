@@ -154,7 +154,7 @@ public class DruidUnnestRule extends RelOptRule
     }
 
     // Evaluate the expression. It's a constant, so no bindings are needed.
-    final Expr parsedExpression = expression.parse(plannerContext.getExprMacroTable());
+    final Expr parsedExpression = plannerContext.parseExpression(expression.getExpression());
     final ExprEval<?> eval = parsedExpression.eval(InputBindings.nilBindings());
     final List<Object[]> rows = new ArrayList<>();
 
@@ -166,7 +166,7 @@ public class DruidUnnestRule extends RelOptRule
         }
       }
     } else {
-      rows.add(new Object[]{eval.valueOrDefault()});
+      rows.add(new Object[]{eval.value()});
     }
 
     // Transform to inline datasource.

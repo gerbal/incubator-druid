@@ -17,76 +17,119 @@
  */
 
 import type { QueryResult } from 'druid-query-toolkit';
-import FileSaver from 'file-saver';
+import { saveAs } from 'file-saver';
 import * as JSONBig from 'json-bigint-native';
+import { Align, getMarkdownTable } from 'markdown-table-ts';
 
-import { stringifyValue } from './general';
+import { copyAndAlert, stringifyValue } from './general';
+import { queryResultToValuesQuery } from './values-query';
 
-export function formatForFormat(s: null | string | number | Date, format: 'csv' | 'tsv'): string {
-  // stringify and remove line break
-  const str = stringifyValue(s).replace(/(?:\r\n|\r|\n)/g, ' ');
+export type FileFormat = 'csv' | 'tsv' | 'json' | 'sql' | 'markdown';
+export const FILE_FORMATS: FileFormat[] = ['csv', 'tsv', 'json', 'sql', 'markdown'];
 
-  if (format === 'csv') {
-    // csv: single quote => double quote, handle ','
-    return `"${str.replace(/"/g, '""')}"`;
-  } else {
-    // tsv: single quote => double quote, \t => ''
-    return str.replace(/\t/g, '').replace(/"/g, '""');
+const FILE_FORMAT_TO_MIME_TYPE: Record<FileFormat, string> = {
+  csv: 'text/csv',
+  tsv: 'text/tab-separated-values',
+  json: 'application/json',
+  sql: 'text/plain',
+  markdown: 'text/markdown',
+};
+
+export const FILE_FORMAT_TO_LABEL: Record<FileFormat, string> = {
+  csv: 'CSV',
+  tsv: 'TSV',
+  json: 'JSON (new line delimited)',
+  sql: 'SQL (VALUES)',
+  markdown: 'Markdown table',
+};
+
+export function stringifyCsvValue(s: null | string | number | Date): string {
+  if (s == null) return '';
+  const str = stringifyValue(s).replace(/\r?\n/g, ' ').replace(/"/g, '""');
+
+  if (/["\n\t,]/.test(str)) {
+    return `"${str}"`;
   }
+
+  return str;
 }
 
-export function downloadFile(text: string, type: string, filename: string): void {
-  let blobType;
-  switch (type) {
-    case 'json':
-      blobType = 'application/json';
-      break;
+export function stringifyTsvValue(s: null | string | number | Date): string {
+  if (s == null) return '';
+  return stringifyValue(s).replace(/\r?\n|\t/g, ' ');
+}
+
+export function stringifyMarkdownValue(s: null | string | number | Date): string {
+  if (s == null) return '';
+  return stringifyValue(s).replace(/\r?\n/g, '<br>');
+}
+
+function queryResultToDsv(
+  queryResult: QueryResult,
+  delimiter: string,
+  valueFormatter: (v: any) => string,
+): string {
+  return [
+    queryResult.header.map(column => valueFormatter(column.name)).join(delimiter),
+    ...queryResult.rows.map(row => row.map(cell => valueFormatter(cell)).join(delimiter)),
+  ].join('\n');
+}
+
+export function downloadFile(text: string, fileFormat: FileFormat, filename: string): void {
+  saveAs(
+    new Blob([text], {
+      type: FILE_FORMAT_TO_MIME_TYPE[fileFormat],
+    }),
+    filename,
+  );
+}
+
+export function queryResultsToString(queryResult: QueryResult, format: FileFormat): string {
+  const { header, rows } = queryResult;
+
+  switch (format) {
+    case 'csv':
+      return queryResultToDsv(queryResult, ',', stringifyCsvValue);
+
     case 'tsv':
-      blobType = 'text/tab-separated-values';
-      break;
+      return queryResultToDsv(queryResult, '\t', stringifyTsvValue);
+
+    case 'sql':
+      return queryResultToValuesQuery(queryResult).toString();
+
+    case 'json':
+      return queryResult
+        .toObjectArray()
+        .map(r => JSONBig.stringify(r))
+        .join('\n');
+
+    case 'markdown':
+      return getMarkdownTable({
+        table: {
+          head: header.map(column => column.name),
+          body: rows.map(row => row.map(stringifyMarkdownValue)),
+        },
+        alignment: header.map(column => (column.isNumeric() ? Align.Right : Align.Left)),
+      });
+
     default:
-      // csv
-      blobType = `text/${type}`;
-      break;
+      throw new Error(`unknown format: ${format}`);
   }
-
-  const blob = new Blob([text], {
-    type: blobType,
-  });
-
-  FileSaver.saveAs(blob, filename);
 }
 
 export function downloadQueryResults(
   queryResult: QueryResult,
   filename: string,
-  format: string,
+  fileFormat: FileFormat,
 ): void {
-  let lines: string[] = [];
-  let separator = '';
+  const resultString: string = queryResultsToString(queryResult, fileFormat);
+  downloadFile(resultString, fileFormat, filename);
+}
 
-  if (format === 'csv' || format === 'tsv') {
-    separator = format === 'csv' ? ',' : '\t';
-    lines.push(
-      queryResult.header.map(column => formatForFormat(column.name, format)).join(separator),
-    );
-    lines = lines.concat(
-      queryResult.rows.map(r => r.map(cell => formatForFormat(cell, format)).join(separator)),
-    );
-  } else {
-    // json
-    lines = queryResult.rows.map(r => {
-      const outputObject: Record<string, any> = {};
-      for (let k = 0; k < r.length; k++) {
-        const newName = queryResult.header[k];
-        if (newName) {
-          outputObject[newName.name] = r[k];
-        }
-      }
-      return JSONBig.stringify(outputObject);
-    });
-  }
-
-  const lineBreak = '\n';
-  downloadFile(lines.join(lineBreak), format, filename);
+export function copyQueryResultsToClipboard(
+  queryResult: QueryResult,
+  fileFormat: FileFormat,
+): void {
+  const resultString: string = queryResultsToString(queryResult, fileFormat);
+  copyAndAlert(resultString, 'Query results copied to clipboard');
 }

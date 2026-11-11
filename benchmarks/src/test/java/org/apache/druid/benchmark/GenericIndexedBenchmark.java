@@ -20,7 +20,6 @@
 package org.apache.druid.benchmark;
 
 import com.google.common.primitives.Ints;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.common.io.smoosh.FileSmoosher;
 import org.apache.druid.java.util.common.io.smoosh.SmooshedFileMapper;
@@ -61,13 +60,9 @@ import java.util.concurrent.TimeUnit;
 @State(Scope.Benchmark)
 public class GenericIndexedBenchmark
 {
-  static {
-    NullHandling.initializeForTests();
-  }
-
   public static final int ITERATIONS = 10000;
 
-  static final ObjectStrategy<byte[]> BYTE_ARRAY_STRATEGY = new ObjectStrategy<byte[]>()
+  static final ObjectStrategy<byte[]> BYTE_ARRAY_STRATEGY = new ObjectStrategy<>()
   {
     @Override
     public Class<byte[]> getClazz()
@@ -127,7 +122,7 @@ public class GenericIndexedBenchmark
       genericIndexedWriter.write(element.array());
     }
     smooshDir = FileUtils.createTempDir();
-    file = File.createTempFile("genericIndexedBenchmark", "meta");
+    file = new File(smooshDir, "meta");
 
     try (FileChannel fileChannel =
              FileChannel.open(file.toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE);

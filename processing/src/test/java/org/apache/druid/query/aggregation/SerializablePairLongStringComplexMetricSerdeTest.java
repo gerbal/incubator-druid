@@ -20,9 +20,9 @@
 package org.apache.druid.query.aggregation;
 
 import com.google.common.collect.ImmutableList;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.segment.ColumnValueSelector;
 import org.apache.druid.segment.GenericColumnSerializer;
+import org.apache.druid.segment.IndexSpec;
 import org.apache.druid.segment.column.ColumnBuilder;
 import org.apache.druid.segment.column.ColumnHolder;
 import org.apache.druid.segment.column.ComplexColumn;
@@ -31,8 +31,8 @@ import org.apache.druid.segment.serde.cell.RandomStringUtils;
 import org.apache.druid.segment.writeout.HeapByteBufferWriteOutBytes;
 import org.apache.druid.segment.writeout.OnHeapMemorySegmentWriteOutMedium;
 import org.apache.druid.segment.writeout.SegmentWriteOutMedium;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
@@ -47,10 +47,6 @@ import java.util.concurrent.atomic.AtomicReference;
 
 public class SerializablePairLongStringComplexMetricSerdeTest
 {
-  static {
-    NullHandling.initializeForTests();
-  }
-
   private static final SerializablePairLongStringComplexMetricSerde LEGACY_SERDE =
       new SerializablePairLongStringComplexMetricSerde();
   private static final SerializablePairLongStringComplexMetricSerde COMPRESSED_SERDE =
@@ -73,7 +69,7 @@ public class SerializablePairLongStringComplexMetricSerdeTest
     assertExpected(ImmutableList.of(new SerializablePairLongString(
         100L,
         randomStringUtils.randomAlphanumeric(2 * 1024 * 1024)
-    )), 2097182, 2103140);
+    )), 2097182, 2103139);
   }
 
   @Test
@@ -90,7 +86,7 @@ public class SerializablePairLongStringComplexMetricSerdeTest
       valueList.add(new SerializablePairLongString(Integer.MAX_VALUE + (long) i, stringList.get(i % numStrings)));
     }
 
-    assertExpected(valueList, 10440010, 1746026);
+    assertExpected(valueList, 10440010, 1746198);
   }
 
   @Test
@@ -115,7 +111,7 @@ public class SerializablePairLongStringComplexMetricSerdeTest
       valueList.add(new SerializablePairLongString(random.nextLong(), randomStringUtils.randomAlphanumeric(1024)));
     }
 
-    assertExpected(valueList, 10440010, 10428975);
+    assertExpected(valueList, 10440010, 10429009);
   }
 
   @Test
@@ -152,12 +148,12 @@ public class SerializablePairLongStringComplexMetricSerdeTest
     SegmentWriteOutMedium writeOutMedium = new OnHeapMemorySegmentWriteOutMedium();
     ByteBuffer legacyBuffer = serializeAllValuesToByteBuffer(
         expected,
-        LEGACY_SERDE.getSerializer(writeOutMedium, "not-used"),
+        LEGACY_SERDE.getSerializer(writeOutMedium, "not-used", IndexSpec.getDefault()),
         expectedLegacySize
     ).asReadOnlyBuffer();
     ByteBuffer compressedBuffer = serializeAllValuesToByteBuffer(
         expected,
-        COMPRESSED_SERDE.getSerializer(writeOutMedium, "not-used"),
+        COMPRESSED_SERDE.getSerializer(writeOutMedium, "not-used", IndexSpec.getDefault()),
         expectedCompressedSize
     ).asReadOnlyBuffer();
 
@@ -165,8 +161,8 @@ public class SerializablePairLongStringComplexMetricSerdeTest
          ComplexColumn compressedCol = createComplexColumn(compressedBuffer)
     ) {
       for (int i = 0; i < expected.size(); i++) {
-        Assert.assertEquals(expected.get(i), legacyCol.getRowValue(i));
-        Assert.assertEquals(expected.get(i), compressedCol.getRowValue(i));
+        Assertions.assertEquals(expected.get(i), legacyCol.getRowValue(i));
+        Assertions.assertEquals(expected.get(i), compressedCol.getRowValue(i));
       }
     }
     return compressedBuffer;
@@ -184,10 +180,10 @@ public class SerializablePairLongStringComplexMetricSerdeTest
 
     final ComplexColumn col = (ComplexColumn) columnHolder.getColumn();
     if (col instanceof SerializablePairLongStringComplexColumn) {
-      Assert.assertEquals(serializedSize, col.getLength());
+      Assertions.assertEquals(serializedSize, col.getLength());
     }
-    Assert.assertEquals("serializablePairLongString", col.getTypeName());
-    Assert.assertEquals(SerializablePairLongString.class, col.getClazz());
+    Assertions.assertEquals("serializablePairLongString", col.getTypeName());
+    Assertions.assertEquals(SerializablePairLongString.class, col.getClazz());
 
     return col;
   }
@@ -204,7 +200,7 @@ public class SerializablePairLongStringComplexMetricSerdeTest
 
     final AtomicReference<SerializablePairLongString> reference = new AtomicReference<>(null);
     ColumnValueSelector<SerializablePairLongString> valueSelector =
-        new SingleObjectColumnValueSelector<SerializablePairLongString>(
+        new SingleObjectColumnValueSelector<>(
             SerializablePairLongString.class
         )
         {
@@ -239,10 +235,10 @@ public class SerializablePairLongStringComplexMetricSerdeTest
     byteBuffer.flip();
 
     if (expectedSize > -1) {
-      Assert.assertEquals(expectedSize, serializer.getSerializedSize());
+      Assertions.assertEquals(expectedSize, serializer.getSerializedSize());
     }
 
-    Assert.assertEquals(serializer.getSerializedSize(), byteBuffer.limit());
+    Assertions.assertEquals(serializer.getSerializedSize(), byteBuffer.limit());
 
     return byteBuffer;
   }

@@ -19,45 +19,66 @@
 
 package org.apache.druid.cli;
 
-import com.google.common.collect.ImmutableList;
 import com.google.inject.Injector;
+import com.google.inject.Key;
+import com.google.inject.TypeLiteral;
 import org.apache.druid.guice.GuiceInjectors;
-import org.junit.Assert;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.apache.druid.guice.annotations.JSR311Resource;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
+import java.util.List;
 import java.util.Properties;
+import java.util.Set;
+import java.util.stream.Stream;
 
-@RunWith(Parameterized.class)
 public class MainTest
 {
-  @Parameterized.Parameters(name = "{0}")
-  public static Iterable<Object[]> constructorFeeder()
+  private static Stream<ServerRunnable> runnables()
   {
-    return ImmutableList.of(
-        new Object[]{new CliOverlord()},
-        new Object[]{new CliBroker()},
-        new Object[]{new CliHistorical()},
-        new Object[]{new CliCoordinator()},
-        new Object[]{new CliMiddleManager()},
-        new Object[]{new CliRouter()},
-        new Object[]{new CliIndexer()}
+    return Stream.of(
+        new CliOverlord(),
+        new CliBroker(),
+        new CliHistorical(),
+        new CliCoordinator(),
+        new CliMiddleManager(),
+        new CliRouter(),
+        new CliIndexer()
     );
   }
 
-  private final ServerRunnable runnable;
-
-  public MainTest(ServerRunnable runnable)
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("runnables")
+  public void testSimpleInjection(ServerRunnable runnable)
   {
-    this.runnable = runnable;
+    Assertions.assertNotNull(makeInjector(runnable));
   }
 
-  @Test
-  public void testSimpleInjection()
+  /**
+   * Jersey routes each request to a single root resource class, so an endpoint is unreachable if its path falls under
+   * a more specific {@code @Path} of another resource class served by the same process.
+   */
+  @ParameterizedTest(name = "{0}")
+  @MethodSource("runnables")
+  public void testNoShadowedEndpoints(final ServerRunnable runnable)
   {
-    final Injector injector = GuiceInjectors.makeStartupInjector();
-    injector.injectMembers(runnable);
-    Assert.assertNotNull(runnable.makeInjector(runnable.getNodeRoles(new Properties())));
+    final Set<Class<?>> resources = makeInjector(runnable).getInstance(
+        Key.get(new TypeLiteral<Set<Class<?>>>() {}, JSR311Resource.class)
+    );
+    Assertions.assertFalse(resources.isEmpty());
+
+    final List<String> shadowedEndpoints = JerseyShadowedEndpoints.find(resources);
+    Assertions.assertTrue(
+        shadowedEndpoints.isEmpty(),
+        () -> "Unreachable endpoints:\n" + String.join("\n", shadowedEndpoints)
+    );
+  }
+
+  private static Injector makeInjector(final ServerRunnable runnable)
+  {
+    final Injector startupInjector = GuiceInjectors.makeStartupInjector();
+    startupInjector.injectMembers(runnable);
+    return runnable.makeInjector(runnable.getNodeRoles(new Properties()));
   }
 }

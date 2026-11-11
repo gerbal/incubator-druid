@@ -35,8 +35,8 @@ import org.apache.druid.query.aggregation.post.FieldAccessPostAggregator;
 import org.apache.druid.query.dimension.DefaultDimensionSpec;
 import org.apache.druid.query.ordering.StringComparators;
 import org.joda.time.DateTime;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -73,17 +73,17 @@ public class TopNBinaryFnTest
     Iterator i1 = ((Iterable) o1).iterator();
     Iterator i2 = ((Iterable) o2).iterator();
     while (i1.hasNext() && i2.hasNext()) {
-      Assert.assertEquals(i1.next(), i2.next());
+      Assertions.assertEquals(i1.next(), i2.next());
     }
-    Assert.assertTrue(!i1.hasNext() && !i2.hasNext());
+    Assertions.assertTrue(!i1.hasNext() && !i2.hasNext());
   }
 
   @Test
   public void testMerge()
   {
-    Result<TopNResultValue> result1 = new Result<TopNResultValue>(
+    Result<TopNResultValue> result1 = new Result<>(
         currTime,
-        new TopNResultValue(
+        TopNResultValue.create(
             ImmutableList.<Map<String, Object>>of(
                 ImmutableMap.of(
                     "rows", 1L,
@@ -103,9 +103,9 @@ public class TopNBinaryFnTest
             )
         )
     );
-    Result<TopNResultValue> result2 = new Result<TopNResultValue>(
+    Result<TopNResultValue> result2 = new Result<>(
         currTime,
-        new TopNResultValue(
+        TopNResultValue.create(
             ImmutableList.<Map<String, Object>>of(
                 ImmutableMap.of(
                     "rows", 2L,
@@ -126,9 +126,9 @@ public class TopNBinaryFnTest
         )
     );
 
-    Result<TopNResultValue> expected = new Result<TopNResultValue>(
+    Result<TopNResultValue> expected = new Result<>(
         currTime,
-        new TopNResultValue(
+        TopNResultValue.create(
             ImmutableList.<Map<String, Object>>of(
                 ImmutableMap.of(
                     "testdim", "1",
@@ -156,16 +156,16 @@ public class TopNBinaryFnTest
         result1,
         result2
     );
-    Assert.assertEquals(expected.getTimestamp(), actual.getTimestamp());
+    Assertions.assertEquals(expected.getTimestamp(), actual.getTimestamp());
     assertTopNMergeResult(expected.getValue(), actual.getValue());
   }
 
   @Test
   public void testMergeDay()
   {
-    Result<TopNResultValue> result1 = new Result<TopNResultValue>(
+    Result<TopNResultValue> result1 = new Result<>(
         currTime,
-        new TopNResultValue(
+        TopNResultValue.create(
             ImmutableList.<Map<String, Object>>of(
                 ImmutableMap.of(
                     "rows", 1L,
@@ -185,9 +185,9 @@ public class TopNBinaryFnTest
             )
         )
     );
-    Result<TopNResultValue> result2 = new Result<TopNResultValue>(
+    Result<TopNResultValue> result2 = new Result<>(
         currTime,
-        new TopNResultValue(
+        TopNResultValue.create(
             ImmutableList.<Map<String, Object>>of(
                 ImmutableMap.of(
                     "rows", 2L,
@@ -208,9 +208,9 @@ public class TopNBinaryFnTest
         )
     );
 
-    Result<TopNResultValue> expected = new Result<TopNResultValue>(
+    Result<TopNResultValue> expected = new Result<>(
         Granularities.DAY.bucketStart(currTime),
-        new TopNResultValue(
+        TopNResultValue.create(
             ImmutableList.<Map<String, Object>>of(
                 ImmutableMap.of(
                     "testdim", "1",
@@ -237,16 +237,16 @@ public class TopNBinaryFnTest
         result1,
         result2
     );
-    Assert.assertEquals(expected.getTimestamp(), actual.getTimestamp());
+    Assertions.assertEquals(expected.getTimestamp(), actual.getTimestamp());
     assertTopNMergeResult(expected.getValue(), actual.getValue());
   }
 
   @Test
   public void testMergeOneResultNull()
   {
-    Result<TopNResultValue> result1 = new Result<TopNResultValue>(
+    Result<TopNResultValue> result1 = new Result<>(
         currTime,
-        new TopNResultValue(
+        TopNResultValue.create(
             ImmutableList.<Map<String, Object>>of(
                 ImmutableMap.of(
                     "rows", 1L,
@@ -281,16 +281,16 @@ public class TopNBinaryFnTest
         result1,
         result2
     );
-    Assert.assertEquals(expected.getTimestamp(), actual.getTimestamp());
+    Assertions.assertEquals(expected.getTimestamp(), actual.getTimestamp());
     assertTopNMergeResult(expected.getValue(), actual.getValue());
   }
 
   @Test
   public void testMergeByPostAgg()
   {
-    Result<TopNResultValue> result1 = new Result<TopNResultValue>(
+    Result<TopNResultValue> result1 = new Result<>(
         currTime,
-        new TopNResultValue(
+        TopNResultValue.create(
             ImmutableList.<Map<String, Object>>of(
                 ImmutableMap.of(
                     "rows", 1L,
@@ -313,9 +313,9 @@ public class TopNBinaryFnTest
             )
         )
     );
-    Result<TopNResultValue> result2 = new Result<TopNResultValue>(
+    Result<TopNResultValue> result2 = new Result<>(
         currTime,
-        new TopNResultValue(
+        TopNResultValue.create(
             ImmutableList.<Map<String, Object>>of(
                 ImmutableMap.of(
                     "rows", 2L,
@@ -339,9 +339,9 @@ public class TopNBinaryFnTest
         )
     );
 
-    Result<TopNResultValue> expected = new Result<TopNResultValue>(
+    Result<TopNResultValue> expected = new Result<>(
         currTime,
-        new TopNResultValue(
+        TopNResultValue.create(
             ImmutableList.<Map<String, Object>>of(
                 ImmutableMap.of(
                     "testdim", "other",
@@ -376,16 +376,16 @@ public class TopNBinaryFnTest
         result1,
         result2
     );
-    Assert.assertEquals(expected.getTimestamp(), actual.getTimestamp());
+    Assertions.assertEquals(expected.getTimestamp(), actual.getTimestamp());
     assertTopNMergeResult(expected.getValue(), actual.getValue());
   }
 
   @Test
   public void testMergeShiftedTimestamp()
   {
-    Result<TopNResultValue> result1 = new Result<TopNResultValue>(
+    Result<TopNResultValue> result1 = new Result<>(
         currTime,
-        new TopNResultValue(
+        TopNResultValue.create(
             ImmutableList.<Map<String, Object>>of(
                 ImmutableMap.of(
                     "rows", 1L,
@@ -405,9 +405,9 @@ public class TopNBinaryFnTest
             )
         )
     );
-    Result<TopNResultValue> result2 = new Result<TopNResultValue>(
+    Result<TopNResultValue> result2 = new Result<>(
         currTime.plusHours(2),
-        new TopNResultValue(
+        TopNResultValue.create(
             ImmutableList.<Map<String, Object>>of(
                 ImmutableMap.of(
                     "rows", 2L,
@@ -428,9 +428,9 @@ public class TopNBinaryFnTest
         )
     );
 
-    Result<TopNResultValue> expected = new Result<TopNResultValue>(
+    Result<TopNResultValue> expected = new Result<>(
         currTime,
-        new TopNResultValue(
+        TopNResultValue.create(
             ImmutableList.<Map<String, Object>>of(
                 ImmutableMap.of(
                     "testdim", "1",
@@ -457,16 +457,16 @@ public class TopNBinaryFnTest
         result1,
         result2
     );
-    Assert.assertEquals(expected.getTimestamp(), actual.getTimestamp());
+    Assertions.assertEquals(expected.getTimestamp(), actual.getTimestamp());
     assertTopNMergeResult(expected.getValue(), actual.getValue());
   }
 
   @Test
   public void testMergeLexicographicWithInvalidDimName()
   {
-    Result<TopNResultValue> result1 = new Result<TopNResultValue>(
+    Result<TopNResultValue> result1 = new Result<>(
         currTime,
-        new TopNResultValue(
+        TopNResultValue.create(
             ImmutableList.<Map<String, Object>>of(
                 ImmutableMap.of(
                     "rows", 1L,
@@ -476,9 +476,9 @@ public class TopNBinaryFnTest
             )
         )
     );
-    Result<TopNResultValue> result2 = new Result<TopNResultValue>(
+    Result<TopNResultValue> result2 = new Result<>(
         currTime,
-        new TopNResultValue(
+        TopNResultValue.create(
             ImmutableList.<Map<String, Object>>of(
                 ImmutableMap.of(
                     "rows", 2L,
@@ -494,9 +494,9 @@ public class TopNBinaryFnTest
     resultMap.put("rows", 3L);
     resultMap.put("index", 5L);
 
-    Result<TopNResultValue> expected = new Result<TopNResultValue>(
+    Result<TopNResultValue> expected = new Result<>(
         currTime,
-        new TopNResultValue(
+        TopNResultValue.create(
             ImmutableList.of(
                 resultMap
             )
@@ -514,7 +514,7 @@ public class TopNBinaryFnTest
         result1,
         result2
     );
-    Assert.assertEquals(expected.getTimestamp(), actual.getTimestamp());
+    Assertions.assertEquals(expected.getTimestamp(), actual.getTimestamp());
     assertTopNMergeResult(expected.getValue(), actual.getValue());
   }
 }

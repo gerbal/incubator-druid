@@ -23,9 +23,11 @@ sidebar_label: "Search"
   ~ under the License.
   -->
 
-> Apache Druid supports two query languages: [Druid SQL](sql.md) and [native queries](querying.md).
-> This document describes a query
-> type that is only available in the native language.
+:::info
+ Apache&circledR; Druid supports two query languages: [Druid SQL](sql.md) and [native queries](querying.md).
+ This document describes a query
+ type that is only available in the native language.
+:::
 
 A search query returns dimension values that match the search specification.
 
@@ -55,7 +57,7 @@ There are several main parts to a search query:
 
 |property|description|required?|
 |--------|-----------|---------|
-|queryType|This String should always be "search"; this is the first thing Apache Druid looks at to figure out how to interpret the query.|yes|
+|queryType|This String should always be "search"; this is the first thing Apache&circledR; Druid looks at to figure out how to interpret the query.|yes|
 |dataSource|A String or Object defining the data source to query, very similar to a table in a relational database. See [DataSource](../querying/datasource.md) for more information.|yes|
 |granularity|Defines the granularity of the query. See [Granularities](../querying/granularities.md).|no (default to `all`)|
 |filter|See [Filters](../querying/filters.md).|no|
@@ -65,7 +67,7 @@ There are several main parts to a search query:
 |virtualColumns|A JSON list of [virtual columns](./virtual-columns.md) available to use in `searchDimensions`.| no (default none)|
 |query|See [SearchQuerySpec](#searchqueryspec).|yes|
 |sort|An object specifying how the results of the search should be sorted.<br/>Possible types are "lexicographic" (the default sort), "alphanumeric", "strlen", and "numeric".<br/>See [Sorting Orders](./sorting-orders.md) for more details.|no|
-|context|See [Context](../querying/query-context.md)|no|
+|context|See [Context](../querying/query-context-reference.md)|no|
 
 The format of the result is:
 
@@ -124,10 +126,6 @@ are unique.
 queryableIndexSegment, and then evaluates search predicates. If some filters support bitmap indexes, the cursor can read
 only the rows which satisfy those filters, thereby saving I/O cost. However, it might be slow with filters of low selectivity.
 
-- "auto" strategy uses a cost-based planner for choosing an optimal search strategy. It estimates the cost of index-only
-and cursor-based execution plans, and chooses the optimal one. Currently, it is not enabled by default due to the overhead
-of cost estimation.
-
 ## Server configuration
 
 The following runtime properties apply:
@@ -142,7 +140,7 @@ The following query context parameters apply:
 
 |Property|Description|
 |--------|-----------|
-|`searchStrategy`|Overrides the value of `druid.query.search.searchStrategy` for this query.|
+|`searchStrategy`|Overrides the value of `druid.query.search.searchStrategy` for this query.| <!-- GENERATED QUERY CONTEXT PARAMETER: searchStrategy -->
 
 ## SearchQuerySpec
 
@@ -159,7 +157,7 @@ If any part of a dimension value contains the value specified in this search que
 
 ### `fragment`
 
-If any part of a dimension value contains all of the values specified in this search query spec, regardless of case by default, a "match" occurs. The grammar is:
+If any part of a dimension value contains all the values specified in this search query spec, regardless of case by default, a "match" occurs. The grammar is:
 
 ```json
 {

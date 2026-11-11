@@ -19,19 +19,16 @@
 
 package org.apache.druid.indexing.overlord;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.google.common.base.Function;
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Maps;
 import com.google.inject.Inject;
+import org.apache.druid.error.DruidException;
 import org.apache.druid.indexer.TaskInfo;
 import org.apache.druid.indexer.TaskStatus;
 import org.apache.druid.indexer.TaskStatusPlus;
 import org.apache.druid.indexing.common.TaskLock;
-import org.apache.druid.indexing.common.actions.TaskAction;
 import org.apache.druid.indexing.common.config.TaskStorageConfig;
 import org.apache.druid.indexing.common.task.Task;
 import org.apache.druid.java.util.common.DateTimes;
@@ -39,16 +36,13 @@ import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.lifecycle.LifecycleStart;
 import org.apache.druid.java.util.common.lifecycle.LifecycleStop;
 import org.apache.druid.java.util.emitter.EmittingLogger;
-import org.apache.druid.metadata.EntryExistsException;
 import org.apache.druid.metadata.MetadataStorageActionHandler;
 import org.apache.druid.metadata.MetadataStorageActionHandlerFactory;
-import org.apache.druid.metadata.MetadataStorageActionHandlerTypes;
 import org.apache.druid.metadata.MetadataStorageConnector;
-import org.apache.druid.metadata.MetadataStorageTablesConfig;
 import org.apache.druid.metadata.TaskLookup;
 import org.apache.druid.metadata.TaskLookup.ActiveTaskLookup;
-import org.apache.druid.metadata.TaskLookup.CompleteTaskLookup;
 import org.apache.druid.metadata.TaskLookup.TaskLookupType;
+import org.joda.time.DateTime;
 
 import javax.annotation.Nullable;
 import java.util.Collections;
@@ -59,45 +53,9 @@ import java.util.stream.Collectors;
 
 public class MetadataTaskStorage implements TaskStorage
 {
-
-  private static final MetadataStorageActionHandlerTypes<Task, TaskStatus, TaskAction, TaskLock> TASK_TYPES = new MetadataStorageActionHandlerTypes<Task, TaskStatus, TaskAction, TaskLock>()
-  {
-    @Override
-    public TypeReference<Task> getEntryType()
-    {
-      return new TypeReference<Task>()
-      {
-      };
-    }
-
-    @Override
-    public TypeReference<TaskStatus> getStatusType()
-    {
-      return new TypeReference<TaskStatus>()
-      {
-      };
-    }
-
-    @Override
-    public TypeReference<TaskAction> getLogType()
-    {
-      return new TypeReference<TaskAction>()
-      {
-      };
-    }
-
-    @Override
-    public TypeReference<TaskLock> getLockType()
-    {
-      return new TypeReference<TaskLock>()
-      {
-      };
-    }
-  };
-
   private final MetadataStorageConnector metadataStorageConnector;
   private final TaskStorageConfig config;
-  private final MetadataStorageActionHandler<Task, TaskStatus, TaskAction, TaskLock> handler;
+  private final MetadataStorageActionHandler handler;
 
   private static final EmittingLogger log = new EmittingLogger(MetadataTaskStorage.class);
 
@@ -110,7 +68,7 @@ public class MetadataTaskStorage implements TaskStorage
   {
     this.metadataStorageConnector = metadataStorageConnector;
     this.config = config;
-    this.handler = factory.create(MetadataStorageTablesConfig.TASK_ENTRY_TYPE, TASK_TYPES);
+    this.handler = factory.create();
   }
 
   @LifecycleStart
@@ -128,7 +86,7 @@ public class MetadataTaskStorage implements TaskStorage
   }
 
   @Override
-  public void insert(final Task task, final TaskStatus status) throws EntryExistsException
+  public TaskInfo insert(final Task task, final TaskStatus status)
   {
     Preconditions.checkNotNull(task, "task");
     Preconditions.checkNotNull(status, "status");
@@ -139,12 +97,13 @@ public class MetadataTaskStorage implements TaskStorage
         status.getId()
     );
 
-    log.info("Inserting task %s with status: %s", task.getId(), status);
+    log.info("Inserting task [%s] with status [%s].", task.getId(), status);
+    final DateTime insertionTime = DateTimes.nowUtc();
 
     try {
       handler.insert(
           task.getId(),
-          DateTimes.nowUtc(),
+          insertionTime,
           task.getDataSource(),
           task,
           status.isRunnable(),
@@ -153,13 +112,18 @@ public class MetadataTaskStorage implements TaskStorage
           task.getGroupId()
       );
     }
-    catch (Exception e) {
-      if (e instanceof EntryExistsException) {
-        throw (EntryExistsException) e;
-      } else {
-        throw new RuntimeException(e);
-      }
+    catch (DruidException e) {
+      throw e;
     }
+    catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+
+    return new TaskInfo(
+        insertionTime,
+        status,
+        task
+    );
   }
 
   @Override
@@ -167,15 +131,12 @@ public class MetadataTaskStorage implements TaskStorage
   {
     Preconditions.checkNotNull(status, "status");
 
-    log.info("Updating task %s to status: %s", status.getId(), status);
+    final String taskId = status.getId();
+    log.info("Updating status of task [%s] to [%s].", taskId, status);
 
-    final boolean set = handler.setStatus(
-        status.getId(),
-        status.isRunnable(),
-        status
-    );
+    final boolean set = handler.setStatus(taskId, status.isRunnable(), status);
     if (!set) {
-      throw new ISE("Active task not found: %s", status.getId());
+      throw new ISE("No active task for id [%s]", taskId);
     }
   }
 
@@ -193,9 +154,15 @@ public class MetadataTaskStorage implements TaskStorage
 
   @Nullable
   @Override
-  public TaskInfo<Task, TaskStatus> getTaskInfo(String taskId)
+  public TaskInfo getTaskInfo(String taskId)
   {
     return handler.getTaskInfo(taskId);
+  }
+
+  @Override
+  public List<TaskInfo> getCompletedTasksInfo(DateTime start, @Nullable Integer n)
+  {
+    return handler.getTaskInfos(Map.of(TaskLookupType.COMPLETE, new TaskLookup.CompleteTaskLookup(n, start)), null);
   }
 
   @Override
@@ -203,23 +170,30 @@ public class MetadataTaskStorage implements TaskStorage
   {
     // filter out taskInfo with a null 'task' which should only happen in practice if we are missing a jackson module
     // and don't know what to do with the payload, so we won't be able to make use of it anyway
-    return handler.getTaskInfos(Collections.singletonMap(TaskLookupType.ACTIVE, ActiveTaskLookup.getInstance()), null)
+    return getActiveTaskInfos().stream()
+                               .map(TaskInfo::getTask)
+                               .collect(Collectors.toList());
+  }
+
+  @Override
+  public List<TaskInfo> getActiveTaskInfos()
+  {
+    return handler.getTaskInfos(Map.of(TaskLookupType.ACTIVE, ActiveTaskLookup.getInstance()), null)
                   .stream()
-                  .filter(taskInfo -> taskInfo.getStatus().isRunnable() && taskInfo.getTask() != null)
-                  .map(TaskInfo::getTask)
+                  .filter(taskInfo -> taskInfo.getStatus().isRunnable())
                   .collect(Collectors.toList());
   }
 
   @Override
   public List<Task> getActiveTasksByDatasource(String datasource)
   {
-    List<TaskInfo<Task, TaskStatus>> activeTaskInfos = handler.getTaskInfos(
+    List<TaskInfo> activeTaskInfos = handler.getTaskInfos(
         Collections.singletonMap(TaskLookupType.ACTIVE, ActiveTaskLookup.getInstance()),
         datasource
     );
     ImmutableList.Builder<Task> tasksBuilder = ImmutableList.builder();
-    for (TaskInfo<Task, TaskStatus> taskInfo : activeTaskInfos) {
-      if (taskInfo.getStatus().isRunnable() && taskInfo.getTask() != null) {
+    for (TaskInfo taskInfo : activeTaskInfos) {
+      if (taskInfo.getStatus().isRunnable()) {
         tasksBuilder.add(taskInfo.getTask());
       }
     }
@@ -227,12 +201,16 @@ public class MetadataTaskStorage implements TaskStorage
   }
 
   @Override
-  public List<TaskInfo<Task, TaskStatus>> getTaskInfos(
+  public List<TaskInfo> getTaskInfos(
       Map<TaskLookupType, TaskLookup> taskLookups,
       @Nullable String datasource
   )
   {
-    Map<TaskLookupType, TaskLookup> theTaskLookups = processTaskLookups(taskLookups);
+    Map<TaskLookupType, TaskLookup> theTaskLookups =
+        TaskStorageUtils.processTaskLookups(
+            taskLookups,
+            DateTimes.nowUtc().minus(config.getRecentlyFinishedThreshold())
+        );
     return Collections.unmodifiableList(handler.getTaskInfos(theTaskLookups, datasource));
   }
 
@@ -242,34 +220,16 @@ public class MetadataTaskStorage implements TaskStorage
       @Nullable String datasource
   )
   {
-    Map<TaskLookupType, TaskLookup> processedTaskLookups = processTaskLookups(taskLookups);
-    return Collections.unmodifiableList(
-        handler.getTaskStatusList(processedTaskLookups, datasource)
-               .stream()
-               .map(TaskStatusPlus::fromTaskIdentifierInfo)
-               .collect(Collectors.toList())
-    );
-  }
-
-  private Map<TaskLookupType, TaskLookup> processTaskLookups(
-      Map<TaskLookupType, TaskLookup> taskLookups
-  )
-  {
-    Map<TaskLookupType, TaskLookup> processedTaskLookups = Maps.newHashMapWithExpectedSize(taskLookups.size());
-    for (Entry<TaskLookupType, TaskLookup> entry : taskLookups.entrySet()) {
-      if (entry.getKey() == TaskLookupType.COMPLETE) {
-        CompleteTaskLookup completeTaskLookup = (CompleteTaskLookup) entry.getValue();
-        processedTaskLookups.put(
-            entry.getKey(),
-            completeTaskLookup.hasTaskCreatedTimeFilter()
-            ? completeTaskLookup
-            : completeTaskLookup.withDurationBeforeNow(config.getRecentlyFinishedThreshold())
+    Map<TaskLookupType, TaskLookup> processedTaskLookups =
+        TaskStorageUtils.processTaskLookups(
+            taskLookups,
+            DateTimes.nowUtc().minus(config.getRecentlyFinishedThreshold())
         );
-      } else {
-        processedTaskLookups.put(entry.getKey(), entry.getValue());
-      }
-    }
-    return processedTaskLookups;
+
+    return handler.getTaskStatusList(processedTaskLookups, datasource)
+                  .stream()
+                  .map(TaskStatusPlus::fromTaskIdentifierInfo)
+                  .collect(Collectors.toList());
   }
 
   @Override
@@ -279,10 +239,8 @@ public class MetadataTaskStorage implements TaskStorage
     Preconditions.checkNotNull(taskLock, "taskLock");
 
     log.info(
-        "Adding lock on interval[%s] version[%s] for task: %s",
-        taskLock.getInterval(),
-        taskLock.getVersion(),
-        taskid
+        "Adding lock on interval[%s] version[%s] for task [%s].",
+        taskLock.getInterval(), taskLock.getVersion(), taskid
     );
 
     handler.addLock(taskid, taskLock);
@@ -296,15 +254,13 @@ public class MetadataTaskStorage implements TaskStorage
     Preconditions.checkNotNull(newLock, "newLock");
 
     log.info(
-        "Replacing an existing lock[%s] with a new lock[%s] for task: %s",
-        oldLock,
-        newLock,
-        taskid
+        "Replacing an existing lock[%s] with a new lock[%s] for task [%s].",
+        oldLock, newLock, taskid
     );
 
     final Long oldLockId = handler.getLockId(taskid, oldLock);
     if (oldLockId == null) {
-      throw new ISE("Cannot find an existing lock[%s]", oldLock);
+      throw new ISE("Cannot find lock[%s] for task [%s]", oldLock, taskid);
     }
 
     handler.replaceLock(taskid, oldLockId, newLock);
@@ -336,34 +292,10 @@ public class MetadataTaskStorage implements TaskStorage
   {
     return ImmutableList.copyOf(
         Iterables.transform(
-            getLocksWithIds(taskid).entrySet(), new Function<Map.Entry<Long, TaskLock>, TaskLock>()
-            {
-              @Override
-              public TaskLock apply(Map.Entry<Long, TaskLock> e)
-              {
-                return e.getValue();
-              }
-            }
+            getLocksWithIds(taskid).entrySet(),
+            Entry::getValue
         )
     );
-  }
-
-  @Deprecated
-  @Override
-  public <T> void addAuditLog(final Task task, final TaskAction<T> taskAction)
-  {
-    Preconditions.checkNotNull(taskAction, "taskAction");
-
-    log.info("Logging action for task[%s]: %s", task.getId(), taskAction);
-
-    handler.addLog(task.getId(), taskAction);
-  }
-
-  @Deprecated
-  @Override
-  public List<TaskAction> getAuditLogs(final String taskId)
-  {
-    return handler.getLogs(taskId);
   }
 
   private Map<Long, TaskLock> getLocksWithIds(final String taskid)

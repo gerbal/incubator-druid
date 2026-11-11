@@ -21,6 +21,7 @@ package org.apache.druid.utils;
 
 import com.google.common.primitives.Ints;
 import com.google.inject.Inject;
+import com.sun.management.OperatingSystemMXBean;
 
 import java.io.File;
 import java.lang.management.ManagementFactory;
@@ -44,6 +45,7 @@ public class JvmUtils
   private static RuntimeInfo RUNTIME_INFO = new RuntimeInfo();
 
   private static final ThreadMXBean THREAD_MX_BEAN = ManagementFactory.getThreadMXBean();
+  private static final OperatingSystemMXBean OPERATING_SYSTEM_MX_BEAN = (OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean();
 
   private static int computeMajorVersion()
   {
@@ -70,11 +72,10 @@ public class JvmUtils
     return MAJOR_VERSION;
   }
 
-  public static boolean isIsJava9Compatible()
-  {
-    return MAJOR_VERSION >= 9;
-  }
-
+  /**
+   * Deprecated, inject {@link RuntimeInfo} instead of using this function.
+   */
+  @Deprecated
   public static RuntimeInfo getRuntimeInfo()
   {
     return RUNTIME_INFO;
@@ -142,10 +143,13 @@ public class JvmUtils
   }
 
   /**
-   * Only for testing.
+   * Get the total memory of the machine it is running on. This function is container aware.
+   * If the machine is running in a container, the function will return the total memory of the container.
+   * If the machine is not running in a container, the function will return the total memory of the machine.
+   * @return the total memory of the machine it is running on in bytes.
    */
-  public static void resetTestsToDefaultRuntimeInfo()
+  public static long getTotalMemory()
   {
-    RUNTIME_INFO = new RuntimeInfo();
+    return OPERATING_SYSTEM_MX_BEAN.getTotalPhysicalMemorySize();
   }
 }

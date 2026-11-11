@@ -22,8 +22,10 @@ package org.apache.druid.frame.key;
 import com.google.common.collect.ImmutableList;
 import nl.jqno.equalsverifier.EqualsVerifier;
 import org.apache.druid.java.util.common.guava.Comparators;
-import org.junit.Assert;
-import org.junit.Test;
+import org.apache.druid.segment.column.ColumnType;
+import org.apache.druid.segment.column.RowSignature;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
 
@@ -37,22 +39,31 @@ public class ClusterByTest
         new KeyColumn("y", KeyOrder.ASCENDING)
     );
 
-    Assert.assertEquals(
-        RowKeyComparator.create(keyColumns),
-        new ClusterBy(keyColumns, 1).keyComparator()
+    final RowSignature rowSignature = RowSignature.builder()
+                                                  .add("x", ColumnType.LONG)
+                                                  .add("y", ColumnType.LONG)
+                                                  .build();
+
+    Assertions.assertEquals(
+        RowKeyComparator.create(keyColumns, rowSignature),
+        new ClusterBy(keyColumns, 1).keyComparator(rowSignature)
     );
   }
 
   @Test
   public void test_bucketComparator_noKey()
   {
-    Assert.assertSame(Comparators.alwaysEqual(), ClusterBy.none().bucketComparator());
+    Assertions.assertSame(Comparators.alwaysEqual(), ClusterBy.none().bucketComparator(RowSignature.empty()));
   }
 
   @Test
   public void test_bucketComparator_noBucketKey()
   {
-    Assert.assertSame(
+    RowSignature rowSignature = RowSignature.builder()
+                                            .add("x", ColumnType.LONG)
+                                            .add("y", ColumnType.LONG)
+                                            .build();
+    Assertions.assertSame(
         Comparators.alwaysEqual(),
         new ClusterBy(
             ImmutableList.of(
@@ -60,29 +71,37 @@ public class ClusterByTest
                 new KeyColumn("y", KeyOrder.ASCENDING)
             ),
             0
-        ).bucketComparator()
+        ).bucketComparator(rowSignature)
     );
   }
 
   @Test
   public void test_bucketComparator_withBucketKey()
   {
-    Assert.assertEquals(
-        RowKeyComparator.create(ImmutableList.of(new KeyColumn("x", KeyOrder.ASCENDING))),
+    RowSignature rowSignature = RowSignature.builder()
+                                            .add("x", ColumnType.LONG)
+                                            .add("y", ColumnType.LONG)
+                                            .build();
+    Assertions.assertEquals(
+        RowKeyComparator.create(
+            ImmutableList.of(new KeyColumn("x", KeyOrder.ASCENDING)),
+            rowSignature
+
+        ),
         new ClusterBy(
             ImmutableList.of(
                 new KeyColumn("x", KeyOrder.ASCENDING),
                 new KeyColumn("y", KeyOrder.ASCENDING)
             ),
             1
-        ).bucketComparator()
+        ).bucketComparator(rowSignature)
     );
   }
 
   @Test
   public void test_sortable()
   {
-    Assert.assertFalse(
+    Assertions.assertFalse(
         new ClusterBy(
             ImmutableList.of(
                 new KeyColumn("x", KeyOrder.NONE),
@@ -92,7 +111,7 @@ public class ClusterByTest
         ).sortable()
     );
 
-    Assert.assertTrue(
+    Assertions.assertTrue(
         new ClusterBy(
             ImmutableList.of(
                 new KeyColumn("x", KeyOrder.ASCENDING),
@@ -102,7 +121,7 @@ public class ClusterByTest
         ).sortable()
     );
 
-    Assert.assertTrue(new ClusterBy(Collections.emptyList(), 0).sortable());
+    Assertions.assertTrue(new ClusterBy(Collections.emptyList(), 0).sortable());
   }
 
   @Test

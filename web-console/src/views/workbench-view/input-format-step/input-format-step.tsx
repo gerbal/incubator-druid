@@ -19,18 +19,27 @@
 import { Button, Callout, FormGroup, Icon, Intent, Tag } from '@blueprintjs/core';
 import { IconNames } from '@blueprintjs/icons';
 import type { SqlExpression } from 'druid-query-toolkit';
-import { C } from 'druid-query-toolkit';
+import { C, SqlColumnDeclaration, SqlType } from 'druid-query-toolkit';
 import React, { useState } from 'react';
 
-import { AutoForm, CenterMessage, LearnMore, Loader } from '../../../components';
-import type { InputFormat, InputSource, SignatureColumn } from '../../../druid-models';
 import {
-  guessColumnTypeFromHeaderAndRows,
-  guessIsArrayFromHeaderAndRows,
-  INPUT_FORMAT_FIELDS,
+  ArrayIngestModeSwitch,
+  AutoForm,
+  CenterMessage,
+  LearnMore,
+  Loader,
+} from '../../../components';
+import type { ArrayIngestMode, InputFormat, InputSource } from '../../../druid-models';
+import {
+  BATCH_INPUT_FORMAT_FIELDS,
+  chooseByBestTimestamp,
+  DEFAULT_ARRAY_INGEST_MODE,
+  DETECTION_TIMESTAMP_SPEC,
+  getPossibleSystemFieldsForInputSource,
+  guessColumnTypeFromSampleResponse,
   inputFormatOutputsNumericStrings,
-  PLACEHOLDER_TIMESTAMP_SPEC,
   possibleDruidFormatForValues,
+  TIME_COLUMN,
 } from '../../../druid-models';
 import { useQueryManager } from '../../../hooks';
 import { getLink } from '../../../links';
@@ -41,60 +50,83 @@ import {
   filterMap,
   timeFormatToSql,
 } from '../../../utils';
-import type { SampleHeaderAndRows, SampleSpec } from '../../../utils/sampler';
-import { headerAndRowsFromSampleResponse, postToSampler } from '../../../utils/sampler';
+import type { SampleResponse, SampleSpec } from '../../../utils/sampler';
+import { getHeaderNamesFromSampleResponse, postToSampler } from '../../../utils/sampler';
 import { ParseDataTable } from '../../load-data-view/parse-data-table/parse-data-table';
 
 import './input-format-step.scss';
 
-const noop = () => {};
-
-export interface InputFormatAndMore {
+export interface InputSourceFormatAndMore {
+  inputSource: InputSource;
   inputFormat: InputFormat;
-  signature: SignatureColumn[];
-  isArrays: boolean[];
+  signature: SqlColumnDeclaration[];
   timeExpression: SqlExpression | undefined;
+  arrayMode: ArrayIngestMode;
+}
+
+interface InputSourceAndFormat {
+  inputSource: InputSource;
+  inputFormat: Partial<InputFormat>;
 }
 
 interface PossibleTimeExpression {
   column: string;
+  format: string;
   timeExpression: SqlExpression;
 }
 
 export interface InputFormatStepProps {
-  inputSource: InputSource;
+  initInputSource: InputSource;
   initInputFormat: Partial<InputFormat>;
   doneButton: boolean;
-  onSet(inputFormatAndMore: InputFormatAndMore): void;
+  onSet(inputSourceFormatAndMore: InputSourceFormatAndMore): void;
   onBack(): void;
-  onAltSet?(inputFormatAndMore: InputFormatAndMore): void;
+  onAltSet?(inputSourceFormatAndMore: InputSourceFormatAndMore): void;
   altText?: string;
 }
 
+function isValidInputFormat(inputFormat: Partial<InputFormat>): inputFormat is InputFormat {
+  return AutoForm.isValidModel(inputFormat, BATCH_INPUT_FORMAT_FIELDS);
+}
+
 export const InputFormatStep = React.memo(function InputFormatStep(props: InputFormatStepProps) {
-  const { inputSource, initInputFormat, doneButton, onSet, onBack, onAltSet, altText } = props;
+  const { initInputSource, initInputFormat, doneButton, onSet, onBack, onAltSet, altText } = props;
 
-  const [inputFormat, setInputFormat] = useState<Partial<InputFormat>>(initInputFormat);
-  const [inputFormatToSample, setInputFormatToSample] = useState<InputFormat | undefined>(
-    AutoForm.isValidModel(initInputFormat, INPUT_FORMAT_FIELDS) ? initInputFormat : undefined,
-  );
+  const [inputSourceAndFormat, setInputSourceAndFormat] = useState<InputSourceAndFormat>({
+    inputSource: initInputSource,
+    inputFormat: initInputFormat,
+  });
+  const [inputSourceAndFormatToSample, setInputSourceAndFormatToSample] = useState<
+    InputSourceAndFormat | undefined
+  >(isValidInputFormat(initInputFormat) ? inputSourceAndFormat : undefined);
   const [selectTimestamp, setSelectTimestamp] = useState(true);
+  const [arrayIngestMode, setArrayIngestMode] =
+    useState<ArrayIngestMode>(DEFAULT_ARRAY_INGEST_MODE);
 
-  const [previewState] = useQueryManager<InputFormat, SampleHeaderAndRows>({
-    query: inputFormatToSample,
-    processQuery: async (inputFormat: InputFormat) => {
+  const [previewState] = useQueryManager<InputSourceAndFormat, SampleResponse>({
+    query: inputSourceAndFormatToSample,
+    processQuery: async ({ inputSource, inputFormat }, signal) => {
+      const fixedFormatSource = inputSource.type === 'delta';
+      if (!fixedFormatSource && !isValidInputFormat(inputFormat))
+        throw new Error('invalid input format');
+
       const sampleSpec: SampleSpec = {
         type: 'index_parallel',
         spec: {
           ioConfig: {
             type: 'index_parallel',
             inputSource,
-            inputFormat: deepSet(inputFormat, 'keepNullColumns', true),
+            inputFormat: fixedFormatSource
+              ? undefined
+              : (deepSet(inputFormat, 'keepNullColumns', true) as InputFormat),
           },
           dataSchema: {
             dataSource: 'sample',
-            timestampSpec: PLACEHOLDER_TIMESTAMP_SPEC,
-            dimensionsSpec: {},
+            timestampSpec: DETECTION_TIMESTAMP_SPEC,
+            dimensionsSpec: {
+              dimensions: inputSource.systemFields,
+              useSchemaDiscovery: true,
+            },
             granularitySpec: {
               rollup: false,
             },
@@ -106,53 +138,77 @@ export const InputFormatStep = React.memo(function InputFormatStep(props: InputF
         },
       };
 
-      const sampleResponse = await postToSampler(sampleSpec, 'input-format-step');
-
-      return headerAndRowsFromSampleResponse({
-        sampleResponse,
-        ignoreTimeColumn: true,
-        useInput: true,
-      });
+      return await postToSampler(sampleSpec, 'input-format-step', signal);
     },
   });
 
-  const previewData = previewState.data;
+  const previewSampleResponse = previewState.data;
 
   let possibleTimeExpression: PossibleTimeExpression | undefined;
-  if (previewData) {
-    possibleTimeExpression = filterMap(previewData.header, column => {
-      const values = previewData.rows.map(row => row.input[column]);
-      const possibleDruidFormat = possibleDruidFormatForValues(values);
-      if (!possibleDruidFormat) return;
+  if (previewSampleResponse) {
+    possibleTimeExpression = chooseByBestTimestamp(
+      filterMap(getHeaderNamesFromSampleResponse(previewSampleResponse), column => {
+        const values = filterMap(previewSampleResponse.data, d => d.input?.[column]);
+        const possibleDruidFormat = possibleDruidFormatForValues(values);
+        if (!possibleDruidFormat) return;
 
-      const formatSql = timeFormatToSql(possibleDruidFormat);
-      if (!formatSql) return;
+        // The __time column is special because it already is a TIMESTAMP so there is no need parse it in any way
+        if (column === TIME_COLUMN) {
+          return {
+            column,
+            format: '',
+            timeExpression: C(column),
+          };
+        }
 
-      return {
-        column,
-        timeExpression: formatSql.fillPlaceholders([C(column)]),
-      };
-    })[0];
+        const formatSql = timeFormatToSql(possibleDruidFormat);
+        if (!formatSql) return;
+
+        return {
+          column,
+          format: possibleDruidFormat,
+          timeExpression: formatSql.fillPlaceholders([C(column)]),
+        };
+      }),
+    );
   }
 
-  const inputFormatAndMore =
-    previewData && AutoForm.isValidModel(inputFormat, INPUT_FORMAT_FIELDS)
+  const headerNames = previewSampleResponse
+    ? getHeaderNamesFromSampleResponse(previewSampleResponse, 'ignoreIfZero')
+    : undefined;
+
+  const currentInputFormat = inputSourceAndFormat.inputFormat;
+  const inputSourceFormatAndMore: InputSourceFormatAndMore | undefined =
+    previewSampleResponse && headerNames && isValidInputFormat(currentInputFormat)
       ? {
-          inputFormat,
-          signature: previewData.header.map(name => ({
-            name,
-            type: guessColumnTypeFromHeaderAndRows(
-              previewData,
+          inputSource: inputSourceAndFormat.inputSource,
+          inputFormat: currentInputFormat,
+          signature: headerNames.map(name =>
+            SqlColumnDeclaration.create(
               name,
-              inputFormatOutputsNumericStrings(inputFormat),
+              SqlType.fromNativeType(
+                guessColumnTypeFromSampleResponse(
+                  previewSampleResponse,
+                  name,
+                  inputFormatOutputsNumericStrings(currentInputFormat),
+                ),
+              ),
             ),
-          })),
-          isArrays: previewData.header.map(name =>
-            guessIsArrayFromHeaderAndRows(previewData, name),
           ),
           timeExpression: selectTimestamp ? possibleTimeExpression?.timeExpression : undefined,
+          arrayMode: arrayIngestMode,
         }
       : undefined;
+
+  const hasArrays = inputSourceFormatAndMore?.signature.some(d => d.columnType.isArray());
+  const possibleSystemFields = getPossibleSystemFieldsForInputSource(
+    inputSourceAndFormat.inputSource,
+  );
+
+  const needsResample = inputSourceAndFormatToSample !== inputSourceAndFormat;
+  const nextDisabled = !inputSourceFormatAndMore || needsResample;
+
+  const fixedFormatSource = inputSourceFormatAndMore?.inputSource.type === 'delta';
 
   return (
     <div className="input-format-step">
@@ -167,15 +223,13 @@ export const InputFormatStep = React.memo(function InputFormatStep(props: InputF
         {previewState.error && (
           <CenterMessage>{`Error: ${previewState.getErrorMessage()}`}</CenterMessage>
         )}
-        {previewData && (
+        {previewSampleResponse && (
           <ParseDataTable
-            sampleData={previewData}
+            sampleResponse={previewSampleResponse}
             columnFilter=""
             canFlatten={false}
             flattenedColumnsOnly={false}
             flattenFields={EMPTY_ARRAY}
-            onFlattenFieldSelect={noop}
-            useInput
           />
         )}
       </div>
@@ -184,32 +238,70 @@ export const InputFormatStep = React.memo(function InputFormatStep(props: InputF
           <FormGroup>
             <Callout>
               <p>Ensure that your data appears correctly in a row/column orientation.</p>
-              <LearnMore href={`${getLink('DOCS')}/ingestion/data-formats.html`} />
+              <LearnMore href={`${getLink('DOCS')}/ingestion/data-formats`} />
             </Callout>
           </FormGroup>
-          <AutoForm fields={INPUT_FORMAT_FIELDS} model={inputFormat} onChange={setInputFormat} />
-          {inputFormatToSample !== inputFormat && (
+          {fixedFormatSource ? (
+            <FormGroup>
+              <Callout>
+                The <Tag minimal>{inputSourceFormatAndMore?.inputSource.type}</Tag> input source has
+                a fixed format that can not be configured.
+              </Callout>
+            </FormGroup>
+          ) : (
+            <>
+              <AutoForm
+                fields={BATCH_INPUT_FORMAT_FIELDS}
+                model={inputSourceAndFormat.inputFormat}
+                onChange={inputFormat =>
+                  setInputSourceAndFormat({ ...inputSourceAndFormat, inputFormat })
+                }
+              />
+              {possibleSystemFields.length > 0 && (
+                <AutoForm
+                  fields={[
+                    {
+                      name: 'inputSource.systemFields',
+                      label: 'System fields',
+                      type: 'string-array',
+                      suggestions: possibleSystemFields,
+                      info: 'JSON array of system fields to return as part of input rows.',
+                    },
+                  ]}
+                  model={inputSourceAndFormat}
+                  onChange={setInputSourceAndFormat as any}
+                />
+              )}
+            </>
+          )}
+          {needsResample && (
             <FormGroup className="control-buttons">
               <Button
                 text="Preview changes"
                 intent={Intent.PRIMARY}
-                disabled={!AutoForm.isValidModel(inputFormat, INPUT_FORMAT_FIELDS)}
+                disabled={!isValidInputFormat(inputSourceAndFormat.inputFormat)}
                 onClick={() => {
-                  if (!AutoForm.isValidModel(inputFormat, INPUT_FORMAT_FIELDS)) return;
-                  setInputFormatToSample(inputFormat);
+                  if (!isValidInputFormat(inputSourceAndFormat.inputFormat)) return;
+                  setInputSourceAndFormatToSample(inputSourceAndFormat);
                 }}
               />
             </FormGroup>
           )}
         </div>
         <div className="bottom-controls">
+          {hasArrays && (
+            <ArrayIngestModeSwitch
+              arrayIngestMode={arrayIngestMode}
+              changeArrayIngestMode={setArrayIngestMode}
+            />
+          )}
           {possibleTimeExpression && (
             <FormGroup>
               <Callout>
                 <Button
-                  rightIcon={checkedCircleIcon(selectTimestamp)}
+                  endIcon={checkedCircleIcon(selectTimestamp)}
                   onClick={() => setSelectTimestamp(!selectTimestamp)}
-                  minimal
+                  variant="minimal"
                 >
                   Select <Tag minimal>{possibleTimeExpression.column}</Tag> as the primary time
                   column
@@ -222,12 +314,12 @@ export const InputFormatStep = React.memo(function InputFormatStep(props: InputF
               <Callout>
                 <Button
                   text={altText}
-                  rightIcon={IconNames.ARROW_TOP_RIGHT}
-                  minimal
-                  disabled={!inputFormatAndMore}
+                  endIcon={IconNames.ARROW_TOP_RIGHT}
+                  variant="minimal"
+                  disabled={nextDisabled}
                   onClick={() => {
-                    if (!inputFormatAndMore) return;
-                    onAltSet(inputFormatAndMore);
+                    if (!inputSourceFormatAndMore) return;
+                    onAltSet(inputSourceFormatAndMore);
                   }}
                 />
               </Callout>
@@ -238,12 +330,12 @@ export const InputFormatStep = React.memo(function InputFormatStep(props: InputF
             <Button
               className="next"
               text={doneButton ? 'Done' : 'Next'}
-              rightIcon={doneButton ? IconNames.TICK : IconNames.ARROW_RIGHT}
+              endIcon={doneButton ? IconNames.TICK : IconNames.ARROW_RIGHT}
               intent={Intent.PRIMARY}
-              disabled={!inputFormatAndMore}
+              disabled={nextDisabled}
               onClick={() => {
-                if (!inputFormatAndMore) return;
-                onSet(inputFormatAndMore);
+                if (!inputSourceFormatAndMore) return;
+                onSet(inputSourceFormatAndMore);
               }}
             />
           </div>

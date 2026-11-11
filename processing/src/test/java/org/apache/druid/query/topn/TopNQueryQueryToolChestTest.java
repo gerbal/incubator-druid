@@ -24,7 +24,6 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import org.apache.druid.collections.CloseableStupidPool;
 import org.apache.druid.collections.SerializablePair;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.hll.HyperLogLogCollector;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.Intervals;
@@ -43,13 +42,16 @@ import org.apache.druid.query.TestQueryRunners;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
 import org.apache.druid.query.aggregation.LongSumAggregatorFactory;
+import org.apache.druid.query.aggregation.SerializablePairLongDouble;
+import org.apache.druid.query.aggregation.SerializablePairLongFloat;
+import org.apache.druid.query.aggregation.SerializablePairLongLong;
 import org.apache.druid.query.aggregation.SerializablePairLongString;
 import org.apache.druid.query.aggregation.cardinality.CardinalityAggregator;
+import org.apache.druid.query.aggregation.firstlast.last.DoubleLastAggregatorFactory;
+import org.apache.druid.query.aggregation.firstlast.last.FloatLastAggregatorFactory;
+import org.apache.druid.query.aggregation.firstlast.last.LongLastAggregatorFactory;
+import org.apache.druid.query.aggregation.firstlast.last.StringLastAggregatorFactory;
 import org.apache.druid.query.aggregation.hyperloglog.HyperUniquesAggregatorFactory;
-import org.apache.druid.query.aggregation.last.DoubleLastAggregatorFactory;
-import org.apache.druid.query.aggregation.last.FloatLastAggregatorFactory;
-import org.apache.druid.query.aggregation.last.LongLastAggregatorFactory;
-import org.apache.druid.query.aggregation.last.StringLastAggregatorFactory;
 import org.apache.druid.query.aggregation.post.ArithmeticPostAggregator;
 import org.apache.druid.query.aggregation.post.ConstantPostAggregator;
 import org.apache.druid.query.aggregation.post.FieldAccessPostAggregator;
@@ -66,9 +68,8 @@ import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.segment.column.ValueType;
 import org.apache.druid.testing.InitializedNullHandlingTest;
 import org.apache.druid.timeline.SegmentId;
-import org.junit.Assert;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -81,12 +82,6 @@ public class TopNQueryQueryToolChestTest extends InitializedNullHandlingTest
 {
 
   private static final SegmentId SEGMENT_ID = SegmentId.dummy("testSegment");
-
-  @BeforeClass
-  public static void setUpClass()
-  {
-    NullHandling.initializeForTests();
-  }
 
   @Test
   public void testCacheStrategy() throws Exception
@@ -162,8 +157,8 @@ public class TopNQueryQueryToolChestTest extends InitializedNullHandlingTest
         null
     ).getCacheStrategy(query2);
 
-    Assert.assertFalse(Arrays.equals(strategy1.computeCacheKey(query1), strategy2.computeCacheKey(query2)));
-    Assert.assertFalse(Arrays.equals(
+    Assertions.assertFalse(Arrays.equals(strategy1.computeCacheKey(query1), strategy2.computeCacheKey(query2)));
+    Assertions.assertFalse(Arrays.equals(
         strategy1.computeResultLevelCacheKey(query1),
         strategy2.computeResultLevelCacheKey(query2)
     ));
@@ -247,9 +242,9 @@ public class TopNQueryQueryToolChestTest extends InitializedNullHandlingTest
     ).getCacheStrategy(query2);
 
     //segment level cache key excludes postaggregates in topn
-    Assert.assertTrue(Arrays.equals(strategy1.computeCacheKey(query1), strategy2.computeCacheKey(query2)));
-    Assert.assertFalse(Arrays.equals(strategy1.computeCacheKey(query1), strategy1.computeResultLevelCacheKey(query1)));
-    Assert.assertFalse(Arrays.equals(
+    Assertions.assertTrue(Arrays.equals(strategy1.computeCacheKey(query1), strategy2.computeCacheKey(query2)));
+    Assertions.assertFalse(Arrays.equals(strategy1.computeCacheKey(query1), strategy1.computeResultLevelCacheKey(query1)));
+    Assertions.assertFalse(Arrays.equals(
         strategy1.computeResultLevelCacheKey(query1),
         strategy2.computeResultLevelCacheKey(query2)
     ));
@@ -285,17 +280,17 @@ public class TopNQueryQueryToolChestTest extends InitializedNullHandlingTest
 
       TopNQuery query1 = builder.threshold(10).context(null).build();
       MockQueryRunner mockRunner = new MockQueryRunner(runner);
-      new TopNQueryQueryToolChest.ThresholdAdjustingQueryRunner(mockRunner, config).run(QueryPlus.wrap(query1));
-      Assert.assertEquals(1000, mockRunner.query.getThreshold());
+      new TopNQueryQueryToolChest.ThresholdAdjustingQueryRunner(mockRunner).run(QueryPlus.wrap(query1));
+      Assertions.assertEquals(1000, mockRunner.query.getThreshold());
 
       TopNQuery query2 = builder.threshold(10).context(context).build();
 
-      new TopNQueryQueryToolChest.ThresholdAdjustingQueryRunner(mockRunner, config).run(QueryPlus.wrap(query2));
-      Assert.assertEquals(500, mockRunner.query.getThreshold());
+      new TopNQueryQueryToolChest.ThresholdAdjustingQueryRunner(mockRunner).run(QueryPlus.wrap(query2));
+      Assertions.assertEquals(500, mockRunner.query.getThreshold());
 
       TopNQuery query3 = builder.threshold(2000).context(context).build();
-      new TopNQueryQueryToolChest.ThresholdAdjustingQueryRunner(mockRunner, config).run(QueryPlus.wrap(query3));
-      Assert.assertEquals(2000, mockRunner.query.getThreshold());
+      new TopNQueryQueryToolChest.ThresholdAdjustingQueryRunner(mockRunner).run(QueryPlus.wrap(query3));
+      Assertions.assertEquals(2000, mockRunner.query.getThreshold());
     }
   }
 
@@ -313,7 +308,7 @@ public class TopNQueryQueryToolChestTest extends InitializedNullHandlingTest
         .threshold(1)
         .build();
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         RowSignature.builder()
                     .addTimeColumn()
                     .add("dim", ColumnType.STRING)
@@ -351,7 +346,7 @@ public class TopNQueryQueryToolChestTest extends InitializedNullHandlingTest
                 ImmutableList.of(
                     new Result<>(
                         DateTimes.of("2000"),
-                        new TopNResultValue(
+                        TopNResultValue.create(
                             ImmutableList.of(
                                 new DimensionAndMetricValueExtractor(
                                     ImmutableMap.of("dim", "foo", "rows", 1L, "index", 2L, "uniques", 3L, "const", 1L)
@@ -388,9 +383,11 @@ public class TopNQueryQueryToolChestTest extends InitializedNullHandlingTest
   {
     switch (valueType) {
       case LONG:
+        return new SerializablePairLongLong(123L, (long) dimValue);
       case DOUBLE:
+        return new SerializablePairLongDouble(123L, (double) dimValue);
       case FLOAT:
-        return new SerializablePair<>(123L, dimValue);
+        return new SerializablePairLongFloat(123L, (float) dimValue);
       case STRING:
         return new SerializablePairLongString(123L, (String) dimValue);
       default:
@@ -446,7 +443,7 @@ public class TopNQueryQueryToolChestTest extends InitializedNullHandlingTest
     final Result<TopNResultValue> result1 = new Result<>(
         // test timestamps that result in integer size millis
         DateTimes.utc(123L),
-        new TopNResultValue(
+        TopNResultValue.create(
             Collections.singletonList(
                 ImmutableMap.of(
                     "test", dimValue,
@@ -469,12 +466,12 @@ public class TopNQueryQueryToolChestTest extends InitializedNullHandlingTest
 
     Result<TopNResultValue> fromCacheResult = strategy.pullFromSegmentLevelCache().apply(fromCacheValue);
 
-    Assert.assertEquals(result1, fromCacheResult);
+    Assertions.assertEquals(result1, fromCacheResult);
 
     final Result<TopNResultValue> result2 = new Result<>(
         // test timestamps that result in integer size millis
         DateTimes.utc(123L),
-        new TopNResultValue(
+        TopNResultValue.create(
             Collections.singletonList(
                 ImmutableMap.of(
                     "test", dimValue,
@@ -491,7 +488,7 @@ public class TopNQueryQueryToolChestTest extends InitializedNullHandlingTest
     if (valueType.is(ValueType.FLOAT)) {
       typeAdjustedResult2 = new Result<>(
           DateTimes.utc(123L),
-          new TopNResultValue(
+          TopNResultValue.create(
               Collections.singletonList(
                   ImmutableMap.of(
                       "test", dimValue,
@@ -505,7 +502,7 @@ public class TopNQueryQueryToolChestTest extends InitializedNullHandlingTest
     } else if (valueType.is(ValueType.LONG)) {
       typeAdjustedResult2 = new Result<>(
           DateTimes.utc(123L),
-          new TopNResultValue(
+          TopNResultValue.create(
               Collections.singletonList(
                   ImmutableMap.of(
                       "test", dimValue,
@@ -531,7 +528,7 @@ public class TopNQueryQueryToolChestTest extends InitializedNullHandlingTest
     );
 
     Result<TopNResultValue> fromResultCacheResult = strategy.pullFromCache(true).apply(fromResultCacheValue);
-    Assert.assertEquals(typeAdjustedResult2, fromResultCacheResult);
+    Assertions.assertEquals(typeAdjustedResult2, fromResultCacheResult);
   }
 
   private void doTestCacheStrategyOrderByPost(final ColumnType valueType, final Object dimValue) throws IOException
@@ -576,7 +573,7 @@ public class TopNQueryQueryToolChestTest extends InitializedNullHandlingTest
     final Result<TopNResultValue> result1 = new Result<>(
         // test timestamps that result in integer size millis
         DateTimes.utc(123L),
-        new TopNResultValue(
+        TopNResultValue.create(
             Collections.singletonList(
                 ImmutableMap.of(
                     "test", dimValue,
@@ -600,12 +597,12 @@ public class TopNQueryQueryToolChestTest extends InitializedNullHandlingTest
 
     Result<TopNResultValue> fromCacheResult = strategy.pullFromSegmentLevelCache().apply(fromCacheValue);
 
-    Assert.assertEquals(result1, fromCacheResult);
+    Assertions.assertEquals(result1, fromCacheResult);
 
     final Result<TopNResultValue> resultLevelCacheResult = new Result<>(
         // test timestamps that result in integer size millis
         DateTimes.utc(123L),
-        new TopNResultValue(
+        TopNResultValue.create(
             Collections.singletonList(
                 ImmutableMap.of(
                     "test", dimValue,
@@ -627,7 +624,7 @@ public class TopNQueryQueryToolChestTest extends InitializedNullHandlingTest
     );
 
     Result<TopNResultValue> fromResultCacheResult = strategy.pullFromCache(true).apply(fromResultCacheValue);
-    Assert.assertEquals(resultLevelCacheResult, fromResultCacheResult);
+    Assertions.assertEquals(resultLevelCacheResult, fromResultCacheResult);
   }
 
   static class MockQueryRunner implements QueryRunner<Result<TopNResultValue>>

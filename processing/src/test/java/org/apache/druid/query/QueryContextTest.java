@@ -28,17 +28,22 @@ import com.google.common.collect.Ordering;
 import nl.jqno.equalsverifier.EqualsVerifier;
 import nl.jqno.equalsverifier.Warning;
 import org.apache.druid.java.util.common.HumanReadableBytes;
+import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.granularity.Granularity;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
+import org.apache.druid.query.context.QueryContextParameter;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.filter.DimFilter;
 import org.apache.druid.query.spec.QuerySegmentSpec;
+import org.apache.druid.query.topn.TopNQueryConfig;
 import org.apache.druid.segment.DimensionHandlerUtils;
+import org.apache.druid.segment.loading.AcquireMode;
 import org.joda.time.DateTimeZone;
 import org.joda.time.Duration;
 import org.joda.time.Interval;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import javax.annotation.Nullable;
 
@@ -47,12 +52,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertThrows;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class QueryContextTest
 {
@@ -99,6 +104,28 @@ public class QueryContextTest
   }
 
   @Test
+  public void testOfTypedParameters()
+  {
+    assertEquals(
+        ImmutableMap.of(
+            QueryContextParameters.MAX_ROWS_QUEUED_FOR_ORDERING.getName(), 10,
+            QueryContextParameters.USE_RESULT_LEVEL_CACHE.getName(), false
+        ),
+        QueryContext.ofMap(
+            QueryContextParameters.MAX_ROWS_QUEUED_FOR_ORDERING,
+            10,
+            QueryContextParameters.USE_RESULT_LEVEL_CACHE,
+            false
+        )
+    );
+
+    assertThrows(
+        BadQueryContextException.class,
+        () -> QueryContext.ofMap(QueryContextParameters.MAX_ROWS_QUEUED_FOR_ORDERING, 0)
+    );
+  }
+
+  @Test
   public void testIsEmpty()
   {
     assertTrue(QueryContext.empty().isEmpty());
@@ -136,6 +163,61 @@ public class QueryContextTest
     assertTrue(context.getBoolean("key1"));
     assertFalse(context.getBoolean("non-exist", false));
     assertNull(context.getBoolean("non-exist"));
+  }
+
+  @Test
+  public void testGetParameter()
+  {
+    final QueryContext context = QueryContext.of(
+        ImmutableMap.of(
+            QueryContextParameters.MAX_ROWS_QUEUED_FOR_ORDERING.getName(), "10",
+            QueryContextParameters.USE_RESULT_LEVEL_CACHE.getName(), "false"
+        )
+    );
+
+    assertTrue(context.has(QueryContextParameters.MAX_ROWS_QUEUED_FOR_ORDERING));
+    assertEquals(10, context.get(QueryContextParameters.MAX_ROWS_QUEUED_FOR_ORDERING));
+    assertFalse(context.get(QueryContextParameters.USE_RESULT_LEVEL_CACHE));
+    assertFalse(context.getOrDefault(QueryContextParameters.USE_RESULT_LEVEL_CACHE));
+
+    final QueryContext emptyContext = QueryContext.empty();
+    assertFalse(emptyContext.has(QueryContextParameters.MAX_ROWS_QUEUED_FOR_ORDERING));
+    assertNull(emptyContext.get(QueryContextParameters.MAX_ROWS_QUEUED_FOR_ORDERING));
+    assertEquals(20, emptyContext.getOrDefault(QueryContextParameters.MAX_ROWS_QUEUED_FOR_ORDERING, 20));
+    assertThrows(ISE.class, () -> emptyContext.getOrDefault(QueryContextParameters.MAX_ROWS_QUEUED_FOR_ORDERING));
+    assertEquals(
+        TopNQueryConfig.DEFAULT_MIN_TOPN_THRESHOLD,
+        emptyContext.getOrDefault(QueryContextParameters.MIN_TOP_N_THRESHOLD)
+    );
+    assertTrue(emptyContext.get(QueryContextParameters.USE_RESULT_LEVEL_CACHE));
+    assertFalse(emptyContext.getOrDefault(QueryContextParameters.USE_RESULT_LEVEL_CACHE, false));
+    assertTrue(emptyContext.getOrDefault(QueryContextParameters.USE_RESULT_LEVEL_CACHE));
+  }
+
+  @Test
+  public void testGetParameterTreatsExplicitNullAsUnset()
+  {
+    final QueryContextParameter<Integer> nullableWithDefault = QueryContextParameter
+        .builder("nullable", Integer.class, value -> (Integer) value)
+        .description("Test parameter.")
+        .defaultValue(10)
+        .build();
+    final QueryContextParameter<Integer> nonNullable = QueryContextParameter
+        .builder("nonNullable", Integer.class, value -> (Integer) value)
+        .description("Test parameter.")
+        .nullable(false)
+        .build();
+    final Map<String, Object> values = new HashMap<>();
+    values.put(nullableWithDefault.getName(), null);
+    values.put(nonNullable.getName(), null);
+    final QueryContext context = QueryContext.of(values);
+
+    assertFalse(context.has(nullableWithDefault));
+    assertEquals(10, context.get(nullableWithDefault));
+    assertEquals(10, context.getOrDefault(nullableWithDefault));
+    assertEquals(20, context.getOrDefault(nullableWithDefault, 20));
+    assertThrows(BadQueryContextException.class, () -> context.get(nonNullable));
+    assertThrows(BadQueryContextException.class, () -> context.getOrDefault(nonNullable, 20));
   }
 
   @Test
@@ -307,14 +389,14 @@ public class QueryContextTest
   public void testGetHumanReadableBytes()
   {
     final QueryContext context = new QueryContext(
-        ImmutableMap.<String, Object>builder()
-                    .put("m1", 500_000_000)
-                    .put("m2", "500M")
-                    .put("m3", "500Mi")
-                    .put("m4", "500MiB")
-                    .put("m5", "500000000")
-                    .put("m6", "abc")
-                    .build()
+        QueryContext.builder()
+                    .putRaw("m1", 500_000_000)
+                    .putRaw("m2", "500M")
+                    .putRaw("m3", "500Mi")
+                    .putRaw("m4", "500MiB")
+                    .putRaw("m5", "500000000")
+                    .putRaw("m6", "abc")
+                    .toMap()
     );
     assertEquals(500_000_000, context.getHumanReadableBytes("m1", HumanReadableBytes.ZERO).getBytes());
     assertEquals(500_000_000, context.getHumanReadableBytes("m2", HumanReadableBytes.ZERO).getBytes());
@@ -326,10 +408,106 @@ public class QueryContextTest
   }
 
   @Test
+  public void testGetMaxSubqueryBytes()
+  {
+    final QueryContext context1 =
+        QueryContext.of(ImmutableMap.of(QueryContextParameters.MAX_SUBQUERY_BYTES.getName(), 500_000_000));
+    assertEquals("500000000", context1.getMaxSubqueryMemoryBytes(null));
+
+    final QueryContext context2 = QueryContext.of(QueryContextParameters.MAX_SUBQUERY_BYTES, "auto");
+    assertEquals("auto", context2.getMaxSubqueryMemoryBytes(null));
+
+    final QueryContext context3 = new QueryContext(ImmutableMap.of());
+    assertEquals("disabled", context3.getMaxSubqueryMemoryBytes("disabled"));
+  }
+
+  @Test
+  public void testMaxSubqueryBytesAcceptsGuardrailForms()
+  {
+    final QueryContextParameter<String> parameter = QueryContextParameters.MAX_SUBQUERY_BYTES;
+    assertEquals("AUTO", parameter.parse("AUTO"));
+    assertEquals("disabled", parameter.parse("disabled"));
+    assertEquals("100", parameter.parse("100"));
+    assertEquals("100", parameter.parse(100));
+    assertEquals("1000000000", parameter.parse(1e9));
+
+    assertEquals(
+        "Query context parameter [maxSubqueryBytes] should be 'auto', 'disabled' or a non-negative number of bytes, "
+        + "but got [true]",
+        assertThrows(BadQueryContextException.class, () -> parameter.parse(true)).getMessage()
+    );
+    assertThrows(BadQueryContextException.class, () -> parameter.parse("1GiB"));
+    assertThrows(BadQueryContextException.class, () -> parameter.parse("-1"));
+    assertThrows(BadQueryContextException.class, () -> parameter.parse(-1));
+    assertThrows(BadQueryContextException.class, () -> parameter.parse(1.5));
+  }
+
+  @Test
+  public void testGetInFunctionThreshold()
+  {
+    final QueryContext context1 = QueryContext.of(QueryContextParameters.IN_FUNCTION_THRESHOLD, Integer.MAX_VALUE);
+    assertEquals(Integer.MAX_VALUE, context1.getInFunctionThreshold());
+
+    final QueryContext context2 = QueryContext.empty();
+    assertEquals(QueryContextParameters.IN_FUNCTION_THRESHOLD.getLiteralDefault(), context2.getInFunctionThreshold());
+  }
+
+  @Test
+  public void testGetInFunctionExprThreshold()
+  {
+    final QueryContext context1 = QueryContext.of(QueryContextParameters.IN_FUNCTION_EXPR_THRESHOLD, Integer.MAX_VALUE);
+    assertEquals(Integer.MAX_VALUE, context1.getInFunctionExprThreshold());
+
+    final QueryContext context2 = QueryContext.empty();
+    assertEquals(QueryContextParameters.IN_FUNCTION_EXPR_THRESHOLD.getLiteralDefault(), context2.getInFunctionExprThreshold());
+  }
+
+  @Test
   public void testDefaultEnableQueryDebugging()
   {
     assertFalse(QueryContext.empty().isDebug());
-    assertTrue(QueryContext.of(ImmutableMap.of(QueryContexts.ENABLE_DEBUG, true)).isDebug());
+    assertTrue(QueryContext.of(QueryContextParameters.DEBUG, true).isDebug());
+  }
+
+  @Test
+  public void testIsDecoupled()
+  {
+    assertFalse(QueryContext.empty().isDecoupledMode());
+    assertTrue(
+        QueryContext.of(
+            QueryContextParameters.PLANNER_STRATEGY,
+            QueryContexts.PlannerStrategy.DECOUPLED
+        ).isDecoupledMode()
+    );
+    assertTrue(
+        QueryContext.builder()
+                    .putRaw(QueryContextParameters.PLANNER_STRATEGY.getName(), "decoupled")
+                    .toContext()
+                    .isDecoupledMode()
+    );
+    assertFalse(
+        QueryContext.of(
+            QueryContextParameters.PLANNER_STRATEGY,
+            QueryContexts.PlannerStrategy.COUPLED
+        ).isDecoupledMode()
+    );
+    assertThrows(
+        BadQueryContextException.class,
+        () -> QueryContext.builder()
+                          .putRaw(QueryContextParameters.PLANNER_STRATEGY.getName(), "garbage")
+                          .toContext()
+                          .isDecoupledMode()
+    );
+  }
+
+  @Test
+  public void testExtendedFilteredSumRewrite()
+  {
+    assertTrue(QueryContext.empty().isExtendedFilteredSumRewrite());
+    assertFalse(
+        QueryContext.of(QueryContextParameters.EXTENDED_FILTERED_SUM_REWRITE, false)
+            .isExtendedFilteredSumRewrite()
+    );
   }
 
   // This test is a bit silly. It is retained because another test uses the
@@ -343,6 +521,33 @@ public class QueryContextTest
   }
 
   @Test
+  public void testWithOverriddenContextParameter()
+  {
+    final Query<?> query = new LegacyContextQuery(ImmutableMap.of());
+
+    final Query<?> overriddenQuery = query.withOverriddenContext(
+        QueryContextParameters.MAX_ROWS_QUEUED_FOR_ORDERING,
+        10
+    );
+
+    assertEquals(10, overriddenQuery.context().get(QueryContextParameters.MAX_ROWS_QUEUED_FOR_ORDERING));
+
+    assertThrows(
+        BadQueryContextException.class,
+        () -> query.withOverriddenContext(QueryContextParameters.MAX_ROWS_QUEUED_FOR_ORDERING, 0)
+    );
+
+    final Query<?> nullOverriddenQuery = query.withOverriddenContext(
+        QueryContextParameters.USE_RESULT_LEVEL_CACHE,
+        null
+    );
+    assertTrue(nullOverriddenQuery.getContext().containsKey(QueryContextParameters.USE_RESULT_LEVEL_CACHE.getName()));
+    assertNull(nullOverriddenQuery.getContext().get(QueryContextParameters.USE_RESULT_LEVEL_CACHE.getName()));
+    assertFalse(nullOverriddenQuery.context().has(QueryContextParameters.USE_RESULT_LEVEL_CACHE));
+    assertTrue(nullOverriddenQuery.context().isUseResultLevelCache());
+  }
+
+  @Test
   public void testNonLegacyIsNotLegacyContext()
   {
     Query<?> timeseries = Druids.newTimeseriesQueryBuilder()
@@ -353,6 +558,153 @@ public class QueryContextTest
                                 .context(ImmutableMap.of("foo", "bar"))
                                 .build();
     assertNotNull(timeseries.getContext());
+  }
+
+  @Test
+  public void testGetRealtimeSegmentsMode()
+  {
+    assertEquals(
+        QueryContexts.RealtimeSegmentsMode.INCLUDE,
+        QueryContext.empty().getRealtimeSegmentsMode()
+    );
+    assertEquals(
+        QueryContexts.RealtimeSegmentsMode.EXCLUSIVE,
+        QueryContext.of(ImmutableMap.of(QueryContextParameters.REALTIME_SEGMENTS_MODE.getName(), "exclusive"))
+                   .getRealtimeSegmentsMode()
+    );
+    assertEquals(
+        QueryContexts.RealtimeSegmentsMode.EXCLUDE,
+        QueryContext.of(ImmutableMap.of(QueryContextParameters.REALTIME_SEGMENTS_MODE.getName(), "exclude"))
+                   .getRealtimeSegmentsMode()
+    );
+    assertEquals(
+        QueryContexts.RealtimeSegmentsMode.INCLUDE,
+        QueryContext.of(ImmutableMap.of(QueryContextParameters.REALTIME_SEGMENTS_MODE.getName(), "include"))
+                   .getRealtimeSegmentsMode()
+    );
+  }
+
+  @Test
+  public void testGetSegmentAcquireMode()
+  {
+    assertEquals(AcquireMode.FULL, QueryContext.empty().getSegmentAcquireMode(AcquireMode.FULL));
+    assertEquals(AcquireMode.PARTIAL, QueryContext.empty().getSegmentAcquireMode(AcquireMode.PARTIAL));
+    assertEquals(
+        AcquireMode.FULL,
+        QueryContext.builder().putRaw(QueryContextParameters.SEGMENT_ACQUIRE_MODE.getName(), "full").toContext()
+                    .getSegmentAcquireMode(AcquireMode.PARTIAL)
+    );
+    assertEquals(
+        AcquireMode.PARTIAL,
+        QueryContext.builder().putRaw(QueryContextParameters.SEGMENT_ACQUIRE_MODE.getName(), "PARTIAL").toContext()
+                    .getSegmentAcquireMode(AcquireMode.FULL)
+    );
+    assertEquals(
+        AcquireMode.PARTIAL_RULE_HELD,
+        QueryContext.builder()
+                    .putRaw(QueryContextParameters.SEGMENT_ACQUIRE_MODE.getName(), "partial_rule_held")
+                    .toContext()
+                    .getSegmentAcquireMode(AcquireMode.FULL)
+    );
+    assertThrows(
+        BadQueryContextException.class,
+        () -> QueryContext.builder().putRaw(QueryContextParameters.SEGMENT_ACQUIRE_MODE.getName(), "dummy").toContext()
+                          .getSegmentAcquireMode(AcquireMode.FULL)
+    );
+  }
+
+  @Test
+  public void testGetRealtimeSegmentsModeBackwardCompat()
+  {
+    // realtimeSegmentsOnly=true maps to EXCLUSIVE
+    assertEquals(
+        QueryContexts.RealtimeSegmentsMode.EXCLUSIVE,
+        QueryContext.of(QueryContextParameters.REALTIME_SEGMENTS_ONLY, true)
+                   .getRealtimeSegmentsMode()
+    );
+    // realtimeSegmentsOnly=false maps to INCLUDE (default)
+    assertEquals(
+        QueryContexts.RealtimeSegmentsMode.INCLUDE,
+        QueryContext.of(QueryContextParameters.REALTIME_SEGMENTS_ONLY, false)
+                   .getRealtimeSegmentsMode()
+    );
+  }
+
+  @Test
+  public void testIntegerParametersRejectOnlyInexactNumbers()
+  {
+    assertEquals(5, QueryContext.of(ImmutableMap.of(QueryContextParameters.PRIORITY.getName(), 5.0)).getPriority());
+    assertEquals(5, QueryContext.of(ImmutableMap.of(QueryContextParameters.PRIORITY.getName(), "5.0")).getPriority());
+    assertEquals(
+        "Query context parameter [priority] should be in integer format, but got [1.5]",
+        assertThrows(
+            BadQueryContextException.class,
+            () -> QueryContext.of(ImmutableMap.of(QueryContextParameters.PRIORITY.getName(), 1.5)).getPriority()
+        ).getMessage()
+    );
+    assertThrows(
+        BadQueryContextException.class,
+        () -> QueryContext.of(ImmutableMap.of(QueryContextParameters.TIMEOUT.getName(), "1.5")).getTimeout()
+    );
+  }
+
+  @Test
+  public void testGetRealtimeSegmentsModeIgnoresExplicitNullDeprecatedFlag()
+  {
+    final Map<String, Object> context = new HashMap<>();
+    QueryContextParameters.REALTIME_SEGMENTS_MODE.set(context, QueryContexts.RealtimeSegmentsMode.EXCLUDE);
+    context.put(QueryContextParameters.REALTIME_SEGMENTS_ONLY.getName(), null);
+    assertEquals(QueryContexts.RealtimeSegmentsMode.EXCLUDE, QueryContext.of(context).getRealtimeSegmentsMode());
+  }
+
+  @Test
+  public void testGetRealtimeSegmentsModeConflictThrows()
+  {
+    BadQueryContextException e = assertThrows(
+        BadQueryContextException.class,
+        () -> QueryContext.of(
+            QueryContextParameters.REALTIME_SEGMENTS_ONLY,
+            true,
+            QueryContextParameters.REALTIME_SEGMENTS_MODE,
+            QueryContexts.RealtimeSegmentsMode.EXCLUDE
+        ).getRealtimeSegmentsMode()
+    );
+    assertEquals(
+        "Cannot set both [realtimeSegmentsMode] and deprecated [realtimeSegmentsOnly]; use [realtimeSegmentsMode] only.",
+        e.getMessage()
+    );
+  }
+
+  @Test
+  public void testGetRealtimeSegmentsModeInvalidValue()
+  {
+    BadQueryContextException e = assertThrows(
+        BadQueryContextException.class,
+        () -> QueryContext.of(ImmutableMap.of(QueryContextParameters.REALTIME_SEGMENTS_MODE.getName(), "badvalue"))
+                         .getRealtimeSegmentsMode()
+    );
+    assertEquals(
+        "Expected key [realtimeSegmentsMode] to be referring to one of the values [INCLUDE,EXCLUSIVE,EXCLUDE] of enum [RealtimeSegmentsMode], but got [badvalue]",
+        e.getMessage()
+    );
+  }
+
+  @Test
+  public void testSerialization() throws Exception
+  {
+    final QueryContext context = QueryContext.of(
+        ImmutableMap.of(
+            "key1", "true",
+            "key2", true
+        )
+    );
+
+    String ctxStr = JSON_MAPPER.writeValueAsString(context);
+    assertEquals("{\"key1\":\"true\",\"key2\":true}", ctxStr);
+    QueryContext ctx2 = JSON_MAPPER.readValue(ctxStr, QueryContext.class);
+    assertEquals(context, ctx2);
+    assertEquals(true, ctx2.get("key2"));
+    assertEquals("true", ctx2.get("key1"));
   }
 
   public static class LegacyContextQuery implements Query<Integer>
@@ -425,12 +777,6 @@ public class QueryContextTest
     }
 
     @Override
-    public boolean isDescending()
-    {
-      return false;
-    }
-
-    @Override
     public Ordering<Integer> getResultOrdering()
     {
       return Ordering.natural();
@@ -445,7 +791,7 @@ public class QueryContextTest
     @Override
     public Query<Integer> withId(String id)
     {
-      context.put(BaseQuery.QUERY_ID, id);
+      QueryContextParameters.QUERY_ID.set(context, id);
       return this;
     }
 
@@ -453,13 +799,13 @@ public class QueryContextTest
     @Override
     public String getId()
     {
-      return (String) context.get(BaseQuery.QUERY_ID);
+      return (String) context.get(QueryContextParameters.QUERY_ID.getName());
     }
 
     @Override
     public Query<Integer> withSubQueryId(String subQueryId)
     {
-      context.put(BaseQuery.SUB_QUERY_ID, subQueryId);
+      QueryContextParameters.SUB_QUERY_ID.set(context, subQueryId);
       return this;
     }
 
@@ -467,7 +813,7 @@ public class QueryContextTest
     @Override
     public String getSubQueryId()
     {
-      return (String) context.get(BaseQuery.SUB_QUERY_ID);
+      return (String) context.get(QueryContextParameters.SUB_QUERY_ID.getName());
     }
 
     @Override

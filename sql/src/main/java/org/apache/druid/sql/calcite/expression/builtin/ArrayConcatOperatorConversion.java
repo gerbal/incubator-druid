@@ -21,19 +21,23 @@ package org.apache.druid.sql.calcite.expression.builtin;
 
 import org.apache.calcite.sql.SqlFunction;
 import org.apache.calcite.sql.SqlFunctionCategory;
+import org.apache.calcite.sql.SqlOperator;
 import org.apache.calcite.sql.type.OperandTypes;
 import org.apache.calcite.sql.type.SqlTypeFamily;
+import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.sql.calcite.expression.DirectOperatorConversion;
 import org.apache.druid.sql.calcite.expression.OperatorConversions;
 import org.apache.druid.sql.calcite.planner.Calcites;
 
 public class ArrayConcatOperatorConversion extends DirectOperatorConversion
 {
+  public static final String FUNCTION_NAME = "array_concat";
+
   private static final SqlFunction SQL_FUNCTION = OperatorConversions
-      .operatorBuilder("ARRAY_CONCAT")
+      .operatorBuilder(StringUtils.toUpperCase(FUNCTION_NAME))
       .operandTypeChecker(
           OperandTypes.sequence(
-              "(array,array)",
+              "'ARRAY_CONCAT(array, array)'",
               OperandTypes.or(
                   OperandTypes.family(SqlTypeFamily.ARRAY),
                   OperandTypes.family(SqlTypeFamily.STRING)
@@ -50,6 +54,11 @@ public class ArrayConcatOperatorConversion extends DirectOperatorConversion
 
   public ArrayConcatOperatorConversion()
   {
-    super(SQL_FUNCTION, "array_concat");
+    super(SQL_FUNCTION, FUNCTION_NAME);
+  }
+
+  protected ArrayConcatOperatorConversion(SqlOperator operator, String druidFunctionName)
+  {
+    super(operator, druidFunctionName);
   }
 }

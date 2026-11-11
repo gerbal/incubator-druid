@@ -16,7 +16,7 @@
  * limitations under the License.
  */
 
-@import '../../variables';
+@use '../../variables' as *;
 
 .compaction-history-dialog {
   &.#{$bp-ns}-dialog {
@@ -36,11 +36,7 @@
     .global-info {
       position: absolute;
       bottom: 10px;
-      left: 30px;
-      right: 10px;
-      width: auto;
-      white-space: pre;
-      background: $gray1;
+      right: 20px;
     }
   }
 

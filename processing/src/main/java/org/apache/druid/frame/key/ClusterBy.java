@@ -23,6 +23,7 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
+import org.apache.druid.frame.FrameType;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.guava.Comparators;
 import org.apache.druid.segment.ColumnInspector;
@@ -133,7 +134,7 @@ public class ClusterBy
    * The provided {@link ColumnInspector} is used to determine the types of fields in the keys. The provided signature
    * does not have to exactly match the sortColumns: it merely has to contain them all.
    */
-  public RowKeyReader keyReader(final ColumnInspector inspector)
+  public RowKeyReader keyReader(final ColumnInspector inspector, final FrameType frameType)
   {
     final RowSignature.Builder newSignature = RowSignature.builder();
 
@@ -146,35 +147,35 @@ public class ClusterBy
       newSignature.add(columnName, columnType);
     }
 
-    return RowKeyReader.create(newSignature.build());
+    return RowKeyReader.create(newSignature.build(), frameType);
   }
 
   /**
    * Comparator that compares keys for this instance using the given signature.
    */
-  public Comparator<RowKey> keyComparator()
+  public Comparator<RowKey> keyComparator(RowSignature rowSignature)
   {
-    return RowKeyComparator.create(columns);
+    return RowKeyComparator.create(columns, rowSignature);
   }
 
   /**
    * Comparator that compares byte arrays of keys for this instance using the given signature directly.
    */
-  public Comparator<byte[]> byteKeyComparator()
+  public Comparator<byte[]> byteKeyComparator(RowSignature rowSignature)
   {
-    return ByteRowKeyComparator.create(columns);
+    return ByteRowKeyComparator.create(columns, rowSignature);
   }
 
   /**
    * Comparator that compares bucket keys for this instance. Bucket keys are retrieved by calling
    * {@link RowKeyReader#trim(RowKey, int)} with {@link #getBucketByCount()}.
    */
-  public Comparator<RowKey> bucketComparator()
+  public Comparator<RowKey> bucketComparator(final RowSignature rowSignature)
   {
     if (bucketByCount == 0) {
       return Comparators.alwaysEqual();
     } else {
-      return RowKeyComparator.create(columns.subList(0, bucketByCount));
+      return RowKeyComparator.create(columns.subList(0, bucketByCount), rowSignature);
     }
   }
 

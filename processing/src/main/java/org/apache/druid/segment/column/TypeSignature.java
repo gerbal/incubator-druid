@@ -20,6 +20,7 @@
 package org.apache.druid.segment.column;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.google.errorprone.annotations.Immutable;
 import org.apache.druid.java.util.common.StringUtils;
 
 import javax.annotation.Nullable;
@@ -68,6 +69,7 @@ import java.util.Objects;
  * can be merged, which will simplify this interface to no longer need be generic, allow {@link ColumnType} to be
  * collapsed into {@link BaseTypeSignature}, and finally unify the type system.
  */
+@Immutable
 public interface TypeSignature<Type extends TypeDescriptor>
 {
   /**
@@ -107,8 +109,8 @@ public interface TypeSignature<Type extends TypeDescriptor>
   /**
    * A {@link NullableTypeStrategy} is a {@link TypeStrategy} which can handle reading and writing null values, at the
    * very high cost of an additional byte per value, of which a single bit is used to store
-   * {@link org.apache.druid.common.config.NullHandling#IS_NULL_BYTE} or
-   * {@link org.apache.druid.common.config.NullHandling#IS_NOT_NULL_BYTE} as appropriate.
+   * {@link TypeStrategies#IS_NULL_BYTE} or
+   * {@link TypeStrategies#IS_NOT_NULL_BYTE} as appropriate.
    *
    * This pattern is common among buffer aggregators, which don't have access to an external memory location for more
    * efficient tracking of null values and must store this information inline with the accumulated value.
@@ -165,6 +167,12 @@ public interface TypeSignature<Type extends TypeDescriptor>
   default boolean isArray()
   {
     return getType().isArray();
+  }
+
+  @JsonIgnore
+  default boolean isPrimitiveArray()
+  {
+    return getType().isArray() && getElementType() != null && getElementType().isPrimitive();
   }
 
   /**

@@ -21,18 +21,22 @@ package org.apache.druid.sql.calcite.planner;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Preconditions;
+import org.apache.calcite.plan.RelOptPlanner;
+import org.apache.calcite.runtime.CalciteContextException;
 import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.sql.SqlExplain;
 import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlNode;
-import org.apache.calcite.sql.parser.SqlParseException;
 import org.apache.calcite.tools.FrameworkConfig;
 import org.apache.calcite.tools.ValidationException;
-import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.error.DruidException;
+import org.apache.druid.error.InvalidSqlInput;
 import org.apache.druid.query.QueryContext;
-import org.apache.druid.server.security.Access;
+import org.apache.druid.server.security.AuthorizationResult;
 import org.apache.druid.server.security.Resource;
 import org.apache.druid.server.security.ResourceAction;
+import org.apache.druid.sql.calcite.parser.DruidSqlAlterTable;
+import org.apache.druid.sql.calcite.parser.DruidSqlCreateTable;
 import org.apache.druid.sql.calcite.parser.DruidSqlInsert;
 import org.apache.druid.sql.calcite.parser.DruidSqlReplace;
 import org.apache.druid.sql.calcite.run.SqlEngine;
@@ -63,7 +67,7 @@ public class DruidPlanner implements Closeable
 
   public static class AuthResult
   {
-    public final Access authorizationResult;
+    public final AuthorizationResult authorizationResult;
 
     /**
      * Resource actions used with authorizing a cancellation request. These actions
@@ -79,7 +83,7 @@ public class DruidPlanner implements Closeable
     public final Set<ResourceAction> allResourceActions;
 
     public AuthResult(
-        final Access authorizationResult,
+        final AuthorizationResult authorizationResult,
         final Set<ResourceAction> sqlResourceActions,
         final Set<ResourceAction> allResourceActions
     )
@@ -95,6 +99,7 @@ public class DruidPlanner implements Closeable
   private final PlannerContext plannerContext;
   private final SqlEngine engine;
   private final PlannerHook hook;
+  private final PlannerFactory plannerFactory;
   private State state = State.START;
   private SqlStatementHandler handler;
   private boolean authorized;
@@ -103,9 +108,11 @@ public class DruidPlanner implements Closeable
       final FrameworkConfig frameworkConfig,
       final PlannerContext plannerContext,
       final SqlEngine engine,
-      final PlannerHook hook
+      final PlannerHook hook,
+      final PlannerFactory plannerFactory
   )
   {
+    this.plannerFactory = plannerFactory;
     this.frameworkConfig = frameworkConfig;
     this.planner = new CalcitePlanner(frameworkConfig);
     this.plannerContext = plannerContext;
@@ -119,33 +126,25 @@ public class DruidPlanner implements Closeable
    * @return set of {@link Resource} corresponding to any Druid datasources
    * or views which are taking part in the query.
    */
-  public void validate() throws SqlParseException, ValidationException
+  public void validate()
   {
     Preconditions.checkState(state == State.START);
 
     // Validate query context.
     engine.validateContext(plannerContext.queryContextMap());
-
-    // Parse the query string.
-    String sql = plannerContext.getSql();
-    hook.captureSql(sql);
-    SqlNode root = planner.parse(sql);
+    planner.skipParse();
+    final SqlNode root = rewriteParameters(plannerContext.getSqlNode());
+    hook.captureSqlNode(root);
     handler = createHandler(root);
-
-    try {
-      handler.validate();
-      plannerContext.setResourceActions(handler.resourceActions());
-    }
-    catch (RuntimeException e) {
-      throw new ValidationException(e);
-    }
-
+    handler.validate();
+    plannerContext.setResourceActions(handler.resourceActions());
     state = State.VALIDATED;
   }
 
-  private SqlStatementHandler createHandler(final SqlNode node) throws ValidationException
+  private SqlStatementHandler createHandler(final SqlNode node)
   {
     SqlNode query = node;
+
     SqlExplain explain = null;
     if (query.getKind() == SqlKind.EXPLAIN) {
       explain = (SqlExplain) query;
@@ -153,6 +152,16 @@ public class DruidPlanner implements Closeable
     }
 
     SqlStatementHandler.HandlerContext handlerContext = new HandlerContextImpl();
+
+    if (query instanceof DruidSqlCreateTable || query instanceof DruidSqlAlterTable) {
+      // The grammar does not admit EXPLAIN of a DDL statement; this guards the case anyway, since a DDL statement
+      // has no query to explain.
+      if (explain != null) {
+        throw InvalidSqlInput.exception("EXPLAIN is not supported for [%s]", query.getKind());
+      }
+      return createDdlHandler(handlerContext, query);
+    }
+
     if (query.getKind() == SqlKind.INSERT) {
       if (query instanceof DruidSqlInsert) {
         return new IngestHandler.InsertHandler(handlerContext, (DruidSqlInsert) query, explain);
@@ -164,17 +173,67 @@ public class DruidPlanner implements Closeable
     if (query.isA(SqlKind.QUERY)) {
       return new QueryHandler.SelectHandler(handlerContext, query, explain);
     }
-    throw new ValidationException(StringUtils.format("Cannot execute [%s].", node.getKind()));
+    throw InvalidSqlInput.exception("Unsupported SQL statement [%s]", node.getKind());
+  }
+
+  private static SqlStatementHandler createDdlHandler(
+      final SqlStatementHandler.HandlerContext handlerContext,
+      final SqlNode query
+  )
+  {
+    if (query instanceof DruidSqlCreateTable) {
+      return new CatalogDdlHandler.CreateTableHandler(handlerContext, (DruidSqlCreateTable) query);
+    }
+    if (query instanceof DruidSqlAlterTable.AddColumn) {
+      return new CatalogDdlHandler.AddColumnHandler(handlerContext, (DruidSqlAlterTable.AddColumn) query);
+    }
+    if (query instanceof DruidSqlAlterTable.DropColumn) {
+      return new CatalogDdlHandler.DropColumnHandler(handlerContext, (DruidSqlAlterTable.DropColumn) query);
+    }
+    if (query instanceof DruidSqlAlterTable.AlterColumn) {
+      return new CatalogDdlHandler.AlterColumnHandler(handlerContext, (DruidSqlAlterTable.AlterColumn) query);
+    }
+    if (query instanceof DruidSqlAlterTable.AddProjection) {
+      return new CatalogDdlHandler.AddProjectionHandler(handlerContext, (DruidSqlAlterTable.AddProjection) query);
+    }
+    if (query instanceof DruidSqlAlterTable.DropProjection) {
+      return new CatalogDdlHandler.DropProjectionHandler(handlerContext, (DruidSqlAlterTable.DropProjection) query);
+    }
+    if (query instanceof DruidSqlAlterTable.SetProperties) {
+      return new CatalogDdlHandler.SetPropertiesHandler(handlerContext, (DruidSqlAlterTable.SetProperties) query);
+    }
+    throw DruidException.defensive("Unhandled catalog DDL statement [%s]", query.getClass().getSimpleName());
+  }
+
+  /**
+   * Uses {@link SqlParameterizerShuttle} to rewrite {@link SqlNode} to swap out any
+   * {@link org.apache.calcite.sql.SqlDynamicParam} early for their {@link org.apache.calcite.sql.SqlLiteral}
+   * replacement.
+   *
+   * @return a rewritten {@link SqlNode} with any dynamic parameters rewritten in the provided {@code original} node,
+   * if they were present.
+   */
+  private SqlNode rewriteParameters(final SqlNode original)
+  {
+    // Parameter replacement is done only if the client provides parameter values.
+    // If this is a PREPARE-only, then there will be no values even if the statement contains
+    // parameters. If this is a PLAN, then we'll catch later the case that the statement
+    // contains parameters, but no values were provided.
+    if (plannerContext.getParameters().isEmpty()) {
+      return original;
+    } else {
+      return original.accept(new SqlParameterizerShuttle(plannerContext)); // the rewrite happens here.
+    }
   }
 
   /**
    * Prepare a SQL query for execution, including some initial parsing and
    * validation and any dynamic parameter type resolution, to support prepared
    * statements via JDBC.
-   *
+   * <p>
    * Prepare reuses the validation done in {@link #validate()} which must be
    * called first.
-   *
+   * <p>
    * A query can be prepared on a data source without having permissions on
    * that data source. This odd state of affairs is necessary because
    * {@link org.apache.druid.sql.calcite.view.DruidViewMacro} prepares
@@ -192,15 +251,14 @@ public class DruidPlanner implements Closeable
    * Authorizes the statement. Done within the planner to enforce the authorization
    * step within the planner's state machine.
    *
-   * @param authorizer a function from resource actions to a {@link Access} result.
+   * @param authorizer   a function produces {@link AuthorizationResult} based on resource actions.
    * @param extraActions set of additional resource actions beyond those inferred
-   *        from the query itself. Specifically, the set of context keys to
-   *        authorize.
-   *
+   *                     from the query itself. Specifically, the set of context keys to
+   *                     authorize.
    * @return the return value from the authorizer
    */
   public AuthResult authorize(
-      final Function<Set<ResourceAction>, Access> authorizer,
+      final Function<Set<ResourceAction>, AuthorizationResult> authorizer,
       final Set<ResourceAction> extraActions
   )
   {
@@ -208,14 +266,14 @@ public class DruidPlanner implements Closeable
     Set<ResourceAction> sqlResourceActions = plannerContext.getResourceActions();
     Set<ResourceAction> allResourceActions = new HashSet<>(sqlResourceActions);
     allResourceActions.addAll(extraActions);
-    Access access = authorizer.apply(allResourceActions);
-    plannerContext.setAuthorizationResult(access);
+    AuthorizationResult authorizationResult = authorizer.apply(allResourceActions);
+    plannerContext.setAuthorizationResult(authorizationResult);
 
     // Authorization is done as a flag, not a state, alas.
     // Views prepare without authorization, Avatica does authorize, then prepare,
     // so the only constraint is that authorization be done before planning.
     authorized = true;
-    return new AuthResult(access, sqlResourceActions, allResourceActions);
+    return new AuthResult(authorizationResult, sqlResourceActions, allResourceActions);
   }
 
   /**
@@ -226,7 +284,7 @@ public class DruidPlanner implements Closeable
    * <p>
    * Planning reuses the validation done in {@code validate()} which must be called first.
    */
-  public PlannerResult plan() throws ValidationException
+  public PlannerResult plan()
   {
     Preconditions.checkState(state == State.VALIDATED || state == State.PREPARED);
     Preconditions.checkState(authorized);
@@ -304,6 +362,74 @@ public class DruidPlanner implements Closeable
     public PlannerHook hook()
     {
       return hook;
+    }
+
+    @Override
+    public PlannerFactory plannerFactory()
+    {
+      return plannerFactory;
+    }
+  }
+
+  public static DruidException translateException(Exception e)
+  {
+    try {
+      throw e;
+    }
+    catch (DruidException inner) {
+      return inner;
+    }
+    catch (ValidationException inner) {
+      return parseValidationMessage(inner);
+    }
+    catch (RelOptPlanner.CannotPlanException inner) {
+      return DruidException.forPersona(DruidException.Persona.USER)
+                           .ofCategory(DruidException.Category.INVALID_INPUT)
+                           .build(inner, "%s", inner.getMessage());
+    }
+    catch (Exception inner) {
+      // Anything else. Should not get here. Anything else should already have
+      // been translated to a DruidException unless it is an unexpected exception.
+      return DruidException.forPersona(DruidException.Persona.ADMIN)
+                           .ofCategory(DruidException.Category.UNCATEGORIZED)
+                           .build(inner, "%s", inner.getMessage());
+    }
+  }
+
+  private static DruidException parseValidationMessage(Exception e)
+  {
+    if (e.getCause() instanceof DruidException) {
+      return (DruidException) e.getCause();
+    }
+
+    Throwable maybeContextException = e;
+    CalciteContextException contextException = null;
+    while (maybeContextException != null) {
+      if (maybeContextException instanceof CalciteContextException) {
+        contextException = (CalciteContextException) maybeContextException;
+        break;
+      }
+      maybeContextException = maybeContextException.getCause();
+    }
+
+    if (contextException != null) {
+      return InvalidSqlInput
+          .exception(
+              e,
+              "%s (line [%s], column [%s])",
+              // the CalciteContextException .getMessage() assumes cause is non-null, so this should be fine
+              contextException.getCause().getMessage(),
+              contextException.getPosLine(),
+              contextException.getPosColumn()
+          )
+          .withContext("line", String.valueOf(contextException.getPosLine()))
+          .withContext("column", String.valueOf(contextException.getPosColumn()))
+          .withContext("endLine", String.valueOf(contextException.getEndPosLine()))
+          .withContext("endColumn", String.valueOf(contextException.getEndPosColumn()));
+    } else {
+      return DruidException.forPersona(DruidException.Persona.USER)
+                           .ofCategory(DruidException.Category.UNCATEGORIZED)
+                           .build(e, "Uncategorized calcite error message: [%s]", e.getMessage());
     }
   }
 }

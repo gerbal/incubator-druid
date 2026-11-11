@@ -20,7 +20,6 @@
 package org.apache.druid.java.util.metrics;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableMap;
 import org.apache.druid.java.util.common.Pair;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
@@ -40,30 +39,22 @@ import java.util.Map;
 public class JvmMonitor extends FeedDefiningMonitor
 {
 
-  private final Map<String, String[]> dimensions;
-
+  private static final String JVM_VERSION = "jvmVersion";
+  private static final String JAVA_VERSION = System.getProperty("java.version");
   @VisibleForTesting
   @Nullable
   final GcCollectors gcCollectors;
-
   @Nullable
   private final AllocationMetricCollector collector;
 
   public JvmMonitor()
   {
-    this(ImmutableMap.of());
+    this(DEFAULT_METRICS_FEED);
   }
 
-  public JvmMonitor(Map<String, String[]> dimensions)
-  {
-    this(dimensions, DEFAULT_METRICS_FEED);
-  }
-
-  public JvmMonitor(Map<String, String[]> dimensions, String feed)
+  public JvmMonitor(String feed)
   {
     super(feed);
-    Preconditions.checkNotNull(dimensions);
-    this.dimensions = ImmutableMap.copyOf(dimensions);
     this.collector = AllocationMetricCollectors.getAllocationMetricCollector();
     this.gcCollectors = new GcCollectors();
   }
@@ -82,10 +73,10 @@ public class JvmMonitor extends FeedDefiningMonitor
   private void emitThreadAllocationMetrics(ServiceEmitter emitter)
   {
     final ServiceMetricEvent.Builder builder = builder();
-    MonitorUtils.addDimensionsToBuilder(builder, dimensions);
+    builder.setDimension(JVM_VERSION, JAVA_VERSION);
     if (collector != null) {
       long delta = collector.calculateDelta();
-      emitter.emit(builder.build("jvm/heapAlloc/bytes", delta));
+      emitter.emit(builder.setMetric("jvm/heapAlloc/bytes", delta));
     }
   }
 
@@ -104,13 +95,14 @@ public class JvmMonitor extends FeedDefiningMonitor
     for (Map.Entry<String, MemoryUsage> entry : usages.entrySet()) {
       final String kind = entry.getKey();
       final MemoryUsage usage = entry.getValue();
-      final ServiceMetricEvent.Builder builder = builder().setDimension("memKind", kind);
-      MonitorUtils.addDimensionsToBuilder(builder, dimensions);
+      final ServiceMetricEvent.Builder builder = builder()
+          .setDimension("memKind", kind)
+          .setDimension(JVM_VERSION, JAVA_VERSION);
 
-      emitter.emit(builder.build("jvm/mem/max", usage.getMax()));
-      emitter.emit(builder.build("jvm/mem/committed", usage.getCommitted()));
-      emitter.emit(builder.build("jvm/mem/used", usage.getUsed()));
-      emitter.emit(builder.build("jvm/mem/init", usage.getInit()));
+      emitter.emit(builder.setMetric("jvm/mem/max", usage.getMax()));
+      emitter.emit(builder.setMetric("jvm/mem/committed", usage.getCommitted()));
+      emitter.emit(builder.setMetric("jvm/mem/used", usage.getUsed()));
+      emitter.emit(builder.setMetric("jvm/mem/init", usage.getInit()));
     }
 
     // jvm/pool
@@ -119,31 +111,32 @@ public class JvmMonitor extends FeedDefiningMonitor
       final MemoryUsage usage = pool.getUsage();
       final ServiceMetricEvent.Builder builder = builder()
           .setDimension("poolKind", kind)
-          .setDimension("poolName", pool.getName());
-      MonitorUtils.addDimensionsToBuilder(builder, dimensions);
+          .setDimension("poolName", pool.getName())
+          .setDimension(JVM_VERSION, JAVA_VERSION);
 
-      emitter.emit(builder.build("jvm/pool/max", usage.getMax()));
-      emitter.emit(builder.build("jvm/pool/committed", usage.getCommitted()));
-      emitter.emit(builder.build("jvm/pool/used", usage.getUsed()));
-      emitter.emit(builder.build("jvm/pool/init", usage.getInit()));
+      emitter.emit(builder.setMetric("jvm/pool/max", usage.getMax()));
+      emitter.emit(builder.setMetric("jvm/pool/committed", usage.getCommitted()));
+      emitter.emit(builder.setMetric("jvm/pool/used", usage.getUsed()));
+      emitter.emit(builder.setMetric("jvm/pool/init", usage.getInit()));
     }
   }
 
   private void emitDirectMemMetrics(ServiceEmitter emitter)
   {
     for (BufferPoolMXBean pool : ManagementFactory.getPlatformMXBeans(BufferPoolMXBean.class)) {
-      final ServiceMetricEvent.Builder builder = builder().setDimension("bufferpoolName", pool.getName());
-      MonitorUtils.addDimensionsToBuilder(builder, dimensions);
+      final ServiceMetricEvent.Builder builder = builder()
+          .setDimension("bufferpoolName", pool.getName())
+          .setDimension(JVM_VERSION, JAVA_VERSION);
 
-      emitter.emit(builder.build("jvm/bufferpool/capacity", pool.getTotalCapacity()));
-      emitter.emit(builder.build("jvm/bufferpool/used", pool.getMemoryUsed()));
-      emitter.emit(builder.build("jvm/bufferpool/count", pool.getCount()));
+      emitter.emit(builder.setMetric("jvm/bufferpool/capacity", pool.getTotalCapacity()));
+      emitter.emit(builder.setMetric("jvm/bufferpool/used", pool.getMemoryUsed()));
+      emitter.emit(builder.setMetric("jvm/bufferpool/count", pool.getCount()));
     }
   }
 
   private void emitGcMetrics(ServiceEmitter emitter)
   {
-    gcCollectors.emit(emitter, dimensions);
+    gcCollectors.emit(emitter);
   }
 
   private class GcCollectors
@@ -168,37 +161,34 @@ public class JvmMonitor extends FeedDefiningMonitor
 
     }
 
-    void emit(ServiceEmitter emitter, Map<String, String[]> dimensions)
+    void emit(ServiceEmitter emitter)
     {
       for (GcGenerationCollector generationCollector : generationCollectors) {
-        generationCollector.emit(emitter, dimensions);
+        generationCollector.emit(emitter);
       }
 
       for (GcSpaceCollector spaceCollector : spaceCollectors) {
-        spaceCollector.emit(emitter, dimensions);
+        spaceCollector.emit(emitter);
       }
     }
   }
 
   private class GcGenerationCollector
   {
-    private final String generation;
-    private final String collectorName;
-    private final GarbageCollectorMXBean gcBean;
-
-    private long lastInvocations = 0;
-    private long lastCpuMillis = 0;
-
     private static final String GC_YOUNG_GENERATION_NAME = "young";
     private static final String GC_OLD_GENERATION_NAME = "old";
     private static final String GC_ZGC_GENERATION_NAME = "zgc";
-
     private static final String CMS_COLLECTOR_NAME = "cms";
     private static final String G1_COLLECTOR_NAME = "g1";
     private static final String PARALLEL_COLLECTOR_NAME = "parallel";
     private static final String SERIAL_COLLECTOR_NAME = "serial";
     private static final String ZGC_COLLECTOR_NAME = "zgc";
     private static final String SHENANDOAN_COLLECTOR_NAME = "shenandoah";
+    private final String generation;
+    private final String collectorName;
+    private final GarbageCollectorMXBean gcBean;
+    private long lastInvocations = 0;
+    private long lastCpuMillis = 0;
 
     GcGenerationCollector(GarbageCollectorMXBean gcBean)
     {
@@ -250,12 +240,11 @@ public class JvmMonitor extends FeedDefiningMonitor
       }
     }
 
-    void emit(ServiceEmitter emitter, Map<String, String[]> dimensions)
+    void emit(ServiceEmitter emitter)
     {
       ImmutableMap.Builder<String, String[]> dimensionsCopyBuilder = ImmutableMap
-              .<String, String[]>builder()
-              .putAll(dimensions)
-              .put("gcGen", new String[]{generation});
+          .<String, String[]>builder()
+          .put("gcGen", new String[]{generation});
 
       dimensionsCopyBuilder.put("gcName", new String[]{collectorName});
 
@@ -263,14 +252,15 @@ public class JvmMonitor extends FeedDefiningMonitor
 
       final ServiceMetricEvent.Builder builder = builder();
       MonitorUtils.addDimensionsToBuilder(builder, dimensionsCopy);
+      builder.setDimension(JVM_VERSION, JAVA_VERSION);
 
       long newInvocations = gcBean.getCollectionCount();
-      emitter.emit(builder.build("jvm/gc/count", newInvocations - lastInvocations));
+      emitter.emit(builder.setMetric("jvm/gc/count", newInvocations - lastInvocations));
       lastInvocations = newInvocations;
 
       // getCollectionTime is in milliseconds; we report jvm/gc/cpu in nanoseconds.
       long newCpuMillis = gcBean.getCollectionTime();
-      emitter.emit(builder.build("jvm/gc/cpu", (newCpuMillis - lastCpuMillis) * 1_000_000L));
+      emitter.emit(builder.setMetric("jvm/gc/cpu", (newCpuMillis - lastCpuMillis) * 1_000_000L));
       lastCpuMillis = newCpuMillis;
     }
   }
@@ -285,10 +275,10 @@ public class JvmMonitor extends FeedDefiningMonitor
       spaces.add(new GcGenerationSpace(collectionUsage, name));
     }
 
-    void emit(ServiceEmitter emitter, Map<String, String[]> dimensions)
+    void emit(ServiceEmitter emitter)
     {
       for (GcGenerationSpace space : spaces) {
-        space.emit(emitter, dimensions);
+        space.emit(emitter);
       }
     }
   }
@@ -304,17 +294,17 @@ public class JvmMonitor extends FeedDefiningMonitor
       this.name = name;
     }
 
-    void emit(ServiceEmitter emitter, Map<String, String[]> dimensions)
+    void emit(ServiceEmitter emitter)
     {
       final ServiceMetricEvent.Builder builder = builder();
-      MonitorUtils.addDimensionsToBuilder(builder, dimensions);
+      builder
+          .setDimension(JVM_VERSION, JAVA_VERSION)
+          .setDimension("gcGenSpaceName", name);
 
-      builder.setDimension("gcGenSpaceName", name);
-
-      emitter.emit(builder.build("jvm/gc/mem/max", memoryUsage.getMax()));
-      emitter.emit(builder.build("jvm/gc/mem/capacity", memoryUsage.getCommitted()));
-      emitter.emit(builder.build("jvm/gc/mem/used", memoryUsage.getUsed()));
-      emitter.emit(builder.build("jvm/gc/mem/init", memoryUsage.getInit()));
+      emitter.emit(builder.setMetric("jvm/gc/mem/max", memoryUsage.getMax()));
+      emitter.emit(builder.setMetric("jvm/gc/mem/capacity", memoryUsage.getCommitted()));
+      emitter.emit(builder.setMetric("jvm/gc/mem/used", memoryUsage.getUsed()));
+      emitter.emit(builder.setMetric("jvm/gc/mem/init", memoryUsage.getInit()));
     }
   }
 }

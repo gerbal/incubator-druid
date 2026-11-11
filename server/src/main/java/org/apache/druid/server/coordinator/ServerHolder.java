@@ -20,43 +20,181 @@
 package org.apache.druid.server.coordinator;
 
 import org.apache.druid.client.ImmutableDruidServer;
-import org.apache.druid.java.util.common.logger.Logger;
+import org.apache.druid.java.util.emitter.EmittingLogger;
+import org.apache.druid.server.coordination.ServerType;
+import org.apache.druid.server.coordinator.loading.LoadQueuePeon;
+import org.apache.druid.server.coordinator.loading.PartialLoadProfile;
+import org.apache.druid.server.coordinator.loading.SegmentAction;
+import org.apache.druid.server.coordinator.loading.SegmentHolder;
 import org.apache.druid.timeline.DataSegment;
 import org.apache.druid.timeline.SegmentId;
 
+import javax.annotation.Nullable;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
+ * Encapsulates the state of a DruidServer during a single coordinator run.
+ * <p>
+ * ServerHolders are naturally ordered by available size, servers with more
+ * available size first.
  */
 public class ServerHolder implements Comparable<ServerHolder>
 {
-  private static final Logger log = new Logger(ServerHolder.class);
+  private static final Comparator<ServerHolder> MORE_AVAILABLE_SIZE_SERVER_FIRST =
+      Comparator.comparing(ServerHolder::getAvailableSize)
+                .thenComparing(holder -> holder.getServer().getHost())
+                .thenComparing(holder -> holder.getServer().getTier())
+                .thenComparing(holder -> holder.getServer().getType())
+                .reversed();
+
+  private static final EmittingLogger log = new EmittingLogger(ServerHolder.class);
+
   private final ImmutableDruidServer server;
   private final LoadQueuePeon peon;
   private final boolean isDecommissioning;
-  private final int maxSegmentsInLoadQueue;
+  private final boolean isUnmanaged;
+  private final int maxAssignmentsInRun;
+  private final int maxLifetimeInQueue;
+
+  private final int movingSegmentCount;
+  private final int loadingReplicaCount;
+
+  private int totalAssignmentsInRun;
+  private long sizeOfLoadingSegments;
+  private long sizeOfDroppingSegments;
+
+  /**
+   * Remove entries from this map only if the operation is cancelled.
+   * Do not remove entries on load/drop success or failure during the run.
+   */
+  private final Map<DataSegment, SegmentAction> queuedSegments = new HashMap<>();
+
+  /**
+   * Tracks the {@link PartialLoadProfile} for in-flight load operations on this server. Populated from the peon's
+   * existing queue at construction time and updated by {@link #startOperation(SegmentAction, DataSegment,
+   * PartialLoadProfile)} when a fresh partial load is queued during the run. Cleared when the corresponding queued
+   * operation is canceled. Read by the partial-load reconciler to classify in-flight replicas as matching or stale.
+   */
+  private final Map<DataSegment, PartialLoadProfile> inFlightProfiles = new HashMap<>();
+
+  private final SegmentCountsPerInterval projectedSegmentCounts = new SegmentCountsPerInterval();
 
   public ServerHolder(ImmutableDruidServer server, LoadQueuePeon peon)
   {
-    this(server, peon, false);
+    this(server, peon, false, 0, 1);
   }
 
   public ServerHolder(ImmutableDruidServer server, LoadQueuePeon peon, boolean isDecommissioning)
   {
-    this(server, peon, isDecommissioning, 0);
+    this(server, peon, isDecommissioning, 0, 1);
   }
 
   public ServerHolder(
       ImmutableDruidServer server,
       LoadQueuePeon peon,
       boolean isDecommissioning,
-      int maxSegmentsInNodeLoadingQueue
+      int maxSegmentsInLoadQueue,
+      int maxLifetimeInQueue
+  )
+  {
+    this(server, peon, isDecommissioning, false, maxSegmentsInLoadQueue, maxLifetimeInQueue);
+  }
+
+  /**
+   * Creates a new ServerHolder valid for a single coordinator run.
+   *
+   * @param server                 Underlying Druid server
+   * @param peon                   Load queue peon for this server
+   * @param isDecommissioning      Whether the server is decommissioning
+   * @param isUnmanaged            Whether this server is unmanaged and should not participate in segment assignment,
+   *                               drop or balancing.
+   * @param maxSegmentsInLoadQueue Max number of segments that can be present in
+   *                               the load queue at any point. If this is 0, the
+   *                               load queue can have an unlimited number of segments.
+   * @param maxLifetimeInQueue     Number of coordinator runs after a which a segment
+   *                               in load/drop queue is considered to be stuck.
+   */
+  public ServerHolder(
+      ImmutableDruidServer server,
+      LoadQueuePeon peon,
+      boolean isDecommissioning,
+      boolean isUnmanaged,
+      int maxSegmentsInLoadQueue,
+      int maxLifetimeInQueue
   )
   {
     this.server = server;
     this.peon = peon;
     this.isDecommissioning = isDecommissioning;
-    this.maxSegmentsInLoadQueue = maxSegmentsInNodeLoadingQueue;
+    this.isUnmanaged = isUnmanaged;
+
+    this.maxAssignmentsInRun = maxSegmentsInLoadQueue == 0
+                               ? Integer.MAX_VALUE
+                               : maxSegmentsInLoadQueue - peon.getSegmentsToLoad().size();
+    this.maxLifetimeInQueue = maxLifetimeInQueue;
+
+    final AtomicInteger movingSegmentCount = new AtomicInteger();
+    final AtomicInteger loadingReplicaCount = new AtomicInteger();
+    initializeQueuedSegments(movingSegmentCount, loadingReplicaCount);
+
+    this.movingSegmentCount = movingSegmentCount.get();
+    this.loadingReplicaCount = loadingReplicaCount.get();
+  }
+
+  private void initializeQueuedSegments(
+      AtomicInteger movingSegmentCount,
+      AtomicInteger loadingReplicaCount
+  )
+  {
+    for (DataSegment segment : server.iterateAllSegments()) {
+      projectedSegmentCounts.addSegment(segment);
+    }
+
+    final List<SegmentHolder> expiredSegments = new ArrayList<>();
+    for (SegmentHolder holder : peon.getSegmentsInQueue()) {
+      int runsInQueue = holder.incrementAndGetRunsInQueue();
+      if (runsInQueue > maxLifetimeInQueue) {
+        expiredSegments.add(holder);
+      }
+
+      final SegmentAction action = holder.getAction();
+      addToQueuedSegments(holder.getSegment(), action);
+      if (holder.getProfile() != null) {
+        inFlightProfiles.put(holder.getSegment(), holder.getProfile());
+      }
+
+      if (action == SegmentAction.MOVE_TO) {
+        movingSegmentCount.incrementAndGet();
+      }
+      if (action == SegmentAction.REPLICATE) {
+        loadingReplicaCount.incrementAndGet();
+      }
+    }
+
+    for (DataSegment segment : peon.getSegmentsMarkedToDrop()) {
+      addToQueuedSegments(segment, SegmentAction.MOVE_FROM);
+    }
+
+    if (!expiredSegments.isEmpty()) {
+      List<SegmentHolder> expiredSegmentsSubList =
+          expiredSegments.size() > 10 ? expiredSegments.subList(0, 10) : expiredSegments;
+
+      log.makeAlert(
+          "Load queue for server [%s], tier [%s] has [%d] segments stuck.",
+          server.getName(), server.getTier(), expiredSegments.size()
+      )
+         .addData("segments", expiredSegmentsSubList.toString())
+         .addData("maxLifetime", maxLifetimeInQueue).emit();
+    }
   }
 
   public ImmutableDruidServer getServer()
@@ -74,19 +212,33 @@ public class ServerHolder implements Comparable<ServerHolder>
     return server.getMaxSize();
   }
 
-  public long getCurrServerSize()
+  public long getStorageSize()
   {
-    return server.getCurrSize();
+    return server.getStorageSize();
   }
 
-  public long getLoadQueueSize()
-  {
-    return peon.getLoadQueueSize();
-  }
-
+  /**
+   * Total projected disk usage of this server in bytes.
+   * <p>
+   * The total size:
+   * <ol>
+   * <li>INCLUDES segments loaded on this server</li>
+   * <li>INCLUDES segments loading on this server (actions: LOAD/REPLICATE). A load of a segment this server already
+   * serves is an in-place reload, and is counted at its {@link #inPlaceReloadSizeDelta} rather than its full size, so
+   * that the bytes already on disk are not counted twice</li>
+   * <li>INCLUDES segments moving to this server (action: MOVE_TO)</li>
+   * <li>INCLUDES segments moving from this server (action: MOVE_FROM). This is
+   * because these segments have only been <i>marked</i> for drop. We include
+   * the size of these segments to avoid over-assigning the server in case the
+   * corresponding MOVE_TO operation gets delayed or fails.</li>
+   * <li>EXCLUDES segments dropping from this server (action: DROP). Excluding
+   * these segments cannot result in over-assignment because drops are always
+   * processed before loads.</li>
+   * </ol>
+   */
   public long getSizeUsed()
   {
-    return getCurrServerSize() + getLoadQueueSize();
+    return server.getCurrSize() + sizeOfLoadingSegments - sizeOfDroppingSegments;
   }
 
   public double getPercentUsed()
@@ -94,60 +246,27 @@ public class ServerHolder implements Comparable<ServerHolder>
     return (100.0 * getSizeUsed()) / getMaxSize();
   }
 
-  /**
-   * Historical nodes can be 'decommissioned', which instructs Coordinator to move segments from them according to
-   * the percent of move operations diverted from normal balancer moves for this purpose by
-   * {@link CoordinatorDynamicConfig#getDecommissioningMaxPercentOfMaxSegmentsToMove()}. The mechanism allows draining
-   * segments from nodes which are planned for replacement.
-   * @return true if the node is decommissioning
-   */
   public boolean isDecommissioning()
   {
     return isDecommissioning;
   }
 
+  /**
+   * Returns true if this server is unmanaged and should not participate in segment assignment, drop or balancing.
+   */
+  public boolean isUnmanaged()
+  {
+    return isUnmanaged;
+  }
+
+  public boolean isLoadQueueFull()
+  {
+    return totalAssignmentsInRun >= maxAssignmentsInRun;
+  }
+
   public long getAvailableSize()
   {
-    long maxSize = getMaxSize();
-    long sizeUsed = getSizeUsed();
-    long availableSize = maxSize - sizeUsed;
-
-    log.debug(
-        "Server[%s], MaxSize[%,d], CurrSize[%,d], QueueSize[%,d], SizeUsed[%,d], AvailableSize[%,d]",
-        server.getName(),
-        maxSize,
-        getCurrServerSize(),
-        getLoadQueueSize(),
-        sizeUsed,
-        availableSize
-    );
-
-    return availableSize;
-  }
-
-  public boolean isServingSegment(DataSegment segment)
-  {
-    return isServingSegment(segment.getId());
-  }
-
-  public boolean isLoadingSegment(DataSegment segment)
-  {
-    return peon.getSegmentsToLoad().contains(segment);
-  }
-
-  public boolean isDroppingSegment(DataSegment segment)
-  {
-    return peon.getSegmentsToDrop().contains(segment);
-  }
-
-  public int getNumberOfSegmentsInQueue()
-  {
-    return peon.getNumberOfSegmentsInQueue();
-  }
-
-  public boolean isServingSegment(SegmentId segmentId)
-  {
-    return server.getSegment(segmentId) != null;
+    return getMaxSize() - getSizeUsed();
   }
 
   /**
@@ -165,31 +284,293 @@ public class ServerHolder implements Comparable<ServerHolder>
   public boolean canLoadSegment(DataSegment segment)
   {
     return !isDecommissioning
-           && !isServingSegment(segment.getId())
-           && !isLoadingSegment(segment)
-           && (maxSegmentsInLoadQueue == 0 || maxSegmentsInLoadQueue > peon.getNumberOfSegmentsInQueue())
+           && !hasSegmentLoaded(segment.getId())
+           && getActionOnSegment(segment) == null
+           && totalAssignmentsInRun < maxAssignmentsInRun
            && getAvailableSize() >= segment.getSize();
+  }
+
+  public SegmentAction getActionOnSegment(DataSegment segment)
+  {
+    return queuedSegments.get(segment);
+  }
+
+  /**
+   * Segments queued for load, drop or move on this server.
+   * <ul>
+   * <li>Contains segments present in the queue when the current coordinator run started.</li>
+   * <li>Contains segments added to the queue during the current run.</li>
+   * <li>Does not contain segments whose actions were cancelled.</li>
+   * </ul>
+   */
+  public Map<DataSegment, SegmentAction> getQueuedSegments()
+  {
+    return new HashMap<>(queuedSegments);
+  }
+
+  /**
+   * Counts for segments that are expected to be loaded on this server once all the
+   * operations in progress have completed.
+   */
+  public SegmentCountsPerInterval getProjectedSegmentCounts()
+  {
+    return projectedSegmentCounts;
+  }
+
+  /**
+   * Segments that are expected to be loaded on this server once all the operations in progress have completed.
+   */
+  public Set<DataSegment> getProjectedSegments()
+  {
+    final Set<DataSegment> projectedSegments = new HashSet<>(getServedSegments());
+    queuedSegments.forEach((segment, action) -> {
+      if (action.isLoad()) {
+        projectedSegments.add(segment);
+      } else {
+        projectedSegments.remove(segment);
+      }
+    });
+    return projectedSegments;
+  }
+
+  public boolean isProjectedSegment(DataSegment segment)
+  {
+    SegmentAction action = getActionOnSegment(segment);
+    if (action == null) {
+      return hasSegmentLoaded(segment.getId());
+    } else {
+      return action.isLoad();
+    }
+  }
+
+  /**
+   * Segments that are currently in the queue for being loaded on this server.
+   * This does not include segments that are being moved to this server.
+   */
+  public List<DataSegment> getLoadingSegments()
+  {
+    final List<DataSegment> loadingSegments = new ArrayList<>();
+    queuedSegments.forEach((segment, action) -> {
+      if (action == SegmentAction.LOAD || action == SegmentAction.REPLICATE) {
+        loadingSegments.add(segment);
+      }
+    });
+
+    return loadingSegments;
+  }
+
+  /**
+   * Segments that are currently loaded on this server.
+   */
+  public Collection<DataSegment> getServedSegments()
+  {
+    return server.iterateAllSegments();
+  }
+
+  /**
+   * Returns true if this server has the segment loaded and is not dropping it.
+   */
+  public boolean isServingSegment(DataSegment segment)
+  {
+    return hasSegmentLoaded(segment.getId()) && getActionOnSegment(segment) == null;
+  }
+
+  public boolean isLoadingSegment(DataSegment segment)
+  {
+    final SegmentAction action = getActionOnSegment(segment);
+    return action == SegmentAction.LOAD || action == SegmentAction.REPLICATE;
+  }
+
+  public boolean isDroppingSegment(DataSegment segment)
+  {
+    return getActionOnSegment(segment) == SegmentAction.DROP;
+  }
+
+  public int getNumMovingSegments()
+  {
+    return movingSegmentCount;
+  }
+
+  public int getNumLoadingReplicas()
+  {
+    return loadingReplicaCount;
+  }
+
+  public int getNumQueuedSegments()
+  {
+    return queuedSegments.size();
+  }
+
+  /**
+   * Convenience that delegates to {@link #startOperation(SegmentAction, DataSegment, PartialLoadProfile)} with no
+   * partial-load profile, for the regular full-load / drop / move paths that don't carry one.
+   */
+  public boolean startOperation(SegmentAction action, DataSegment segment)
+  {
+    return startOperation(action, segment, null);
+  }
+
+  /**
+   * Records the start of {@code action} on {@code segment} on this server for the current coordinator run.
+   * <p>
+   * If the segment already has a queued action, returns {@code false} and does nothing (the caller is expected to
+   * treat this as a no-op / collision). Otherwise: marks the segment as queued, increments the per-run assignment
+   * counter for load actions (so {@link #isLoadQueueFull()} converges), and updates projected segment counts and
+   * size accounting via {@link #addToQueuedSegments}.
+   * <p>
+   * When {@code profile} is non-null, the {@link PartialLoadProfile} is stashed so the partial-load reconciler can
+   * read the in-flight fingerprint back during the same coordinator run via {@link #getInFlightProfile(DataSegment)}.
+   * The profile is cleared on {@link #cancelOperation}; it stays put on success/failure of the queued action so the
+   * inventory's eventual announcement (with realized fingerprint and loadedBytes) is what overwrites it.
+   */
+  public boolean startOperation(SegmentAction action, DataSegment segment, @Nullable PartialLoadProfile profile)
+  {
+    if (queuedSegments.containsKey(segment)) {
+      return false;
+    }
+
+    if (action.isLoad()) {
+      ++totalAssignmentsInRun;
+    }
+
+    addToQueuedSegments(segment, action);
+    if (profile != null) {
+      inFlightProfiles.put(segment, profile);
+    }
+    return true;
+  }
+
+  public boolean cancelOperation(SegmentAction action, DataSegment segment)
+  {
+    // Cancel only if the action is currently in queue
+    final SegmentAction queuedAction = queuedSegments.get(segment);
+    if (queuedAction != action) {
+      return false;
+    }
+
+    // Try cancelling the operation on the peon
+    // MOVE_FROM operations are not sent to the peon, so they can be considered cancelled
+    if (queuedAction == SegmentAction.MOVE_FROM || peon.cancelOperation(segment)) {
+      removeFromQueuedSegments(segment, queuedAction);
+      inFlightProfiles.remove(segment);
+      return true;
+    } else {
+      return false;
+    }
+  }
+
+  /**
+   * Cancels a {@link SegmentAction#REPLICATE} or {@link SegmentAction#LOAD} if
+   * it is currently being performed on the given segment.
+   *
+   * @return true if the operation was cancelled successfully.
+   */
+  public boolean cancelLoad(DataSegment segment)
+  {
+    return cancelOperation(SegmentAction.REPLICATE, segment)
+           || cancelOperation(SegmentAction.LOAD, segment);
+  }
+
+  /**
+   * Returns the {@link PartialLoadProfile} for an in-flight load of {@code segment} on this server, or {@code null}
+   * if there's no in-flight load or the in-flight load is a regular full-load (no profile). Used by the partial-load
+   * reconciler to classify in-flight replicas as matching or stale relative to the current rule's fingerprint.
+   */
+  @Nullable
+  public PartialLoadProfile getInFlightProfile(DataSegment segment)
+  {
+    return inFlightProfiles.get(segment);
+  }
+
+  /**
+   * The {@link PartialLoadProfile} this server is expected to hold {@code segment} under once its queued operations
+   * finish: the profile of an in-flight load if one is queued, else the profile announced for the loaded replica.
+   * Returns null when the replica is (or is becoming) a regular full load, including an in-flight load that carries
+   * no profile.
+   * <p>
+   * Read this before {@link #cancelOperation}, which clears the in-flight profile.
+   */
+  @Nullable
+  public PartialLoadProfile getProjectedProfile(DataSegment segment)
+  {
+    final SegmentAction action = getActionOnSegment(segment);
+    if (action != null && action.isLoad()) {
+      return getInFlightProfile(segment);
+    }
+    return server.getPartialLoadProfile(segment.getId());
+  }
+
+  private boolean hasSegmentLoaded(SegmentId segmentId)
+  {
+    return server.getSegment(segmentId) != null;
+  }
+
+  public boolean isRealtimeServer()
+  {
+    return server.getType() == ServerType.REALTIME
+           || server.getType() == ServerType.INDEXER_EXECUTOR;
+  }
+
+  private void addToQueuedSegments(DataSegment segment, SegmentAction action)
+  {
+    queuedSegments.put(segment, action);
+
+    // Add to projected if load is started, remove from projected if drop has started
+    if (action.isLoad()) {
+      if (hasSegmentLoaded(segment.getId())) {
+        sizeOfLoadingSegments += inPlaceReloadSizeDelta(segment);
+      } else {
+        projectedSegmentCounts.addSegment(segment);
+        sizeOfLoadingSegments += segment.getSize();
+      }
+    } else {
+      projectedSegmentCounts.removeSegment(segment);
+      if (action == SegmentAction.DROP) {
+        sizeOfDroppingSegments += segment.getSize();
+      }
+      // MOVE_FROM actions graduate to DROP after the corresponding MOVE_TO has finished
+      // Do not consider size delta until then, otherwise we might over-assign the server
+    }
+  }
+
+  private void removeFromQueuedSegments(DataSegment segment, SegmentAction action)
+  {
+    queuedSegments.remove(segment);
+
+    if (action.isLoad()) {
+      if (hasSegmentLoaded(segment.getId())) {
+        sizeOfLoadingSegments -= inPlaceReloadSizeDelta(segment);
+      } else {
+        projectedSegmentCounts.removeSegment(segment);
+        sizeOfLoadingSegments -= segment.getSize();
+      }
+    } else {
+      projectedSegmentCounts.addSegment(segment);
+      if (action == SegmentAction.DROP) {
+        sizeOfDroppingSegments -= segment.getSize();
+      }
+    }
+  }
+
+  /**
+   * Upper bound of bytes an in-place reload of {@code segment} can still add to this server, i.e. a load queued on a
+   * server that is already serving it. This is an upper bound, not the exact delta, which the coordinator cannot know
+   * until the historical announces the footprint it realized.
+   * <p>
+   * Both the loaded set and the announced profile come from this run's immutable server snapshot, so the value is
+   * stable across the {@link #addToQueuedSegments} / {@link #removeFromQueuedSegments} pair for a canceled operation.
+   */
+  private long inPlaceReloadSizeDelta(DataSegment segment)
+  {
+    final PartialLoadProfile loaded = server.getPartialLoadProfile(segment.getId());
+    final Long loadedBytes = loaded == null ? null : loaded.loadedBytes();
+    return loadedBytes == null ? 0L : Math.max(0L, segment.getSize() - loadedBytes);
   }
 
   @Override
   public int compareTo(ServerHolder serverHolder)
   {
-    int result = Long.compare(getAvailableSize(), serverHolder.getAvailableSize());
-    if (result != 0) {
-      return result;
-    }
-
-    result = server.getHost().compareTo(serverHolder.server.getHost());
-    if (result != 0) {
-      return result;
-    }
-
-    result = server.getTier().compareTo(serverHolder.server.getTier());
-    if (result != 0) {
-      return result;
-    }
-
-    return server.getType().compareTo(serverHolder.server.getType());
+    return MORE_AVAILABLE_SIZE_SERVER_FIRST.compare(this, serverHolder);
   }
 
   @Override
@@ -203,21 +584,20 @@ public class ServerHolder implements Comparable<ServerHolder>
     }
 
     ServerHolder that = (ServerHolder) o;
-
-    if (!this.server.getHost().equals(that.server.getHost())) {
-      return false;
-    }
-
-    if (!this.server.getTier().equals(that.getServer().getTier())) {
-      return false;
-    }
-
-    return this.server.getType().equals(that.getServer().getType());
+    return Objects.equals(server.getHost(), that.server.getHost())
+           && Objects.equals(server.getTier(), that.server.getTier())
+           && Objects.equals(server.getType(), that.server.getType());
   }
 
   @Override
   public int hashCode()
   {
     return Objects.hash(server.getHost(), server.getTier(), server.getType());
+  }
+
+  @Override
+  public String toString()
+  {
+    return "ServerHolder{" + server.getHost() + "}";
   }
 }

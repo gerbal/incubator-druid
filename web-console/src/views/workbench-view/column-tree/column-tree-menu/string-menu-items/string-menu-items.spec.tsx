@@ -18,7 +18,6 @@
 
 import { render } from '@testing-library/react';
 import { SqlQuery } from 'druid-query-toolkit';
-import React from 'react';
 
 import { StringMenuItems } from './string-menu-items';
 

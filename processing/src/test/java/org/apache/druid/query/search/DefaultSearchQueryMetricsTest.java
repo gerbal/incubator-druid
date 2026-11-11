@@ -22,23 +22,23 @@ package org.apache.druid.query.search;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import org.apache.druid.java.util.common.ISE;
-import org.apache.druid.java.util.emitter.service.ServiceEmitter;
-import org.apache.druid.query.CachingEmitter;
+import org.apache.druid.java.util.metrics.StubServiceEmitter;
 import org.apache.druid.query.DefaultQueryMetricsTest;
 import org.apache.druid.query.DruidMetrics;
 import org.apache.druid.query.Druids;
 import org.apache.druid.query.QueryRunnerTestHelper;
 import org.apache.druid.query.dimension.DefaultDimensionSpec;
 import org.apache.druid.query.dimension.ListFilteredDimensionSpec;
+import org.apache.druid.testing.InitializedNullHandlingTest;
 import org.joda.time.Interval;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
-public class DefaultSearchQueryMetricsTest
+public class DefaultSearchQueryMetricsTest extends InitializedNullHandlingTest
 {
 
   /**
@@ -47,8 +47,7 @@ public class DefaultSearchQueryMetricsTest
   @Test
   public void testDefaultSearchQueryMetricsQuery()
   {
-    CachingEmitter cachingEmitter = new CachingEmitter();
-    ServiceEmitter serviceEmitter = new ServiceEmitter("", "", cachingEmitter);
+    final StubServiceEmitter serviceEmitter = StubServiceEmitter.createStarted();
     SearchQuery query = Druids
         .newSearchQueryBuilder()
         .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
@@ -67,28 +66,28 @@ public class DefaultSearchQueryMetricsTest
     queryMetrics.query(query);
 
     queryMetrics.reportQueryTime(0).emit(serviceEmitter);
-    Map<String, Object> actualEvent = cachingEmitter.getLastEmittedEvent().toMap();
-    Assert.assertEquals(13, actualEvent.size());
-    Assert.assertTrue(actualEvent.containsKey("feed"));
-    Assert.assertTrue(actualEvent.containsKey("timestamp"));
-    Assert.assertEquals("", actualEvent.get("host"));
-    Assert.assertEquals("", actualEvent.get("service"));
-    Assert.assertEquals(QueryRunnerTestHelper.DATA_SOURCE, actualEvent.get(DruidMetrics.DATASOURCE));
-    Assert.assertEquals(query.getType(), actualEvent.get(DruidMetrics.TYPE));
+    Map<String, Object> actualEvent = serviceEmitter.getEvents().get(0).toMap();
+    Assertions.assertEquals(13, actualEvent.size());
+    Assertions.assertTrue(actualEvent.containsKey("feed"));
+    Assertions.assertTrue(actualEvent.containsKey("timestamp"));
+    Assertions.assertEquals("localhost", actualEvent.get("host"));
+    Assertions.assertEquals("testing", actualEvent.get("service"));
+    Assertions.assertEquals(QueryRunnerTestHelper.DATA_SOURCE, actualEvent.get(DruidMetrics.DATASOURCE));
+    Assertions.assertEquals(query.getType(), actualEvent.get(DruidMetrics.TYPE));
     List<Interval> expectedIntervals = QueryRunnerTestHelper.FULL_ON_INTERVAL_SPEC.getIntervals();
     List<String> expectedStringIntervals =
         expectedIntervals.stream().map(Interval::toString).collect(Collectors.toList());
-    Assert.assertEquals(expectedStringIntervals, actualEvent.get(DruidMetrics.INTERVAL));
-    Assert.assertEquals("false", actualEvent.get("hasFilters"));
-    Assert.assertEquals(expectedIntervals.get(0).toDuration().toString(), actualEvent.get("duration"));
-    Assert.assertEquals("", actualEvent.get(DruidMetrics.ID));
-    Assert.assertEquals(ImmutableMap.of("testKey", "testValue"), actualEvent.get("context"));
+    Assertions.assertEquals(expectedStringIntervals, actualEvent.get(DruidMetrics.INTERVAL));
+    Assertions.assertEquals("false", actualEvent.get("hasFilters"));
+    Assertions.assertEquals(expectedIntervals.get(0).toDuration().toString(), actualEvent.get("duration"));
+    Assertions.assertEquals("", actualEvent.get(DruidMetrics.ID));
+    Assertions.assertEquals(ImmutableMap.of("testKey", "testValue"), actualEvent.get("context"));
 
     // Metric
-    Assert.assertEquals("query/time", actualEvent.get("metric"));
-    Assert.assertEquals(0L, actualEvent.get("value"));
+    Assertions.assertEquals("query/time", actualEvent.get("metric"));
+    Assertions.assertEquals(0L, actualEvent.get("value"));
 
-    Assert.assertThrows(ISE.class, () -> queryMetrics.sqlQueryId("dummy"));
+    Assertions.assertThrows(ISE.class, () -> queryMetrics.sqlQueryId("dummy"));
   }
 
   @Test
@@ -101,9 +100,7 @@ public class DefaultSearchQueryMetricsTest
         .intervals(QueryRunnerTestHelper.FULL_ON_INTERVAL_SPEC)
         .build();
 
-    CachingEmitter cachingEmitter = new CachingEmitter();
-    ServiceEmitter serviceEmitter = new ServiceEmitter("", "", cachingEmitter);
     SearchQueryMetrics queryMetrics = DefaultSearchQueryMetricsFactory.instance().makeMetrics(query);
-    DefaultQueryMetricsTest.testQueryMetricsDefaultMetricNamesAndUnits(cachingEmitter, serviceEmitter, queryMetrics);
+    DefaultQueryMetricsTest.testQueryMetricsDefaultMetricNamesAndUnits(queryMetrics);
   }
 }

@@ -20,7 +20,9 @@
 package org.apache.druid.indexing.common.actions;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import org.apache.druid.indexer.TaskStatus;
 import org.apache.druid.indexing.common.SegmentLock;
 import org.apache.druid.indexing.common.TaskLock;
 import org.apache.druid.indexing.common.TaskLockType;
@@ -28,21 +30,25 @@ import org.apache.druid.indexing.common.TimeChunkLock;
 import org.apache.druid.indexing.common.config.TaskStorageConfig;
 import org.apache.druid.indexing.common.task.NoopTask;
 import org.apache.druid.indexing.common.task.Task;
+import org.apache.druid.indexing.common.task.Tasks;
+import org.apache.druid.indexing.overlord.GlobalTaskLockbox;
 import org.apache.druid.indexing.overlord.HeapMemoryTaskStorage;
 import org.apache.druid.indexing.overlord.LockResult;
 import org.apache.druid.indexing.overlord.SpecificSegmentLockRequest;
-import org.apache.druid.indexing.overlord.TaskLockbox;
+import org.apache.druid.indexing.overlord.TaskStorage;
 import org.apache.druid.indexing.overlord.TimeChunkLockRequest;
 import org.apache.druid.indexing.test.TestIndexerMetadataStorageCoordinator;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.Intervals;
+import org.apache.druid.metadata.ReplaceTaskLock;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 import org.apache.druid.timeline.partition.LinearShardSpec;
 import org.apache.druid.timeline.partition.NumberedShardSpec;
 import org.joda.time.Interval;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
@@ -53,44 +59,36 @@ import java.util.stream.IntStream;
 
 public class TaskLocksTest
 {
-  private TaskLockbox lockbox;
+  private GlobalTaskLockbox lockbox;
   private Task task;
 
-  @Before
+  @BeforeEach
   public void setup()
   {
-    lockbox = new TaskLockbox(
-        new HeapMemoryTaskStorage(new TaskStorageConfig(null)),
+    final TaskStorage taskStorage = new HeapMemoryTaskStorage(new TaskStorageConfig(null));
+    lockbox = new GlobalTaskLockbox(
+        taskStorage,
         new TestIndexerMetadataStorageCoordinator()
     );
+    lockbox.syncFromStorage();
     task = NoopTask.create();
+    taskStorage.insert(task, TaskStatus.running(task.getId()));
     lockbox.add(task);
   }
 
   private Set<DataSegment> createTimeChunkedSegments()
   {
+    final String version = DateTimes.nowUtc().toString();
     return ImmutableSet.of(
-        new DataSegment.Builder()
-            .dataSource(task.getDataSource())
-            .interval(Intervals.of("2017-01-01/2017-01-02"))
-            .version(DateTimes.nowUtc().toString())
-            .shardSpec(new LinearShardSpec(2))
-            .size(0)
-            .build(),
-        new DataSegment.Builder()
-            .dataSource(task.getDataSource())
-            .interval(Intervals.of("2017-01-02/2017-01-03"))
-            .version(DateTimes.nowUtc().toString())
-            .shardSpec(new LinearShardSpec(2))
-            .size(0)
-            .build(),
-        new DataSegment.Builder()
-            .dataSource(task.getDataSource())
-            .interval(Intervals.of("2017-01-03/2017-01-04"))
-            .version(DateTimes.nowUtc().toString())
-            .shardSpec(new LinearShardSpec(2))
-            .size(0)
-            .build()
+        DataSegment.builder(SegmentId.of(task.getDataSource(), Intervals.of("2017-01-01/2017-01-02"), version, null))
+                   .shardSpec(new LinearShardSpec(2))
+                   .build(),
+        DataSegment.builder(SegmentId.of(task.getDataSource(), Intervals.of("2017-01-02/2017-01-03"), version, null))
+                   .shardSpec(new LinearShardSpec(2))
+                   .build(),
+        DataSegment.builder(SegmentId.of(task.getDataSource(), Intervals.of("2017-01-03/2017-01-04"), version, null))
+                   .shardSpec(new LinearShardSpec(2))
+                   .build()
     );
   }
 
@@ -98,47 +96,31 @@ public class TaskLocksTest
   {
     final String version = DateTimes.nowUtc().toString();
     return ImmutableSet.of(
-        new DataSegment.Builder()
-            .dataSource(task.getDataSource())
-            .interval(Intervals.of("2017-01-01/2017-01-02"))
-            .version(version)
-            .shardSpec(new NumberedShardSpec(0, 0))
-            .size(0)
-            .build(),
-        new DataSegment.Builder()
-            .dataSource(task.getDataSource())
-            .interval(Intervals.of("2017-01-01/2017-01-02"))
-            .version(version)
-            .shardSpec(new NumberedShardSpec(1, 0))
-            .size(0)
-            .build(),
-        new DataSegment.Builder()
-            .dataSource(task.getDataSource())
-            .interval(Intervals.of("2017-01-01/2017-01-02"))
-            .version(version)
-            .shardSpec(new NumberedShardSpec(2, 0))
-            .size(0)
-            .build(),
-        new DataSegment.Builder()
-            .dataSource(task.getDataSource())
-            .interval(Intervals.of("2017-01-01/2017-01-02"))
-            .version(version)
-            .shardSpec(new NumberedShardSpec(3, 0))
-            .size(0)
-            .build(),
-        new DataSegment.Builder()
-            .dataSource(task.getDataSource())
-            .interval(Intervals.of("2017-01-01/2017-01-02"))
-            .version(version)
-            .shardSpec(new NumberedShardSpec(4, 0))
-            .size(0)
-            .build()
+        DataSegment.builder(SegmentId.of(task.getDataSource(), Intervals.of("2017-01-01/2017-01-02"), version, null))
+                   .shardSpec(new NumberedShardSpec(0, 0))
+                   .build(),
+        DataSegment.builder(SegmentId.of(task.getDataSource(), Intervals.of("2017-01-01/2017-01-02"), version, null))
+                   .shardSpec(new NumberedShardSpec(1, 0))
+                   .build(),
+        DataSegment.builder(SegmentId.of(task.getDataSource(), Intervals.of("2017-01-01/2017-01-02"), version, null))
+                   .shardSpec(new NumberedShardSpec(2, 0))
+                   .build(),
+        DataSegment.builder(SegmentId.of(task.getDataSource(), Intervals.of("2017-01-01/2017-01-02"), version, null))
+                   .shardSpec(new NumberedShardSpec(3, 0))
+                   .build(),
+        DataSegment.builder(SegmentId.of(task.getDataSource(), Intervals.of("2017-01-01/2017-01-02"), version, null))
+                   .shardSpec(new NumberedShardSpec(4, 0))
+                   .build()
     );
   }
 
-  private LockResult tryTimeChunkLock(Task task, Interval interval)
+  private TaskLock tryTimeChunkLock(Task task, Interval interval, TaskLockType lockType)
   {
-    return lockbox.tryLock(task, new TimeChunkLockRequest(TaskLockType.EXCLUSIVE, task, interval, null));
+    final TaskLock taskLock = lockbox
+        .tryLock(task, new TimeChunkLockRequest(lockType, task, interval, null))
+        .getTaskLock();
+    Assertions.assertNotNull(taskLock);
+    return taskLock;
   }
 
   private LockResult trySegmentLock(Task task, Interval interval, String version, int partitonId)
@@ -162,16 +144,12 @@ public class TaskLocksTest
     final Map<Interval, TaskLock> locks = intervals.stream().collect(
         Collectors.toMap(
             Function.identity(),
-            interval -> {
-              final TaskLock lock = tryTimeChunkLock(task, interval).getTaskLock();
-              Assert.assertNotNull(lock);
-              return lock;
-            }
+            interval -> tryTimeChunkLock(task, interval, TaskLockType.EXCLUSIVE)
         )
     );
 
-    Assert.assertEquals(3, locks.size());
-    Assert.assertTrue(TaskLocks.isLockCoversSegments(task, lockbox, segments));
+    Assertions.assertEquals(3, locks.size());
+    Assertions.assertTrue(TaskLocks.isLockCoversSegments(task, lockbox, segments));
   }
 
   @Test
@@ -186,13 +164,13 @@ public class TaskLocksTest
         .mapToObj(
             partitionId -> {
               final TaskLock lock = trySegmentLock(task, interval, version, partitionId).getTaskLock();
-              Assert.assertNotNull(lock);
+              Assertions.assertNotNull(lock);
               return lock;
             }
         ).collect(Collectors.toList());
 
-    Assert.assertEquals(5, locks.size());
-    Assert.assertTrue(TaskLocks.isLockCoversSegments(task, lockbox, segments));
+    Assertions.assertEquals(5, locks.size());
+    Assertions.assertTrue(TaskLocks.isLockCoversSegments(task, lockbox, segments));
   }
 
   @Test
@@ -206,16 +184,12 @@ public class TaskLocksTest
     final Map<Interval, TaskLock> locks = intervals.stream().collect(
         Collectors.toMap(
             Function.identity(),
-            interval -> {
-              final TaskLock lock = tryTimeChunkLock(task, interval).getTaskLock();
-              Assert.assertNotNull(lock);
-              return lock;
-            }
+            interval -> tryTimeChunkLock(task, interval, TaskLockType.EXCLUSIVE)
         )
     );
 
-    Assert.assertEquals(1, locks.size());
-    Assert.assertTrue(TaskLocks.isLockCoversSegments(task, lockbox, segments));
+    Assertions.assertEquals(1, locks.size());
+    Assertions.assertTrue(TaskLocks.isLockCoversSegments(task, lockbox, segments));
   }
 
   @Test
@@ -231,16 +205,12 @@ public class TaskLocksTest
     final Map<Interval, TaskLock> locks = lockIntervals.stream().collect(
         Collectors.toMap(
             Function.identity(),
-            interval -> {
-              final TaskLock lock = tryTimeChunkLock(task, interval).getTaskLock();
-              Assert.assertNotNull(lock);
-              return lock;
-            }
+            interval -> tryTimeChunkLock(task, interval, TaskLockType.EXCLUSIVE)
         )
     );
 
-    Assert.assertEquals(3, locks.size());
-    Assert.assertFalse(TaskLocks.isLockCoversSegments(task, lockbox, segments));
+    Assertions.assertEquals(3, locks.size());
+    Assertions.assertFalse(TaskLocks.isLockCoversSegments(task, lockbox, segments));
   }
 
   @Test
@@ -256,16 +226,12 @@ public class TaskLocksTest
     final Map<Interval, TaskLock> locks = intervals.stream().collect(
         Collectors.toMap(
             Function.identity(),
-            interval -> {
-              final TaskLock lock = tryTimeChunkLock(task, interval).getTaskLock();
-              Assert.assertNotNull(lock);
-              return lock;
-            }
+            interval -> tryTimeChunkLock(task, interval, TaskLockType.EXCLUSIVE)
         )
     );
 
-    Assert.assertEquals(3, locks.size());
-    Assert.assertEquals(
+    Assertions.assertEquals(3, locks.size());
+    Assertions.assertEquals(
         ImmutableList.of(
             newTimeChunkLock(intervals.get(0), locks.get(intervals.get(0)).getVersion()),
             newTimeChunkLock(intervals.get(1), locks.get(intervals.get(1)).getVersion()),
@@ -287,13 +253,13 @@ public class TaskLocksTest
         .mapToObj(
             partitionId -> {
               final TaskLock lock = trySegmentLock(task, interval, version, partitionId).getTaskLock();
-              Assert.assertNotNull(lock);
+              Assertions.assertNotNull(lock);
               return lock;
             }
         ).collect(Collectors.toList());
 
-    Assert.assertEquals(5, locks.size());
-    Assert.assertEquals(
+    Assertions.assertEquals(5, locks.size());
+    Assertions.assertEquals(
         ImmutableList.of(
             newSegmentLock(interval, locks.get(0).getVersion(), 0),
             newSegmentLock(interval, locks.get(0).getVersion(), 1),
@@ -302,6 +268,106 @@ public class TaskLocksTest
             newSegmentLock(interval, locks.get(0).getVersion(), 4)
         ),
         TaskLocks.findLocksForSegments(task, lockbox, segments)
+    );
+  }
+
+  @Test
+  public void testRevokedLocksDoNotCoverSegments()
+  {
+    final Set<DataSegment> segments = createNumberedPartitionedSegments();
+    final Interval interval = Intervals.of("2017-01-01/2017-01-02");
+
+    final TaskLock lock = tryTimeChunkLock(task, interval, TaskLockType.EXCLUSIVE);
+    Assertions.assertTrue(TaskLocks.isLockCoversSegments(task, lockbox, segments));
+
+    lockbox.revokeLock(task.getId(), lock);
+    Assertions.assertFalse(TaskLocks.isLockCoversSegments(task, lockbox, segments));
+  }
+
+  @Test
+  public void testFindReplaceLocksCoveringSegments()
+  {
+    final Set<DataSegment> segments = createTimeChunkedSegments();
+
+    final Map<DataSegment, TaskLock> lockResults = segments.stream().collect(
+        Collectors.toMap(
+            segment -> segment,
+            segment -> tryTimeChunkLock(task, segment.getInterval(), TaskLockType.REPLACE)
+        )
+    );
+
+    final Map<DataSegment, ReplaceTaskLock> observedLocks
+        = TaskLocks.findReplaceLocksCoveringSegments(task.getDataSource(), lockbox, segments);
+    Assertions.assertEquals(segments.size(), observedLocks.size());
+    for (DataSegment segment : segments) {
+      TaskLock lockFromResult = lockResults.get(segment);
+      Assertions.assertEquals(
+          new ReplaceTaskLock(task.getId(), lockFromResult.getInterval(), lockFromResult.getVersion()),
+          observedLocks.get(segment)
+      );
+    }
+  }
+
+  @Test
+  public void testLockTypeForAppendUsingConcurrentLocks()
+  {
+    Assertions.assertEquals(
+        TaskLockType.APPEND,
+        TaskLocks.determineLockTypeForAppend(
+            ImmutableMap.of(Tasks.USE_CONCURRENT_LOCKS, true)
+        )
+    );
+  }
+
+  @Test
+  public void testLockTypeForAppendWithLockTypeInContext()
+  {
+    Assertions.assertEquals(
+        TaskLockType.REPLACE,
+        TaskLocks.determineLockTypeForAppend(
+            ImmutableMap.of(Tasks.TASK_LOCK_TYPE, "REPLACE")
+        )
+    );
+    Assertions.assertEquals(
+        TaskLockType.APPEND,
+        TaskLocks.determineLockTypeForAppend(
+            ImmutableMap.of(Tasks.TASK_LOCK_TYPE, "APPEND")
+        )
+    );
+    Assertions.assertEquals(
+        TaskLockType.SHARED,
+        TaskLocks.determineLockTypeForAppend(
+            ImmutableMap.of(Tasks.TASK_LOCK_TYPE, "SHARED")
+        )
+    );
+    Assertions.assertEquals(
+        TaskLockType.EXCLUSIVE,
+        TaskLocks.determineLockTypeForAppend(
+            ImmutableMap.of(Tasks.TASK_LOCK_TYPE, "EXCLUSIVE", Tasks.USE_SHARED_LOCK, true)
+        )
+    );
+  }
+
+  @Test
+  public void testLockTypeForAppendWithNoLockTypeInContext()
+  {
+    Assertions.assertEquals(
+        TaskLockType.EXCLUSIVE,
+        TaskLocks.determineLockTypeForAppend(
+            ImmutableMap.of()
+        )
+    );
+    Assertions.assertEquals(
+        TaskLockType.EXCLUSIVE,
+        TaskLocks.determineLockTypeForAppend(
+            ImmutableMap.of(Tasks.USE_SHARED_LOCK, false)
+        )
+    );
+    Assertions.assertEquals(
+        TaskLockType.SHARED,
+        TaskLocks.determineLockTypeForAppend(
+            ImmutableMap.of(Tasks.USE_SHARED_LOCK, true)
+        )
     );
   }
 

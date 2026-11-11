@@ -19,7 +19,7 @@
 
 package org.apache.druid.segment.column;
 
-import com.google.common.base.Preconditions;
+import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.StringUtils;
 
 import javax.annotation.Nullable;
@@ -38,7 +38,8 @@ public class Types
     if (typeString == null) {
       return null;
     }
-    switch (StringUtils.toUpperCase(typeString)) {
+    final String upperTypeString = StringUtils.toUpperCase(typeString);
+    switch (upperTypeString) {
       case "STRING":
         return typeFactory.ofString();
       case "LONG":
@@ -56,14 +57,16 @@ public class Types
       case "COMPLEX":
         return typeFactory.ofComplex(null);
       default:
-        // we do not convert to uppercase here, because complex type name must be preserved in original casing
-        // array could be converted, but are not for no particular reason other than less spooky magic
-        if (typeString.startsWith(ARRAY_PREFIX)) {
+        // Prefix matching is case-insensitive, consistent with the scalar handling above, but the type parameter is
+        // taken from the original string: complex type names are case-sensitive registry keys which must be preserved
+        // in their original casing.
+        if (upperTypeString.startsWith(ARRAY_PREFIX) && upperTypeString.endsWith(">")) {
           T elementType = fromString(typeFactory, typeString.substring(ARRAY_PREFIX.length(), typeString.length() - 1));
-          Preconditions.checkNotNull(elementType, "Array element type must not be null");
-          return typeFactory.ofArray(elementType);
+          if (elementType != null) {
+            return typeFactory.ofArray(elementType);
+          }
         }
-        if (typeString.startsWith(COMPLEX_PREFIX)) {
+        if (upperTypeString.startsWith(COMPLEX_PREFIX) && upperTypeString.endsWith(">")) {
           return typeFactory.ofComplex(typeString.substring(COMPLEX_PREFIX.length(), typeString.length() - 1));
         }
     }
@@ -111,5 +114,49 @@ public class Types
   {
     return (typeSignature1 != null && typeSignature1.is(typeDescriptor)) ||
            (typeSignature2 != null && typeSignature2.is(typeDescriptor));
+  }
+
+  /**
+   * Returns true if {@link TypeSignature} is not null and is {@link TypeSignature#isNumeric()}
+   */
+  public static <T extends TypeDescriptor> boolean isNumeric(@Nullable TypeSignature<T> typeSignature)
+  {
+    return typeSignature != null && typeSignature.isNumeric();
+  }
+
+  /**
+   * Returns true if {@link TypeSignature} is not null and is {@link TypeSignature#isNumeric()} or has
+   * {@link TypeSignature#getElementType()} that is numeric.
+   */
+  public static <T extends TypeDescriptor> boolean isNumericOrNumericArray(@Nullable TypeSignature<T> typeSignature)
+  {
+    if (typeSignature == null) {
+      return false;
+    }
+    return typeSignature.isNumeric() || (typeSignature.isArray() && typeSignature.getElementType().isNumeric());
+  }
+
+  public static class IncompatibleTypeException extends IAE
+  {
+    public IncompatibleTypeException(TypeSignature<?> type, TypeSignature<?> other)
+    {
+      super("Cannot implicitly cast [%s] to [%s]", type, other);
+    }
+  }
+
+  public static class InvalidCastException extends IAE
+  {
+    public InvalidCastException(TypeSignature<?> type, TypeSignature<?> other)
+    {
+      super("Invalid type, cannot cast [" + type + "] to [" + other + "]");
+    }
+  }
+
+  public static class InvalidCastBooleanException extends IAE
+  {
+    public InvalidCastBooleanException(TypeSignature<?> type)
+    {
+      super("Invalid type, cannot coerce [" + type + "] to boolean");
+    }
   }
 }

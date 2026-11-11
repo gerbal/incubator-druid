@@ -28,15 +28,15 @@ import org.apache.druid.query.aggregation.any.FloatAnyAggregatorFactory;
 import org.apache.druid.query.aggregation.any.LongAnyAggregatorFactory;
 import org.apache.druid.query.aggregation.any.StringAnyAggregatorFactory;
 import org.apache.druid.query.aggregation.cardinality.CardinalityAggregatorFactory;
-import org.apache.druid.query.aggregation.first.DoubleFirstAggregatorFactory;
-import org.apache.druid.query.aggregation.first.FloatFirstAggregatorFactory;
-import org.apache.druid.query.aggregation.first.LongFirstAggregatorFactory;
-import org.apache.druid.query.aggregation.first.StringFirstAggregatorFactory;
+import org.apache.druid.query.aggregation.firstlast.first.DoubleFirstAggregatorFactory;
+import org.apache.druid.query.aggregation.firstlast.first.FloatFirstAggregatorFactory;
+import org.apache.druid.query.aggregation.firstlast.first.LongFirstAggregatorFactory;
+import org.apache.druid.query.aggregation.firstlast.first.StringFirstAggregatorFactory;
+import org.apache.druid.query.aggregation.firstlast.last.DoubleLastAggregatorFactory;
+import org.apache.druid.query.aggregation.firstlast.last.FloatLastAggregatorFactory;
+import org.apache.druid.query.aggregation.firstlast.last.LongLastAggregatorFactory;
+import org.apache.druid.query.aggregation.firstlast.last.StringLastAggregatorFactory;
 import org.apache.druid.query.aggregation.hyperloglog.HyperUniquesAggregatorFactory;
-import org.apache.druid.query.aggregation.last.DoubleLastAggregatorFactory;
-import org.apache.druid.query.aggregation.last.FloatLastAggregatorFactory;
-import org.apache.druid.query.aggregation.last.LongLastAggregatorFactory;
-import org.apache.druid.query.aggregation.last.StringLastAggregatorFactory;
 import org.apache.druid.query.aggregation.mean.DoubleMeanAggregatorFactory;
 import org.apache.druid.query.aggregation.post.FinalizingFieldAccessPostAggregator;
 import org.apache.druid.query.dimension.DefaultDimensionSpec;
@@ -46,8 +46,8 @@ import org.apache.druid.query.timeseries.TimeseriesQueryQueryToolChest;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.testing.InitializedNullHandlingTest;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -61,24 +61,24 @@ public class AggregatorFactoryTest extends InitializedNullHandlingTest
   @Test
   public void testMergeAggregators()
   {
-    Assert.assertNull(AggregatorFactory.mergeAggregators(null));
-    Assert.assertNull(AggregatorFactory.mergeAggregators(ImmutableList.of()));
+    Assertions.assertNull(AggregatorFactory.mergeAggregators(null));
+    Assertions.assertNull(AggregatorFactory.mergeAggregators(ImmutableList.of()));
 
     List<AggregatorFactory[]> aggregatorsToBeMerged = new ArrayList<>();
 
     aggregatorsToBeMerged.add(null);
-    Assert.assertNull(AggregatorFactory.mergeAggregators(aggregatorsToBeMerged));
+    Assertions.assertNull(AggregatorFactory.mergeAggregators(aggregatorsToBeMerged));
 
     AggregatorFactory[] emptyAggFactory = new AggregatorFactory[0];
 
     aggregatorsToBeMerged.clear();
     aggregatorsToBeMerged.add(emptyAggFactory);
-    Assert.assertArrayEquals(emptyAggFactory, AggregatorFactory.mergeAggregators(aggregatorsToBeMerged));
+    Assertions.assertArrayEquals(emptyAggFactory, AggregatorFactory.mergeAggregators(aggregatorsToBeMerged));
 
     aggregatorsToBeMerged.clear();
     aggregatorsToBeMerged.add(emptyAggFactory);
     aggregatorsToBeMerged.add(null);
-    Assert.assertNull(AggregatorFactory.mergeAggregators(aggregatorsToBeMerged));
+    Assertions.assertNull(AggregatorFactory.mergeAggregators(aggregatorsToBeMerged));
 
     aggregatorsToBeMerged.clear();
     AggregatorFactory[] af1 = new AggregatorFactory[]{
@@ -87,7 +87,7 @@ public class AggregatorFactoryTest extends InitializedNullHandlingTest
     AggregatorFactory[] af2 = new AggregatorFactory[]{
         new LongMaxAggregatorFactory("name", "fieldName2")
     };
-    Assert.assertArrayEquals(
+    Assertions.assertArrayEquals(
         new AggregatorFactory[]{
             new LongMaxAggregatorFactory("name", "name")
         },
@@ -101,7 +101,7 @@ public class AggregatorFactoryTest extends InitializedNullHandlingTest
     af2 = new AggregatorFactory[]{
         new DoubleMaxAggregatorFactory("name", "fieldName2")
     };
-    Assert.assertNull(AggregatorFactory.mergeAggregators(ImmutableList.of(af1, af2))
+    Assertions.assertNull(AggregatorFactory.mergeAggregators(ImmutableList.of(af1, af2))
     );
   }
 
@@ -148,7 +148,7 @@ public class AggregatorFactoryTest extends InitializedNullHandlingTest
                   // string aggregators
                   new StringFirstAggregatorFactory("stringFirst", "col", null, 1024),
                   new StringLastAggregatorFactory("stringLast", "col", null, 1024),
-                  new StringAnyAggregatorFactory("stringAny", "col", 1024),
+                  new StringAnyAggregatorFactory("stringAny", "col", 1024, true),
                   // sketch aggs
                   new CardinalityAggregatorFactory("cardinality", ImmutableList.of(DefaultDimensionSpec.of("some-col")), false),
                   new HyperUniquesAggregatorFactory("hyperUnique", "hyperunique"),
@@ -201,7 +201,7 @@ public class AggregatorFactoryTest extends InitializedNullHandlingTest
               )
               .build();
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         RowSignature.builder()
                     .addTimeColumn()
                     // aggs
@@ -210,21 +210,21 @@ public class AggregatorFactoryTest extends InitializedNullHandlingTest
                     .add("longSum", ColumnType.LONG)
                     .add("longMin", ColumnType.LONG)
                     .add("longMax", ColumnType.LONG)
-                    .add("longFirst", ColumnType.LONG)
-                    .add("longLast", ColumnType.LONG)
+                    .add("longFirst", null)
+                    .add("longLast", null)
                     .add("longAny", ColumnType.LONG)
                     .add("doubleSum", ColumnType.DOUBLE)
                     .add("doubleMin", ColumnType.DOUBLE)
                     .add("doubleMax", ColumnType.DOUBLE)
-                    .add("doubleFirst", ColumnType.DOUBLE)
-                    .add("doubleLast", ColumnType.DOUBLE)
+                    .add("doubleFirst", null)
+                    .add("doubleLast", null)
                     .add("doubleAny", ColumnType.DOUBLE)
                     .add("doubleMean", null)
                     .add("floatSum", ColumnType.FLOAT)
                     .add("floatMin", ColumnType.FLOAT)
                     .add("floatMax", ColumnType.FLOAT)
-                    .add("floatFirst", ColumnType.FLOAT)
-                    .add("floatLast", ColumnType.FLOAT)
+                    .add("floatFirst", null)
+                    .add("floatLast", null)
                     .add("floatAny", ColumnType.FLOAT)
                     .add("stringFirst", null)
                     .add("stringLast", null)
@@ -307,7 +307,8 @@ public class AggregatorFactoryTest extends InitializedNullHandlingTest
         // string aggregators
         new StringFirstAggregatorFactory("col", "col", null, 1024),
         new StringLastAggregatorFactory("col", "col", null, 1024),
-        new StringAnyAggregatorFactory("col", "col", 1024),
+        new StringAnyAggregatorFactory("col", "col", 1024, true),
+        new StringAnyAggregatorFactory("col", "col", 1024, false),
         // sketch aggs
         new CardinalityAggregatorFactory("col", ImmutableList.of(DefaultDimensionSpec.of("some-col")), false),
         new HyperUniquesAggregatorFactory("col", "hyperunique"),
@@ -324,8 +325,8 @@ public class AggregatorFactoryTest extends InitializedNullHandlingTest
     );
 
     for (AggregatorFactory aggregatorFactory : aggregatorFactories) {
-      Assert.assertEquals(aggregatorFactory, aggregatorFactory.withName("col"));
-      Assert.assertEquals("newTest", aggregatorFactory.withName("newTest").getName());
+      Assertions.assertEquals(aggregatorFactory, aggregatorFactory.withName("col"));
+      Assertions.assertEquals("newTest", aggregatorFactory.withName("newTest").getName());
     }
   }
 }

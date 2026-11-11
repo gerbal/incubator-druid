@@ -19,67 +19,62 @@
 
 package org.apache.druid.segment;
 
-import org.apache.druid.java.util.common.granularity.Granularity;
-import org.apache.druid.java.util.common.guava.Sequence;
-import org.apache.druid.query.QueryMetrics;
-import org.apache.druid.query.filter.Filter;
-import org.apache.druid.segment.vector.VectorCursor;
-import org.joda.time.Interval;
+import org.apache.druid.error.DruidException;
+import org.apache.druid.segment.column.ColumnCapabilities;
+import org.apache.druid.segment.column.RowSignature;
 
 import javax.annotation.Nullable;
 
-/**
- * Interface extended by {@link StorageAdapter}, which gives them the power to create cursors.
- *
- * @see StorageAdapter
- */
-public interface CursorFactory
+public interface CursorFactory extends ColumnInspector
 {
   /**
-   * Returns true if the provided combination of parameters can be handled by "makeVectorCursor".
-   *
-   * Query engines should use this before running in vectorized mode, and be prepared to fall back to non-vectorized
-   * mode if this method returns false.
+   * Creates a {@link CursorHolder} for a given {@link CursorBuildSpec} which describes how the reader is going to
+   * scan, filter, transform, group and aggregate, and/or order the data.
    */
-  default boolean canVectorize(
-      @Nullable Filter filter,
-      VirtualColumns virtualColumns,
-      boolean descending
-  )
+  CursorHolder makeCursorHolder(CursorBuildSpec spec);
+
+  /**
+   * Asynchronous variant of {@link #makeCursorHolder(CursorBuildSpec)} for cursor factories that may need to do I/O
+   * (e.g. download column data from deep storage) before they can serve a cursor. Callers running on threads that
+   * must not block use this rather than {@link #makeCursorHolder}.
+   * <p>
+   * There is intentionally no working default: this method must be explicitly implemented to participate in
+   * async-aware engines (MSQ). A factory whose source is always fully-resident and never needs to block while waiting
+   * on some other thread to perform work can implement {@link ResidentCursorFactory} instead of {@link CursorFactory}
+   * directly, which provides a default implementation of this method that wraps
+   * {@link #makeCursorHolder(CursorBuildSpec)}.
+   */
+  default AsyncCursorHolder makeCursorHolderAsync(CursorBuildSpec spec)
   {
-    return false;
+    throw DruidException.defensive(
+        "makeCursorHolderAsync is not implemented by [%s]. Override it (or implement ResidentCursorFactory): return "
+        + "AsyncCursorHolder.completed(makeCursorHolder(spec)) if the source is always fully resident, or build/await "
+        + "the cursor holder asynchronously if it supports load on demand.",
+        getClass().getName()
+    );
   }
 
   /**
-   * Creates a sequence of Cursors, one for each time-granular bucket (based on the provided Granularity).
+   * Returns the {@link RowSignature} of the data available from this cursor factory. For mutable segments, even though
+   * the signature may evolve over time, any particular object returned by this method is an immutable snapshot.
    */
-  Sequence<Cursor> makeCursors(
-      @Nullable Filter filter,
-      Interval interval,
-      VirtualColumns virtualColumns,
-      Granularity gran,
-      boolean descending,
-      @Nullable QueryMetrics<?> queryMetrics
-  );
+  RowSignature getRowSignature();
 
   /**
-   * Creates a VectorCursor. Unlike the Cursor returned by "makeCursor", there is just one of these. Hence, this method
-   * does not take a "granularity" parameter. Before calling this method, check "canVectorize" to see if the call you
-   * are about to make will throw an error or not.
+   * Returns capabilities of a particular column, if known. May be null if the column doesn't exist, or if
+   * the column does exist but the capabilities are unknown. The latter is possible with dynamically discovered
+   * columns.
    *
-   * Returns null if there is no data to walk over (for example, if the "interval" does not overlap the data interval
-   * of this segment).
+   * Note that CursorFactory are representations of "real" segments, so they are not aware of any virtual columns
+   * that may be involved in a query. In general, query engines should instead use the method
+   * {@link ColumnSelectorFactory#getColumnCapabilities(String)}, which returns capabilities for virtual columns as
+   * well.
+   *
+   * @param column column name
+   *
+   * @return capabilities, or null
    */
+  @Override
   @Nullable
-  default VectorCursor makeVectorCursor(
-      @Nullable Filter filter,
-      Interval interval,
-      VirtualColumns virtualColumns,
-      boolean descending,
-      int vectorSize,
-      @Nullable QueryMetrics<?> queryMetrics
-  )
-  {
-    throw new UnsupportedOperationException("Cannot vectorize. Check 'canVectorize' before calling 'makeVectorCursor'.");
-  }
+  ColumnCapabilities getColumnCapabilities(String column);
 }

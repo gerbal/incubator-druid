@@ -59,7 +59,7 @@ public class DruidSegmentInputEntity implements InputEntity
   }
 
   @Override
-  public InputStream open()
+  public InputStream openRaw()
   {
     throw new UnsupportedOperationException("Don't call this");
   }
@@ -69,6 +69,7 @@ public class DruidSegmentInputEntity implements InputEntity
   {
     final File segmentFile;
     try {
+      segmentCacheManager.load(segment);
       segmentFile = segmentCacheManager.getSegmentFiles(segment);
     }
     catch (SegmentLoadingException e) {
@@ -85,9 +86,7 @@ public class DruidSegmentInputEntity implements InputEntity
       @Override
       public void close()
       {
-        if (!segmentFile.delete()) {
-          log.warn("Could not clean temporary segment file: " + segmentFile);
-        }
+        segmentCacheManager.drop(segment);
       }
     };
   }

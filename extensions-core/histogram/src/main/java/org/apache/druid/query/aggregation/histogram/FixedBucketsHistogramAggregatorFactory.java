@@ -169,8 +169,8 @@ public class FixedBucketsHistogramAggregatorFactory extends AggregatorFactory
       @Override
       public void reset(ColumnValueSelector selector)
       {
-        FixedBucketsHistogram first = (FixedBucketsHistogram) selector.getObject();
-        combined.combineHistogram(first);
+        combined.reset();
+        fold(selector);
       }
 
       @Override
@@ -219,22 +219,6 @@ public class FixedBucketsHistogramAggregatorFactory extends AggregatorFactory
         upperLimit,
         outlierHandlingMode,
         finalizeAsBase64Binary
-    );
-  }
-
-  @Override
-  public List<AggregatorFactory> getRequiredColumns()
-  {
-    return Collections.singletonList(
-        new FixedBucketsHistogramAggregatorFactory(
-            fieldName,
-            fieldName,
-            numBuckets,
-            lowerLimit,
-            upperLimit,
-            outlierHandlingMode,
-            finalizeAsBase64Binary
-        )
     );
   }
 

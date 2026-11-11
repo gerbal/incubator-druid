@@ -20,11 +20,14 @@
 package org.apache.druid.frame.util;
 
 import com.google.common.base.Splitter;
+import com.google.common.collect.ImmutableList;
 import org.apache.druid.common.utils.IdUtils;
 import org.apache.druid.java.util.common.StringUtils;
 
 import javax.annotation.Nullable;
 import java.util.Iterator;
+import java.util.List;
+import java.util.Set;
 
 /**
  * Helper class that fetches the directory and file names corresponding to file location
@@ -32,14 +35,42 @@ import java.util.Iterator;
 public class DurableStorageUtils
 {
   public static final String SUCCESS_MARKER_FILENAME = "__success";
-  public static final Splitter SPLITTER = Splitter.on("/").limit(2);
+  public static final Splitter SPLITTER = Splitter.on("/").limit(3);
+  public static final String QUERY_RESULTS_DIR = "query-results";
 
   public static String getControllerDirectory(final String controllerTaskId)
   {
     return StringUtils.format("controller_%s", IdUtils.validateId("controller task ID", controllerTaskId));
   }
 
-  public static String getSuccessFilePath(
+  private static String getQueryResultsControllerDirectory(final String controllerTaskId)
+  {
+    return StringUtils.format(
+        "%s/controller_%s",
+        QUERY_RESULTS_DIR,
+        IdUtils.validateId("controller task ID", controllerTaskId)
+    );
+  }
+
+  @Nullable
+  private static String getControllerTaskId(final String path)
+  {
+    Iterator<String> elementsIterator = SPLITTER.split(path).iterator();
+    List<String> elements = ImmutableList.copyOf(elementsIterator);
+    if (elements.size() < 2) {
+      return null;
+    }
+    if (!DurableStorageUtils.QUERY_RESULTS_DIR.equals(elements.get(0))) {
+      return null;
+    }
+    if (!elements.get(1).startsWith("controller_")) {
+      return null;
+    }
+    return elements.get(1).substring("controller_".length());
+  }
+
+
+  public static String getWorkerOutputSuccessFilePath(
       final String controllerTaskId,
       final int stageNumber,
       final int workerNumber
@@ -53,10 +84,24 @@ public class DurableStorageUtils
     return StringUtils.format("%s/%s", folderName, SUCCESS_MARKER_FILENAME);
   }
 
+  public static String getQueryResultsSuccessFilePath(
+      final String controllerTaskId,
+      final int stageNumber,
+      final int workerNumber
+  )
+  {
+    String folderName = getQueryResultsWorkerOutputFolderName(
+        controllerTaskId,
+        stageNumber,
+        workerNumber
+    );
+    return StringUtils.format("%s/%s", folderName, SUCCESS_MARKER_FILENAME);
+  }
+
   /**
    * Fetches the directory location where workers will store the partition files corresponding to the stage number
    */
-  public static String getWorkerOutputFolderName(
+  private static String getWorkerOutputFolderName(
       final String controllerTaskId,
       final int stageNumber,
       final int workerNumber
@@ -65,6 +110,21 @@ public class DurableStorageUtils
     return StringUtils.format(
         "%s/stage_%d/worker_%d",
         getControllerDirectory(controllerTaskId),
+        stageNumber,
+        workerNumber
+    );
+  }
+
+
+  private static String getQueryResultsWorkerOutputFolderName(
+      final String controllerTaskId,
+      final int stageNumber,
+      final int workerNumber
+  )
+  {
+    return StringUtils.format(
+        "%s/stage_%d/worker_%d",
+        getQueryResultsControllerDirectory(controllerTaskId),
         stageNumber,
         workerNumber
     );
@@ -83,7 +143,26 @@ public class DurableStorageUtils
   {
     return StringUtils.format(
         "%s/taskId_%s",
-        getWorkerOutputFolderName(controllerTaskId, stageNumber, workerNumber),
+        getWorkerOutputFolderName(
+            IdUtils.validateId("controller task ID", controllerTaskId),
+            stageNumber,
+            workerNumber
+        ),
+        taskId
+    );
+  }
+
+
+  public static String getQueryResultsForTaskIdFolderName(
+      final String controllerTaskId,
+      final int stageNumber,
+      final int workerNumber,
+      final String taskId
+  )
+  {
+    return StringUtils.format(
+        "%s/taskId_%s",
+        getQueryResultsWorkerOutputFolderName(controllerTaskId, stageNumber, workerNumber),
         taskId
     );
   }
@@ -92,7 +171,7 @@ public class DurableStorageUtils
    * Fetches the file location where a particular worker writes the data corresponding to a particular stage
    * and partition
    */
-  public static String getPartitionOutputsFileNameForPartition(
+  public static String getPartitionOutputsFileNameWithPathForPartition(
       final String controllerTaskId,
       final int stageNumber,
       final int workerNumber,
@@ -103,6 +182,21 @@ public class DurableStorageUtils
     return StringUtils.format(
         "%s/part_%d",
         getTaskIdOutputsFolderName(controllerTaskId, stageNumber, workerNumber, taskId),
+        partitionNumber
+    );
+  }
+
+  public static String getQueryResultsFileNameWithPathForPartition(
+      final String controllerTaskId,
+      final int stageNumber,
+      final int workerNumber,
+      final String taskId,
+      final int partitionNumber
+  )
+  {
+    return StringUtils.format(
+        "%s/part_%d",
+        getQueryResultsForTaskIdFolderName(controllerTaskId, stageNumber, workerNumber, taskId),
         partitionNumber
     );
   }
@@ -127,8 +221,8 @@ public class DurableStorageUtils
   }
 
   /**
-   * Tries to parse out the controller taskID from the input path.
-   * <br></br>
+   * Tries to parse out the most top level directory from the path. Returns null if there is no such directory.
+   * <br>
    * For eg:
    * <br/>
    * <ul>
@@ -138,7 +232,7 @@ public class DurableStorageUtils
    * </ul>
    */
   @Nullable
-  public static String getControllerTaskIdWithPrefixFromPath(String path)
+  public static String getNextDirNameWithPrefixFromPath(String path)
   {
     if (path == null) {
       return null;
@@ -149,5 +243,26 @@ public class DurableStorageUtils
     } else {
       return null;
     }
+  }
+
+  /**
+   * Checks if a query result file should be retained by checking if its task ID is recently completed.
+   * Parses the controller task ID from paths under {@link #QUERY_RESULTS_DIR} and checks membership
+   * in the provided set.
+   *
+   * @param path                      the file path to check
+   * @param recentlyCompletedTaskIds  set of task IDs that completed recently and whose files should be retained
+   * @return {@code true} if the file belongs to a recently completed task; {@code false} otherwise
+   */
+  public static boolean isQueryResultFileActive(String path, Set<String> recentlyCompletedTaskIds)
+  {
+    if (path == null) {
+      return false;
+    }
+    final String taskId = getControllerTaskId(path);
+    if (taskId == null) {
+      return false;
+    }
+    return recentlyCompletedTaskIds.contains(taskId);
   }
 }

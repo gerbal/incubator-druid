@@ -16,10 +16,9 @@
  * limitations under the License.
  */
 
-import React from 'react';
+import { render } from '@testing-library/react';
 
 import { QueryState } from '../../../utils';
-import { shallow } from '../../../utils/shallow-renderer';
 
 import type { DatasourceColumnsTableRow } from './datasource-columns-table';
 import { DatasourceColumnsTable } from './datasource-columns-table';
@@ -37,19 +36,22 @@ describe('DatasourceColumnsTable', () => {
   }
 
   it('matches snapshot on init', () => {
-    expect(shallow(makeDatasourceColumnsTable())).toMatchSnapshot();
+    const { container } = render(makeDatasourceColumnsTable());
+    expect(container.firstChild).toMatchSnapshot();
   });
 
   it('matches snapshot on loading', () => {
     columnsState = QueryState.LOADING;
 
-    expect(shallow(makeDatasourceColumnsTable())).toMatchSnapshot();
+    const { container } = render(makeDatasourceColumnsTable());
+    expect(container.firstChild).toMatchSnapshot();
   });
 
   it('matches snapshot on error', () => {
     columnsState = new QueryState({ error: new Error('test error') });
 
-    expect(shallow(makeDatasourceColumnsTable())).toMatchSnapshot();
+    const { container } = render(makeDatasourceColumnsTable());
+    expect(container.firstChild).toMatchSnapshot();
   });
 
   it('matches snapshot on no data', () => {
@@ -57,7 +59,8 @@ describe('DatasourceColumnsTable', () => {
       data: [],
     });
 
-    expect(shallow(makeDatasourceColumnsTable())).toMatchSnapshot();
+    const { container } = render(makeDatasourceColumnsTable());
+    expect(container.firstChild).toMatchSnapshot();
   });
 
   it('matches snapshot on some data', () => {
@@ -74,6 +77,7 @@ describe('DatasourceColumnsTable', () => {
       ],
     });
 
-    expect(shallow(makeDatasourceColumnsTable())).toMatchSnapshot();
+    const { container } = render(makeDatasourceColumnsTable());
+    expect(container.firstChild).toMatchSnapshot();
   });
 });

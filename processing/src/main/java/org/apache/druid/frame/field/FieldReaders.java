@@ -20,11 +20,11 @@
 package org.apache.druid.frame.field;
 
 import com.google.common.base.Preconditions;
+import org.apache.druid.frame.FrameType;
 import org.apache.druid.frame.key.RowKey;
 import org.apache.druid.frame.key.RowKeyReader;
 import org.apache.druid.frame.write.UnsupportedColumnTypeException;
 import org.apache.druid.segment.column.ColumnType;
-import org.apache.druid.segment.column.ValueType;
 
 /**
  * Helper used to read field values from row-based frames or {@link RowKey}.
@@ -42,27 +42,41 @@ public class FieldReaders
   /**
    * Helper used by {@link org.apache.druid.frame.read.FrameReader}.
    */
-  public static FieldReader create(final String columnName, final ColumnType columnType)
+  public static FieldReader create(final String columnName, final ColumnType columnType, final FrameType frameType)
   {
     switch (Preconditions.checkNotNull(columnType, "columnType").getType()) {
       case LONG:
-        return new LongFieldReader();
+        return LongFieldReader.forPrimitive();
 
       case FLOAT:
-        return new FloatFieldReader();
+        return FloatFieldReader.forPrimitive(frameType);
 
       case DOUBLE:
-        return new DoubleFieldReader();
+        return DoubleFieldReader.forPrimitive(frameType);
 
       case STRING:
-        return new StringFieldReader(false);
+        return new StringFieldReader();
 
       case COMPLEX:
         return ComplexFieldReader.createFromType(columnType);
 
       case ARRAY:
-        if (columnType.getElementType().getType() == ValueType.STRING) {
-          return new StringFieldReader(true);
+        switch (Preconditions.checkNotNull(columnType.getElementType().getType(), "array elementType")) {
+          case STRING:
+            return new StringArrayFieldReader();
+
+          case LONG:
+            return new LongArrayFieldReader();
+
+          case FLOAT:
+            return new FloatArrayFieldReader(frameType);
+
+          case DOUBLE:
+            return new DoubleArrayFieldReader(frameType);
+
+          default:
+            throw new UnsupportedColumnTypeException(columnName, columnType);
+
         }
         // Fall through to error for other array types
 

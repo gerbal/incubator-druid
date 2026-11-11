@@ -21,20 +21,34 @@ package org.apache.druid.guice.http;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.google.inject.Binder;
 import com.google.inject.Binding;
 import com.google.inject.Inject;
 import com.google.inject.Module;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.PooledByteBufAllocator;
+import io.netty.buffer.UnpooledByteBufAllocator;
+import io.netty.handler.codec.http.HttpHeaders;
+import org.apache.druid.error.DruidException;
 import org.apache.druid.guice.JsonConfigProvider;
 import org.apache.druid.guice.LazySingleton;
 import org.apache.druid.guice.annotations.EscalatedClient;
 import org.apache.druid.guice.annotations.EscalatedGlobal;
 import org.apache.druid.guice.annotations.Global;
+import org.apache.druid.guice.annotations.Self;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.http.client.AbstractHttpClient;
 import org.apache.druid.java.util.http.client.HttpClient;
 import org.apache.druid.java.util.http.client.HttpClientConfig;
 import org.apache.druid.java.util.http.client.HttpClientInit;
+import org.apache.druid.java.util.http.client.NettyHttpClient;
+import org.apache.druid.java.util.http.client.Request;
+import org.apache.druid.java.util.http.client.response.HttpResponseHandler;
+import org.apache.druid.server.DruidNode;
+import org.apache.druid.server.metrics.HttpClientPoolRegistry;
 import org.apache.druid.server.security.Escalator;
+import org.joda.time.Duration;
 
 import javax.net.ssl.SSLContext;
 import java.lang.annotation.Annotation;
@@ -47,12 +61,12 @@ public class HttpClientModule implements Module
 {
   public static HttpClientModule global()
   {
-    return new HttpClientModule("druid.global.http", Global.class);
+    return new HttpClientModule("druid.global.http", Global.class, false);
   }
 
   public static HttpClientModule escalatedGlobal()
   {
-    return new HttpClientModule("druid.global.http", EscalatedGlobal.class);
+    return new HttpClientModule("druid.global.http", EscalatedGlobal.class, false);
   }
 
   private static final Set<Class<? extends Annotation>> ESCALATING_ANNOTATIONS =
@@ -61,11 +75,13 @@ public class HttpClientModule implements Module
   private final String propertyPrefix;
   private final Class<? extends Annotation> annotationClazz;
   private final boolean isEscalated;
+  private final boolean eagerByDefault;
 
-  public HttpClientModule(String propertyPrefix, Class<? extends Annotation> annotationClazz)
+  public HttpClientModule(String propertyPrefix, Class<? extends Annotation> annotationClazz, boolean eagerByDefault)
   {
     this.propertyPrefix = Preconditions.checkNotNull(propertyPrefix, "propertyPrefix");
     this.annotationClazz = Preconditions.checkNotNull(annotationClazz, "annotationClazz");
+    this.eagerByDefault = eagerByDefault;
 
     isEscalated = ESCALATING_ANNOTATIONS.contains(this.annotationClazz);
   }
@@ -76,25 +92,33 @@ public class HttpClientModule implements Module
     JsonConfigProvider.bind(binder, propertyPrefix, DruidHttpClientConfig.class, annotationClazz);
     binder.bind(HttpClient.class)
           .annotatedWith(annotationClazz)
-          .toProvider(new HttpClientProvider(annotationClazz, isEscalated))
+          .toProvider(new HttpClientProvider(annotationClazz, isEscalated, eagerByDefault))
           .in(LazySingleton.class);
   }
 
   public static class HttpClientProvider extends AbstractHttpClientProvider<HttpClient>
   {
+    private final Class<? extends Annotation> annotationClazz;
     private final boolean isEscalated;
+    private final boolean eagerByDefault;
     private Escalator escalator;
+    private DruidNode node;
+    private HttpClientPoolRegistry poolRegistry;
 
-    public HttpClientProvider(Class<? extends Annotation> annotationClazz, boolean isEscalated)
+    public HttpClientProvider(Class<? extends Annotation> annotationClazz, boolean isEscalated, boolean eagerByDefault)
     {
       super(annotationClazz);
+      this.annotationClazz = annotationClazz;
       this.isEscalated = isEscalated;
+      this.eagerByDefault = eagerByDefault;
     }
 
     @Inject
-    public void inject(Escalator escalator)
+    public void inject(Escalator escalator, @Self DruidNode node, HttpClientPoolRegistry poolRegistry)
     {
       this.escalator = escalator;
+      this.node = node;
+      this.poolRegistry = poolRegistry;
     }
 
     @Override
@@ -105,8 +129,11 @@ public class HttpClientModule implements Module
       final HttpClientConfig.Builder builder = HttpClientConfig
           .builder()
           .withNumConnections(config.getNumConnections())
-          .withEagerInitialization(config.isEagerInitialization())
+          .withEagerInitialization(config.isEagerInitialization(eagerByDefault))
+          .withPoolImplementation(config.getPoolImplementation())
           .withReadTimeout(config.getReadTimeout())
+          .withConnectTimeout(config.getConnectTimeout())
+          .withByteBufAllocator(resolveAllocator(config.getAllocator()))
           .withWorkerCount(config.getNumMaxThreads())
           .withCompressionCodec(
               HttpClientConfig.CompressionCodec.valueOf(StringUtils.toUpperCase(config.getCompressionCodec()))
@@ -119,16 +146,64 @@ public class HttpClientModule implements Module
         builder.withSslContext(sslContextBinding.getProvider().get());
       }
 
-      HttpClient client = HttpClientInit.createClient(
+      NettyHttpClient client = HttpClientInit.createNettyClient(
           builder.build(),
           getLifecycleProvider().get()
       );
+      poolRegistry.register(clientName(), client.getPool());
+      HttpClient clientWithUserAgent = new AbstractHttpClient()
+      {
+        @Override
+        public <Intermediate, Final> ListenableFuture<Final> go(
+            Request request,
+            HttpResponseHandler<Intermediate, Final> handler,
+            Duration readTimeout
+        )
+        {
+          request.setHeader(HttpHeaders.Names.USER_AGENT, StringUtils.format("%s/%s", node.getServiceName(), node.getVersion()));
+          return client.go(request, handler, readTimeout);
+        }
+      };
 
       if (isEscalated) {
-        return escalator.createEscalatedClient(client);
+        return escalator.createEscalatedClient(clientWithUserAgent);
       } else {
-        return client;
+        return clientWithUserAgent;
       }
+    }
+
+    /**
+     * The binding annotation of this client, which is what tells its pool apart from the pools of the other clients
+     * of the same process - {@code druid.global.http} backs two of them.
+     */
+    private String clientName()
+    {
+      final String simpleName = annotationClazz.getSimpleName();
+      return StringUtils.toLowerCase(simpleName.substring(0, 1)) + simpleName.substring(1);
+    }
+  }
+
+  /**
+   * Maps the {@link DruidHttpClientConfig#getAllocator()} string to a Netty {@link ByteBufAllocator}
+   * instance. Update this when upgrading Netty if new versions introduce additional allocators.
+   */
+  private static ByteBufAllocator resolveAllocator(String name)
+  {
+    if (name == null) {
+      return HttpClientConfig.DEFAULT_BYTE_BUF_ALLOCATOR;
+    }
+    switch (StringUtils.toLowerCase(name)) {
+      case "adaptive":
+        return HttpClientConfig.DEFAULT_BYTE_BUF_ALLOCATOR;
+      case "pooled":
+        return PooledByteBufAllocator.DEFAULT;
+      case "unpooled":
+        return UnpooledByteBufAllocator.DEFAULT;
+      default:
+        throw DruidException
+            .forPersona(DruidException.Persona.OPERATOR)
+            .ofCategory(DruidException.Category.INVALID_INPUT)
+            .build("Unknown allocator[%s]; expected one of adaptive, pooled, unpooled", name);
     }
   }
 }

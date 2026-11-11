@@ -21,18 +21,29 @@ package org.apache.druid.segment;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Sets;
+import org.apache.druid.error.DruidException;
 import org.apache.druid.java.util.common.io.Closer;
+import org.apache.druid.query.Order;
+import org.apache.druid.query.OrderBy;
 import org.apache.druid.query.monomorphicprocessing.RuntimeShapeInspector;
 import org.apache.druid.segment.column.BaseColumn;
+import org.apache.druid.segment.column.BaseColumnHolder;
 import org.apache.druid.segment.column.ColumnCapabilities;
+import org.apache.druid.segment.column.ColumnFormat;
 import org.apache.druid.segment.column.ColumnHolder;
 import org.apache.druid.segment.column.ColumnIndexSupplier;
+import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.DictionaryEncodedColumn;
-import org.apache.druid.segment.column.DictionaryEncodedValueIndex;
 import org.apache.druid.segment.data.BitmapValues;
 import org.apache.druid.segment.data.CloseableIndexed;
 import org.apache.druid.segment.data.ImmutableBitmapValues;
 import org.apache.druid.segment.data.IndexedIterable;
+import org.apache.druid.segment.index.semantic.DictionaryEncodedValueIndex;
+import org.apache.druid.segment.nested.NestedCommonFormatColumn;
+import org.apache.druid.segment.nested.NestedDataComplexTypeSerde;
+import org.apache.druid.segment.nested.SortedValueDictionary;
+import org.apache.druid.segment.projections.ClusteredValueGroupsBaseTableSchema;
+import org.apache.druid.segment.projections.TableClusterGroupSpec;
 import org.apache.druid.segment.selector.settable.SettableColumnValueSelector;
 import org.apache.druid.segment.selector.settable.SettableLongColumnValueSelector;
 import org.apache.druid.utils.CloseableUtils;
@@ -41,6 +52,7 @@ import org.joda.time.Interval;
 import javax.annotation.Nullable;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -55,13 +67,49 @@ public class QueryableIndexIndexableAdapter implements IndexableAdapter
   private final QueryableIndex input;
   private final ImmutableList<String> availableDimensions;
   private final Metadata metadata;
+  private final int timePositionForComparator;
 
   public QueryableIndexIndexableAdapter(QueryableIndex input)
   {
     this.input = input;
     numRows = input.getNumRows();
     availableDimensions = ImmutableList.copyOf(input.getAvailableDimensions());
+    if (availableDimensions.contains(ColumnHolder.TIME_COLUMN_NAME)) {
+      throw DruidException.defensive("Unexpectedly encountered dimension[%s]", ColumnHolder.TIME_COLUMN_NAME);
+    }
     this.metadata = input.getMetadata();
+
+    final List<OrderBy> inputOrdering = input.getOrdering();
+
+    int foundTimePosition = -1;
+    int i = 0;
+
+    // Some sort columns may not exist in the index, for example if they are omitted due to being 100% nulls.
+    // Locate the __time column in the sort order, skipping any nonexistent columns. This will be the position of
+    // the __time column within the dimension handlers.
+    for (final OrderBy orderBy : inputOrdering) {
+      final String columnName = orderBy.getColumnName();
+
+      if (orderBy.getOrder() != Order.ASCENDING) {
+        throw DruidException.defensive("Order[%s] for column[%s] is not supported", orderBy.getOrder(), columnName);
+      }
+
+      if (ColumnHolder.TIME_COLUMN_NAME.equals(columnName)) {
+        foundTimePosition = i;
+        break;
+      } else if (input.getDimensionHandlers().containsKey(columnName)) {
+        i++;
+      }
+    }
+
+    if (foundTimePosition >= 0) {
+      this.timePositionForComparator = foundTimePosition;
+    } else {
+      // Sort order is set, but does not contain __time. Indexable adapters involve all columns in TimeAndDimsPointer
+      // comparators, so we need to put the __time column somewhere. Put it immediately after the ones in the
+      // sort order.
+      this.timePositionForComparator = inputOrdering.size();
+    }
   }
 
   public QueryableIndex getQueryableIndex()
@@ -82,16 +130,33 @@ public class QueryableIndexIndexableAdapter implements IndexableAdapter
   }
 
   @Override
-  public List<String> getDimensionNames()
+  public List<String> getDimensionNames(final boolean includeTime)
   {
-    return availableDimensions;
+    // Clustered base tables have no top-level columns; their logical dimensions (clustering + per-group) come
+    // from the cluster summary so segment-level merging machinery sees the same shape as a regular segment.
+    final ClusteredValueGroupsBaseTableSchema clusteredSummary = input.getClusteredBaseSummary();
+    if (clusteredSummary != null) {
+      return includeTime ? clusteredSummary.getColumns() : clusteredSummary.getDimensionNames();
+    }
+    if (includeTime) {
+      final List<String> retVal = new ArrayList<>(availableDimensions.size() + 1);
+      retVal.add(ColumnHolder.TIME_COLUMN_NAME);
+      retVal.addAll(availableDimensions);
+      return retVal;
+    } else {
+      return availableDimensions;
+    }
   }
 
   @Override
   public List<String> getMetricNames()
   {
+    final ClusteredValueGroupsBaseTableSchema clusteredSummary = input.getClusteredBaseSummary();
+    if (clusteredSummary != null) {
+      return Collections.emptyList();
+    }
     final Set<String> columns = Sets.newLinkedHashSet(input.getColumnNames());
-    final HashSet<String> dimensions = Sets.newHashSet(getDimensionNames());
+    final HashSet<String> dimensions = Sets.newHashSet(availableDimensions);
     return ImmutableList.copyOf(Sets.difference(columns, dimensions));
   }
 
@@ -99,7 +164,7 @@ public class QueryableIndexIndexableAdapter implements IndexableAdapter
   @Override
   public <T extends Comparable<? super T>> CloseableIndexed<T> getDimValueLookup(String dimension)
   {
-    final ColumnHolder columnHolder = input.getColumnHolder(dimension);
+    final BaseColumnHolder columnHolder = input.getColumnHolder(dimension);
 
     if (columnHolder == null) {
       return null;
@@ -108,13 +173,20 @@ public class QueryableIndexIndexableAdapter implements IndexableAdapter
     final BaseColumn col = columnHolder.getColumn();
 
     if (!(col instanceof DictionaryEncodedColumn)) {
+      // this shouldn't happen, but if it does, try to close to prevent a leak
+      try {
+        col.close();
+      }
+      catch (IOException e) {
+        throw new RuntimeException(e);
+      }
       return null;
     }
 
     @SuppressWarnings("unchecked")
     DictionaryEncodedColumn<T> dict = (DictionaryEncodedColumn<T>) col;
 
-    return new CloseableIndexed<T>()
+    return new CloseableIndexed<>()
     {
 
       @Override
@@ -155,19 +227,79 @@ public class QueryableIndexIndexableAdapter implements IndexableAdapter
     };
   }
 
+  @Nullable
+  @Override
+  public NestedColumnMergable getNestedColumnMergeables(String columnName)
+  {
+    final BaseColumnHolder columnHolder = input.getColumnHolder(columnName);
+
+    if (columnHolder == null) {
+      return null;
+    }
+    final ColumnFormat format = columnHolder.getColumnFormat();
+    if (!(format instanceof NestedCommonFormatColumn.Format
+          || format instanceof NestedDataComplexTypeSerde.NestedColumnFormatV4)) {
+      return null;
+    }
+
+    final BaseColumn col = columnHolder.getColumn();
+    if (col instanceof NestedCommonFormatColumn) {
+      NestedCommonFormatColumn column = (NestedCommonFormatColumn) col;
+      return new NestedColumnMergable(
+          new SortedValueDictionary(
+              column.getStringDictionary(),
+              column.getLongDictionary(),
+              column.getDoubleDictionary(),
+              column.getArrayDictionary(),
+              column
+          ),
+          column.getFieldTypeInfo(),
+          ColumnType.NESTED_DATA.equals(column.getLogicalType()),
+          false,
+          null
+      );
+    }
+
+    // this shouldn't happen because of the format check, but if it does try to close the column just in case
+    try {
+      col.close();
+    }
+    catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+    return null;
+  }
+
   @Override
   public RowIteratorImpl getRows()
   {
     return new RowIteratorImpl();
   }
 
+  @Override
+  public IndexableAdapter getProjectionAdapter(String projection)
+  {
+    QueryableIndex projectionIndex = input.getProjectionQueryableIndex(projection);
+    DruidException.conditionalDefensive(projectionIndex != null, "Projection[%s] was not found", projection);
+    return new QueryableIndexIndexableAdapter(projectionIndex);
+  }
+
+  @Override
+  public IndexableAdapter getClusterGroupAdapter(TableClusterGroupSpec spec)
+  {
+    // Merge/persist must not write clustering columns into the per-group files, so omit them here.
+    final QueryableIndex groupIndex = input.getClusterGroupQueryableIndex(spec, false);
+    DruidException.conditionalDefensive(groupIndex != null, "Cluster group spec [%s] was not found", spec);
+    return new QueryableIndexIndexableAdapter(groupIndex);
+  }
+
   /**
    * On {@link #moveToNext()} and {@link #mark()}, this class copies all column values into a set of {@link
    * SettableColumnValueSelector} instances. Alternative approach was to save only offset in column and use the same
-   * column value selectors as in {@link QueryableIndexStorageAdapter}. The approach with "caching" in {@link
+   * column value selectors as in {@link QueryableIndexCursorFactory}. The approach with "caching" in {@link
    * SettableColumnValueSelector}s is chosen for two reasons:
    *  1) Avoid re-reading column values from serialized format multiple times (because they are accessed multiple times)
-   *     For comparison, it's not a factor for {@link QueryableIndexStorageAdapter} because during query processing,
+   *     For comparison, it's not a factor for {@link QueryableIndexCursorFactory} because during query processing,
    *     column values are usually accessed just once per offset, if aggregator or query runner are written sanely.
    *     Avoiding re-reads is especially important for object columns, because object deserialization is potentially
    *     expensive.
@@ -203,11 +335,11 @@ public class QueryableIndexIndexableAdapter implements IndexableAdapter
     RowIteratorImpl()
     {
       this.closer = Closer.create();
-      this.columnCache = new ColumnCache(input, closer);
+      this.columnCache = new ColumnCache(input, VirtualColumns.EMPTY, closer);
 
       final ColumnSelectorFactory columnSelectorFactory = new QueryableIndexColumnSelectorFactory(
           VirtualColumns.EMPTY,
-          false,
+          timePositionForComparator == 0 ? Order.ASCENDING : Order.NONE,
           offset,
           columnCache
       );
@@ -237,6 +369,7 @@ public class QueryableIndexIndexableAdapter implements IndexableAdapter
 
       rowPointer = new RowPointer(
           rowTimestampSelector,
+          timePositionForComparator,
           rowDimensionValueSelectors,
           dimensionHandlers,
           rowMetricSelectors,
@@ -254,6 +387,7 @@ public class QueryableIndexIndexableAdapter implements IndexableAdapter
           .toArray(SettableColumnValueSelector[]::new);
       markedRowPointer = new TimeAndDimsPointer(
           markedTimestampSelector,
+          timePositionForComparator,
           markedDimensionValueSelectors,
           dimensionHandlers,
           markedMetricSelectors,
@@ -340,13 +474,19 @@ public class QueryableIndexIndexableAdapter implements IndexableAdapter
   @Override
   public ColumnCapabilities getCapabilities(String column)
   {
-    return input.getColumnHolder(column).getHandlerCapabilities();
+    return input.getColumnHolder(column).getCapabilities();
+  }
+
+  @Override
+  public ColumnFormat getFormat(String column)
+  {
+    return input.getColumnHolder(column).getColumnFormat();
   }
 
   @Override
   public BitmapValues getBitmapValues(String dimension, int dictId)
   {
-    final ColumnHolder columnHolder = input.getColumnHolder(dimension);
+    final BaseColumnHolder columnHolder = input.getColumnHolder(dimension);
     if (columnHolder == null) {
       return BitmapValues.EMPTY;
     }

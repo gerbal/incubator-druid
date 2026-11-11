@@ -19,7 +19,6 @@
 
 package org.apache.druid.query.aggregation;
 
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.segment.ColumnSelectorFactory;
 import org.apache.druid.segment.TestHelper;
 import org.apache.druid.segment.column.ColumnCapabilitiesImpl;
@@ -27,9 +26,9 @@ import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
 import org.apache.druid.segment.vector.VectorValueSelector;
 import org.easymock.EasyMock;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
 
@@ -55,14 +54,13 @@ public class LongMaxAggregationTest
     longMaxVectorAggFactory = TestHelper.makeJsonMapper().readValue(vectorAggSpecJson, LongMaxAggregatorFactory.class);
   }
 
-  @Before
+  @BeforeEach
   public void setup()
   {
-    NullHandling.initializeForTests();
     selector = new TestLongColumnSelector(values);
     colSelectorFactory = EasyMock.createMock(ColumnSelectorFactory.class);
     EasyMock.expect(colSelectorFactory.makeColumnValueSelector("nilly")).andReturn(selector);
-    EasyMock.expect(colSelectorFactory.getColumnCapabilities("nilly")).andReturn(null);
+    EasyMock.expect(colSelectorFactory.getColumnCapabilities("nilly")).andReturn(null).anyTimes();
     EasyMock.replay(colSelectorFactory);
 
 
@@ -88,9 +86,9 @@ public class LongMaxAggregationTest
     aggregate(selector, agg);
     aggregate(selector, agg);
 
-    Assert.assertEquals(values[2], ((Long) agg.get()).longValue());
-    Assert.assertEquals(values[2], agg.getLong());
-    Assert.assertEquals((float) values[2], agg.getFloat(), 0.0001);
+    Assertions.assertEquals(values[2], ((Long) agg.get()).longValue());
+    Assertions.assertEquals(values[2], agg.getLong());
+    Assertions.assertEquals((float) values[2], agg.getFloat(), 0.0001);
   }
 
   @Test
@@ -106,9 +104,9 @@ public class LongMaxAggregationTest
     aggregate(selector, agg, buffer, 0);
     aggregate(selector, agg, buffer, 0);
 
-    Assert.assertEquals(values[2], ((Long) agg.get(buffer, 0)).longValue());
-    Assert.assertEquals(values[2], agg.getLong(buffer, 0));
-    Assert.assertEquals((float) values[2], agg.getFloat(buffer, 0), 0.0001);
+    Assertions.assertEquals(values[2], ((Long) agg.get(buffer, 0)).longValue());
+    Assertions.assertEquals(values[2], agg.getLong(buffer, 0));
+    Assertions.assertEquals((float) values[2], agg.getFloat(buffer, 0), 0.0001);
   }
 
 
@@ -116,9 +114,9 @@ public class LongMaxAggregationTest
   public void testLongMaxVectorAggregator()
   {
     // Some sanity.
-    Assert.assertTrue(longMaxVectorAggFactory.canVectorize(vectorColumnSelectorFactory));
+    Assertions.assertTrue(longMaxVectorAggFactory.canVectorize(vectorColumnSelectorFactory));
     VectorValueSelector vectorValueSelector = longMaxVectorAggFactory.vectorSelector(vectorColumnSelectorFactory);
-    Assert.assertEquals(longValues1, vectorValueSelector.getLongVector());
+    Assertions.assertEquals(longValues1, vectorValueSelector.getLongVector());
 
     VectorAggregator vectorAggregator = longMaxVectorAggFactory.factorizeVector(vectorColumnSelectorFactory);
 
@@ -126,23 +124,23 @@ public class LongMaxAggregationTest
     vectorAggregator.init(buf, 0);
 
     vectorAggregator.aggregate(buf, 0, 0, 3);
-    Assert.assertEquals(longValues1[0], (long) vectorAggregator.get(buf, 0));
+    Assertions.assertEquals(longValues1[0], (long) vectorAggregator.get(buf, 0));
 
     vectorAggregator.aggregate(buf, 8, 0, 3);
-    Assert.assertEquals(longValues1[0], (long) vectorAggregator.get(buf, 8));
+    Assertions.assertEquals(longValues1[0], (long) vectorAggregator.get(buf, 8));
 
     vectorAggregator.aggregate(buf, 16, 3, 7);
-    Assert.assertEquals(longValues1[3], (long) vectorAggregator.get(buf, 16));
+    Assertions.assertEquals(longValues1[3], (long) vectorAggregator.get(buf, 16));
 
     vectorAggregator.init(buf, 0);
     vectorAggregator.aggregate(buf, 0, 0, 10);
-    Assert.assertEquals(longValues1[3], (long) vectorAggregator.get(buf, 0));
+    Assertions.assertEquals(longValues1[3], (long) vectorAggregator.get(buf, 0));
   }
 
   @Test
   public void testCombine()
   {
-    Assert.assertEquals(9223372036854775803L, longMaxAggFactory.combine(9223372036854775800L, 9223372036854775803L));
+    Assertions.assertEquals(9223372036854775803L, longMaxAggFactory.combine(9223372036854775800L, 9223372036854775803L));
   }
 
   @Test
@@ -152,10 +150,10 @@ public class LongMaxAggregationTest
     LongMaxAggregatorFactory oneMore = new LongMaxAggregatorFactory("name1", "fieldName1");
     LongMaxAggregatorFactory two = new LongMaxAggregatorFactory("name2", "fieldName2");
 
-    Assert.assertEquals(one.hashCode(), oneMore.hashCode());
+    Assertions.assertEquals(one.hashCode(), oneMore.hashCode());
 
-    Assert.assertTrue(one.equals(oneMore));
-    Assert.assertFalse(one.equals(two));
+    Assertions.assertEquals(one, oneMore);
+    Assertions.assertNotEquals(one, two);
   }
 
   private void aggregate(TestLongColumnSelector selector, Aggregator agg)

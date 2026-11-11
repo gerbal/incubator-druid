@@ -19,20 +19,39 @@
 
 package org.apache.druid.query.scan;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import nl.jqno.equalsverifier.EqualsVerifier;
+import nl.jqno.equalsverifier.Warning;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.common.guava.Sequences;
+import org.apache.druid.math.expr.ExprMacroTable;
+import org.apache.druid.query.BadQueryContextException;
 import org.apache.druid.query.Druids;
+import org.apache.druid.query.Order;
+import org.apache.druid.query.OrderBy;
+import org.apache.druid.query.Query;
+import org.apache.druid.query.QueryRunnerTestHelper;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.spec.MultipleIntervalSegmentSpec;
 import org.apache.druid.query.spec.QuerySegmentSpec;
+import org.apache.druid.segment.CursorBuildSpec;
+import org.apache.druid.segment.TestHelper;
+import org.apache.druid.segment.VirtualColumns;
 import org.apache.druid.segment.column.ColumnHolder;
+import org.apache.druid.segment.column.ColumnType;
+import org.apache.druid.segment.column.RowSignature;
+import org.apache.druid.segment.virtual.ExpressionVirtualColumn;
+import org.apache.druid.testing.InitializedNullHandlingTest;
 import org.joda.time.Interval;
-import org.junit.Assert;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -41,14 +60,15 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Set;
 
-public class ScanQueryTest
+public class ScanQueryTest extends InitializedNullHandlingTest
 {
+  private static final ObjectMapper JSON_MAPPER = TestHelper.makeJsonMapper();
   private static QuerySegmentSpec intervalSpec;
   private static ScanResultValue s1;
   private static ScanResultValue s2;
   private static ScanResultValue s3;
 
-  @BeforeClass
+  @BeforeAll
   public static void setup()
   {
     intervalSpec = new MultipleIntervalSegmentSpec(
@@ -59,7 +79,7 @@ public class ScanQueryTest
 
     ArrayList<HashMap<String, Object>> events1 = new ArrayList<>();
     HashMap<String, Object> event1 = new HashMap<>();
-    event1.put(ColumnHolder.TIME_COLUMN_NAME, new Long(42));
+    event1.put(ColumnHolder.TIME_COLUMN_NAME, 42L);
     events1.add(event1);
 
     s1 = new ScanResultValue(
@@ -70,7 +90,7 @@ public class ScanQueryTest
 
     ArrayList<HashMap<String, Object>> events2 = new ArrayList<>();
     HashMap<String, Object> event2 = new HashMap<>();
-    event2.put(ColumnHolder.TIME_COLUMN_NAME, new Long(43));
+    event2.put(ColumnHolder.TIME_COLUMN_NAME, 43L);
     events2.add(event2);
 
     s2 = new ScanResultValue(
@@ -92,45 +112,28 @@ public class ScanQueryTest
     );
   }
 
-  @Test(expected = IllegalArgumentException.class)
-  public void testAscendingScanQueryWithInvalidColumns()
+  @Test
+  public void testSerdeAndLegacyBackwardsCompat() throws JsonProcessingException
   {
-    Druids.newScanQueryBuilder()
-          .order(ScanQuery.Order.ASCENDING)
-          .columns(ImmutableList.of("not time", "also not time"))
-          .dataSource("source")
-          .intervals(intervalSpec)
-          .build();
-  }
-
-  @Test(expected = IllegalArgumentException.class)
-  public void testDescendingScanQueryWithInvalidColumns()
-  {
-    Druids.newScanQueryBuilder()
-          .order(ScanQuery.Order.DESCENDING)
-          .columns(ImmutableList.of("not time", "also not time"))
-          .dataSource("source")
-          .intervals(intervalSpec)
-          .build();
+    ScanQuery query = Druids.newScanQueryBuilder()
+                            .columns(ImmutableList.of("__time", "quality"))
+                            .dataSource("source")
+                            .intervals(intervalSpec)
+                            .build();
+    String json = JSON_MAPPER.writeValueAsString(query);
+    Assertions.assertTrue(json.contains("\"legacy\":false"));
+    Assertions.assertEquals(query, JSON_MAPPER.readValue(json, Query.class));
   }
 
   @Test
-  public void testConflictingOrderByAndTimeOrder()
+  public void testAscendingScanQueryWithInvalidColumns()
   {
-    Assert.assertThrows(
-        "Cannot provide 'order' incompatible with 'orderBy'",
+    Assertions.assertThrows(
         IllegalArgumentException.class,
         () ->
             Druids.newScanQueryBuilder()
-                  .order(ScanQuery.Order.ASCENDING)
-                  .orderBy(
-                      // Not ok, even though it starts with __time ASC, because it also has non-time component.
-                      ImmutableList.of(
-                          new ScanQuery.OrderBy("__time", ScanQuery.Order.ASCENDING),
-                          new ScanQuery.OrderBy("quality", ScanQuery.Order.DESCENDING)
-                      )
-                  )
-                  .columns(ImmutableList.of("__time", "quality"))
+                  .order(Order.ASCENDING)
+                  .columns(ImmutableList.of("not time", "also not time"))
                   .dataSource("source")
                   .intervals(intervalSpec)
                   .build()
@@ -138,12 +141,50 @@ public class ScanQueryTest
   }
 
   @Test
+  public void testDescendingScanQueryWithInvalidColumns()
+  {
+    Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            Druids.newScanQueryBuilder()
+                  .order(Order.DESCENDING)
+                  .columns(ImmutableList.of("not time", "also not time"))
+                  .dataSource("source")
+                  .intervals(intervalSpec)
+                  .build()
+    );
+  }
+
+  @Test
+  public void testConflictingOrderByAndTimeOrder()
+  {
+    Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            Druids.newScanQueryBuilder()
+                  .order(Order.ASCENDING)
+                  .orderBy(
+                      // Not ok, even though it starts with __time ASC, because it also has non-time component.
+                      ImmutableList.of(
+                          OrderBy.ascending("__time"),
+                          OrderBy.descending("quality")
+                      )
+                  )
+                  .columns(ImmutableList.of("__time", "quality"))
+                  .dataSource("source")
+                  .intervals(intervalSpec)
+                  .build(),
+        "Cannot provide 'order' incompatible with 'orderBy'"
+    );
+  }
+
+  @Test
   public void testCompatibleOrderByAndTimeOrder()
   {
-    Assert.assertNotNull(
+    Assertions.assertNotNull(
         Druids.newScanQueryBuilder()
-              .order(ScanQuery.Order.ASCENDING)
-              .orderBy(ImmutableList.of(new ScanQuery.OrderBy("__time", ScanQuery.Order.ASCENDING)))
+              .order(Order.ASCENDING)
+              .orderBy(ImmutableList.of(OrderBy.ascending("__time")))
               .columns(ImmutableList.of("__time", "quality"))
               .dataSource("source")
               .intervals(intervalSpec)
@@ -155,9 +196,9 @@ public class ScanQueryTest
   @Test
   public void testValidScanQueryInitialization()
   {
-    List<ScanQuery.Order> nonOrderedOrders = Arrays.asList(null, ScanQuery.Order.NONE);
+    List<Order> nonOrderedOrders = Arrays.asList(null, Order.NONE);
 
-    for (ScanQuery.Order order : nonOrderedOrders) {
+    for (Order order : nonOrderedOrders) {
       Druids.newScanQueryBuilder()
             .order(order)
             .columns(ImmutableList.of("not time"))
@@ -187,9 +228,9 @@ public class ScanQueryTest
             .build();
     }
 
-    Set<ScanQuery.Order> orderedOrders = ImmutableSet.of(ScanQuery.Order.ASCENDING, ScanQuery.Order.DESCENDING);
+    Set<Order> orderedOrders = ImmutableSet.of(Order.ASCENDING, Order.DESCENDING);
 
-    for (ScanQuery.Order order : orderedOrders) {
+    for (Order order : orderedOrders) {
       Druids.newScanQueryBuilder()
             .order(order)
             .columns((List<String>) null)
@@ -219,13 +260,36 @@ public class ScanQueryTest
     }
   }
 
+  @Test
+  public void testMaxRowsQueuedForOrderingMustBeGreaterThanZero()
+  {
+    // Use a raw context so that ScanQuery itself validates the value.
+    Assertions.assertThrows(
+        BadQueryContextException.class,
+        () -> Druids.newScanQueryBuilder()
+                    .dataSource("source")
+                    .intervals(intervalSpec)
+                    .context(ImmutableMap.of(QueryContextParameters.MAX_ROWS_QUEUED_FOR_ORDERING.getName(), 0))
+                    .build()
+    );
+    Assertions.assertEquals(
+        1,
+        Druids.newScanQueryBuilder()
+              .dataSource("source")
+              .intervals(intervalSpec)
+              .context(ImmutableMap.of(QueryContextParameters.MAX_ROWS_QUEUED_FOR_ORDERING.getName(), 1))
+              .build()
+              .getMaxRowsQueuedForOrdering()
+    );
+  }
+
   // Validates that getResultOrdering will work for the broker n-way merge
   @Test
   public void testMergeSequenceForResults()
   {
     // Should be able to handle merging s1, s2, s3
     ScanQuery noOrderScan = Druids.newScanQueryBuilder()
-                                  .order(ScanQuery.Order.NONE)
+                                  .order(Order.NONE)
                                   .resultFormat(ScanQuery.ResultFormat.RESULT_FORMAT_LIST)
                                   .dataSource("some src")
                                   .intervals(intervalSpec)
@@ -233,7 +297,7 @@ public class ScanQueryTest
 
     // Should only handle s1 and s2
     ScanQuery descendingOrderScan = Druids.newScanQueryBuilder()
-                                          .order(ScanQuery.Order.DESCENDING)
+                                          .order(Order.DESCENDING)
                                           .resultFormat(ScanQuery.ResultFormat.RESULT_FORMAT_LIST)
                                           .dataSource("some src")
                                           .intervals(intervalSpec)
@@ -241,7 +305,7 @@ public class ScanQueryTest
 
     // Should only handle s1 and s2
     ScanQuery ascendingOrderScan = Druids.newScanQueryBuilder()
-                                         .order(ScanQuery.Order.ASCENDING)
+                                         .order(Order.ASCENDING)
                                          .resultFormat(ScanQuery.ResultFormat.RESULT_FORMAT_LIST)
                                          .dataSource("some src")
                                          .intervals(intervalSpec)
@@ -256,7 +320,7 @@ public class ScanQueryTest
         ).flatMerge(seq -> seq, noOrderScan.getResultOrdering());
 
     List<ScanResultValue> noOrderList = noOrderSeq.toList();
-    Assert.assertEquals(3, noOrderList.size());
+    Assertions.assertEquals(3, noOrderList.size());
 
 
     // Ascending
@@ -268,9 +332,9 @@ public class ScanQueryTest
     ).flatMerge(seq -> seq, ascendingOrderScan.getResultOrdering());
 
     List<ScanResultValue> ascendingList = ascendingOrderSeq.toList();
-    Assert.assertEquals(2, ascendingList.size());
-    Assert.assertEquals(s1, ascendingList.get(0));
-    Assert.assertEquals(s2, ascendingList.get(1));
+    Assertions.assertEquals(2, ascendingList.size());
+    Assertions.assertEquals(s1, ascendingList.get(0));
+    Assertions.assertEquals(s2, ascendingList.get(1));
 
     // Descending
     Sequence<ScanResultValue> descendingOrderSeq = Sequences.simple(
@@ -281,16 +345,16 @@ public class ScanQueryTest
     ).flatMerge(seq -> seq, descendingOrderScan.getResultOrdering());
 
     List<ScanResultValue> descendingList = descendingOrderSeq.toList();
-    Assert.assertEquals(2, descendingList.size());
-    Assert.assertEquals(s2, descendingList.get(0));
-    Assert.assertEquals(s1, descendingList.get(1));
+    Assertions.assertEquals(2, descendingList.size());
+    Assertions.assertEquals(s2, descendingList.get(0));
+    Assertions.assertEquals(s1, descendingList.get(1));
   }
 
-  @Test(expected = ISE.class)
+  @Test
   public void testTimeOrderingWithoutTimeColumn()
   {
     ScanQuery descendingOrderScan = Druids.newScanQueryBuilder()
-                                          .order(ScanQuery.Order.DESCENDING)
+                                          .order(Order.DESCENDING)
                                           .resultFormat(ScanQuery.ResultFormat.RESULT_FORMAT_LIST)
                                           .dataSource("some src")
                                           .intervals(intervalSpec)
@@ -304,7 +368,7 @@ public class ScanQueryTest
     ).flatMerge(seq -> seq, descendingOrderScan.getResultOrdering());
 
     // This should throw an ISE
-    List<ScanResultValue> res = borkedSequence.toList();
+    Assertions.assertThrows(ISE.class, borkedSequence::toList);
   }
 
   @Test
@@ -313,13 +377,13 @@ public class ScanQueryTest
     final ScanQuery scanQuery =
         Druids.newScanQueryBuilder()
               .columns("__time")
-              .orderBy(Collections.singletonList(new ScanQuery.OrderBy("__time", ScanQuery.Order.DESCENDING)))
+              .orderBy(Collections.singletonList(OrderBy.descending("__time")))
               .resultFormat(ScanQuery.ResultFormat.RESULT_FORMAT_LIST)
               .dataSource("some src")
               .intervals(intervalSpec)
               .build();
 
-    Assert.assertNotNull(scanQuery.getResultOrdering());
+    Assertions.assertNotNull(scanQuery.getResultOrdering());
   }
 
   @Test
@@ -329,13 +393,13 @@ public class ScanQueryTest
     final ScanQuery scanQuery =
         Druids.newScanQueryBuilder()
               .columns("quality")
-              .orderBy(Collections.singletonList(new ScanQuery.OrderBy("quality", ScanQuery.Order.ASCENDING)))
+              .orderBy(Collections.singletonList(OrderBy.ascending("quality")))
               .resultFormat(ScanQuery.ResultFormat.RESULT_FORMAT_LIST)
               .dataSource("some src")
               .intervals(intervalSpec)
               .build();
 
-    Assert.assertThrows("Cannot execute query with orderBy [quality ASC]", ISE.class, scanQuery::getResultOrdering);
+    Assertions.assertThrows(ISE.class, scanQuery::getResultOrdering, "Cannot execute query with orderBy [quality ASC]");
   }
 
   @Test
@@ -343,13 +407,13 @@ public class ScanQueryTest
   {
     final ScanQuery query =
         Druids.newScanQueryBuilder()
-              .order(ScanQuery.Order.DESCENDING)
+              .order(Order.DESCENDING)
               .resultFormat(ScanQuery.ResultFormat.RESULT_FORMAT_LIST)
               .dataSource("some src")
               .intervals(intervalSpec)
               .build();
 
-    Assert.assertNull(query.getRequiredColumns());
+    Assertions.assertNull(query.getRequiredColumns());
   }
 
   @Test
@@ -357,14 +421,14 @@ public class ScanQueryTest
   {
     final ScanQuery query =
         Druids.newScanQueryBuilder()
-              .order(ScanQuery.Order.DESCENDING)
+              .order(Order.DESCENDING)
               .resultFormat(ScanQuery.ResultFormat.RESULT_FORMAT_LIST)
               .dataSource("some src")
               .intervals(intervalSpec)
               .columns(Collections.emptyList())
               .build();
 
-    Assert.assertNull(query.getRequiredColumns());
+    Assertions.assertNull(query.getRequiredColumns());
   }
 
   @Test
@@ -378,6 +442,57 @@ public class ScanQueryTest
               .columns("foo", "bar")
               .build();
 
-    Assert.assertEquals(ImmutableSet.of("__time", "foo", "bar"), query.getRequiredColumns());
+    Assertions.assertEquals(ImmutableSet.of("__time", "foo", "bar"), query.getRequiredColumns());
+  }
+
+  @Test
+  public void testGetRowSignature()
+  {
+    final ScanQuery query = Druids.newScanQueryBuilder()
+        .resultFormat(ScanQuery.ResultFormat.RESULT_FORMAT_LIST)
+        .dataSource("some src")
+        .intervals(intervalSpec)
+        .columns("foo", "bar")
+        .columnTypes(ImmutableList.<ColumnType>builder().add(ColumnType.LONG, ColumnType.FLOAT).build())
+        .build();
+    RowSignature sig = RowSignature.builder()
+        .add("foo", ColumnType.LONG)
+        .add("bar", ColumnType.FLOAT)
+        .build();
+
+    Assertions.assertEquals(sig, query.getRowSignature());
+  }
+
+  @Test
+  public void testAsCursorBuildSpec()
+  {
+    final VirtualColumns virtualColumns = VirtualColumns.create(
+        new ExpressionVirtualColumn("v0", "concat(placement, 'foo')", ColumnType.STRING, ExprMacroTable.nil())
+    );
+    final ScanQuery query =
+        Druids.newScanQueryBuilder()
+              .resultFormat(ScanQuery.ResultFormat.RESULT_FORMAT_LIST)
+              .dataSource("some src")
+              .intervals(QueryRunnerTestHelper.FIRST_TO_THIRD)
+              .virtualColumns(virtualColumns)
+              .columns("foo", "bar")
+              .build();
+
+    final CursorBuildSpec buildSpec = ScanQueryEngine.makeCursorBuildSpec(query, null);
+    Assertions.assertEquals(QueryRunnerTestHelper.FIRST_TO_THIRD.getIntervals().get(0), buildSpec.getInterval());
+    Assertions.assertNull(buildSpec.getGroupingColumns());
+    Assertions.assertNull(buildSpec.getAggregators());
+    Assertions.assertEquals(virtualColumns, buildSpec.getVirtualColumns());
+  }
+
+  @Test
+  public void testEquals()
+  {
+    EqualsVerifier.forClass(ScanQuery.class)
+        .suppress(Warning.NULL_FIELDS, Warning.NONFINAL_FIELDS)
+        // these fields are derived from the context
+        .withIgnoredFields("maxRowsQueuedForOrdering", "maxSegmentPartitionsOrderedInMemory")
+        .usingGetClass()
+        .verify();
   }
 }

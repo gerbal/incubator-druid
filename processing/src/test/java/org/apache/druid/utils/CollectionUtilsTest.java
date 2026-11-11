@@ -19,12 +19,19 @@
 
 package org.apache.druid.utils;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
-import org.junit.Test;
+import org.apache.druid.java.util.common.ISE;
+import org.hamcrest.CoreMatchers;
+import org.hamcrest.MatcherAssert;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
-
-import static org.junit.Assert.assertEquals;
 
 public class CollectionUtilsTest
 {
@@ -37,28 +44,70 @@ public class CollectionUtilsTest
   @Test
   public void testSubtract()
   {
-    assertEquals(empty, CollectionUtils.subtract(empty, empty));
-    assertEquals(abc, CollectionUtils.subtract(abc, empty));
-    assertEquals(empty, CollectionUtils.subtract(abc, abc));
-    assertEquals(abc, CollectionUtils.subtract(abc, efg));
-    assertEquals(ImmutableSet.of("a"), CollectionUtils.subtract(abc, bcd));
+    Assertions.assertEquals(empty, CollectionUtils.subtract(empty, empty));
+    Assertions.assertEquals(abc, CollectionUtils.subtract(abc, empty));
+    Assertions.assertEquals(empty, CollectionUtils.subtract(abc, abc));
+    Assertions.assertEquals(abc, CollectionUtils.subtract(abc, efg));
+    Assertions.assertEquals(ImmutableSet.of("a"), CollectionUtils.subtract(abc, bcd));
   }
 
   @Test
   public void testIntersect()
   {
-    assertEquals(empty, CollectionUtils.intersect(empty, empty));
-    assertEquals(abc, CollectionUtils.intersect(abc, abc));
-    assertEquals(empty, CollectionUtils.intersect(abc, efg));
-    assertEquals(ImmutableSet.of("b", "c"), CollectionUtils.intersect(abc, bcd));
+    Assertions.assertEquals(empty, CollectionUtils.intersect(empty, empty));
+    Assertions.assertEquals(abc, CollectionUtils.intersect(abc, abc));
+    Assertions.assertEquals(empty, CollectionUtils.intersect(abc, efg));
+    Assertions.assertEquals(ImmutableSet.of("b", "c"), CollectionUtils.intersect(abc, bcd));
   }
 
   @Test
   public void testUnion()
   {
-    assertEquals(empty, CollectionUtils.union(empty, empty));
-    assertEquals(abc, CollectionUtils.union(abc, abc));
-    assertEquals(ImmutableSet.of("a", "b", "c", "e", "f", "g"), CollectionUtils.union(abc, efg));
-    assertEquals(ImmutableSet.of("a", "b", "c", "d"), CollectionUtils.union(abc, bcd));
+    Assertions.assertEquals(empty, CollectionUtils.union(empty, empty));
+    Assertions.assertEquals(abc, CollectionUtils.union(abc, abc));
+    Assertions.assertEquals(ImmutableSet.of("a", "b", "c", "e", "f", "g"), CollectionUtils.union(abc, efg));
+    Assertions.assertEquals(ImmutableSet.of("a", "b", "c", "d"), CollectionUtils.union(abc, bcd));
+  }
+
+  @Test
+  public void testGetOnlyElement_empty()
+  {
+    final IllegalStateException e = Assertions.assertThrows(
+        IllegalStateException.class,
+        () -> CollectionUtils.getOnlyElement(Collections.emptyList(), xs -> new ISE("oops"))
+    );
+    MatcherAssert.assertThat(e.getMessage(), CoreMatchers.equalTo("oops"));
+  }
+
+  @Test
+  public void testGetOnlyElement_one()
+  {
+    Assertions.assertEquals(
+        "a",
+        CollectionUtils.getOnlyElement(Collections.singletonList("a"), xs -> new ISE("oops"))
+    );
+  }
+
+  @Test
+  public void testGetOnlyElement_two()
+  {
+    final IllegalStateException e = Assertions.assertThrows(
+        IllegalStateException.class,
+        () -> CollectionUtils.getOnlyElement(ImmutableList.of("a", "b"), xs -> new ISE("oops"))
+    );
+    MatcherAssert.assertThat(e.getMessage(), CoreMatchers.equalTo("oops"));
+  }
+
+  @Test
+  public void test_toMap()
+  {
+    Assertions.assertEquals(
+        Map.of("a", "A", "b", "B"),
+        CollectionUtils.toMap(
+            List.of("a", "b"),
+            entry -> entry,
+            entry -> entry.toUpperCase(Locale.ROOT)
+        )
+    );
   }
 }

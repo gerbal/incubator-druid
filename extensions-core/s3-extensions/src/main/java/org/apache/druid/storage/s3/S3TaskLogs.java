@@ -19,11 +19,8 @@
 
 package org.apache.druid.storage.s3;
 
-import com.amazonaws.AmazonServiceException;
-import com.amazonaws.services.s3.model.AmazonS3Exception;
-import com.amazonaws.services.s3.model.GetObjectRequest;
-import com.amazonaws.services.s3.model.ObjectMetadata;
 import com.google.common.base.Optional;
+import com.google.common.base.Supplier;
 import com.google.common.base.Throwables;
 import com.google.inject.Inject;
 import org.apache.druid.common.utils.CurrentTimeMillisSupplier;
@@ -31,10 +28,14 @@ import org.apache.druid.java.util.common.IOE;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.tasklogs.TaskLogs;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.time.Instant;
 import java.util.Date;
 
 /**
@@ -44,14 +45,14 @@ public class S3TaskLogs implements TaskLogs
 {
   private static final Logger log = new Logger(S3TaskLogs.class);
 
-  private final ServerSideEncryptingAmazonS3 service;
+  private final Supplier<ServerSideEncryptingAmazonS3> service;
   private final S3TaskLogsConfig config;
   private final S3InputDataConfig inputDataConfig;
   private final CurrentTimeMillisSupplier timeSupplier;
 
   @Inject
   public S3TaskLogs(
-      ServerSideEncryptingAmazonS3 service,
+      Supplier<ServerSideEncryptingAmazonS3> service,
       S3TaskLogsConfig config,
       S3InputDataConfig inputDataConfig,
       CurrentTimeMillisSupplier timeSupplier
@@ -67,50 +68,83 @@ public class S3TaskLogs implements TaskLogs
   public Optional<InputStream> streamTaskLog(final String taskid, final long offset) throws IOException
   {
     final String taskKey = getTaskLogKey(taskid, "log");
-    return streamTaskFile(offset, taskKey);
+    return streamTaskFileWithRetry(offset, taskKey);
   }
 
   @Override
   public Optional<InputStream> streamTaskReports(String taskid) throws IOException
   {
     final String taskKey = getTaskLogKey(taskid, "report.json");
-    return streamTaskFile(0, taskKey);
+    return streamTaskFileWithRetry(0, taskKey);
   }
 
-  private Optional<InputStream> streamTaskFile(final long offset, String taskKey) throws IOException
+  @Override
+  public Optional<InputStream> streamTaskStatus(String taskid) throws IOException
+  {
+    final String taskKey = getTaskLogKey(taskid, "status.json");
+    return streamTaskFileWithRetry(0, taskKey);
+  }
+
+  @Override
+  public void pushTaskPayload(String taskid, File taskPayloadFile) throws IOException
+  {
+    final String taskKey = getTaskLogKey(taskid, "task.json");
+    log.info("Pushing task payload [%s] to location [%s]", taskPayloadFile, taskKey);
+    pushTaskFile(taskPayloadFile, taskKey);
+  }
+
+  @Override
+  public Optional<InputStream> streamTaskPayload(String taskid) throws IOException
+  {
+    final String taskKey = getTaskLogKey(taskid, "task.json");
+    return streamTaskFileWithRetry(0, taskKey);
+  }
+
+  /**
+   * Using the retry conditions defined in {@link S3Utils#S3RETRY}.
+   */
+  private Optional<InputStream> streamTaskFileWithRetry(final long offset, String taskKey) throws IOException
   {
     try {
-      final ObjectMetadata objectMetadata = service.getObjectMetadata(config.getS3Bucket(), taskKey);
-
-      try {
-        final long start;
-        final long end = objectMetadata.getContentLength() - 1;
-
-        if (offset > 0 && offset < objectMetadata.getContentLength()) {
-          start = offset;
-        } else if (offset < 0 && (-1 * offset) < objectMetadata.getContentLength()) {
-          start = objectMetadata.getContentLength() + offset;
-        } else {
-          start = 0;
-        }
-
-        final GetObjectRequest request = new GetObjectRequest(config.getS3Bucket(), taskKey)
-            .withMatchingETagConstraint(ensureQuotated(objectMetadata.getETag()))
-            .withRange(start, end);
-
-        return Optional.of(service.getObject(request).getObjectContent());
-      }
-      catch (AmazonServiceException e) {
-        throw new IOException(e);
-      }
+      return S3Utils.retryS3Operation(() -> streamTaskFile(offset, taskKey));
     }
-    catch (AmazonS3Exception e) {
-      if (404 == e.getStatusCode()
-          || "NoSuchKey".equals(e.getErrorCode())
-          || "NoSuchBucket".equals(e.getErrorCode())) {
+    catch (Exception e) {
+      throw new IOE(e, "Failed to stream logs for task[%s] starting at offset[%d]", taskKey, offset);
+    }
+  }
+
+  private Optional<InputStream> streamTaskFile(final long offset, String taskKey)
+  {
+    try {
+      final HeadObjectResponse objectMetadata = service.get().getObjectMetadata(config.getS3Bucket(), taskKey);
+
+      final long start;
+      final long end = objectMetadata.contentLength() - 1;
+
+      long contentLength = objectMetadata.contentLength();
+      if (offset >= contentLength || offset <= -contentLength) {
+        start = 0;
+      } else if (offset >= 0) {
+        start = offset;
+      } else {
+        start = contentLength + offset;
+      }
+
+      GetObjectRequest.Builder requestBuilder = GetObjectRequest.builder()
+          .bucket(config.getS3Bucket())
+          .key(taskKey)
+          .ifMatch(ensureQuotated(objectMetadata.eTag()))
+          .range(AwsBytesRange.of(start, end).getBytesRange());
+
+      return Optional.of(service.get().getObject(requestBuilder));
+    }
+    catch (S3Exception e) {
+      if (404 == e.statusCode()
+          || "NoSuchKey".equals(e.awsErrorDetails() != null ? e.awsErrorDetails().errorCode() : null)
+          || "NoSuchBucket".equals(e.awsErrorDetails() != null ? e.awsErrorDetails().errorCode() : null)) {
         return Optional.absent();
       } else {
-        throw new IOE(e, "Failed to stream logs from: %s", taskKey);
+        throw e;
       }
     }
   }
@@ -141,12 +175,20 @@ public class S3TaskLogs implements TaskLogs
     pushTaskFile(reportFile, taskKey);
   }
 
+  @Override
+  public void pushTaskStatus(String taskid, File statusFile) throws IOException
+  {
+    final String taskKey = getTaskLogKey(taskid, "status.json");
+    log.info("Pushing task status %s to: %s", statusFile, taskKey);
+    pushTaskFile(statusFile, taskKey);
+  }
+
   private void pushTaskFile(final File logFile, String taskKey) throws IOException
   {
     try {
       S3Utils.retryS3Operation(
           () -> {
-            S3Utils.uploadFileIfPossible(service, config.getDisableAcl(), config.getS3Bucket(), taskKey, logFile);
+            S3Utils.uploadFileIfPossible(service.get(), config.getDisableAcl(), config.getS3Bucket(), taskKey, logFile);
             return null;
           }
       );
@@ -186,11 +228,14 @@ public class S3TaskLogs implements TaskLogs
     );
     try {
       S3Utils.deleteObjectsInPath(
-          service,
+          service.get(),
           inputDataConfig.getMaxListingLength(),
           config.getS3Bucket(),
           config.getS3Prefix(),
-          (object) -> object.getLastModified().getTime() < timestamp
+          (object) -> {
+            Instant lastModified = object.lastModified();
+            return lastModified != null && lastModified.toEpochMilli() < timestamp;
+          }
       );
     }
     catch (Exception e) {

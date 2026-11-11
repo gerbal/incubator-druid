@@ -34,6 +34,7 @@ import org.apache.calcite.rel.type.RelDataType;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.query.Druids;
 import org.apache.druid.query.QueryDataSource;
+import org.apache.druid.query.TableDataSource;
 import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.sql.calcite.planner.PlannerContext;
 import org.apache.druid.sql.calcite.table.RowSignatures;
@@ -46,7 +47,16 @@ import java.util.Set;
  */
 public class DruidOuterQueryRel extends DruidRel<DruidOuterQueryRel>
 {
-  private static final QueryDataSource DUMMY_DATA_SOURCE = new QueryDataSource(
+  static final TableDataSource DUMMY_DATA_SOURCE = new TableDataSource("__subquery__")
+  {
+    @Override
+    public boolean isProcessable()
+    {
+      return false;
+    }
+  };
+
+  private static final QueryDataSource DUMMY_QUERY_DATA_SOURCE = new QueryDataSource(
       Druids.newScanQueryBuilder().dataSource("__subquery__").eternityInterval().build()
   );
 
@@ -73,7 +83,7 @@ public class DruidOuterQueryRel extends DruidRel<DruidOuterQueryRel>
   {
     return new DruidOuterQueryRel(
         sourceRel.getCluster(),
-        partialQuery.getTraitSet(sourceRel.getConvention()),
+        partialQuery.getTraitSet(sourceRel.getConvention(), sourceRel.getPlannerContext()),
         sourceRel,
         partialQuery,
         sourceRel.getPlannerContext()
@@ -91,7 +101,7 @@ public class DruidOuterQueryRel extends DruidRel<DruidOuterQueryRel>
   {
     return new DruidOuterQueryRel(
         getCluster(),
-        newQueryBuilder.getTraitSet(getConvention()),
+        newQueryBuilder.getTraitSet(getConvention(), getPlannerContext()),
         sourceRel,
         newQueryBuilder,
         getPlannerContext()
@@ -109,7 +119,8 @@ public class DruidOuterQueryRel extends DruidRel<DruidOuterQueryRel>
         sourceRowSignature,
         getPlannerContext(),
         getCluster().getRexBuilder(),
-        finalizeAggregations
+        finalizeAggregations,
+        true
     );
   }
 
@@ -117,13 +128,11 @@ public class DruidOuterQueryRel extends DruidRel<DruidOuterQueryRel>
   public DruidQuery toDruidQueryForExplaining()
   {
     return partialQuery.build(
-        DUMMY_DATA_SOURCE,
-        RowSignatures.fromRelDataType(
-            sourceRel.getRowType().getFieldNames(),
-            sourceRel.getRowType()
-        ),
+        partialQuery.getWindow() == null ? DUMMY_DATA_SOURCE : DUMMY_QUERY_DATA_SOURCE,
+        RowSignatures.fromRelDataTypeWithUniqueFields(sourceRel.getRowType()),
         getPlannerContext(),
         getCluster().getRexBuilder(),
+        false,
         false
     );
   }

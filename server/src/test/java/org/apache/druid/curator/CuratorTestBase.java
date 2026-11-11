@@ -19,23 +19,20 @@
 
 package org.apache.druid.curator;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.collect.ImmutableSet;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.CuratorFrameworkFactory;
 import org.apache.curator.retry.RetryOneTime;
 import org.apache.curator.test.TestingServer;
 import org.apache.curator.test.Timing;
-import org.apache.curator.utils.ZKPaths;
-import org.apache.druid.client.DruidServer;
-import org.apache.druid.common.utils.UUIDUtils;
-import org.apache.druid.java.util.common.DateTimes;
-import org.apache.druid.server.initialization.ZkPathsConfig;
-import org.apache.druid.timeline.DataSegment;
 import org.apache.zookeeper.CreateMode;
 import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.data.Stat;
+import org.junit.jupiter.api.Assertions;
 
 import java.io.IOException;
+import java.util.Arrays;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
  */
@@ -45,13 +42,16 @@ public class CuratorTestBase
   protected Timing timing;
   protected CuratorFramework curator;
 
-  private int batchCtr = 0;
-
-  protected void setupServerAndCurator() throws Exception
+  public void setupServerAndCurator() throws Exception
   {
     server = new TestingServer();
     timing = new Timing();
-    curator = CuratorFrameworkFactory
+    curator = createCurator();
+  }
+
+  private CuratorFramework createCurator()
+  {
+    return CuratorFrameworkFactory
         .builder()
         .connectString(server.getConnectString())
         .sessionTimeoutMs(timing.session())
@@ -61,131 +61,7 @@ public class CuratorTestBase
         .build();
   }
 
-  protected void setupZNodeForServer(DruidServer server, ZkPathsConfig zkPathsConfig, ObjectMapper jsonMapper)
-  {
-    final String announcementsPath = zkPathsConfig.getAnnouncementsPath();
-    final String inventoryPath = zkPathsConfig.getLiveSegmentsPath();
-
-    String zkPath = ZKPaths.makePath(announcementsPath, server.getHost());
-    try {
-      curator.create()
-             .creatingParentsIfNeeded()
-             .forPath(zkPath, jsonMapper.writeValueAsBytes(server.getMetadata()));
-      curator.create()
-             .creatingParentsIfNeeded()
-             .forPath(ZKPaths.makePath(inventoryPath, server.getHost()));
-    }
-    catch (KeeperException.NodeExistsException e) {
-      /*
-       * For some reason, Travis build sometimes fails here because of
-       * org.apache.zookeeper.KeeperException$NodeExistsException: KeeperErrorCode = NodeExists, though it should never
-       * happen because zookeeper should be in a clean state for each run of tests.
-       * Address issue: https://github.com/apache/druid/issues/1512
-       */
-      try {
-        curator.setData()
-               .forPath(zkPath, jsonMapper.writeValueAsBytes(server.getMetadata()));
-        curator.setData()
-               .forPath(ZKPaths.makePath(inventoryPath, server.getHost()));
-      }
-      catch (Exception e1) {
-        throw new RuntimeException(e1);
-      }
-    }
-    catch (Exception e) {
-      throw new RuntimeException(e);
-    }
-  }
-
-  protected void announceSegmentForServer(
-      DruidServer druidServer,
-      DataSegment segment,
-      ZkPathsConfig zkPathsConfig,
-      ObjectMapper jsonMapper
-  )
-  {
-    final String segmentAnnouncementPath =
-        ZKPaths.makePath(zkPathsConfig.getLiveSegmentsPath(), druidServer.getHost(), segment.getId().toString());
-
-    try {
-      curator.create()
-             .compressed()
-             .withMode(CreateMode.EPHEMERAL)
-             .forPath(segmentAnnouncementPath, jsonMapper.writeValueAsBytes(ImmutableSet.of(segment)));
-    }
-    catch (KeeperException.NodeExistsException e) {
-      try {
-        curator.setData()
-               .forPath(segmentAnnouncementPath, jsonMapper.writeValueAsBytes(ImmutableSet.of(segment)));
-      }
-      catch (Exception e1) {
-        throw new RuntimeException(e1);
-      }
-    }
-    catch (Exception e) {
-      throw new RuntimeException(e);
-    }
-  }
-
-  protected String announceBatchSegmentsForServer(
-      DruidServer druidServer,
-      ImmutableSet<DataSegment> segments,
-      ZkPathsConfig zkPathsConfig,
-      ObjectMapper jsonMapper
-  )
-  {
-    final String segmentAnnouncementPath = ZKPaths.makePath(
-        zkPathsConfig.getLiveSegmentsPath(),
-        druidServer.getHost(),
-        UUIDUtils.generateUuid(
-          druidServer.getHost(),
-          druidServer.getType().toString(),
-          druidServer.getTier(),
-          DateTimes.nowUtc().toString()
-        ) + (batchCtr++)
-    );
-
-
-    try {
-      curator.create()
-             .compressed()
-             .withMode(CreateMode.EPHEMERAL)
-             .forPath(segmentAnnouncementPath, jsonMapper.writeValueAsBytes(segments));
-    }
-    catch (KeeperException.NodeExistsException e) {
-      try {
-        curator.setData()
-               .forPath(segmentAnnouncementPath, jsonMapper.writeValueAsBytes(segments));
-      }
-      catch (Exception e1) {
-        throw new RuntimeException(e1);
-      }
-    }
-    catch (Exception e) {
-      throw new RuntimeException(e);
-    }
-
-    return segmentAnnouncementPath;
-  }
-
-  protected void unannounceSegmentForServer(DruidServer druidServer, DataSegment segment, ZkPathsConfig zkPathsConfig)
-      throws Exception
-  {
-    String path = ZKPaths.makePath(
-        zkPathsConfig.getLiveSegmentsPath(),
-        druidServer.getHost(),
-        segment.getId().toString()
-    );
-    curator.delete().guaranteed().forPath(path);
-  }
-
-  protected void unannounceSegmentFromBatchForServer(DruidServer druidServer, DataSegment segment, String batchPath, ZkPathsConfig zkPathsConfig)
-      throws Exception
-  {
-    curator.delete().guaranteed().forPath(batchPath);
-  }
-
-  protected void tearDownServerAndCurator()
+  public void tearDownServerAndCurator()
   {
     try {
       curator.close();
@@ -196,6 +72,68 @@ public class CuratorTestBase
     }
   }
 
-}
+  public String getConnectString()
+  {
+    return server.getConnectString();
+  }
 
-//Build at Tue Dec 22 21:30:00 CST 2015
+  /**
+   * Starts a new client, with its own session, that owns an ephemeral node at the given path.
+   */
+  public CuratorFramework createEphemeralNodeInNewSession(final String path, final byte[] bytes) throws Exception
+  {
+    final CuratorFramework client = createCurator();
+    try {
+      client.start();
+      client.blockUntilConnected();
+      client.create().creatingParentsIfNeeded().withMode(CreateMode.EPHEMERAL).forPath(path, bytes);
+      return client;
+    }
+    catch (Exception e) {
+      client.close();
+      throw e;
+    }
+  }
+
+  /**
+   * Waits until the node at the given path holds the given bytes and belongs to the session of {@link #curator}.
+   */
+  public void awaitAnnounced(final String path, final byte[] bytes) throws Exception
+  {
+    final long deadline = System.currentTimeMillis() + timing.forWaiting().milliseconds();
+    while (!isAnnounced(path, bytes)) {
+      Assertions.assertTrue(System.currentTimeMillis() < deadline, "Timed out waiting for " + path);
+      Thread.sleep(100);
+    }
+  }
+
+  private boolean isAnnounced(final String path, final byte[] bytes) throws Exception
+  {
+    final Stat stat = new Stat();
+    try {
+      final byte[] data = curator.getData().decompressed().storingStatIn(stat).forPath(path);
+      return Arrays.equals(bytes, data)
+             && stat.getEphemeralOwner() == curator.getZookeeperClient().getZooKeeper().getSessionId();
+    }
+    catch (KeeperException e) {
+      // Missing node, or the client is reconnecting.
+      return false;
+    }
+  }
+
+  /**
+   * Blocks the ZooKeeper event thread of {@link #curator}, which delays all of its background callbacks and watch
+   * notifications, until the returned latch is counted down.
+   */
+  public CountDownLatch blockEventThread() throws Exception
+  {
+    final CountDownLatch blocked = new CountDownLatch(1);
+    final CountDownLatch release = new CountDownLatch(1);
+    curator.checkExists().inBackground((client, event) -> {
+      blocked.countDown();
+      release.await(timing.forWaiting().milliseconds(), TimeUnit.MILLISECONDS);
+    }).forPath("/");
+    Assertions.assertTrue(timing.awaitLatch(blocked));
+    return release;
+  }
+}

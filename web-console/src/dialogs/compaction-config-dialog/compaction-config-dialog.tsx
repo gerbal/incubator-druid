@@ -16,18 +16,28 @@
  * limitations under the License.
  */
 
-import { Button, Callout, Classes, Code, Dialog, Intent } from '@blueprintjs/core';
+import { Button, Callout, Classes, Code, Dialog, Intent, Switch } from '@blueprintjs/core';
 import React, { useState } from 'react';
 
 import type { FormJsonTabs } from '../../components';
-import { AutoForm, FormJsonSelector, JsonInput } from '../../components';
+import {
+  AutoForm,
+  ExternalLink,
+  FormGroupWithInfo,
+  FormJsonSelector,
+  JsonInput,
+  PopoverText,
+} from '../../components';
 import type { CompactionConfig } from '../../druid-models';
 import {
   COMPACTION_CONFIG_FIELDS,
   compactionConfigHasLegacyInputSegmentSizeBytesSet,
 } from '../../druid-models';
-import { deepDelete, formatBytesCompact } from '../../utils';
+import { getLink } from '../../links';
+import { deepDelete, deepGet, deepSet, formatBytesCompact } from '../../utils';
 import { CompactionHistoryDialog } from '../compaction-history-dialog/compaction-history-dialog';
+
+import { COMPACTION_CONFIG_COMPLETIONS } from './compaction-config-completions';
 
 import './compaction-config-dialog.scss';
 
@@ -74,7 +84,7 @@ export const CompactionConfigDialog = React.memo(function CompactionConfigDialog
       {compactionConfigHasLegacyInputSegmentSizeBytesSet(currentConfig) && (
         <Callout className="legacy-callout" intent={Intent.WARNING}>
           <p>
-            You current config sets the legacy <Code>inputSegmentSizeBytes</Code> to{' '}
+            Your current config sets the legacy <Code>inputSegmentSizeBytes</Code> to{' '}
             <Code>{formatBytesCompact(currentConfig.inputSegmentSizeBytes!)}</Code> it is
             recommended to unset this property.
           </p>
@@ -87,24 +97,61 @@ export const CompactionConfigDialog = React.memo(function CompactionConfigDialog
           </p>
         </Callout>
       )}
-      <FormJsonSelector tab={currentTab} onChange={setCurrentTab} />
+      <FormJsonSelector
+        tab={currentTab}
+        onChange={t => {
+          setJsonError(undefined);
+          setCurrentTab(t);
+        }}
+      />
       <div className="content">
         {currentTab === 'form' ? (
-          <AutoForm
-            fields={COMPACTION_CONFIG_FIELDS}
-            model={currentConfig}
-            onChange={m => setCurrentConfig(m as CompactionConfig)}
-          />
+          <>
+            <AutoForm
+              fields={COMPACTION_CONFIG_FIELDS}
+              model={currentConfig}
+              onChange={m => setCurrentConfig(m as CompactionConfig)}
+            />
+            <FormGroupWithInfo
+              inlineInfo
+              info={
+                <PopoverText>
+                  <p>
+                    If you want to append data to a datasource while compaction is running, you need
+                    to enable concurrent append and replace for the datasource by updating the
+                    compaction settings.
+                  </p>
+                  <p>
+                    For more information refer to the{' '}
+                    <ExternalLink href={`${getLink('DOCS')}/ingestion/concurrent-append-replace`}>
+                      documentation
+                    </ExternalLink>
+                    .
+                  </p>
+                </PopoverText>
+              }
+            >
+              <Switch
+                label="Use concurrent locks"
+                checked={Boolean(deepGet(currentConfig, 'taskContext.useConcurrentLocks'))}
+                onChange={() => {
+                  setCurrentConfig(
+                    deepGet(currentConfig, 'taskContext.useConcurrentLocks')
+                      ? deepDelete(currentConfig, 'taskContext.useConcurrentLocks')
+                      : deepSet(currentConfig, 'taskContext.useConcurrentLocks', true),
+                  );
+                }}
+              />
+            </FormGroupWithInfo>
+          </>
         ) : (
           <JsonInput
             value={currentConfig}
-            onChange={v => {
-              setCurrentConfig(v);
-              setJsonError(undefined);
-            }}
-            onError={setJsonError}
+            onChange={setCurrentConfig}
+            setError={setJsonError}
             issueWithValue={value => AutoForm.issueWithModel(value, COMPACTION_CONFIG_FIELDS)}
             height="100%"
+            jsonCompletions={COMPACTION_CONFIG_COMPLETIONS}
           />
         )}
       </div>
@@ -113,10 +160,19 @@ export const CompactionConfigDialog = React.memo(function CompactionConfigDialog
           <Button
             className="history-button"
             text="History"
-            minimal
+            variant="minimal"
             onClick={() => setShowHistory(true)}
           />
-          {compactionConfig && <Button text="Delete" intent={Intent.DANGER} onClick={onDelete} />}
+          {compactionConfig ? (
+            <Button text="Delete" intent={Intent.DANGER} onClick={onDelete} />
+          ) : (
+            <Button
+              text="Delete"
+              disabled
+              intent={Intent.DANGER}
+              data-tooltip="There is no compaction config currently set for this datasource"
+            />
+          )}
           <Button text="Close" onClick={onClose} />
           <Button
             text="Submit"

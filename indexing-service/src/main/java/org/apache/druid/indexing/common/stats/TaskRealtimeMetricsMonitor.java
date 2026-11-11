@@ -19,125 +19,148 @@
 
 package org.apache.druid.indexing.common.stats;
 
-import com.google.common.collect.ImmutableMap;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.java.util.emitter.service.ServiceMetricEvent;
 import org.apache.druid.java.util.metrics.AbstractMonitor;
-import org.apache.druid.java.util.metrics.MonitorUtils;
 import org.apache.druid.query.DruidMetrics;
+import org.apache.druid.segment.incremental.InputRowFilterResult;
 import org.apache.druid.segment.incremental.RowIngestionMeters;
 import org.apache.druid.segment.incremental.RowIngestionMetersTotals;
-import org.apache.druid.segment.realtime.FireDepartment;
-import org.apache.druid.segment.realtime.FireDepartmentMetrics;
+import org.apache.druid.segment.realtime.SegmentGenerationMetrics;
 
-import javax.annotation.Nullable;
+import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Replaces the old RealtimeMetricsMonitor for indexing tasks that use a single FireDepartment, with changes to
- * read row ingestion stats from RowIngestionMeters (which supports moving averages) instead of FireDepartmentMetrics.
- * See comment on RowIngestionMeters for more information regarding relationship between RowIngestionMeters and
- * FireDepartmentMetrics.
+ * Emits metrics from {@link SegmentGenerationMetrics} and {@link RowIngestionMeters}.
  */
 public class TaskRealtimeMetricsMonitor extends AbstractMonitor
 {
   private static final EmittingLogger log = new EmittingLogger(TaskRealtimeMetricsMonitor.class);
 
-  private final FireDepartment fireDepartment;
+  private final SegmentGenerationMetrics segmentGenerationMetrics;
   private final RowIngestionMeters rowIngestionMeters;
-  private final Map<String, String[]> dimensions;
-  @Nullable
-  private final Map<String, Object> metricTags;
+  private final ServiceMetricEvent.Builder builder;
 
-  private FireDepartmentMetrics previousFireDepartmentMetrics;
+  private SegmentGenerationMetrics previousSegmentGenerationMetrics;
   private RowIngestionMetersTotals previousRowIngestionMetersTotals;
 
   public TaskRealtimeMetricsMonitor(
-      FireDepartment fireDepartment,
+      SegmentGenerationMetrics segmentGenerationMetrics,
       RowIngestionMeters rowIngestionMeters,
-      Map<String, String[]> dimensions,
-      @Nullable Map<String, Object> metricTags
+      ServiceMetricEvent.Builder metricEventBuilder
   )
   {
-    this.fireDepartment = fireDepartment;
+    this.segmentGenerationMetrics = segmentGenerationMetrics;
     this.rowIngestionMeters = rowIngestionMeters;
-    this.dimensions = ImmutableMap.copyOf(dimensions);
-    this.metricTags = metricTags;
-    previousFireDepartmentMetrics = new FireDepartmentMetrics();
-    previousRowIngestionMetersTotals = new RowIngestionMetersTotals(0, 0, 0, 0, 0);
+    this.builder = metricEventBuilder;
+    previousSegmentGenerationMetrics = new SegmentGenerationMetrics();
+    previousRowIngestionMetersTotals = new RowIngestionMetersTotals(0, 0, 0, Map.of(), 0);
   }
 
   @Override
   public boolean doMonitor(ServiceEmitter emitter)
   {
-    FireDepartmentMetrics metrics = fireDepartment.getMetrics().snapshot();
+    SegmentGenerationMetrics metrics = segmentGenerationMetrics.snapshot();
     RowIngestionMetersTotals rowIngestionMetersTotals = rowIngestionMeters.getTotals();
 
-    final ServiceMetricEvent.Builder builder = new ServiceMetricEvent.Builder()
-        .setDimension(DruidMetrics.DATASOURCE, fireDepartment.getDataSchema().getDataSource());
-    MonitorUtils.addDimensionsToBuilder(builder, dimensions);
+    // Emit per-reason metrics with the reason dimension
+    final Map<String, Long> currentThrownAwayByReason = rowIngestionMetersTotals.getThrownAwayByReason();
+    final Map<String, Long> previousThrownAwayByReason = previousRowIngestionMetersTotals.getThrownAwayByReason();
+    final Map<String, Long> deltaThrownAwayByReason = new HashMap<>();
+    for (InputRowFilterResult reason : InputRowFilterResult.rejectedValues()) {
+      final long currentCount = currentThrownAwayByReason.getOrDefault(reason.getReason(), 0L);
+      final long previousCount = previousThrownAwayByReason.getOrDefault(reason.getReason(), 0L);
+      final long delta = currentCount - previousCount;
+      if (delta > 0) {
+        deltaThrownAwayByReason.put(reason.getReason(), delta);
+        emitter.emit(
+            builder.setDimension(DruidMetrics.REASON, reason.getReason())
+                   .setMetric("ingest/events/thrownAway", delta)
+        );
+      }
+    }
+    // The per-reason emissions above set DruidMetrics.REASON on the shared builder. Clear it so the
+    // dimension does not leak into the non-reason metrics emitted below (e.g. ingest/events/filtered),
+    // nor into later monitor ticks, since the same builder instance is reused across ticks.
+    builder.removeDimension(DruidMetrics.REASON);
 
-    final long thrownAway = rowIngestionMetersTotals.getThrownAway() - previousRowIngestionMetersTotals.getThrownAway();
-    if (thrownAway > 0) {
+    final long totalThrownAway = deltaThrownAwayByReason.values().stream().reduce(0L, Long::sum);
+    if (totalThrownAway > 0) {
       log.warn(
-          "[%,d] events thrown away. Possible causes: null events, events filtered out by transformSpec, or events outside earlyMessageRejectionPeriod / lateMessageRejectionPeriod.",
-          thrownAway
+          "[%,d] events thrown away. Breakdown: [%s]",
+          totalThrownAway,
+          deltaThrownAwayByReason
       );
     }
-    builder.setDimensionIfNotNull(DruidMetrics.TAGS, metricTags);
-    emitter.emit(builder.build("ingest/events/thrownAway", thrownAway));
 
     final long unparseable = rowIngestionMetersTotals.getUnparseable()
                              - previousRowIngestionMetersTotals.getUnparseable();
     if (unparseable > 0) {
       log.error("[%,d] unparseable events discarded. Turn on debug logging to see exception stack trace.", unparseable);
     }
-    emitter.emit(builder.build("ingest/events/unparseable", unparseable));
+    emitter.emit(builder.setMetric("ingest/events/unparseable", unparseable));
 
     final long processedWithError = rowIngestionMetersTotals.getProcessedWithError() - previousRowIngestionMetersTotals.getProcessedWithError();
     if (processedWithError > 0) {
       log.error("[%,d] events processed with errors! Set logParseExceptions to true in the ingestion spec to log these errors.", processedWithError);
     }
-    emitter.emit(builder.build("ingest/events/processedWithError", processedWithError));
+    emitter.emit(builder.setMetric("ingest/events/processedWithError", processedWithError));
 
-    emitter.emit(builder.build("ingest/events/processed", rowIngestionMetersTotals.getProcessed() - previousRowIngestionMetersTotals.getProcessed()));
+    emitter.emit(builder.setMetric("ingest/events/processed", rowIngestionMetersTotals.getProcessed() - previousRowIngestionMetersTotals.getProcessed()));
 
-    final long dedup = metrics.dedup() - previousFireDepartmentMetrics.dedup();
+    final long filtered = rowIngestionMetersTotals.getFiltered() - previousRowIngestionMetersTotals.getFiltered();
+    emitter.emit(builder.setMetric("ingest/events/filtered", filtered));
+
+    final long dedup = metrics.dedup() - previousSegmentGenerationMetrics.dedup();
     if (dedup > 0) {
       log.warn("[%,d] duplicate events!", dedup);
     }
-    emitter.emit(builder.build("ingest/events/duplicate", dedup));
-
-    emitter.emit(builder.build("ingest/rows/output", metrics.rowOutput() - previousFireDepartmentMetrics.rowOutput()));
-    emitter.emit(builder.build("ingest/persists/count", metrics.numPersists() - previousFireDepartmentMetrics.numPersists()));
-    emitter.emit(builder.build("ingest/persists/time", metrics.persistTimeMillis() - previousFireDepartmentMetrics.persistTimeMillis()));
-    emitter.emit(builder.build("ingest/persists/cpu", metrics.persistCpuTime() - previousFireDepartmentMetrics.persistCpuTime()));
+    emitter.emit(builder.setMetric("ingest/events/duplicate", dedup));
     emitter.emit(
-        builder.build(
-            "ingest/persists/backPressure",
-            metrics.persistBackPressureMillis() - previousFireDepartmentMetrics.persistBackPressureMillis()
+        builder.setMetric(
+            "ingest/input/bytes",
+            rowIngestionMetersTotals.getProcessedBytes() - previousRowIngestionMetersTotals.getProcessedBytes()
         )
     );
-    emitter.emit(builder.build("ingest/persists/failed", metrics.failedPersists() - previousFireDepartmentMetrics.failedPersists()));
-    emitter.emit(builder.build("ingest/handoff/failed", metrics.failedHandoffs() - previousFireDepartmentMetrics.failedHandoffs()));
-    emitter.emit(builder.build("ingest/merge/time", metrics.mergeTimeMillis() - previousFireDepartmentMetrics.mergeTimeMillis()));
-    emitter.emit(builder.build("ingest/merge/cpu", metrics.mergeCpuTime() - previousFireDepartmentMetrics.mergeCpuTime()));
-    emitter.emit(builder.build("ingest/handoff/count", metrics.handOffCount() - previousFireDepartmentMetrics.handOffCount()));
-    emitter.emit(builder.build("ingest/sink/count", metrics.sinkCount()));
+
+    emitter.emit(builder.setMetric("ingest/rows/output", metrics.rowOutput() - previousSegmentGenerationMetrics.rowOutput()));
+    emitter.emit(builder.setMetric("ingest/persists/count", metrics.numPersists() - previousSegmentGenerationMetrics.numPersists()));
+    emitter.emit(builder.setMetric("ingest/persists/time", metrics.persistTimeMillis() - previousSegmentGenerationMetrics.persistTimeMillis()));
+    emitter.emit(builder.setMetric("ingest/persists/cpu", metrics.persistCpuTime() - previousSegmentGenerationMetrics.persistCpuTime()));
+    emitter.emit(
+        builder.setMetric(
+            "ingest/persists/backPressure",
+            metrics.persistBackPressureMillis() - previousSegmentGenerationMetrics.persistBackPressureMillis()
+        )
+    );
+    emitter.emit(builder.setMetric("ingest/persists/failed", metrics.failedPersists() - previousSegmentGenerationMetrics.failedPersists()));
+    emitter.emit(builder.setMetric("ingest/handoff/failed", metrics.failedHandoffs() - previousSegmentGenerationMetrics.failedHandoffs()));
+    emitter.emit(builder.setMetric("ingest/merge/time", metrics.mergeTimeMillis() - previousSegmentGenerationMetrics.mergeTimeMillis()));
+    emitter.emit(builder.setMetric("ingest/merge/cpu", metrics.mergeCpuTime() - previousSegmentGenerationMetrics.mergeCpuTime()));
+    emitter.emit(builder.setMetric("ingest/handoff/count", metrics.handOffCount() - previousSegmentGenerationMetrics.handOffCount()));
+    emitter.emit(builder.setMetric("ingest/sink/count", metrics.sinkCount()));
 
     long messageGap = metrics.messageGap();
     if (messageGap >= 0) {
-      emitter.emit(builder.build("ingest/events/messageGap", messageGap));
+      emitter.emit(builder.setMetric("ingest/events/messageGap", messageGap));
+    }
+
+    final SegmentGenerationMetrics.MessageGapStats messageGapStats = metrics.getMessageGapStats();
+    if (messageGapStats.count() > 0) {
+      emitter.emit(builder.setMetric("ingest/events/minMessageGap", messageGapStats.min()));
+      emitter.emit(builder.setMetric("ingest/events/maxMessageGap", messageGapStats.max()));
+      emitter.emit(builder.setMetric("ingest/events/avgMessageGap", messageGapStats.avg()));
     }
 
     long maxSegmentHandoffTime = metrics.maxSegmentHandoffTime();
     if (maxSegmentHandoffTime >= 0) {
-      emitter.emit(builder.build("ingest/handoff/time", maxSegmentHandoffTime));
+      emitter.emit(builder.setMetric("ingest/handoff/time", maxSegmentHandoffTime));
     }
 
     previousRowIngestionMetersTotals = rowIngestionMetersTotals;
-    previousFireDepartmentMetrics = metrics;
+    previousSegmentGenerationMetrics = metrics;
     return true;
   }
 }

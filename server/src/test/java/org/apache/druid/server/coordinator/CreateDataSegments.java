@@ -20,28 +20,50 @@
 package org.apache.druid.server.coordinator;
 
 import org.apache.druid.java.util.common.DateTimes;
+import org.apache.druid.java.util.common.Intervals;
+import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.granularity.Granularity;
 import org.apache.druid.segment.IndexIO;
+import org.apache.druid.server.http.DataSegmentPlus;
+import org.apache.druid.timeline.CompactionState;
 import org.apache.druid.timeline.DataSegment;
 import org.apache.druid.timeline.partition.NumberedShardSpec;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
+import org.joda.time.format.DateTimeFormat;
+import org.joda.time.format.DateTimeFormatter;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Test utility to create {@link DataSegment}s for a given datasource.
  */
 public class CreateDataSegments
 {
+  private static final DateTime DEFAULT_START = DateTimes.of("2012-10-24");
+
   private final String datasource;
 
-  private DateTime startTime;
-  private Granularity granularity;
-  private int numPartitions;
-  private int numIntervals;
+  private DateTime startTime = DEFAULT_START.plusDays(ThreadLocalRandom.current().nextInt(3000));
+  private Granularity granularity = Granularities.DAY;
+  private int numPartitions = 1;
+  private int numIntervals = 1;
+  private long sizeInBytes = 500_000_000;
+
+  private String version = "1";
+  private CompactionState compactionState = null;
+
+  // Plus fields
+  private Boolean used;
+  private DateTime lastUpdatedTime;
+  private String upgradedFromSegmentId;
+  private String schemaFingerprint;
+  private Integer numRows;
+  private String indexingStateFingerprint;
 
   public static CreateDataSegments ofDatasource(String datasource)
   {
@@ -66,28 +88,115 @@ public class CreateDataSegments
     return this;
   }
 
+  public CreateDataSegments startingAt(DateTime startOfFirstInterval)
+  {
+    this.startTime = startOfFirstInterval;
+    return this;
+  }
+
   public CreateDataSegments withNumPartitions(int numPartitions)
   {
     this.numPartitions = numPartitions;
     return this;
   }
 
+  public CreateDataSegments withCompactionState(CompactionState compactionState)
+  {
+    this.compactionState = compactionState;
+    return this;
+  }
+
+  /**
+   * Specifies the version to use for creating the segments. Default version is
+   * {@code "1"}.
+   */
+  public CreateDataSegments withVersion(String version)
+  {
+    this.version = version;
+    return this;
+  }
+
+  public CreateDataSegments withNumRows(Integer numRows)
+  {
+    this.numRows = numRows;
+    return this;
+  }
+
+  public CreateDataSegments withSchemaFingerprint(String schemaFingerprint)
+  {
+    this.schemaFingerprint = schemaFingerprint;
+    return this;
+  }
+
+  public CreateDataSegments withIndexingStateFingerprint(String indexingStateFingerprint)
+  {
+    this.indexingStateFingerprint = indexingStateFingerprint;
+    return this;
+  }
+
+  public CreateDataSegments markUnused()
+  {
+    this.used = false;
+    return this;
+  }
+
+  public CreateDataSegments markUsed()
+  {
+    this.used = true;
+    return this;
+  }
+
+  public CreateDataSegments lastUpdatedOn(DateTime updatedTime)
+  {
+    this.lastUpdatedTime = updatedTime;
+    return this;
+  }
+
+  public CreateDataSegments updatedNow()
+  {
+    return lastUpdatedOn(DateTimes.nowUtc());
+  }
+
+  /**
+   * Creates a single {@link DataSegmentPlus} object with the specified parameters.
+   */
+  public DataSegmentPlus asPlus()
+  {
+    return plus(eachOfSize(sizeInBytes).get(0));
+  }
+
   public List<DataSegment> eachOfSizeInMb(long sizeMb)
   {
-    final List<DataSegment> segments = new ArrayList<>();
+    return eachOfSize(sizeMb * 1_000_000);
+  }
+
+  public List<DataSegment> eachOfSize(long sizeInBytes)
+  {
+    boolean isEternityInterval = Objects.equals(granularity, Granularities.ALL);
+    if (isEternityInterval) {
+      numIntervals = 1;
+    }
 
     int uniqueIdInInterval = 0;
     DateTime nextStart = startTime;
+
+    final List<DataSegment> segments = new ArrayList<>();
     for (int numInterval = 0; numInterval < numIntervals; ++numInterval) {
-      Interval nextInterval = new Interval(nextStart, granularity.increment(nextStart));
+      Interval nextInterval = isEternityInterval
+                              ? Intervals.ETERNITY
+                              : new Interval(nextStart, granularity.increment(nextStart));
       for (int numPartition = 0; numPartition < numPartitions; ++numPartition) {
         segments.add(
             new NumberedDataSegment(
                 datasource,
                 nextInterval,
+                version,
                 new NumberedShardSpec(numPartition, numPartitions),
                 ++uniqueIdInInterval,
-                sizeMb
+                compactionState,
+                sizeInBytes,
+                numRows,
+                indexingStateFingerprint
             )
         );
       }
@@ -97,39 +206,66 @@ public class CreateDataSegments
     return Collections.unmodifiableList(segments);
   }
 
+  private DataSegmentPlus plus(DataSegment segment)
+  {
+    return new DataSegmentPlus(
+        segment,
+        DateTimes.nowUtc(),
+        lastUpdatedTime,
+        used,
+        schemaFingerprint,
+        numRows == null ? null : numRows.longValue(),
+        upgradedFromSegmentId,
+        indexingStateFingerprint
+    );
+  }
+
   /**
    * Simple implementation of DataSegment with a unique integer id to make debugging easier.
    */
   private static class NumberedDataSegment extends DataSegment
   {
+    private static final DateTimeFormatter FORMATTER = DateTimeFormat.forPattern("yyyyMMdd");
     private final int uniqueId;
 
     private NumberedDataSegment(
         String datasource,
         Interval interval,
+        String version,
         NumberedShardSpec shardSpec,
-        int uinqueId,
-        long size
+        int uniqueId,
+        CompactionState compactionState,
+        long size,
+        Integer numRows,
+        String indexingStateFingerprint
     )
     {
       super(
           datasource,
           interval,
-          "1",
+          version,
           Collections.emptyMap(),
           Collections.emptyList(),
           Collections.emptyList(),
+          Collections.emptyList(),
+          null,
           shardSpec,
+          compactionState,
           IndexIO.CURRENT_VERSION_ID,
-          size
+          size,
+          numRows,
+          indexingStateFingerprint,
+          PruneSpecsHolder.DEFAULT
       );
-      this.uniqueId = uinqueId;
+      this.uniqueId = uniqueId;
     }
 
     @Override
     public String toString()
     {
-      return "{" + getDataSource() + "::" + uniqueId + "}";
+      return "{" + getDataSource()
+             + "::" + getInterval().getStart().toString(FORMATTER)
+             + "::" + uniqueId + "}";
     }
   }
 }

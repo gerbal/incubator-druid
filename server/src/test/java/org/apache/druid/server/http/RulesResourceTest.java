@@ -27,10 +27,11 @@ import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.metadata.MetadataRuleManager;
 import org.easymock.EasyMock;
+import org.joda.time.DateTime;
 import org.joda.time.Interval;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import javax.ws.rs.core.Response;
 import java.util.List;
@@ -41,7 +42,7 @@ public class RulesResourceTest
   private MetadataRuleManager databaseRuleManager;
   private AuditManager auditManager;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
     databaseRuleManager = EasyMock.createStrictMock(MetadataRuleManager.class);
@@ -51,26 +52,10 @@ public class RulesResourceTest
   @Test
   public void testGetDatasourceRuleHistoryWithCount()
   {
-    AuditEntry entry1 = new AuditEntry(
-        "testKey",
-        "testType",
-        new AuditInfo(
-            "testAuthor",
-            "testComment",
-            "127.0.0.1"
-        ),
-        "testPayload",
+    AuditEntry entry1 = createAuditEntry(
         DateTimes.of("2013-01-02T00:00:00Z")
     );
-    AuditEntry entry2 = new AuditEntry(
-        "testKey",
-        "testType",
-        new AuditInfo(
-            "testAuthor",
-            "testComment",
-            "127.0.0.1"
-        ),
-        "testPayload",
+    AuditEntry entry2 = createAuditEntry(
         DateTimes.of("2013-01-01T00:00:00Z")
     );
     EasyMock.expect(auditManager.fetchAuditHistory(EasyMock.eq("datasource1"), EasyMock.eq("rules"), EasyMock.eq(2)))
@@ -82,9 +67,9 @@ public class RulesResourceTest
 
     Response response = rulesResource.getDatasourceRuleHistory("datasource1", null, 2);
     List<AuditEntry> rulesHistory = (List) response.getEntity();
-    Assert.assertEquals(2, rulesHistory.size());
-    Assert.assertEquals(entry1, rulesHistory.get(0));
-    Assert.assertEquals(entry2, rulesHistory.get(1));
+    Assertions.assertEquals(2, rulesHistory.size());
+    Assertions.assertEquals(entry1, rulesHistory.get(0));
+    Assertions.assertEquals(entry2, rulesHistory.get(1));
 
     EasyMock.verify(auditManager);
   }
@@ -94,29 +79,17 @@ public class RulesResourceTest
   {
     String interval = "P2D/2013-01-02T00:00:00Z";
     Interval theInterval = Intervals.of(interval);
-    AuditEntry entry1 = new AuditEntry(
-        "testKey",
-        "testType",
-        new AuditInfo(
-            "testAuthor",
-            "testComment",
-            "127.0.0.1"
-        ),
-        "testPayload",
+    AuditEntry entry1 = createAuditEntry(
         DateTimes.of("2013-01-02T00:00:00Z")
     );
-    AuditEntry entry2 = new AuditEntry(
-        "testKey",
-        "testType",
-        new AuditInfo(
-            "testAuthor",
-            "testComment",
-            "127.0.0.1"
-        ),
-        "testPayload",
+    AuditEntry entry2 = createAuditEntry(
         DateTimes.of("2013-01-01T00:00:00Z")
     );
-    EasyMock.expect(auditManager.fetchAuditHistory(EasyMock.eq("datasource1"), EasyMock.eq("rules"), EasyMock.eq(theInterval)))
+    EasyMock.expect(auditManager.fetchAuditHistory(
+        EasyMock.eq("datasource1"),
+        EasyMock.eq("rules"),
+        EasyMock.eq(theInterval)
+    ))
             .andReturn(ImmutableList.of(entry1, entry2))
             .once();
     EasyMock.replay(auditManager);
@@ -125,9 +98,9 @@ public class RulesResourceTest
 
     Response response = rulesResource.getDatasourceRuleHistory("datasource1", interval, null);
     List<AuditEntry> rulesHistory = (List) response.getEntity();
-    Assert.assertEquals(2, rulesHistory.size());
-    Assert.assertEquals(entry1, rulesHistory.get(0));
-    Assert.assertEquals(entry2, rulesHistory.get(1));
+    Assertions.assertEquals(2, rulesHistory.size());
+    Assertions.assertEquals(entry1, rulesHistory.get(0));
+    Assertions.assertEquals(entry2, rulesHistory.get(1));
 
     EasyMock.verify(auditManager);
   }
@@ -136,17 +109,17 @@ public class RulesResourceTest
   public void testGetDatasourceRuleHistoryWithWrongCount()
   {
     EasyMock.expect(auditManager.fetchAuditHistory(EasyMock.eq("datasource1"), EasyMock.eq("rules"), EasyMock.eq(-1)))
-        .andThrow(new IllegalArgumentException("Limit must be greater than zero!"))
-        .once();
+            .andThrow(new IllegalArgumentException("Limit must be greater than zero!"))
+            .once();
     EasyMock.replay(auditManager);
 
     RulesResource rulesResource = new RulesResource(databaseRuleManager, auditManager);
 
     Response response = rulesResource.getDatasourceRuleHistory("datasource1", null, -1);
     Map<String, Object> rulesHistory = (Map) response.getEntity();
-    Assert.assertEquals(400, response.getStatus());
-    Assert.assertTrue(rulesHistory.containsKey("error"));
-    Assert.assertEquals("Limit must be greater than zero!", rulesHistory.get("error"));
+    Assertions.assertEquals(400, response.getStatus());
+    Assertions.assertTrue(rulesHistory.containsKey("error"));
+    Assertions.assertEquals("Limit must be greater than zero!", rulesHistory.get("error"));
 
     EasyMock.verify(auditManager);
   }
@@ -154,26 +127,10 @@ public class RulesResourceTest
   @Test
   public void testGetAllDatasourcesRuleHistoryWithCount()
   {
-    AuditEntry entry1 = new AuditEntry(
-        "testKey",
-        "testType",
-        new AuditInfo(
-            "testAuthor",
-            "testComment",
-            "127.0.0.1"
-        ),
-        "testPayload",
+    AuditEntry entry1 = createAuditEntry(
         DateTimes.of("2013-01-02T00:00:00Z")
     );
-    AuditEntry entry2 = new AuditEntry(
-        "testKey",
-        "testType",
-        new AuditInfo(
-            "testAuthor",
-            "testComment",
-            "127.0.0.1"
-        ),
-        "testPayload",
+    AuditEntry entry2 = createAuditEntry(
         DateTimes.of("2013-01-01T00:00:00Z")
     );
     EasyMock.expect(auditManager.fetchAuditHistory(EasyMock.eq("rules"), EasyMock.eq(2)))
@@ -185,9 +142,9 @@ public class RulesResourceTest
 
     Response response = rulesResource.getDatasourceRuleHistory(null, 2);
     List<AuditEntry> rulesHistory = (List) response.getEntity();
-    Assert.assertEquals(2, rulesHistory.size());
-    Assert.assertEquals(entry1, rulesHistory.get(0));
-    Assert.assertEquals(entry2, rulesHistory.get(1));
+    Assertions.assertEquals(2, rulesHistory.size());
+    Assertions.assertEquals(entry1, rulesHistory.get(0));
+    Assertions.assertEquals(entry2, rulesHistory.get(1));
 
     EasyMock.verify(auditManager);
   }
@@ -197,26 +154,10 @@ public class RulesResourceTest
   {
     String interval = "P2D/2013-01-02T00:00:00Z";
     Interval theInterval = Intervals.of(interval);
-    AuditEntry entry1 = new AuditEntry(
-        "testKey",
-        "testType",
-        new AuditInfo(
-            "testAuthor",
-            "testComment",
-            "127.0.0.1"
-        ),
-        "testPayload",
+    AuditEntry entry1 = createAuditEntry(
         DateTimes.of("2013-01-02T00:00:00Z")
     );
-    AuditEntry entry2 = new AuditEntry(
-        "testKey",
-        "testType",
-        new AuditInfo(
-            "testAuthor",
-            "testComment",
-            "127.0.0.1"
-        ),
-        "testPayload",
+    AuditEntry entry2 = createAuditEntry(
         DateTimes.of("2013-01-01T00:00:00Z")
     );
     EasyMock.expect(auditManager.fetchAuditHistory(EasyMock.eq("rules"), EasyMock.eq(theInterval)))
@@ -228,9 +169,9 @@ public class RulesResourceTest
 
     Response response = rulesResource.getDatasourceRuleHistory(interval, null);
     List<AuditEntry> rulesHistory = (List) response.getEntity();
-    Assert.assertEquals(2, rulesHistory.size());
-    Assert.assertEquals(entry1, rulesHistory.get(0));
-    Assert.assertEquals(entry2, rulesHistory.get(1));
+    Assertions.assertEquals(2, rulesHistory.size());
+    Assertions.assertEquals(entry1, rulesHistory.get(0));
+    Assertions.assertEquals(entry2, rulesHistory.get(1));
 
     EasyMock.verify(auditManager);
   }
@@ -239,19 +180,32 @@ public class RulesResourceTest
   public void testGetAllDatasourcesRuleHistoryWithWrongCount()
   {
     EasyMock.expect(auditManager.fetchAuditHistory(EasyMock.eq("rules"), EasyMock.eq(-1)))
-        .andThrow(new IllegalArgumentException("Limit must be greater than zero!"))
-        .once();
+            .andThrow(new IllegalArgumentException("Limit must be greater than zero!"))
+            .once();
     EasyMock.replay(auditManager);
 
     RulesResource rulesResource = new RulesResource(databaseRuleManager, auditManager);
 
     Response response = rulesResource.getDatasourceRuleHistory(null, -1);
     Map<String, Object> rulesHistory = (Map) response.getEntity();
-    Assert.assertEquals(400, response.getStatus());
-    Assert.assertTrue(rulesHistory.containsKey("error"));
-    Assert.assertEquals("Limit must be greater than zero!", rulesHistory.get("error"));
+    Assertions.assertEquals(400, response.getStatus());
+    Assertions.assertTrue(rulesHistory.containsKey("error"));
+    Assertions.assertEquals("Limit must be greater than zero!", rulesHistory.get("error"));
 
     EasyMock.verify(auditManager);
+  }
+
+  private AuditInfo createAuditInfo()
+  {
+    return new AuditInfo("testAuthor", "testIdentity", "testComment", "127.0.0.1");
+  }
+
+  private AuditEntry createAuditEntry(DateTime auditTime)
+  {
+    return new AuditEntry(
+        "testKey", "testType", createAuditInfo(), null,
+        AuditEntry.Payload.fromString("testPayload"), auditTime
+    );
   }
 
 }

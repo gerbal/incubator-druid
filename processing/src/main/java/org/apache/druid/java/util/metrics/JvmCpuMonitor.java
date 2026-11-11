@@ -19,14 +19,14 @@
 
 package org.apache.druid.java.util.metrics;
 
-import com.google.common.base.Preconditions;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.java.util.emitter.service.ServiceMetricEvent;
-import org.hyperic.sigar.ProcCpu;
-import org.hyperic.sigar.Sigar;
-import org.hyperic.sigar.SigarException;
+import oshi.SystemInfo;
+import oshi.software.os.OSProcess;
+import oshi.software.os.OperatingSystem;
 
 import java.util.Map;
 
@@ -34,56 +34,63 @@ public class JvmCpuMonitor extends FeedDefiningMonitor
 {
   private static final Logger log = new Logger(JvmCpuMonitor.class);
 
-  private final Sigar sigar = SigarUtil.getSigar();
-  private final long currentProcessId = sigar.getPid();
-
+  private final OperatingSystem operatingSystem;
+  private final int currentProcessId;
   private final KeyedDiff diff = new KeyedDiff();
-
-  private Map<String, String[]> dimensions;
+  private OSProcess previousProcess;
 
   public JvmCpuMonitor()
   {
-    this(ImmutableMap.of());
+    this(DEFAULT_METRICS_FEED);
   }
 
-  public JvmCpuMonitor(Map<String, String[]> dimensions)
+  public JvmCpuMonitor(String feed)
   {
-    this(dimensions, DEFAULT_METRICS_FEED);
+    this(feed, new SystemInfo().getOperatingSystem());
   }
 
-  public JvmCpuMonitor(Map<String, String[]> dimensions, String feed)
+  @VisibleForTesting
+  JvmCpuMonitor(String feed, OperatingSystem operatingSystem)
   {
     super(feed);
-    Preconditions.checkNotNull(dimensions);
-    this.dimensions = ImmutableMap.copyOf(dimensions);
+    this.operatingSystem = operatingSystem;
+    this.currentProcessId = operatingSystem.getProcessId();
+    this.previousProcess = operatingSystem.getProcess(currentProcessId);
   }
 
   @Override
   public boolean doMonitor(ServiceEmitter emitter)
   {
-    // process CPU
-    try {
-      ProcCpu procCpu = sigar.getProcCpu(currentProcessId);
-      final ServiceMetricEvent.Builder builder = builder();
-      MonitorUtils.addDimensionsToBuilder(builder, dimensions);
-      // delta for total, sys, user
-      Map<String, Long> procDiff = diff.to(
-          "proc/cpu", ImmutableMap.of(
-              "jvm/cpu/total", procCpu.getTotal(),
-              "jvm/cpu/sys", procCpu.getSys(),
-              "jvm/cpu/user", procCpu.getUser()
-          )
-      );
-      if (procDiff != null) {
-        for (Map.Entry<String, Long> entry : procDiff.entrySet()) {
-          emitter.emit(builder.build(entry.getKey(), entry.getValue()));
-        }
+    // Use getProcess() instead of getCurrentProcess() so lookup failures return null rather than a zero-valued
+    // CurrentProcessStub, which would corrupt the CPU deltas and previous-process baseline.
+    final OSProcess currentProcess = operatingSystem.getProcess(currentProcessId);
+    if (currentProcess == null) {
+      log.error("Unable to get current process CPU metrics");
+      return true;
+    }
+
+    final ServiceMetricEvent.Builder builder = builder();
+    final long userTime = currentProcess.getUserTime();
+    final long sysTime = currentProcess.getKernelTime();
+    final Map<String, Long> procDiff = diff.to(
+        "proc/cpu", ImmutableMap.of(
+            "jvm/cpu/total", userTime + sysTime,
+            "jvm/cpu/sys", sysTime,
+            "jvm/cpu/user", userTime
+        )
+    );
+    if (procDiff != null) {
+      for (Map.Entry<String, Long> entry : procDiff.entrySet()) {
+        emitter.emit(builder.setMetric(entry.getKey(), entry.getValue()));
       }
-      emitter.emit(builder.build("jvm/cpu/percent", procCpu.getPercent()));
     }
-    catch (SigarException e) {
-      log.error(e, "Failed to get ProcCpu");
+
+    final double cpuLoad = currentProcess.getProcessCpuLoadBetweenTicks(previousProcess);
+    if (cpuLoad >= 0) {
+      emitter.emit(builder.setMetric("jvm/cpu/percent", cpuLoad * 100));
     }
+
+    previousProcess = currentProcess;
     return true;
   }
 }

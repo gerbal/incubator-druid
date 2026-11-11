@@ -28,24 +28,24 @@ import org.apache.druid.data.input.MapBasedRow;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.HumanReadableBytes;
 import org.apache.druid.java.util.common.StringUtils;
-import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.granularity.PeriodGranularity;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.common.guava.Sequences;
 import org.apache.druid.query.Druids;
-import org.apache.druid.query.FinalizeResultsQueryRunner;
 import org.apache.druid.query.QueryPlus;
 import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QueryRunnerTestHelper;
-import org.apache.druid.query.QueryToolChest;
 import org.apache.druid.query.Result;
 import org.apache.druid.query.aggregation.DoubleMaxAggregatorFactory;
 import org.apache.druid.query.aggregation.DoubleMinAggregatorFactory;
 import org.apache.druid.query.aggregation.ExpressionLambdaAggregatorFactory;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.context.ResponseContext;
 import org.apache.druid.query.dimension.DefaultDimensionSpec;
 import org.apache.druid.query.expression.TestExprMacroTable;
+import org.apache.druid.query.filter.NotDimFilter;
+import org.apache.druid.query.filter.SelectorDimFilter;
 import org.apache.druid.query.timeseries.TimeseriesQuery;
 import org.apache.druid.query.timeseries.TimeseriesQueryRunnerTest;
 import org.apache.druid.query.timeseries.TimeseriesResultValue;
@@ -55,12 +55,12 @@ import org.apache.druid.segment.VirtualColumns;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.virtual.ExpressionVirtualColumn;
 import org.joda.time.DateTime;
-import org.junit.AfterClass;
-import org.junit.Assert;
-import org.junit.BeforeClass;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -72,18 +72,19 @@ import java.util.Map;
 /**
  * This class is for testing both timeseries and groupBy queries with the same set of queries.
  */
-@RunWith(Parameterized.class)
+@ParameterizedClass
+@MethodSource("constructorFeeder")
 public class GroupByTimeseriesQueryRunnerTest extends TimeseriesQueryRunnerTest
 {
   private static TestGroupByBuffers BUFFER_POOLS = null;
 
-  @BeforeClass
+  @BeforeAll
   public static void setUpClass()
   {
     BUFFER_POOLS = TestGroupByBuffers.createDefault();
   }
 
-  @AfterClass
+  @AfterAll
   public static void tearDownClass()
   {
     BUFFER_POOLS.close();
@@ -91,33 +92,23 @@ public class GroupByTimeseriesQueryRunnerTest extends TimeseriesQueryRunnerTest
   }
 
   @SuppressWarnings("unchecked")
-  @Parameterized.Parameters(name = "{0}, vectorize = {1}")
   public static Iterable<Object[]> constructorFeeder()
   {
     setUpClass();
     GroupByQueryConfig config = new GroupByQueryConfig();
-    config.setMaxIntermediateRows(10000);
     final GroupByQueryRunnerFactory factory = GroupByQueryRunnerTest.makeQueryRunnerFactory(config, BUFFER_POOLS);
 
     final List<Object[]> constructors = new ArrayList<>();
 
-    for (QueryRunner<ResultRow> runner : QueryRunnerTestHelper.makeQueryRunners(factory)) {
+    for (QueryRunner<ResultRow> runner : QueryRunnerTestHelper.makeQueryRunnersToMerge(factory, false)) {
       final QueryRunner modifiedRunner = new QueryRunner()
       {
         @Override
         public Sequence run(QueryPlus queryPlus, ResponseContext responseContext)
         {
+          queryPlus = GroupByQueryRunnerTestHelper.populateResourceId(queryPlus);
           final ObjectMapper jsonMapper = TestHelper.makeJsonMapper();
           TimeseriesQuery tsQuery = (TimeseriesQuery) queryPlus.getQuery();
-          QueryRunner<ResultRow> newRunner = factory.mergeRunners(
-              Execs.directExecutor(), ImmutableList.of(runner)
-          );
-          QueryToolChest toolChest = factory.getToolchest();
-
-          newRunner = new FinalizeResultsQueryRunner<>(
-              toolChest.mergeResults(toolChest.preMergeQueryDecoration(newRunner)),
-              toolChest
-          );
 
           final String timeDimension = tsQuery.getTimestampResultField();
           final List<VirtualColumn> virtualColumns = new ArrayList<>(
@@ -136,17 +127,17 @@ public class GroupByTimeseriesQueryRunnerTest extends TimeseriesQueryRunnerTest
                 )
             );
 
-            theContext.put(GroupByQuery.CTX_TIMESTAMP_RESULT_FIELD, timeDimension);
+            QueryContextParameters.TIMESTAMP_RESULT_FIELD.set(theContext, timeDimension);
             try {
-              theContext.put(
-                  GroupByQuery.CTX_TIMESTAMP_RESULT_FIELD_GRANULARITY,
+              QueryContextParameters.TIMESTAMP_RESULT_FIELD_GRANULARITY.set(
+                  theContext,
                   jsonMapper.writeValueAsString(granularity)
               );
             }
             catch (JsonProcessingException e) {
               throw new RuntimeException(e);
             }
-            theContext.put(GroupByQuery.CTX_TIMESTAMP_RESULT_FIELD_INDEX, 0);
+            QueryContextParameters.TIMESTAMP_RESULT_FIELD_IN_ORIGINAL_DIMENSIONS.set(theContext, 0);
           }
 
           GroupByQuery newQuery = GroupByQuery
@@ -163,11 +154,12 @@ public class GroupByTimeseriesQueryRunnerTest extends TimeseriesQueryRunnerTest
               .setAggregatorSpecs(tsQuery.getAggregatorSpecs())
               .setPostAggregatorSpecs(tsQuery.getPostAggregatorSpecs())
               .setVirtualColumns(VirtualColumns.create(virtualColumns))
+              .setLimit(tsQuery.getLimit())
               .setContext(theContext)
               .build();
 
           return Sequences.map(
-              newRunner.run(queryPlus.withQuery(newQuery), responseContext),
+              runner.run(queryPlus.withQuery(newQuery), responseContext),
               new Function<ResultRow, Result<TimeseriesResultValue>>()
               {
                 @Override
@@ -192,9 +184,15 @@ public class GroupByTimeseriesQueryRunnerTest extends TimeseriesQueryRunnerTest
       };
 
       for (boolean vectorize : ImmutableList.of(false, true)) {
-        // Add vectorization tests for any indexes that support it.
-        if (!vectorize || QueryRunnerTestHelper.isTestRunnerVectorizable(runner)) {
-          constructors.add(new Object[]{modifiedRunner, vectorize});
+        for (boolean useVectorApi : ImmutableList.of(false, true)) {
+          if (!vectorize && useVectorApi) {
+            // SIMD path is reachable only when vectorization is on; skip the redundant combo.
+            continue;
+          }
+          // Add vectorization tests for any indexes that support it.
+          if (!vectorize || QueryRunnerTestHelper.isTestRunnerVectorizable(runner)) {
+            constructors.add(new Object[]{modifiedRunner, vectorize, useVectorApi});
+          }
         }
       }
     }
@@ -202,9 +200,9 @@ public class GroupByTimeseriesQueryRunnerTest extends TimeseriesQueryRunnerTest
     return constructors;
   }
 
-  public GroupByTimeseriesQueryRunnerTest(QueryRunner runner, boolean vectorize)
+  public GroupByTimeseriesQueryRunnerTest(QueryRunner runner, boolean vectorize, boolean useVectorApi)
   {
-    super(runner, false, vectorize, QueryRunnerTestHelper.COMMON_DOUBLE_AGGREGATORS);
+    super(runner, false, vectorize, QueryRunnerTestHelper.COMMON_DOUBLE_AGGREGATORS, useVectorApi);
   }
 
   // GroupBy handles timestamps differently when granularity is ALL
@@ -229,16 +227,16 @@ public class GroupByTimeseriesQueryRunnerTest extends TimeseriesQueryRunnerTest
     Iterable<Result<TimeseriesResultValue>> results = runner.run(QueryPlus.wrap(query)).toList();
     Result<TimeseriesResultValue> result = results.iterator().next();
 
-    Assert.assertEquals(expectedEarliest, result.getTimestamp());
-    Assert.assertFalse(
-        StringUtils.format("Timestamp[%s] > expectedLast[%s]", result.getTimestamp(), expectedLast),
-        result.getTimestamp().isAfter(expectedLast)
+    Assertions.assertEquals(expectedEarliest, result.getTimestamp());
+    Assertions.assertFalse(
+        result.getTimestamp().isAfter(expectedLast),
+        StringUtils.format("Timestamp[%s] > expectedLast[%s]", result.getTimestamp(), expectedLast)
     );
 
     final TimeseriesResultValue value = result.getValue();
 
-    Assert.assertEquals(result.toString(), 1870.061029, value.getDoubleMetric("maxIndex"), 1870.061029 * 1e-6);
-    Assert.assertEquals(result.toString(), 59.021022, value.getDoubleMetric("minIndex"), 59.021022 * 1e-6);
+    Assertions.assertEquals(1870.061029, value.getDoubleMetric("maxIndex"), 1870.061029 * 1e-6, result.toString());
+    Assertions.assertEquals(59.021022, value.getDoubleMetric("minIndex"), 59.021022 * 1e-6, result.toString());
   }
 
   // GroupBy handles timestamps differently when granularity is ALL
@@ -268,17 +266,46 @@ public class GroupByTimeseriesQueryRunnerTest extends TimeseriesQueryRunnerTest
     Iterable<Result<TimeseriesResultValue>> results = runner.run(QueryPlus.wrap(query)).toList();
     Result<TimeseriesResultValue> result = results.iterator().next();
 
-    Assert.assertEquals(expectedEarliest, result.getTimestamp());
-    Assert.assertFalse(
-        StringUtils.format("Timestamp[%s] > expectedLast[%s]", result.getTimestamp(), expectedLast),
-        result.getTimestamp().isAfter(expectedLast)
+    Assertions.assertEquals(expectedEarliest, result.getTimestamp());
+    Assertions.assertFalse(
+        result.getTimestamp().isAfter(expectedLast),
+        StringUtils.format("Timestamp[%s] > expectedLast[%s]", result.getTimestamp(), expectedLast)
     );
-    Assert.assertEquals(59L, (long) result.getValue().getLongMetric(QueryRunnerTestHelper.LONG_MIN_INDEX_METRIC));
-    Assert.assertEquals(1870, (long) result.getValue().getLongMetric(QueryRunnerTestHelper.LONG_MAX_INDEX_METRIC));
-    Assert.assertEquals(59.021022D, result.getValue().getDoubleMetric(QueryRunnerTestHelper.DOUBLE_MIN_INDEX_METRIC), 0);
-    Assert.assertEquals(1870.061029D, result.getValue().getDoubleMetric(QueryRunnerTestHelper.DOUBLE_MAX_INDEX_METRIC), 0);
-    Assert.assertEquals(59.021023F, result.getValue().getFloatMetric(QueryRunnerTestHelper.FLOAT_MIN_INDEX_METRIC), 0);
-    Assert.assertEquals(1870.061F, result.getValue().getFloatMetric(QueryRunnerTestHelper.FLOAT_MAX_INDEX_METRIC), 0);
+    Assertions.assertEquals(59L, (long) result.getValue().getLongMetric(QueryRunnerTestHelper.LONG_MIN_INDEX_METRIC));
+    Assertions.assertEquals(1870, (long) result.getValue().getLongMetric(QueryRunnerTestHelper.LONG_MAX_INDEX_METRIC));
+    Assertions.assertEquals(
+        59.021022D,
+        result.getValue().getDoubleMetric(QueryRunnerTestHelper.DOUBLE_MIN_INDEX_METRIC),
+        0
+    );
+    Assertions.assertEquals(
+        1870.061029D,
+        result.getValue().getDoubleMetric(QueryRunnerTestHelper.DOUBLE_MAX_INDEX_METRIC),
+        0
+    );
+    Assertions.assertEquals(59.021023F, result.getValue().getFloatMetric(QueryRunnerTestHelper.FLOAT_MIN_INDEX_METRIC), 0);
+    Assertions.assertEquals(1870.061F, result.getValue().getFloatMetric(QueryRunnerTestHelper.FLOAT_MAX_INDEX_METRIC), 0);
+  }
+
+  @Override
+  public void testTimeseriesNullableLongMax()
+  {
+    // Skip this test because the timeseries test expects a null value to be returned for the aggregator even if
+    // there's no data for a period in query, but group by doesn't return data for periods that have no data.
+  }
+
+  @Override
+  public void testTimeseriesProjections()
+  {
+    // Skip this test because the timeseries test expects a null value to be returned for the aggregator even if
+    // there's no data for a period in query, but group by doesn't return data for periods that have no data.
+  }
+
+  @Override
+  public void testTimeseriesProjectionsCounts()
+  {
+    // Skip this test because the timeseries test expects a 0 value to be returned for the count aggregator even if
+    // there's no data for a period in query, but group by doesn't return data for periods that have no data.
   }
 
   @Override
@@ -333,11 +360,6 @@ public class GroupByTimeseriesQueryRunnerTest extends TimeseriesQueryRunnerTest
   @Override
   public void testTimeseriesWithExpressionAggregatorTooBig()
   {
-    cannotVectorize();
-    if (!vectorize) {
-      // size bytes when it overshoots varies slightly between algorithms
-      expectedException.expectMessage("Unable to serialize [ARRAY<STRING>]");
-    }
     TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
                                   .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
                                   .granularity(Granularities.DAY)
@@ -366,6 +388,44 @@ public class GroupByTimeseriesQueryRunnerTest extends TimeseriesQueryRunnerTest
                                   .context(makeContext())
                                   .build();
 
-    runner.run(QueryPlus.wrap(query)).toList();
+    if (vectorize) {
+      final RuntimeException exception = Assertions.assertThrows(
+          RuntimeException.class,
+          () -> runner.run(QueryPlus.wrap(query)).toList()
+      );
+      Assertions.assertTrue(exception.getMessage().contains("Cannot vectorize!"));
+      return;
+    }
+    // Size bytes when it overshoots varies slightly between algorithms.
+    final Throwable exception = Assertions.assertThrows(
+        Throwable.class,
+        () -> runner.run(QueryPlus.wrap(query)).toList()
+    );
+    Assertions.assertTrue(
+        exception.getMessage() != null
+        && exception.getMessage().contains("Unable to serialize [ARRAY<STRING>]")
+    );
+  }
+
+  @Override
+  @Test
+  public void testTimeseriesWithInvertedFilterOnNonExistentDimension()
+  {
+    TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
+                                  .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
+                                  .granularity(QueryRunnerTestHelper.DAY_GRAN)
+                                  .filters(new NotDimFilter(new SelectorDimFilter("bobby", "sally", null)))
+                                  .intervals(QueryRunnerTestHelper.FIRST_TO_THIRD)
+                                  .aggregators(aggregatorFactoryList)
+                                  .postAggregators(QueryRunnerTestHelper.ADD_ROWS_INDEX_CONSTANT)
+                                  .descending(descending)
+                                  .context(makeContext())
+                                  .build();
+
+
+    Iterable<Result<TimeseriesResultValue>> results = runner.run(QueryPlus.wrap(query))
+                                                            .toList();
+    // group by query results are empty instead of day bucket results with zeros and nulls
+    Assertions.assertEquals(Collections.emptyList(), results);
   }
 }

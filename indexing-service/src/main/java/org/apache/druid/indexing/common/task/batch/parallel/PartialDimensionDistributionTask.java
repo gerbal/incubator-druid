@@ -20,13 +20,16 @@
 package org.apache.druid.indexing.common.task.batch.parallel;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.hash.BloomFilter;
 import com.google.common.hash.Funnels;
+import org.apache.druid.common.config.Configs;
 import org.apache.druid.data.input.HandlingInputRowIterator;
 import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.data.input.InputRow;
@@ -34,6 +37,7 @@ import org.apache.druid.data.input.InputSource;
 import org.apache.druid.data.input.Rows;
 import org.apache.druid.data.input.StringTuple;
 import org.apache.druid.indexer.TaskStatus;
+import org.apache.druid.indexer.granularity.GranularitySpec;
 import org.apache.druid.indexer.partitions.DimensionRangePartitionsSpec;
 import org.apache.druid.indexing.common.TaskToolbox;
 import org.apache.druid.indexing.common.actions.SurrogateTaskActionClient;
@@ -48,15 +52,18 @@ import org.apache.druid.java.util.common.parsers.CloseableIterator;
 import org.apache.druid.segment.incremental.ParseExceptionHandler;
 import org.apache.druid.segment.incremental.RowIngestionMeters;
 import org.apache.druid.segment.indexing.DataSchema;
-import org.apache.druid.segment.indexing.granularity.GranularitySpec;
+import org.apache.druid.server.security.AuthorizationUtils;
+import org.apache.druid.server.security.ResourceAction;
 import org.joda.time.Interval;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
+import java.util.Set;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
 /**
  * The worker task of {@link PartialDimensionDistributionParallelIndexTaskRunner}. This task
@@ -67,13 +74,16 @@ public class PartialDimensionDistributionTask extends PerfectRollupWorkerTask
 {
   public static final String TYPE = "partial_dimension_distribution";
 
+  /**
+   * Used in tests to reduce the memory consumption of the dedup bloom filter.
+   */
+  public static final String CTX_BLOOM_FILTER_EXPECTED_INSERTIONS = "bloomFilterExpectedInsertions";
+
   // Do not skip nulls as StringDistribution can handle null values.
-  // This behavior is different from hadoop indexing.
   private static final boolean SKIP_NULL = false;
 
   private final int numAttempts;
   private final ParallelIndexIngestionSpec ingestionSchema;
-  private final String supervisorTaskId;
   private final String subtaskSpecId;
 
   // For testing
@@ -103,7 +113,9 @@ public class PartialDimensionDistributionTask extends PerfectRollupWorkerTask
         ingestionSchema,
         context,
         () -> new DedupInputRowFilter(
-            ingestionSchema.getDataSchema().getGranularitySpec().getQueryGranularity()
+            ingestionSchema.getDataSchema().getGranularitySpec().getQueryGranularity(),
+            (Integer) context.get(CTX_BLOOM_FILTER_EXPECTED_INSERTIONS),
+            null
         )
     );
   }
@@ -127,7 +139,8 @@ public class PartialDimensionDistributionTask extends PerfectRollupWorkerTask
         taskResource,
         ingestionSchema.getDataSchema(),
         ingestionSchema.getTuningConfig(),
-        context
+        context,
+        supervisorTaskId
     );
 
     Preconditions.checkArgument(
@@ -139,7 +152,6 @@ public class PartialDimensionDistributionTask extends PerfectRollupWorkerTask
     this.subtaskSpecId = subtaskSpecId;
     this.numAttempts = numAttempts;
     this.ingestionSchema = ingestionSchema;
-    this.supervisorTaskId = supervisorTaskId;
     this.dedupInputRowFilterSupplier = dedupRowDimValueFilterSupplier;
   }
 
@@ -156,12 +168,6 @@ public class PartialDimensionDistributionTask extends PerfectRollupWorkerTask
   }
 
   @JsonProperty
-  private String getSupervisorTaskId()
-  {
-    return supervisorTaskId;
-  }
-
-  @JsonProperty
   @Override
   public String getSubtaskSpecId()
   {
@@ -174,12 +180,25 @@ public class PartialDimensionDistributionTask extends PerfectRollupWorkerTask
     return TYPE;
   }
 
+  @Nonnull
+  @JsonIgnore
+  @Override
+  public Set<ResourceAction> getInputSourceResources()
+  {
+    return getIngestionSchema().getIOConfig().getInputSource() != null ?
+           getIngestionSchema().getIOConfig().getInputSource().getTypes()
+                               .stream()
+                               .map(AuthorizationUtils::createExternalResourceReadAction)
+                               .collect(Collectors.toSet()) :
+           ImmutableSet.of();
+  }
+
   @Override
   public boolean isReady(TaskActionClient taskActionClient) throws Exception
   {
     if (!getIngestionSchema().getDataSchema().getGranularitySpec().inputIntervals().isEmpty()) {
       return tryTimeChunkLock(
-          new SurrogateTaskActionClient(supervisorTaskId, taskActionClient),
+          new SurrogateTaskActionClient(getSupervisorTaskId(), taskActionClient),
           getIngestionSchema().getDataSchema().getGranularitySpec().inputIntervals()
       );
     } else {
@@ -203,7 +222,7 @@ public class PartialDimensionDistributionTask extends PerfectRollupWorkerTask
     );
     boolean isAssumeGrouped = partitionsSpec.isAssumeGrouped();
 
-    InputSource inputSource = ingestionSchema.getIOConfig().getNonNullInputSource();
+    InputSource inputSource = ingestionSchema.getIOConfig().getNonNullInputSource(toolbox);
     InputFormat inputFormat = inputSource.needsFormat()
                               ? ParallelIndexSupervisorTask.getInputFormat(ingestionSchema)
                               : null;
@@ -214,15 +233,13 @@ public class PartialDimensionDistributionTask extends PerfectRollupWorkerTask
         tuningConfig.getMaxParseExceptions(),
         tuningConfig.getMaxSavedParseExceptions()
     );
-    final boolean determineIntervals = granularitySpec.inputIntervals().isEmpty();
-
     try (
         final CloseableIterator<InputRow> inputRowIterator = AbstractBatchIndexTask.inputSourceReader(
             toolbox.getIndexingTmpDir(),
             dataSchema,
             inputSource,
             inputFormat,
-            determineIntervals ? Objects::nonNull : AbstractBatchIndexTask.defaultRowFilter(granularitySpec),
+            allowNonNullRowsWithinInputIntervalsOf(granularitySpec),
             buildSegmentsMeters,
             parseExceptionHandler
         );
@@ -301,7 +318,7 @@ public class PartialDimensionDistributionTask extends PerfectRollupWorkerTask
   private void sendReport(TaskToolbox toolbox, DimensionDistributionReport report)
   {
     final ParallelIndexSupervisorTaskClient taskClient = toolbox.getSupervisorTaskClientProvider().build(
-        supervisorTaskId,
+        getSupervisorTaskId(),
         ingestionSchema.getTuningConfig().getChatHandlerTimeout(),
         ingestionSchema.getTuningConfig().getChatHandlerNumRetries()
     );
@@ -346,25 +363,24 @@ public class PartialDimensionDistributionTask extends PerfectRollupWorkerTask
     private final Granularity queryGranularity;
     private final BloomFilter<CharSequence> groupingBloomFilter;
 
-    DedupInputRowFilter(Granularity queryGranularity)
-    {
-      this(queryGranularity, BLOOM_FILTER_EXPECTED_INSERTIONS, BLOOM_FILTER_EXPECTED_FALSE_POSITIVE_PROBABILTY);
-    }
-
-    @VisibleForTesting
-      // to allow controlling false positive rate of bloom filter
     DedupInputRowFilter(
         Granularity queryGranularity,
-        int bloomFilterExpectedInsertions,
-        double bloomFilterFalsePositiveProbability
+        @Nullable Integer bloomFilterExpectedInsertions,
+        @Nullable Double bloomFilterFalsePositiveProbability
     )
     {
       delegate = new PassthroughInputRowFilter();
       this.queryGranularity = queryGranularity;
       groupingBloomFilter = BloomFilter.create(
           Funnels.unencodedCharsFunnel(),
-          bloomFilterExpectedInsertions,
-          bloomFilterFalsePositiveProbability
+          Configs.valueOrDefault(
+              bloomFilterExpectedInsertions,
+              BLOOM_FILTER_EXPECTED_INSERTIONS
+          ),
+          Configs.valueOrDefault(
+              bloomFilterFalsePositiveProbability,
+              BLOOM_FILTER_EXPECTED_FALSE_POSITIVE_PROBABILTY
+          )
       );
     }
 

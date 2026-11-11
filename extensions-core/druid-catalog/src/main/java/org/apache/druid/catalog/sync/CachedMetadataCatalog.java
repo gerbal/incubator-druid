@@ -20,6 +20,7 @@
 package org.apache.druid.catalog.sync;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.druid.catalog.MetadataCatalog;
 import org.apache.druid.catalog.model.ResolvedTable;
 import org.apache.druid.catalog.model.SchemaRegistry;
 import org.apache.druid.catalog.model.SchemaRegistry.SchemaSpec;
@@ -29,6 +30,7 @@ import org.apache.druid.catalog.model.TableMetadata;
 import org.apache.druid.guice.annotations.Json;
 import org.apache.druid.java.util.common.logger.Logger;
 
+import javax.annotation.Nullable;
 import javax.inject.Inject;
 
 import java.util.ArrayList;
@@ -140,6 +142,28 @@ public class CachedMetadataCatalog implements MetadataCatalog, CatalogUpdateList
       });
       orderedTables.sort((e1, e2) -> e1.id().name().compareTo(e2.id().name()));
       return orderedTables;
+    }
+
+    /**
+     * Replace one entry with the authoritative row just read from the Coordinator, or remove it if the table no
+     * longer exists there. Unlike {@link #update}, this does not describe what changed, so no prior entry is
+     * expected: the row was read from the source of truth, and installing it is correct whether the entry was
+     * present, stale, or never seen. An entry newer than the row is kept, so a racing notification cannot be
+     * rolled back.
+     */
+    public synchronized void resync(String name, @Nullable TableMetadata table)
+    {
+      if (table == null) {
+        cache.remove(name);
+        return;
+      }
+      cache.compute(
+          name,
+          (k, v) -> v != null && v.table != null && v.table.updateTime() > table.updateTime()
+                    ? v
+                    : new TableEntry(table)
+      );
+      version = Math.max(version, table.updateTime());
     }
 
     public synchronized void update(UpdateEvent event)
@@ -277,6 +301,22 @@ public class CachedMetadataCatalog implements MetadataCatalog, CatalogUpdateList
       });
       return tables;
     }
+
+    /**
+     * Populate the cache by asking the catalog source for all tables for
+     * this schema.
+     */
+    public synchronized void resync(CatalogSource source)
+    {
+      List<TableMetadata> tables = source.tablesForSchema(schema.name());
+      cache.clear();
+      for (TableMetadata table : tables) {
+        cache.compute(
+            table.id().name(),
+            (k, v) -> computeCreate(v, table)
+        );
+      }
+    }
   }
 
   private final ConcurrentHashMap<String, SchemaEntry> schemaCache = new ConcurrentHashMap<>();
@@ -323,9 +363,34 @@ public class CachedMetadataCatalog implements MetadataCatalog, CatalogUpdateList
     SchemaEntry schemaEntry = entryFor(event.table.id().schema());
     if (schemaEntry != null) {
       schemaEntry.update(event);
+    } else {
+      resync();
     }
   }
 
+  /**
+   * Refresh one table from an authoritative read of the Coordinator: {@code table} is installed as the current
+   * entry, or the entry is removed when {@code table} is null. The incremental {@link #updated} events describe a
+   * change and so expect the cache to hold what came before; this does not, which makes it the right entry point
+   * for a caller that has just read the table's current state, such as the DDL write path freshening the issuing
+   * Broker ahead of the Coordinator's own notification.
+   */
+  public void resynced(TableId tableId, @Nullable TableMetadata table)
+  {
+    SchemaEntry schemaEntry = entryFor(tableId.schema());
+    if (schemaEntry != null) {
+      schemaEntry.resync(tableId.name(), table);
+    } else {
+      resync();
+    }
+  }
+
+  /**
+   * Get the list of table names <i>in the cache</i>. Does not attempt to
+   * lazy load the list since doing so is costly: we don't know when it
+   * might be out of date. Rely on priming the cache, and update notifications
+   * to keep the list accurate.
+   */
   @Override
   public Set<String> tableNames(String schemaName)
   {
@@ -333,8 +398,13 @@ public class CachedMetadataCatalog implements MetadataCatalog, CatalogUpdateList
     return schemaEntry == null ? Collections.emptySet() : schemaEntry.tableNames();
   }
 
+  /**
+   * Clear the cache. Primarily for testing.
+   */
+  @Override
   public void flush()
   {
+    LOG.info("Flush requested");
     schemaCache.clear();
   }
 
@@ -346,5 +416,19 @@ public class CachedMetadataCatalog implements MetadataCatalog, CatalogUpdateList
           SchemaSpec schema = schemaRegistry.schema(k);
           return schema == null ? null : new SchemaEntry(schema);
         });
+  }
+
+  /**
+   * Discard any existing cached tables and reload directly from the
+   * catalog source. Manages the two schemas which the catalog manages.
+   * If the catalog were to manage others, add those here as well.
+   * Done both at Catalog client startup, and on demand for testing.
+   */
+  @Override
+  public void resync()
+  {
+    LOG.info("Resync requested");
+    entryFor(TableId.DRUID_SCHEMA).resync(base);
+    entryFor(TableId.EXTERNAL_SCHEMA).resync(base);
   }
 }

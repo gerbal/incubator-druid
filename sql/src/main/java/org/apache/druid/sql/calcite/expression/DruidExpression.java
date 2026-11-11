@@ -26,11 +26,13 @@ import com.google.common.io.BaseEncoding;
 import com.google.common.primitives.Chars;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.druid.math.expr.Expr;
-import org.apache.druid.math.expr.ExprMacroTable;
-import org.apache.druid.math.expr.Parser;
+import org.apache.druid.math.expr.ExprEval;
+import org.apache.druid.math.expr.ExprType;
+import org.apache.druid.math.expr.ExpressionType;
 import org.apache.druid.segment.VirtualColumn;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.virtual.ExpressionVirtualColumn;
+import org.apache.druid.sql.calcite.planner.ExpressionParser;
 
 import javax.annotation.Nullable;
 import java.util.ArrayList;
@@ -48,7 +50,7 @@ import java.util.function.Function;
  *
  * When added to {@link org.apache.druid.sql.calcite.rel.VirtualColumnRegistry} whenever used by projections, filters,
  * aggregators, or other query components, these will be converted into native virtual columns using
- * {@link #toVirtualColumn(String, ColumnType, ExprMacroTable)}
+ * {@link #toVirtualColumn(String, ColumnType, ExpressionParser)}
  *
  * Approximate expression structure is retained in the {@link #arguments}, which when fed into the
  * {@link ExpressionGenerator} that all {@link DruidExpression} must be created with will produce the final String
@@ -179,6 +181,19 @@ public class DruidExpression
         Collections.emptyList(),
         null
     );
+  }
+
+  /**
+   * Create a literal expression from an {@link ExprEval}.
+   */
+  public static DruidExpression ofLiteral(final DruidLiteral literal)
+  {
+    if (literal.type() != null && literal.type().is(ExprType.STRING)) {
+      return ofStringLiteral((String) literal.value());
+    } else {
+      final ColumnType evalColumnType = literal.type() != null ? ExpressionType.toColumnType(literal.type()) : null;
+      return ofLiteral(evalColumnType, ExprEval.ofType(literal.type(), literal.value()).toExpr().stringify());
+    }
   }
 
   public static DruidExpression ofStringLiteral(final String s)
@@ -354,7 +369,7 @@ public class DruidExpression
 
   public String getDirectColumn()
   {
-    return Preconditions.checkNotNull(simpleExtraction.getColumn());
+    return Preconditions.checkNotNull(simpleExtraction, "simpleExtraction").getColumn();
   }
 
   public boolean isSimpleExtraction()
@@ -367,6 +382,11 @@ public class DruidExpression
     return Preconditions.checkNotNull(simpleExtraction);
   }
 
+  public boolean isArray()
+  {
+    return druidType != null && druidType.isArray();
+  }
+
   /**
    * Get sub {@link DruidExpression} arguments of this expression
    */
@@ -375,35 +395,55 @@ public class DruidExpression
     return arguments;
   }
 
-  /**
-   * Compile the {@link DruidExpression} into a string and parse it into a native Druid {@link Expr}
-   */
-  public Expr parse(final ExprMacroTable macroTable)
-  {
-    return Parser.parse(expression.get(), macroTable);
-  }
-
   public VirtualColumn toVirtualColumn(
       final String name,
       final ColumnType outputType,
-      final ExprMacroTable macroTable
+      final ExpressionParser parser
   )
   {
-    return virtualColumnCreator.create(name, outputType, expression.get(), macroTable);
+    return virtualColumnCreator.create(name, outputType, parser, this);
   }
 
   public VirtualColumn toExpressionVirtualColumn(
       final String name,
       final ColumnType outputType,
-      final ExprMacroTable macroTable
+      final ExpressionParser parser
   )
   {
-    return DEFAULT_VIRTUAL_COLUMN_BUILDER.create(name, outputType, expression.get(), macroTable);
+    return DEFAULT_VIRTUAL_COLUMN_BUILDER.create(name, outputType, parser, this);
   }
 
   public NodeType getType()
   {
     return nodeType;
+  }
+
+  /**
+   * Returns whether this expression is {@link NodeType#IDENTIFIER} or {@link NodeType#SPECIALIZED}. Useful because
+   * these are the expressions that can be expected to become direct column references once virtual columns have gone
+   * through a specialization pass.
+   */
+  public boolean isIdentifierOrSpecialized()
+  {
+    return nodeType == NodeType.IDENTIFIER || nodeType == NodeType.SPECIALIZED;
+  }
+
+  /**
+   * Returns true if this expression or any of its arguments (recursively) has
+   * {@link NodeType#SPECIALIZED} type, indicating the expression would benefit
+   * from virtual column specialization.
+   */
+  public boolean containsSpecializedNodes()
+  {
+    if (nodeType == NodeType.SPECIALIZED) {
+      return true;
+    }
+    for (final DruidExpression arg : arguments) {
+      if (arg.containsSpecializedNodes()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -413,7 +453,7 @@ public class DruidExpression
    * supplied by other means.
    *
    * This value is not currently used other than for tracking the types of the {@link DruidExpression} tree. The
-   * value passed to {@link #toVirtualColumn(String, ColumnType, ExprMacroTable)} will instead be whatever type "hint"
+   * value passed to {@link #toVirtualColumn(String, ColumnType, ExpressionParser)} will instead be whatever type "hint"
    * was specified when the expression was added to the {@link org.apache.druid.sql.calcite.rel.VirtualColumnRegistry}.
    */
   @Nullable
@@ -437,6 +477,22 @@ public class DruidExpression
     );
   }
 
+  public DruidExpression map(
+      final Function<SimpleExtraction, SimpleExtraction> extractionMap,
+      final Function<String, String> expressionMap,
+      final ColumnType newType
+  )
+  {
+    return new DruidExpression(
+        nodeType,
+        newType,
+        simpleExtraction == null ? null : extractionMap.apply(simpleExtraction),
+        (args) -> expressionMap.apply(expressionGenerator.compile(args)),
+        arguments,
+        virtualColumnCreator
+    );
+  }
+
   public DruidExpression withArguments(List<DruidExpression> newArgs)
   {
     return new DruidExpression(
@@ -446,6 +502,25 @@ public class DruidExpression
         expressionGenerator,
         newArgs,
         virtualColumnCreator
+    );
+  }
+
+  /**
+   * Returns a copy of this expression as {@link NodeType#SPECIALIZED} backed by a plain
+   * {@link ExpressionVirtualColumn}. When used as an argument of another {@link NodeType#SPECIALIZED} expression, the
+   * {@link org.apache.druid.sql.calcite.rel.VirtualColumnRegistry} will lift this expression into its own virtual
+   * column and replace the argument with a direct column reference to it, which allows the parent virtual column to
+   * reference it.
+   */
+  public DruidExpression asSpecialized()
+  {
+    return new DruidExpression(
+        NodeType.SPECIALIZED,
+        druidType,
+        simpleExtraction,
+        expressionGenerator,
+        arguments,
+        DEFAULT_VIRTUAL_COLUMN_BUILDER
     );
   }
 
@@ -581,15 +656,28 @@ public class DruidExpression
   @FunctionalInterface
   public interface VirtualColumnCreator
   {
-    VirtualColumn create(String name, ColumnType outputType, String expression, ExprMacroTable macroTable);
+    /**
+     * Create a virtual column for an expression.
+     *
+     * @param name       name of the virtual column
+     * @param outputType type of the virtual column
+     * @param parser     expression parser, if needed
+     * @param self       expression, possibly rewritten to refer to specialized virtual columns
+     */
+    VirtualColumn create(
+        String name,
+        ColumnType outputType,
+        ExpressionParser parser,
+        DruidExpression self
+    );
   }
 
   public static class ExpressionVirtualColumnCreator implements VirtualColumnCreator
   {
     @Override
-    public VirtualColumn create(String name, ColumnType outputType, String expression, ExprMacroTable macroTable)
+    public VirtualColumn create(String name, ColumnType outputType, ExpressionParser parser, DruidExpression self)
     {
-      return new ExpressionVirtualColumn(name, expression, outputType, macroTable);
+      return new ExpressionVirtualColumn(name, self.getExpression(), parser.parse(self.getExpression()), outputType);
     }
   }
 }

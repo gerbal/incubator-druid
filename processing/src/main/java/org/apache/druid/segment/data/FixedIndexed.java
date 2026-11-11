@@ -21,8 +21,10 @@ package org.apache.druid.segment.data;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Supplier;
-import org.apache.druid.common.config.NullHandling;
+import it.unimi.dsi.fastutil.ints.IntIntImmutablePair;
+import it.unimi.dsi.fastutil.ints.IntIntPair;
 import org.apache.druid.query.monomorphicprocessing.RuntimeShapeInspector;
+import org.apache.druid.segment.column.TypeStrategies;
 import org.apache.druid.segment.column.TypeStrategy;
 
 import javax.annotation.Nullable;
@@ -57,10 +59,18 @@ public class FixedIndexed<T> implements Indexed<T>
     final byte version = buffer.get();
     Preconditions.checkState(version == 0, "Unknown version [%s]", version);
     final byte flags = buffer.get();
-    final boolean hasNull = (flags & NullHandling.IS_NULL_BYTE) == NullHandling.IS_NULL_BYTE ? true : false;
+    final boolean hasNull = (flags & TypeStrategies.IS_NULL_BYTE) == TypeStrategies.IS_NULL_BYTE ? true : false;
     final boolean isSorted = (flags & IS_SORTED_MASK) == IS_SORTED_MASK ? true : false;
     Preconditions.checkState(!(hasNull && !isSorted), "cannot have null values if not sorted");
     final int size = buffer.getInt() + (hasNull ? 1 : 0);
+    final int valuesCount = hasNull ? size - 1 : size;
+    Preconditions.checkArgument(valuesCount >= 0, "valuesCount[%s] must be non-negative", valuesCount);
+    Preconditions.checkArgument(
+        (long) width * valuesCount <= buffer.remaining(),
+        "size[%s] with width[%s] exceeds the available buffer",
+        size,
+        width
+    );
     final int valuesOffset = buffer.position();
     final Supplier<FixedIndexed<T>> fixedIndexed = () -> new FixedIndexed<>(
         bb,
@@ -73,7 +83,7 @@ public class FixedIndexed<T> implements Indexed<T>
         valuesOffset
     );
 
-    bb.position(buffer.position() + (width * size));
+    bb.position(buffer.position() + (width * valuesCount));
     return fixedIndexed;
   }
 
@@ -168,26 +178,48 @@ public class FixedIndexed<T> implements Indexed<T>
     return IndexedIterable.create(this).iterator();
   }
 
+
+
+  public IntIntPair getRange(
+      @Nullable T startValue,
+      boolean startStrict,
+      @Nullable T endValue,
+      boolean endStrict
+  )
+  {
+    final int firstValue = hasNull ? 1 : 0;
+    int startIndex, endIndex;
+    if (startValue == null) {
+      startIndex = firstValue;
+    } else {
+      final int found = indexOf(startValue);
+      if (found >= firstValue) {
+        startIndex = startStrict ? found + 1 : found;
+      } else {
+        startIndex = -(found + 1);
+      }
+    }
+
+    if (endValue == null) {
+      endIndex = size();
+    } else {
+      final int found = indexOf(endValue);
+      if (found >= firstValue) {
+        endIndex = endStrict ? found : found + 1;
+      } else {
+        endIndex = -(found + 1);
+      }
+    }
+
+    endIndex = Math.max(startIndex, endIndex);
+    return new IntIntImmutablePair(startIndex, endIndex);
+  }
+
   @Override
   public void inspectRuntimeShape(RuntimeShapeInspector inspector)
   {
     inspector.visit("buffer", buffer);
     inspector.visit("typeStrategy", typeStrategy);
     inspector.visit("comparator", comparator);
-  }
-
-  @Override
-  public String toString()
-  {
-    StringBuilder sb = new StringBuilder("FixedIndexed[");
-    if (size() > 0) {
-      for (int i = 0; i < size(); i++) {
-        T value = get(i);
-        sb.append(value).append(',').append(' ');
-      }
-      sb.setLength(sb.length() - 2);
-    }
-    sb.append(']');
-    return sb.toString();
   }
 }

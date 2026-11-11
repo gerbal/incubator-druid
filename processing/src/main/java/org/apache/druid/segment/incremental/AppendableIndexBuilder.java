@@ -29,9 +29,6 @@ public abstract class AppendableIndexBuilder
 {
   @Nullable
   protected IncrementalIndexSchema incrementalIndexSchema = null;
-  protected boolean deserializeComplexMetrics = true;
-  protected boolean concurrentEventAdd = false;
-  protected boolean sortFacts = true;
   protected int maxRowCount = 0;
   protected long maxBytesInMemory = 0;
   // When set to true, for any row that already has metric (with the same name defined in metricSpec),
@@ -40,7 +37,6 @@ public abstract class AppendableIndexBuilder
   // DruidInputSource since that is the only case where we can have existing metrics.
   // This is currently only use by auto compaction and should not be use for anything else.
   protected boolean preserveExistingMetrics = false;
-  protected boolean useMaxMemoryEstimates = true;
 
   protected final Logger log = new Logger(this.getClass());
 
@@ -88,24 +84,6 @@ public abstract class AppendableIndexBuilder
     return this;
   }
 
-  public AppendableIndexBuilder setDeserializeComplexMetrics(final boolean deserializeComplexMetrics)
-  {
-    this.deserializeComplexMetrics = deserializeComplexMetrics;
-    return this;
-  }
-
-  public AppendableIndexBuilder setConcurrentEventAdd(final boolean concurrentEventAdd)
-  {
-    this.concurrentEventAdd = concurrentEventAdd;
-    return this;
-  }
-
-  public AppendableIndexBuilder setSortFacts(final boolean sortFacts)
-  {
-    this.sortFacts = sortFacts;
-    return this;
-  }
-
   public AppendableIndexBuilder setMaxRowCount(final int maxRowCount)
   {
     this.maxRowCount = maxRowCount;
@@ -121,12 +99,6 @@ public abstract class AppendableIndexBuilder
   public AppendableIndexBuilder setPreserveExistingMetrics(final boolean preserveExistingMetrics)
   {
     this.preserveExistingMetrics = preserveExistingMetrics;
-    return this;
-  }
-
-  public AppendableIndexBuilder setUseMaxMemoryEstimates(final boolean useMaxMemoryEstimates)
-  {
-    this.useMaxMemoryEstimates = useMaxMemoryEstimates;
     return this;
   }
 

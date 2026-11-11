@@ -73,6 +73,9 @@ public class RoaringBitmapSerdeFactory implements BitmapSerdeFactory
     @Nullable
     public ImmutableBitmap fromByteBuffer(ByteBuffer buffer, int numBytes)
     {
+      if (numBytes == 0) {
+        return INSTANCE.bitmapFactory.makeEmptyImmutableBitmap();
+      }
       buffer.limit(buffer.position() + numBytes);
       return new WrappedImmutableRoaringBitmap(new ImmutableRoaringBitmap(buffer));
     }
@@ -81,7 +84,7 @@ public class RoaringBitmapSerdeFactory implements BitmapSerdeFactory
     @Override
     public byte[] toBytes(@Nullable ImmutableBitmap val)
     {
-      if (val == null || val.size() == 0) {
+      if (val == null || val.isEmpty()) {
         return new byte[]{};
       }
       return val.toBytes();

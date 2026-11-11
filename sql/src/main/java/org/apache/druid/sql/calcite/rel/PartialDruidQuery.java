@@ -47,6 +47,7 @@ import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.query.DataSource;
 import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.sql.calcite.planner.PlannerContext;
+import org.apache.druid.sql.calcite.run.EngineFeature;
 
 import javax.annotation.Nullable;
 import java.util.ArrayList;
@@ -78,7 +79,14 @@ public class PartialDruidQuery
 
     // WHERE_FILTER, SELECT_PROJECT may be present on any query, except ones with WINDOW.
     WHERE_FILTER,
-    SELECT_PROJECT,
+    SELECT_PROJECT {
+      @Override
+      public boolean canFollow(Stage stage)
+      {
+        // SELECT_PROJECT can be stacked on top of another SELECT_PROJECT.
+        return stage.compareTo(this) <= 0;
+      }
+    },
 
     // AGGREGATE, HAVING_FILTER, AGGREGATE_PROJECT can be present on non-WINDOW aggregating queries.
     AGGREGATE,
@@ -165,12 +173,12 @@ public class PartialDruidQuery
     return new PartialDruidQuery(builderSupplier, inputRel, null, null, null, null, null, null, null, null, null);
   }
 
-  public static PartialDruidQuery createOuterQuery(final PartialDruidQuery inputQuery)
+  public static PartialDruidQuery createOuterQuery(final PartialDruidQuery inputQuery, PlannerContext plannerContext)
   {
     final RelNode inputRel = inputQuery.leafRel();
     return create(
         inputRel.copy(
-            inputQuery.getTraitSet(inputRel.getConvention()),
+            inputQuery.getTraitSet(inputRel.getConvention(), plannerContext),
             inputRel.getInputs()
         )
     );
@@ -253,26 +261,48 @@ public class PartialDruidQuery
     if (selectProject == null) {
       theProject = newSelectProject;
     } else {
-      final List<RexNode> newProjectRexNodes = RelOptUtil.pushPastProject(
-          newSelectProject.getProjects(),
-          selectProject
-      );
-
-      if (RexUtil.isIdentity(newProjectRexNodes, selectProject.getInput().getRowType())) {
-        // The projection is gone.
-        theProject = null;
-      } else {
-        final RelBuilder relBuilder = builderSupplier.get();
-        relBuilder.push(selectProject.getInput());
-        relBuilder.project(
-            newProjectRexNodes,
-            newSelectProject.getRowType().getFieldNames(),
-            true
-        );
-        theProject = (Project) relBuilder.build();
-      }
+      return mergeProject(newSelectProject);
     }
 
+    return new PartialDruidQuery(
+        builderSupplier,
+        scan,
+        whereFilter,
+        theProject,
+        aggregate,
+        aggregateProject,
+        havingFilter,
+        sort,
+        sortProject,
+        window,
+        windowProject
+    );
+  }
+
+  public PartialDruidQuery mergeProject(Project newSelectProject)
+  {
+    if (stage() != Stage.SELECT_PROJECT) {
+      throw new ISE("Expected partial query state to be [%s], but found [%s]", Stage.SELECT_PROJECT, stage());
+    }
+    Project theProject;
+    final List<RexNode> newProjectRexNodes = RelOptUtil.pushPastProject(
+        newSelectProject.getProjects(),
+        selectProject
+    );
+
+    if (RexUtil.isIdentity(newProjectRexNodes, selectProject.getInput().getRowType())) {
+      // The projection is gone.
+      theProject = null;
+    } else {
+      final RelBuilder relBuilder = builderSupplier.get();
+      relBuilder.push(selectProject.getInput());
+      relBuilder.project(
+          newProjectRexNodes,
+          newSelectProject.getRowType().getFieldNames(),
+          true
+      );
+      theProject = (Project) relBuilder.build();
+    }
     return new PartialDruidQuery(
         builderSupplier,
         scan,
@@ -428,7 +458,7 @@ public class PartialDruidQuery
    *
    * @param convention convention to include in the returned array
    */
-  public RelTraitSet getTraitSet(final Convention convention)
+  public RelTraitSet getTraitSet(final Convention convention, final PlannerContext plannerContext)
   {
     final RelTraitSet leafRelTraits = leafRel().getTraitSet();
 
@@ -438,7 +468,9 @@ public class PartialDruidQuery
       case AGGREGATE:
       case AGGREGATE_PROJECT:
         final RelCollation collation = leafRelTraits.getTrait(RelCollationTraitDef.INSTANCE);
-        if ((collation == null || collation.getFieldCollations().isEmpty()) && aggregate.getGroupSets().size() == 1) {
+        if (plannerContext.featureAvailable(EngineFeature.GROUPBY_IMPLICITLY_SORTS)
+            && (collation == null || collation.getFieldCollations().isEmpty())
+            && aggregate.getGroupSets().size() == 1) {
           // Druid sorts by grouping keys when grouping. Add the collation.
           // Note: [aggregate.getGroupSets().size() == 1] above means that collation isn't added for GROUPING SETS.
           final List<RelFieldCollation> sortFields = new ArrayList<>();
@@ -487,7 +519,8 @@ public class PartialDruidQuery
       final RowSignature sourceRowSignature,
       final PlannerContext plannerContext,
       final RexBuilder rexBuilder,
-      final boolean finalizeAggregations
+      final boolean finalizeAggregations,
+      final boolean applyPolicies
   )
   {
     return DruidQuery.fromPartialQuery(
@@ -497,6 +530,7 @@ public class PartialDruidQuery
         plannerContext,
         rexBuilder,
         finalizeAggregations,
+        applyPolicies,
         null
     );
   }
@@ -507,6 +541,7 @@ public class PartialDruidQuery
       final PlannerContext plannerContext,
       final RexBuilder rexBuilder,
       final boolean finalizeAggregations,
+      final boolean applyPolicies,
       @Nullable VirtualColumnRegistry virtualColumnRegistry
   )
   {
@@ -517,6 +552,7 @@ public class PartialDruidQuery
         plannerContext,
         rexBuilder,
         finalizeAggregations,
+        applyPolicies,
         virtualColumnRegistry
     );
   }
@@ -687,6 +723,7 @@ public class PartialDruidQuery
   public int hashCode()
   {
     return Objects.hash(
+        builderSupplier,
         scan,
         whereFilter,
         selectProject,

@@ -26,21 +26,26 @@ import org.apache.calcite.rel.RelRoot;
 import org.apache.calcite.schema.SchemaPlus;
 import org.apache.druid.query.QueryRunnerFactoryConglomerate;
 import org.apache.druid.query.QuerySegmentWalker;
+import org.apache.druid.query.policy.NoopPolicyEnforcer;
+import org.apache.druid.server.security.AuthConfig;
+import org.apache.druid.sql.calcite.parser.DruidSqlParser;
 import org.apache.druid.sql.calcite.planner.CalciteRulesManager;
 import org.apache.druid.sql.calcite.planner.CatalogResolver;
 import org.apache.druid.sql.calcite.planner.PlannerConfig;
 import org.apache.druid.sql.calcite.planner.PlannerContext;
 import org.apache.druid.sql.calcite.planner.PlannerToolbox;
 import org.apache.druid.sql.calcite.run.NativeSqlEngine;
+import org.apache.druid.sql.calcite.schema.ConstantDruidSchemaCatalogProvider;
 import org.apache.druid.sql.calcite.schema.DruidSchema;
 import org.apache.druid.sql.calcite.schema.DruidSchemaCatalog;
 import org.apache.druid.sql.calcite.schema.NamedDruidSchema;
 import org.apache.druid.sql.calcite.schema.NamedViewSchema;
 import org.apache.druid.sql.calcite.schema.ViewSchema;
 import org.apache.druid.sql.calcite.util.CalciteTests;
+import org.apache.druid.sql.hook.DruidHookDispatcher;
 import org.easymock.EasyMock;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
 
@@ -58,23 +63,31 @@ public class ExternalTableScanRuleTest
         CalciteTests.createExprMacroTable(),
         CalciteTests.getJsonMapper(),
         new PlannerConfig(),
-        new DruidSchemaCatalog(
-            EasyMock.createMock(SchemaPlus.class),
-            ImmutableMap.of(
-                "druid", new NamedDruidSchema(EasyMock.createMock(DruidSchema.class), "druid"),
-                NamedViewSchema.NAME, new NamedViewSchema(EasyMock.createMock(ViewSchema.class))
+        new ConstantDruidSchemaCatalogProvider(
+            new DruidSchemaCatalog(
+                EasyMock.createMock(SchemaPlus.class),
+                ImmutableMap.of(
+                    "druid", new NamedDruidSchema(EasyMock.createMock(DruidSchema.class), "druid"),
+                    NamedViewSchema.NAME, new NamedViewSchema(EasyMock.createMock(ViewSchema.class))
+                )
             )
         ),
         CalciteTests.createJoinableFactoryWrapper(),
         CatalogResolver.NULL_RESOLVER,
         "druid",
         new CalciteRulesManager(ImmutableSet.of()),
-        CalciteTests.TEST_AUTHORIZER_MAPPER
+        CalciteTests.TEST_AUTHORIZER_MAPPER,
+        AuthConfig.newBuilder().build(),
+        NoopPolicyEnforcer.instance(),
+        new DruidHookDispatcher()
     );
     final PlannerContext plannerContext = PlannerContext.create(
         toolbox,
-        "DUMMY", // The actual query isn't important for this test
+        "SELECT 1", // The actual query isn't important for this test
+        DruidSqlParser.parse("SELECT 1", false).getMainStatement(),
         engine,
+        null,
+        Collections.emptySet(),
         Collections.emptyMap(),
         null
     );
@@ -84,7 +97,7 @@ public class ExternalTableScanRuleTest
 
     ExternalTableScanRule rule = new ExternalTableScanRule(plannerContext);
     rule.matches(EasyMock.createMock(RelOptRuleCall.class));
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "Cannot use [EXTERN] with SQL engine [native].",
         plannerContext.getPlanningError()
     );

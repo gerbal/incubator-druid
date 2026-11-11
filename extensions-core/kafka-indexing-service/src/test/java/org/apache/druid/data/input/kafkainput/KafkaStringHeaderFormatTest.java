@@ -22,6 +22,7 @@ package org.apache.druid.data.input.kafkainput;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
+import nl.jqno.equalsverifier.EqualsVerifier;
 import org.apache.druid.data.input.kafka.KafkaRecordEntity;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.Pair;
@@ -29,12 +30,13 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.header.internals.RecordHeaders;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 
 
 public class KafkaStringHeaderFormatTest
@@ -72,24 +74,26 @@ public class KafkaStringHeaderFormatTest
       }
   );
   private KafkaRecordEntity inputEntity;
-  private long timestamp = DateTimes.of("2021-06-24T00:00:00.000Z").getMillis();
+  private final long timestamp = DateTimes.of("2021-06-24T00:00:00.000Z").getMillis();
 
   @Test
   public void testSerde() throws JsonProcessingException
   {
-    Assert.assertEquals(
-        KAFKAHEADERNOENCODE,
-        KAFKAHEADERNOENCODE
-    );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         KAFKAHEADERNOENCODE,
         MAPPER.readValue(MAPPER.writeValueAsString(KAFKAHEADERNOENCODE), KafkaStringHeaderFormat.class)
     );
     final KafkaStringHeaderFormat kafkaAsciiHeader = new KafkaStringHeaderFormat("US-ASCII");
-    Assert.assertNotEquals(
+    Assertions.assertNotEquals(
         KAFKAHEADERNOENCODE,
         kafkaAsciiHeader
     );
+  }
+
+  @Test
+  public void testEquals()
+  {
+    EqualsVerifier.forClass(KafkaStringHeaderFormat.class).usingGetClass().verify();
   }
 
   @Test
@@ -99,8 +103,8 @@ public class KafkaStringHeaderFormatTest
     Headers headers = new RecordHeaders(SAMPLE_HEADERS);
     inputEntity = new KafkaRecordEntity(new ConsumerRecord<byte[], byte[]>(
         "sample", 0, 0, timestamp,
-        null, null, 0, 0,
-        null, "sampleValue".getBytes(StandardCharsets.UTF_8), headers
+        null, 0, 0,
+        null, "sampleValue".getBytes(StandardCharsets.UTF_8), headers, Optional.empty()
     ));
     List<Pair<String, Object>> expectedResults = Arrays.asList(
         Pair.of("test.kafka.header.encoding", "application/json"),
@@ -109,7 +113,7 @@ public class KafkaStringHeaderFormatTest
 
     KafkaHeaderFormat headerInput = new KafkaStringHeaderFormat(null);
     KafkaHeaderReader headerParser = headerInput.createReader(inputEntity.getRecord().headers(), headerLabelPrefix);
-    Assert.assertEquals(expectedResults, headerParser.read());
+    Assertions.assertEquals(expectedResults, headerParser.read());
   }
 
   @Test
@@ -150,8 +154,8 @@ public class KafkaStringHeaderFormatTest
     Headers headers = new RecordHeaders(header);
     inputEntity = new KafkaRecordEntity(new ConsumerRecord<byte[], byte[]>(
         "sample", 0, 0, timestamp,
-        null, null, 0, 0,
-        null, "sampleValue".getBytes(StandardCharsets.UTF_8), headers
+        null, 0, 0,
+        null, "sampleValue".getBytes(StandardCharsets.UTF_8), headers, Optional.empty()
     ));
     List<Pair<String, Object>> expectedResults = Arrays.asList(
         Pair.of("test.kafka.header.encoding", "application/json"),
@@ -161,7 +165,7 @@ public class KafkaStringHeaderFormatTest
     KafkaHeaderFormat headerInput = new KafkaStringHeaderFormat("US-ASCII");
     KafkaHeaderReader headerParser = headerInput.createReader(inputEntity.getRecord().headers(), headerLabelPrefix);
     List<Pair<String, Object>> rows = headerParser.read();
-    Assert.assertEquals(expectedResults, rows);
+    Assertions.assertEquals(expectedResults, rows);
   }
 
   @Test
@@ -202,8 +206,8 @@ public class KafkaStringHeaderFormatTest
     Headers headers = new RecordHeaders(header);
     inputEntity = new KafkaRecordEntity(new ConsumerRecord<byte[], byte[]>(
         "sample", 0, 0, timestamp,
-        null, null, 0, 0,
-        null, "sampleValue".getBytes(StandardCharsets.UTF_8), headers
+        null, 0, 0,
+        null, "sampleValue".getBytes(StandardCharsets.UTF_8), headers, Optional.empty()
     ));
     List<Pair<String, Object>> expectedResults = Arrays.asList(
         Pair.of("test.kafka.header.encoding", "?pplic?tion/json"),
@@ -213,7 +217,7 @@ public class KafkaStringHeaderFormatTest
     KafkaHeaderFormat headerInput = new KafkaStringHeaderFormat("US-ASCII");
     KafkaHeaderReader headerParser = headerInput.createReader(inputEntity.getRecord().headers(), headerLabelPrefix);
     List<Pair<String, Object>> rows = headerParser.read();
-    Assert.assertEquals(expectedResults, rows);
+    Assertions.assertEquals(expectedResults, rows);
   }
 }
 

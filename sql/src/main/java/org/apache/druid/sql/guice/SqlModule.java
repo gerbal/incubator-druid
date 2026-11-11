@@ -20,21 +20,19 @@
 package org.apache.druid.sql.guice;
 
 import com.google.common.base.Preconditions;
-import com.google.common.base.Supplier;
 import com.google.inject.Binder;
 import com.google.inject.Inject;
 import com.google.inject.Key;
 import com.google.inject.Module;
 import com.google.inject.Provides;
+import com.google.inject.multibindings.Multibinder;
 import org.apache.druid.catalog.model.TableDefnRegistry;
 import org.apache.druid.guice.LazySingleton;
 import org.apache.druid.guice.PolyBind;
 import org.apache.druid.guice.annotations.NativeQuery;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
-import org.apache.druid.query.DefaultQueryConfig;
 import org.apache.druid.server.QueryScheduler;
 import org.apache.druid.server.log.RequestLogger;
-import org.apache.druid.server.security.AuthConfig;
 import org.apache.druid.sql.SqlLifecycleManager;
 import org.apache.druid.sql.SqlStatementFactory;
 import org.apache.druid.sql.SqlToolbox;
@@ -43,8 +41,10 @@ import org.apache.druid.sql.calcite.aggregation.SqlAggregationModule;
 import org.apache.druid.sql.calcite.expression.builtin.QueryLookupOperatorConversion;
 import org.apache.druid.sql.calcite.planner.CalcitePlannerModule;
 import org.apache.druid.sql.calcite.planner.CatalogResolver;
+import org.apache.druid.sql.calcite.planner.CatalogTableWriter;
 import org.apache.druid.sql.calcite.planner.PlannerFactory;
 import org.apache.druid.sql.calcite.run.NativeSqlEngine;
+import org.apache.druid.sql.calcite.run.SqlEngine;
 import org.apache.druid.sql.calcite.schema.DruidCalciteSchemaModule;
 import org.apache.druid.sql.calcite.schema.DruidSchemaManager;
 import org.apache.druid.sql.calcite.schema.NoopDruidSchemaManager;
@@ -125,6 +125,15 @@ public class SqlModule implements Module
 
     // Default do-nothing catalog resolver
     binder.bind(CatalogResolver.class).toInstance(CatalogResolver.NULL_RESOLVER);
+
+    // Default catalog writer, which reports that catalog DDL needs the druid-catalog extension
+    binder.bind(CatalogTableWriter.class).toInstance(CatalogTableWriter.NOT_AVAILABLE);
+
+    // Bind the engine
+    Multibinder.newSetBinder(binder, SqlEngine.class)
+               .addBinding()
+               .to(NativeSqlEngine.class)
+               .in(LazySingleton.class);
   }
 
   private boolean isEnabled()
@@ -165,8 +174,6 @@ public class SqlModule implements Module
         final ServiceEmitter emitter,
         final RequestLogger requestLogger,
         final QueryScheduler queryScheduler,
-        final AuthConfig authConfig,
-        final Supplier<DefaultQueryConfig> defaultQueryConfig,
         final SqlLifecycleManager sqlLifecycleManager
     )
     {
@@ -176,8 +183,6 @@ public class SqlModule implements Module
           emitter,
           requestLogger,
           queryScheduler,
-          authConfig,
-          defaultQueryConfig.get(),
           sqlLifecycleManager
       );
     }

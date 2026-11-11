@@ -36,8 +36,8 @@ import org.apache.druid.query.timeseries.TimeseriesQueryQueryToolChest;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.RowSignature;
 import org.easymock.EasyMock;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
@@ -51,13 +51,14 @@ public class ArrayOfDoublesSketchToBase64StringPostAggregatorTest
         new ConstantPostAggregator("", 0)
     );
     DefaultObjectMapper mapper = new DefaultObjectMapper();
-    ArrayOfDoublesSketchToBase64StringPostAggregator andBackAgain = mapper.readValue(
+    mapper.registerModules(new ArrayOfDoublesSketchModule().getJacksonModules());
+    PostAggregator andBackAgain = mapper.readValue(
         mapper.writeValueAsString(there),
-        ArrayOfDoublesSketchToBase64StringPostAggregator.class
+        PostAggregator.class
     );
 
-    Assert.assertEquals(there, andBackAgain);
-    Assert.assertArrayEquals(there.getCacheKey(), andBackAgain.getCacheKey());
+    Assertions.assertEquals(there, andBackAgain);
+    Assertions.assertArrayEquals(there.getCacheKey(), andBackAgain.getCacheKey());
   }
 
   @Test
@@ -68,7 +69,7 @@ public class ArrayOfDoublesSketchToBase64StringPostAggregatorTest
         new ConstantPostAggregator("", 0)
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "ArrayOfDoublesSketchToBase64StringPostAggregator{name='a', field=ConstantPostAggregator{name='', constantValue=0}}",
         postAgg.toString()
     );
@@ -91,7 +92,7 @@ public class ArrayOfDoublesSketchToBase64StringPostAggregatorTest
         "a",
         field1
     );
-    Assert.assertNotNull("output string should not be null", postAgg.compute(ImmutableMap.of()));
+    Assertions.assertNotNull(postAgg.compute(ImmutableMap.of()), "output string should not be null");
   }
 
   @Test
@@ -101,8 +102,8 @@ public class ArrayOfDoublesSketchToBase64StringPostAggregatorTest
         "a",
         new ConstantPostAggregator("", 0)
     );
-    Exception exception = Assert.assertThrows(IAE.class, () -> postAgg.getComparator());
-    Assert.assertEquals("Comparing sketch summaries is not supported", exception.getMessage());
+    Exception exception = Assertions.assertThrows(IAE.class, () -> postAgg.getComparator());
+    Assertions.assertEquals("Comparing sketch summaries is not supported", exception.getMessage());
   }
 
   @Test
@@ -134,7 +135,7 @@ public class ArrayOfDoublesSketchToBase64StringPostAggregatorTest
             )
             .build();
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         RowSignature.builder()
             .addTimeColumn()
             .add("count", ColumnType.LONG)

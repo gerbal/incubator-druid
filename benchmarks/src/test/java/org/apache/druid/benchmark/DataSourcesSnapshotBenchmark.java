@@ -24,6 +24,7 @@ import org.apache.druid.client.ImmutableDruidDataSource;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 import org.apache.druid.timeline.partition.NoneShardSpec;
 import org.joda.time.Interval;
 import org.openjdk.jmh.annotations.Benchmark;
@@ -41,9 +42,7 @@ import org.openjdk.jmh.infra.Blackhole;
 
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 @State(Scope.Benchmark)
@@ -54,7 +53,7 @@ import java.util.concurrent.TimeUnit;
 @Measurement(iterations = 50)
 public class DataSourcesSnapshotBenchmark
 {
-  private static Interval TEST_SEGMENT_INTERVAL = Intervals.of("2012-03-15T00:00:00.000/2012-03-16T00:00:00.000");
+  private static final Interval TEST_SEGMENT_INTERVAL = Intervals.of("2012-03-15T00:00:00.000/2012-03-16T00:00:00.000");
 
   @Param({"500", "1000"})
   private int numDataSources;
@@ -69,32 +68,26 @@ public class DataSourcesSnapshotBenchmark
   {
     long start = System.currentTimeMillis();
 
-    Map<String, ImmutableDruidDataSource> dataSources = new HashMap<>();
+    final List<DataSegment> segments = new ArrayList<>();
 
     for (int i = 0; i < numDataSources; i++) {
       String dataSource = StringUtils.format("ds-%d", i);
-      List<DataSegment> segments = new ArrayList<>();
 
       for (int j = 0; j < numSegmentPerDataSource; j++) {
         segments.add(
-            new DataSegment(
-                dataSource,
-                TEST_SEGMENT_INTERVAL,
-                String.valueOf(j),
-                Collections.emptyMap(),
-                Collections.emptyList(),
-                Collections.emptyList(),
-                NoneShardSpec.instance(),
-                0,
-                10L
-            )
+            DataSegment.builder(SegmentId.of(dataSource, TEST_SEGMENT_INTERVAL, String.valueOf(j), 0))
+                       .loadSpec(Collections.emptyMap())
+                       .dimensions(Collections.emptyList())
+                       .metrics(Collections.emptyList())
+                       .shardSpec(NoneShardSpec.instance())
+                       .binaryVersion(0)
+                       .size(10L)
+                       .build()
         );
       }
-
-      dataSources.put(dataSource, new ImmutableDruidDataSource(dataSource, Collections.emptyMap(), segments));
     }
 
-    snapshot = new DataSourcesSnapshot(dataSources);
+    snapshot = DataSourcesSnapshot.fromUsedSegments(segments);
 
     System.out.println("Setup Time " + (System.currentTimeMillis() - start) + " ms");
   }

@@ -24,6 +24,7 @@ import com.google.common.collect.MinMaxPriorityQueue;
 import com.google.common.collect.Ordering;
 import com.google.common.primitives.Ints;
 
+import javax.annotation.Nullable;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.Objects;
@@ -76,11 +77,22 @@ public class StableLimitingSorter<T>
   }
 
   /**
+   * Returns the greatest element currently retained, or null if there are none. Once the sorter is full, an element
+   * offered to {@link #add} is retained only if it sorts strictly before this one.
+   */
+  @Nullable
+  public T peekLast()
+  {
+    final NumberedElement<T> last = queue.peekLast();
+    return last == null ? null : last.getElement();
+  }
+
+  /**
    * Drain elements in sorted order (least first).
    */
   public Iterator<T> drain()
   {
-    return new Iterator<T>()
+    return new Iterator<>()
     {
       @Override
       public boolean hasNext()

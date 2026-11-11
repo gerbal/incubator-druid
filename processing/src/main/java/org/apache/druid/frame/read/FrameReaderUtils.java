@@ -21,16 +21,19 @@ package org.apache.druid.frame.read;
 
 import com.google.common.primitives.Ints;
 import org.apache.datasketches.memory.Memory;
+import org.apache.druid.frame.FrameType;
 import org.apache.druid.frame.allocation.MemoryRange;
+import org.apache.druid.frame.field.ComplexFieldReader;
 import org.apache.druid.frame.segment.row.FrameColumnSelectorFactory;
 import org.apache.druid.segment.ColumnSelectorFactory;
 import org.apache.druid.segment.ColumnValueSelector;
-import org.apache.druid.segment.column.ColumnCapabilities;
+import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.RowSignature;
-import org.apache.druid.segment.column.ValueType;
+import org.apache.druid.segment.serde.ComplexMetricSerde;
 
 import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.function.Supplier;
 
 /**
@@ -38,6 +41,15 @@ import java.util.function.Supplier;
  */
 public class FrameReaderUtils
 {
+  /**
+   * Columns that are used to directly select row memory through a {@link ColumnSelectorFactory}.
+   */
+  public static final List<String> ROW_MEMORY_COLUMNS = List.of(
+      FrameColumnSelectorFactory.FRAME_TYPE_COLUMN,
+      FrameColumnSelectorFactory.ROW_SIGNATURE_COLUMN,
+      FrameColumnSelectorFactory.ROW_MEMORY_COLUMN
+  );
+
   /**
    * Returns a ByteBuffer containing data from the provided {@link Memory}. The ByteBuffer is always newly
    * created, so it is OK to change its position, limit, etc. However, it may point directly to the backing memory
@@ -65,22 +77,30 @@ public class FrameReaderUtils
    * to be null. Callers must check for this.
    *
    * @param columnSelectorFactory frame column selector factory
+   * @param expectedFrameType     expected type of the target frame
    * @param expectedSignature     expected signature of the target frame
    */
   @Nullable
   public static Supplier<MemoryRange<Memory>> makeRowMemorySupplier(
       final ColumnSelectorFactory columnSelectorFactory,
+      final FrameType expectedFrameType,
       final RowSignature expectedSignature
   )
   {
     if (mayBeAbleToSelectRowMemory(columnSelectorFactory)) {
-      final ColumnValueSelector<?> signatureSelector =
+      @SuppressWarnings("unchecked")
+      final ColumnValueSelector<FrameType> frameTypeSelector =
+          columnSelectorFactory.makeColumnValueSelector(FrameColumnSelectorFactory.FRAME_TYPE_COLUMN);
+
+      @SuppressWarnings("unchecked")
+      final ColumnValueSelector<RowSignature> signatureSelector =
           columnSelectorFactory.makeColumnValueSelector(FrameColumnSelectorFactory.ROW_SIGNATURE_COLUMN);
 
-      final ColumnValueSelector<?> memorySelector =
+      @SuppressWarnings("unchecked")
+      final ColumnValueSelector<MemoryRange<Memory>> memorySelector =
           columnSelectorFactory.makeColumnValueSelector(FrameColumnSelectorFactory.ROW_MEMORY_COLUMN);
 
-      return new Supplier<MemoryRange<Memory>>()
+      return new Supplier<>()
       {
         private RowSignature lastSignature = null;
         private boolean lastSignatureOk = false;
@@ -88,7 +108,13 @@ public class FrameReaderUtils
         @Override
         public MemoryRange<Memory> get()
         {
-          final RowSignature selectedSignature = (RowSignature) signatureSelector.getObject();
+          final FrameType selectedFrameType = frameTypeSelector.getObject();
+
+          if (selectedFrameType != expectedFrameType) {
+            return null;
+          }
+
+          final RowSignature selectedSignature = signatureSelector.getObject();
 
           //noinspection ObjectEquality: checking reference equality on purpose
           if (selectedSignature != lastSignature) {
@@ -97,8 +123,7 @@ public class FrameReaderUtils
           }
 
           if (lastSignatureOk) {
-            //noinspection unchecked
-            return (MemoryRange<Memory>) memorySelector.getObject();
+            return memorySelector.getObject();
           } else {
             return null;
           }
@@ -117,24 +142,51 @@ public class FrameReaderUtils
   public static int compareMemoryUnsigned(
       final Memory memory1,
       final long position1,
-      final long length1,
+      final int length1,
       final Memory memory2,
       final long position2,
-      final long length2
+      final int length2
   )
   {
-    final long commonLength = Math.min(length1, length2);
+    final int commonLength = Math.min(length1, length2);
 
-    for (long i = 0; i < commonLength; i++) {
-      final byte byte1 = memory1.getByte(position1 + i);
-      final byte byte2 = memory2.getByte(position2 + i);
-      final int cmp = (byte1 & 0xFF) - (byte2 & 0xFF); // Unsigned comparison
+    for (int i = 0; i < commonLength; i += Long.BYTES) {
+      final int remaining = commonLength - i;
+      final long r1 = readComparableLong(memory1, position1 + i, remaining);
+      final long r2 = readComparableLong(memory2, position2 + i, remaining);
+      final int cmp = Long.compare(r1, r2);
       if (cmp != 0) {
         return cmp;
       }
     }
 
-    return Long.compare(length1, length2);
+    return Integer.compare(length1, length2);
+  }
+
+  public static long readComparableLong(final Memory memory, final long position, final int length)
+  {
+    long retVal = 0;
+    switch (length) {
+      case 7:
+        retVal |= (memory.getByte(position + 6) & 0xFFL) << 8;
+      case 6:
+        retVal |= (memory.getByte(position + 5) & 0xFFL) << 16;
+      case 5:
+        retVal |= (memory.getByte(position + 4) & 0xFFL) << 24;
+      case 4:
+        retVal |= (memory.getByte(position + 3) & 0xFFL) << 32;
+      case 3:
+        retVal |= (memory.getByte(position + 2) & 0xFFL) << 40;
+      case 2:
+        retVal |= (memory.getByte(position + 1) & 0xFFL) << 48;
+      case 1:
+        retVal |= (memory.getByte(position) & 0xFFL) << 56;
+        break;
+      default:
+        retVal = Long.reverseBytes(memory.getLong(position));
+    }
+
+    return retVal + Long.MIN_VALUE;
   }
 
   /**
@@ -189,6 +241,52 @@ public class FrameReaderUtils
     return Integer.compare(length1, length2);
   }
 
+  public static int compareComplexTypes(
+      final byte[] array1,
+      final int position1,
+      final byte[] array2,
+      final int position2,
+      final ColumnType columnType,
+      final ComplexMetricSerde complexMetricSerde
+  )
+  {
+    return columnType.getNullableStrategy().compare(
+        ComplexFieldReader.readFieldFromByteArray(complexMetricSerde, array1, position1),
+        ComplexFieldReader.readFieldFromByteArray(complexMetricSerde, array2, position2)
+    );
+  }
+
+  public static int compareComplexTypes(
+      final Memory memory,
+      final long position1,
+      final byte[] array,
+      final int position2,
+      final ColumnType columnType,
+      final ComplexMetricSerde complexMetricSerde
+  )
+  {
+    return columnType.getNullableStrategy().compare(
+        ComplexFieldReader.readFieldFromMemory(complexMetricSerde, memory, position1),
+        ComplexFieldReader.readFieldFromByteArray(complexMetricSerde, array, position2)
+    );
+  }
+
+  public static int compareComplexTypes(
+      final Memory memory1,
+      final long position1,
+      final Memory memory2,
+      final long position2,
+      final ColumnType columnType,
+      final ComplexMetricSerde complexMetricSerde
+  )
+  {
+    return columnType.getNullableStrategy().compare(
+        ComplexFieldReader.readFieldFromMemory(complexMetricSerde, memory1, position1),
+        ComplexFieldReader.readFieldFromMemory(complexMetricSerde, memory2, position2)
+    );
+  }
+
+
   /**
    * Returns whether a {@link ColumnSelectorFactory} may be able to provide a {@link MemoryRange}. This enables
    * efficient copying without needing to deal with each field individually.
@@ -198,18 +296,10 @@ public class FrameReaderUtils
    */
   private static boolean mayBeAbleToSelectRowMemory(final ColumnSelectorFactory columnSelectorFactory)
   {
-    final ColumnCapabilities rowSignatureCapabilities =
-        columnSelectorFactory.getColumnCapabilities(FrameColumnSelectorFactory.ROW_SIGNATURE_COLUMN);
-
-    if (rowSignatureCapabilities == null || rowSignatureCapabilities.getType() != ValueType.COMPLEX) {
-      return false;
-    }
-
-    final ColumnCapabilities rowMemoryCapabilities =
-        columnSelectorFactory.getColumnCapabilities(FrameColumnSelectorFactory.ROW_MEMORY_COLUMN);
-
-    if (rowMemoryCapabilities == null || rowMemoryCapabilities.getType() != ValueType.COMPLEX) {
-      return false;
+    for (final String columnName : ROW_MEMORY_COLUMNS) {
+      if (columnSelectorFactory.getColumnCapabilities(columnName) == null) {
+        return false;
+      }
     }
 
     return true;

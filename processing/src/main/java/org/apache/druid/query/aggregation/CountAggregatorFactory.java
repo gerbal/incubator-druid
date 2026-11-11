@@ -23,13 +23,13 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import org.apache.druid.math.expr.ExprMacroTable;
 import org.apache.druid.segment.ColumnInspector;
 import org.apache.druid.segment.ColumnSelectorFactory;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
 
 import javax.annotation.Nullable;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 
@@ -40,9 +40,7 @@ public class CountAggregatorFactory extends AggregatorFactory
   private final String name;
 
   @JsonCreator
-  public CountAggregatorFactory(
-      @JsonProperty("name") String name
-  )
+  public CountAggregatorFactory(@JsonProperty("name") String name)
   {
     Preconditions.checkNotNull(name, "Must have a valid, non-null aggregator name");
 
@@ -94,13 +92,7 @@ public class CountAggregatorFactory extends AggregatorFactory
   @Override
   public AggregatorFactory getCombiningFactory()
   {
-    return new LongSumAggregatorFactory(name, name);
-  }
-
-  @Override
-  public List<AggregatorFactory> getRequiredColumns()
-  {
-    return Collections.singletonList(new CountAggregatorFactory(name));
+    return new LongSumAggregatorFactory(name, name, null, ExprMacroTable.nil(), true);
   }
 
   @Override

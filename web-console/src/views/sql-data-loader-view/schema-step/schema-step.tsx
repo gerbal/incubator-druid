@@ -26,22 +26,37 @@ import {
   Menu,
   MenuDivider,
   MenuItem,
+  PopoverNext,
   Tag,
 } from '@blueprintjs/core';
 import { IconNames } from '@blueprintjs/icons';
-import { Popover2 } from '@blueprintjs/popover2';
 import classNames from 'classnames';
 import { select, selectAll } from 'd3-selection';
-import type { QueryResult } from 'druid-query-toolkit';
-import { C, F, QueryRunner, SqlExpression, SqlQuery } from 'druid-query-toolkit';
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  C,
+  Column,
+  F,
+  QueryResult,
+  QueryRunner,
+  SqlExpression,
+  SqlQuery,
+  SqlType,
+} from 'druid-query-toolkit';
+import type { JSX } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useState } from 'react';
 
-import { ClearableInput, LearnMore, Loader } from '../../../components';
+import {
+  ClearableInput,
+  ENABLED_DISABLED_OPTIONS_TEXT,
+  LearnMore,
+  Loader,
+  MenuBoolean,
+} from '../../../components';
 import { AsyncActionDialog } from '../../../dialogs';
-import type { Execution, IngestQueryPattern } from '../../../druid-models';
+import type { Execution, ExternalConfig, IngestQueryPattern } from '../../../druid-models';
 import {
   changeQueryPatternExpression,
-  externalConfigToTableExpression,
+  DETECTION_TIMESTAMP_SPEC,
   fitIngestQueryPattern,
   getDestinationMode,
   getQueryPatternExpression,
@@ -49,7 +64,7 @@ import {
   ingestQueryPatternToQuery,
   possibleDruidFormatForValues,
   TIME_COLUMN,
-  WorkbenchQueryPart,
+  WorkbenchQuery,
 } from '../../../druid-models';
 import {
   executionBackgroundResultStatusCheck,
@@ -57,6 +72,7 @@ import {
   submitTaskQuery,
 } from '../../../helpers';
 import { useLastDefined, usePermanentCallback, useQueryManager } from '../../../hooks';
+import { useLastDefinedDeep } from '../../../hooks/use-last-defined-deep';
 import { getLink } from '../../../links';
 import { AppToaster } from '../../../singletons';
 import type { QueryAction } from '../../../utils';
@@ -64,16 +80,19 @@ import {
   caseInsensitiveContains,
   change,
   dataTypeToIcon,
+  deepSet,
   DruidError,
+  EXPERIMENTAL_ICON,
   filterMap,
   oneOf,
   queryDruidSql,
-  sampleDataToQuery,
+  queryResultToValuesQuery,
   tickIcon,
   timeFormatToSql,
   wait,
   without,
 } from '../../../utils';
+import { getHeaderFromSampleResponse, postToSampler } from '../../../utils/sampler';
 import { FlexibleQueryInput } from '../../workbench-view/flexible-query-input/flexible-query-input';
 import { ColumnActions } from '../column-actions/column-actions';
 import { ColumnEditor } from '../column-editor/column-editor';
@@ -261,7 +280,9 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
   const [showRollupConfirm, setShowRollupConfirm] = useState(false);
   const [showRollupAnalysisPane, setShowRollupAnalysisPane] = useState(false);
   const [showDestinationDialog, setShowDestinationDialog] = useState(false);
-  const lastWorkingQueryPattern = useRef<IngestQueryPattern | undefined>();
+  const [lastWorkingQueryPattern, setLastWorkingQueryPattern] = useState<
+    IngestQueryPattern | undefined
+  >();
 
   const columnFilter = useCallback(
     (columnName: string) => caseInsensitiveContains(columnName, columnSearch),
@@ -288,12 +309,30 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
     onQueryStringChange(parsedQuery.apply(queryAction).toString());
   });
 
+  const handleModeSelect = (newMode: Mode) => {
+    if (newMode === 'sql' && editorColumn) {
+      if (editorColumn.dirty) {
+        AppToaster.show({
+          message:
+            'Please save or discard the changes in the column editor before switching to the SQL tab.',
+          intent: Intent.WARNING,
+        });
+        return;
+      }
+
+      setEditorColumn(undefined);
+    }
+
+    setMode(newMode);
+  };
+
   const handleColumnSelect = usePermanentCallback((index: number) => {
     if (!ingestQueryPattern) return;
 
     if (editorColumn?.dirty) {
       AppToaster.show({
-        message: 'Please save or discard the changes in the column editor.',
+        message:
+          'Please save or discard the changes in the column editor before switching columns.',
         intent: Intent.WARNING,
       });
       return;
@@ -334,9 +373,9 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
   // Use this direct DOM manipulation via d3 to avoid re-rendering the table when the selection changes
   useLayoutEffect(() => {
     if (mode !== 'table') return;
-    selectAll('.preview-table .rt-th').classed('selected', false);
+    selectAll('.preview-table .ct-th').classed('selected', false);
     if (selectedColumnIndex !== -1) {
-      select(`.preview-table .rt-th.column${selectedColumnIndex}`).classed('selected', true);
+      select(`.preview-table .ct-th.column${selectedColumnIndex}`).classed('selected', true);
     }
   }, [mode, selectedColumnIndex, columnSearch]);
 
@@ -364,44 +403,97 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
 
   const [existingTableState] = useQueryManager<string, string[]>({
     initQuery: '',
-    processQuery: async (_: string, _cancelToken) => {
+    processQuery: async (_, signal) => {
       // Check if datasource already exists
-      const tables = await queryDruidSql({
-        query: `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'druid' ORDER BY TABLE_NAME ASC`,
-        resultFormat: 'array',
-      });
+      const tables = await queryDruidSql(
+        {
+          query: `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'druid' ORDER BY TABLE_NAME ASC`,
+          resultFormat: 'array',
+          context: { engine: 'native' },
+        },
+        signal,
+      );
 
       return tables.map(t => t[0]);
     },
   });
 
-  const sampleQueryString = useLastDefined(
+  const sampleExternalConfig = useLastDefinedDeep(
     ingestQueryPattern && mode !== 'sql' // Only sample the data if we are not in the SQL tab live editing the SQL
-      ? SqlQuery.create(
-          externalConfigToTableExpression(ingestQueryPattern.mainExternalConfig),
-        ).toString()
+      ? ingestQueryPattern.mainExternalConfig
       : undefined,
   );
 
-  const [sampleState] = useQueryManager<string, QueryResult, Execution>({
-    query: sampleQueryString,
-    processQuery: async (sampleQueryString, cancelToken) => {
-      return extractResult(
-        await submitTaskQuery({
-          query: sampleQueryString,
-          context: {
-            sqlOuterLimit: 50,
+  const [sampleState] = useQueryManager<ExternalConfig, QueryResult, Execution>({
+    query: sampleExternalConfig,
+    processQuery: async (sampleExternalConfig, signal) => {
+      const sampleResponse = await postToSampler(
+        {
+          type: 'index_parallel',
+          spec: {
+            ioConfig: {
+              type: 'index_parallel',
+              inputSource: sampleExternalConfig.inputSource,
+              inputFormat: deepSet(sampleExternalConfig.inputFormat, 'keepNullColumns', true),
+            },
+            dataSchema: {
+              dataSource: 'sample',
+              timestampSpec: DETECTION_TIMESTAMP_SPEC,
+              dimensionsSpec: {
+                dimensions: filterMap(sampleExternalConfig.signature, s => {
+                  const columnName = s.getColumnName();
+                  if (columnName === TIME_COLUMN) return;
+                  if (s.columnType.isArray()) {
+                    return {
+                      type: 'auto',
+                      castToType: s.columnType.getNativeType().toUpperCase(),
+                      name: columnName,
+                    };
+                  } else {
+                    const t = s.columnType.getNativeType();
+                    return {
+                      name: columnName,
+                      type: t === 'COMPLEX<json>' ? 'json' : t,
+                    };
+                  }
+                }),
+              },
+              granularitySpec: {
+                rollup: false,
+              },
+            },
           },
-          cancelToken,
-        }),
+          samplerConfig: {
+            numRows: 50,
+            timeoutMs: 15000,
+          },
+        },
+        'sample',
+        signal,
       );
+
+      const columns = getHeaderFromSampleResponse(sampleResponse).map(({ name, type }) => {
+        return new Column({
+          name,
+          nativeType: type,
+          sqlType: name === TIME_COLUMN ? 'TIMESTAMP' : SqlType.fromNativeType(type).toString(),
+        });
+      });
+
+      return new QueryResult({
+        header: columns,
+        rows: filterMap(sampleResponse.data, r => {
+          const { parsed } = r;
+          if (!parsed) return;
+          return columns.map(({ name }) => parsed[name]);
+        }),
+      });
     },
-    backgroundStatusCheck: executionBackgroundResultStatusCheck,
   });
 
   const sampleDataQuery = useMemo(() => {
     if (!sampleState.data) return;
-    return sampleDataToQuery(sampleState.data);
+    return queryResultToValuesQuery(sampleState.data);
   }, [sampleState.data]);
 
   const previewQueryString = useLastDefined(
@@ -412,9 +504,8 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
 
   const [previewResultState] = useQueryManager<string, QueryResult, Execution>({
     query: previewQueryString,
-    processQuery: async (previewQueryString, cancelToken) => {
-      const taskEngine = WorkbenchQueryPart.isTaskEngineNeeded(previewQueryString);
-      if (taskEngine) {
+    processQuery: async (previewQueryString, signal) => {
+      if (WorkbenchQuery.isTaskEngineNeeded(previewQueryString)) {
         return extractResult(
           await submitTaskQuery({
             query: previewQueryString,
@@ -423,7 +514,7 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
               finalizeAggregations: false,
               sqlOuterLimit: 25,
             },
-            cancelToken,
+            signal,
           }),
         );
       } else {
@@ -432,30 +523,33 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
           result = await queryRunner.runQuery({
             query: previewQueryString,
             extraQueryContext: { sqlOuterLimit: 25, sqlStringifyArrays: false },
-            cancelToken,
+            signal,
           });
         } catch (e) {
           throw new DruidError(e);
         }
 
-        return result.attachQuery({}, SqlQuery.maybeParse(previewQueryString));
+        return result.attachQuery({} as any, SqlQuery.maybeParse(previewQueryString));
       }
     },
     backgroundStatusCheck: executionBackgroundResultStatusCheck,
   });
 
-  useEffect(() => {
-    if (!previewResultState.data) return;
-    lastWorkingQueryPattern.current = ingestQueryPattern;
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- excluding 'ingestQueryPattern'
-  }, [previewResultState]);
+  // Remember the query pattern that last produced a preview so that an error can be reverted
+  const [prevPreviewResultState, setPrevPreviewResultState] = useState(previewResultState);
+  if (previewResultState !== prevPreviewResultState) {
+    setPrevPreviewResultState(previewResultState);
+    if (previewResultState.data) setLastWorkingQueryPattern(ingestQueryPattern);
+  }
 
   const unusedColumns = ingestQueryPattern
-    ? ingestQueryPattern.mainExternalConfig.signature.filter(
-        ({ name }) =>
-          !ingestQueryPattern.dimensions.some(d => d.containsColumnName(name)) &&
-          !ingestQueryPattern.metrics?.some(m => m.containsColumnName(name)),
-      )
+    ? ingestQueryPattern.mainExternalConfig.signature.filter(columnDeclaration => {
+        const columnName = columnDeclaration.getColumnName();
+        return (
+          !ingestQueryPattern.dimensions.some(d => d.containsColumnName(columnName)) &&
+          !ingestQueryPattern.metrics?.some(m => m.containsColumnName(columnName))
+        );
+      })
     : [];
 
   const timeColumn =
@@ -476,8 +570,8 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
       subtitle="Configure schema"
       toolbar={
         <>
-          <Popover2
-            position="bottom"
+          <PopoverNext
+            placement="bottom"
             content={
               <Menu>
                 <MenuItem
@@ -500,17 +594,19 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
                 )}
               </Menu>
             }
+            lazy
+            shouldReturnFocusOnClose={false}
           >
-            <Button icon={IconNames.FILTER} minimal>
+            <Button icon={IconNames.FILTER} variant="minimal">
               Filters &nbsp;
               <Tag minimal round>
                 {ingestQueryPattern ? ingestQueryPattern.filters.length : '?'}
               </Tag>
             </Button>
-          </Popover2>
+          </PopoverNext>
           {ingestQueryPattern && (
-            <Popover2
-              position="bottom"
+            <PopoverNext
+              placement="bottom"
               content={
                 <Menu>
                   {timeColumn ? (
@@ -536,8 +632,10 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
                   )}
                 </Menu>
               }
+              lazy
+              shouldReturnFocusOnClose={false}
             >
-              <Button icon={IconNames.SPLIT_COLUMNS} minimal>
+              <Button icon={IconNames.SPLIT_COLUMNS} variant="minimal">
                 Partition &nbsp;
                 <Tag minimal round>
                   {ingestQueryPattern.partitionedBy === 'all'
@@ -545,11 +643,11 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
                     : ingestQueryPattern.partitionedBy}
                 </Tag>
               </Button>
-            </Popover2>
+            </PopoverNext>
           )}
           {ingestQueryPattern && (
-            <Popover2
-              position="bottom"
+            <PopoverNext
+              placement="bottom"
               content={
                 <Menu>
                   {ingestQueryPattern.clusteredBy.map((p, i) => (
@@ -561,6 +659,7 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
                       <MenuItem
                         icon={IconNames.CROSS}
                         text="Remove"
+                        shouldDismissPopover={false}
                         onClick={() =>
                           updatePattern({
                             ...ingestQueryPattern,
@@ -573,17 +672,15 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
                   <MenuItem icon={IconNames.PLUS} text="Add column clustering">
                     {filterMap(ingestQueryPattern.dimensions, (dimension, i) => {
                       const outputName = dimension.getOutputName();
-                      if (
-                        outputName === TIME_COLUMN ||
-                        ingestQueryPattern.clusteredBy.includes(i)
-                      ) {
-                        return;
-                      }
+                      if (ingestQueryPattern.clusteredBy.includes(i)) return;
 
                       return (
                         <MenuItem
                           key={i}
                           text={outputName}
+                          disabled={
+                            outputName === TIME_COLUMN && ingestQueryPattern.forceSegmentSortByTime
+                          }
                           onClick={() =>
                             updatePattern({
                               ...ingestQueryPattern,
@@ -595,16 +692,29 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
                       );
                     })}
                   </MenuItem>
+                  <MenuDivider />
+                  <MenuBoolean
+                    icon={IconNames.GEOTIME}
+                    text="Force segment sort by time"
+                    value={ingestQueryPattern.forceSegmentSortByTime}
+                    onValueChange={v =>
+                      updatePattern({ ...ingestQueryPattern, forceSegmentSortByTime: Boolean(v) })
+                    }
+                    optionsText={ENABLED_DISABLED_OPTIONS_TEXT}
+                    optionsLabelElement={{ false: EXPERIMENTAL_ICON }}
+                  />
                 </Menu>
               }
+              lazy
+              shouldReturnFocusOnClose={false}
             >
-              <Button icon={IconNames.MERGE_COLUMNS} minimal>
+              <Button icon={IconNames.MERGE_COLUMNS} variant="minimal">
                 Cluster &nbsp;
                 <Tag minimal round>
                   {ingestQueryPattern.clusteredBy.length}
                 </Tag>
               </Button>
-            </Popover2>
+            </PopoverNext>
           )}
           <Button
             icon={IconNames.COMPRESSED}
@@ -612,7 +722,7 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
               setEditorColumn(undefined); // Clear any selected column if any
               setShowRollupConfirm(true);
             }}
-            minimal
+            variant="minimal"
           >
             Rollup &nbsp;
             <Tag minimal round>
@@ -623,7 +733,7 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
             <Button
               className="destination-button"
               icon={IconNames.MULTI_SELECT}
-              minimal
+              variant="minimal"
               onClick={() => setShowDestinationDialog(true)}
             >
               {`Datasource: ${ingestQueryPattern.destinationTableName} `}
@@ -644,27 +754,27 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
                 text="Table"
                 disabled={!ingestQueryPattern}
                 active={effectiveMode === 'table'}
-                onClick={() => setMode('table')}
+                onClick={() => handleModeSelect('table')}
               />
               <Button
                 icon={IconNames.LIST_COLUMNS}
                 text="List"
                 disabled={!ingestQueryPattern}
                 active={effectiveMode === 'list'}
-                onClick={() => setMode('list')}
+                onClick={() => handleModeSelect('list')}
               />
               <Button
                 icon={IconNames.APPLICATION}
                 text="SQL"
                 active={effectiveMode === 'sql'}
-                onClick={() => setMode('sql')}
+                onClick={() => handleModeSelect('sql')}
               />
             </ButtonGroup>
             {enableAnalyze && ingestQueryPattern?.metrics && (
               <Button
                 icon={IconNames.LIGHTBULB}
                 text="Analyze rollup"
-                minimal
+                variant="minimal"
                 active={showRollupAnalysisPane}
                 onClick={() => setShowRollupAnalysisPane(!showRollupAnalysisPane)}
               />
@@ -672,9 +782,9 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
           </div>
           {effectiveMode !== 'sql' && ingestQueryPattern && (
             <div className="control-line right">
-              <Popover2
+              <PopoverNext
                 className="add-column-control"
-                position="bottom"
+                placement="bottom"
                 content={
                   <Menu>
                     {ingestQueryPattern.metrics ? (
@@ -699,42 +809,47 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
                     )}
                     <MenuDivider />
                     {unusedColumns.length ? (
-                      unusedColumns.map((column, i) => (
-                        <MenuItem
-                          key={i}
-                          icon={dataTypeToIcon(column.type)}
-                          text={column.name}
-                          onClick={() => {
-                            handleQueryAction(q =>
-                              q.addSelect(
-                                C(column.name),
-                                ingestQueryPattern.metrics
-                                  ? { insertIndex: 'last-grouping', addToGroupBy: 'end' }
-                                  : {},
-                              ),
-                            );
-                          }}
-                        />
-                      ))
+                      unusedColumns.map((columnDeclaration, i) => {
+                        const columnName = columnDeclaration.getColumnName();
+                        return (
+                          <MenuItem
+                            key={i}
+                            icon={dataTypeToIcon(columnDeclaration.columnType.getNativeType())}
+                            text={columnName}
+                            onClick={() => {
+                              handleQueryAction(q =>
+                                q.addSelect(
+                                  C(columnName),
+                                  ingestQueryPattern.metrics
+                                    ? { insertIndex: 'last-grouping', addToGroupBy: 'end' }
+                                    : {},
+                                ),
+                              );
+                            }}
+                          />
+                        );
+                      })
                     ) : (
                       <MenuItem icon={IconNames.BLANK} text="No column suggestions" disabled />
                     )}
                   </Menu>
                 }
+                lazy
+                shouldReturnFocusOnClose={false}
               >
                 <Button className="add-column" icon={IconNames.PLUS} text="Add column" />
-              </Popover2>
+              </PopoverNext>
               <ClearableInput
                 className="column-filter-control"
                 value={columnSearch}
                 placeholder="Search columns"
-                onChange={setColumnSearch}
+                onValueChange={setColumnSearch}
               />
             </div>
           )}
           {effectiveMode === 'sql' && (
             <div className="control-line right">
-              <Button rightIcon={IconNames.ARROW_TOP_RIGHT} onClick={goToQuery}>
+              <Button endIcon={IconNames.ARROW_TOP_RIGHT} onClick={goToQuery}>
                 Open in <strong>Query</strong> view
               </Button>
             </div>
@@ -747,11 +862,7 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
                 <PreviewError
                   errorMessage={String(previewResultState.getErrorMessage())}
                   onRevert={
-                    lastWorkingQueryPattern.current &&
-                    (() => {
-                      if (!lastWorkingQueryPattern.current) return;
-                      updatePattern(lastWorkingQueryPattern.current);
-                    })
+                    lastWorkingQueryPattern && (() => updatePattern(lastWorkingQueryPattern))
                   }
                 />
               ) : (
@@ -777,13 +888,7 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
             (previewResultState.isError() ? (
               <PreviewError
                 errorMessage={String(previewResultState.getErrorMessage())}
-                onRevert={
-                  lastWorkingQueryPattern.current &&
-                  (() => {
-                    if (!lastWorkingQueryPattern.current) return;
-                    updatePattern(lastWorkingQueryPattern.current);
-                  })
-                }
+                onRevert={lastWorkingQueryPattern && (() => updatePattern(lastWorkingQueryPattern))}
               />
             ) : (
               previewResultSomeData && (
@@ -797,11 +902,10 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
             ))}
           {effectiveMode === 'sql' && (
             <FlexibleQueryInput
-              autoHeight={false}
               queryString={queryString}
               onQueryStringChange={onQueryStringChange}
               columnMetadata={undefined}
-              leaveBackground
+              transparentBackground={false}
             />
           )}
         </div>
@@ -819,14 +923,15 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
                     of a column you can cast it to a specific type. You can do that by clicking on a
                     column header.
                   </p>
-                  <LearnMore href={`${getLink('DOCS')}/ingestion/schema-design.html`} />
+                  <LearnMore href={`${getLink('DOCS')}/ingestion/schema-design`} />
                 </Callout>
               </FormGroup>
             )}
             {editorColumn && ingestQueryPattern && (
               <>
                 <ColumnEditor
-                  expression={editorColumn.expression}
+                  key={editorColumn.index}
+                  initExpression={editorColumn.expression}
                   onApply={newColumn => {
                     if (!editorColumn) return;
                     updatePattern(
@@ -839,7 +944,10 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
                     );
                   }}
                   onCancel={() => setEditorColumn(undefined)}
-                  dirty={() => setEditorColumn({ ...editorColumn, dirty: true })}
+                  dirty={() => {
+                    if (!editorColumn.dirty) return;
+                    setEditorColumn({ ...editorColumn, dirty: true });
+                  }}
                   queryResult={previewResultState.data}
                   headerIndex={editorColumn.index}
                 />
@@ -876,10 +984,11 @@ export const SchemaStep = function SchemaStep(props: SchemaStepProps) {
                 <AnchorButton
                   icon={IconNames.HELP}
                   text="Learn more..."
-                  href={`${getLink('DOCS')}/ingestion/data-model.html#primary-timestamp`}
+                  href={`${getLink('DOCS')}/ingestion/schema-model#primary-timestamp`}
                   target="_blank"
+                  rel="noopener noreferrer"
                   intent={Intent.WARNING}
-                  minimal
+                  variant="minimal"
                 />
               </Callout>
             )}

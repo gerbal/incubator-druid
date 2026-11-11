@@ -19,9 +19,7 @@
 
 package org.apache.druid.segment;
 
-import com.google.common.base.Preconditions;
 import org.apache.druid.segment.column.ColumnCapabilities;
-import org.apache.druid.segment.column.ValueType;
 import org.apache.druid.segment.vector.MultiValueDimensionVectorSelector;
 import org.apache.druid.segment.vector.SingleValueDimensionVectorSelector;
 import org.apache.druid.segment.vector.VectorObjectSelector;
@@ -84,14 +82,21 @@ public interface VectorColumnProcessorFactory<T>
   T makeLongProcessor(ColumnCapabilities capabilities, VectorValueSelector selector);
 
   /**
+   * Called when {@link ColumnCapabilities#getType()} is ARRAY.
+   */
+  T makeArrayProcessor(ColumnCapabilities capabilities, VectorObjectSelector selector);
+
+  /**
    * Called when {@link ColumnCapabilities#getType()} is COMPLEX. May also be called for STRING typed columns in
    * cases where the dictionary does not exist or is not expected to be useful.
+   *
+   * @see VectorObjectSelector#getObjectVector() for details on what can appear here when type is STRING
    */
   T makeObjectProcessor(@SuppressWarnings("unused") ColumnCapabilities capabilities, VectorObjectSelector selector);
 
   /**
-   * The processor factory can influence the decision on whether or not to prefer a dictionary encoded column value
-   * selector over a an object selector by examining the {@link ColumnCapabilities}.
+   * The processor factory can influence the decision on whether to prefer a dictionary encoded column value selector
+   * over an object selector by examining the {@link ColumnCapabilities}.
    *
    * By default, all processor factories prefer to use a dictionary encoded selector if the column has a dictionary
    * available ({@link ColumnCapabilities#isDictionaryEncoded()} is true), and there is a unique mapping of dictionary
@@ -107,8 +112,6 @@ public interface VectorColumnProcessorFactory<T>
    */
   default boolean useDictionaryEncodedSelector(ColumnCapabilities capabilities)
   {
-    Preconditions.checkArgument(capabilities != null, "Capabilities must not be null");
-    Preconditions.checkArgument(capabilities.is(ValueType.STRING), "Must only be called on a STRING column");
-    return capabilities.isDictionaryEncoded().and(capabilities.areDictionaryValuesUnique()).isTrue();
+    return ColumnProcessors.useDictionaryEncodedSelector(capabilities);
   }
 }

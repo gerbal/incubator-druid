@@ -22,12 +22,13 @@ package org.apache.druid.client;
 import com.fasterxml.jackson.annotation.JacksonInject;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Predicates;
+import jakarta.validation.constraints.NotNull;
 import org.apache.druid.discovery.DruidNodeDiscoveryProvider;
 import org.apache.druid.guice.annotations.EscalatedClient;
 import org.apache.druid.guice.annotations.Smile;
+import org.apache.druid.java.util.common.concurrent.ScheduledExecutorFactory;
+import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.java.util.http.client.HttpClient;
-
-import javax.validation.constraints.NotNull;
 
 /**
  */
@@ -51,6 +52,14 @@ public class FilteredHttpServerInventoryViewProvider implements FilteredServerIn
   @NotNull
   private DruidNodeDiscoveryProvider druidNodeDiscoveryProvider;
 
+  @JacksonInject
+  @NotNull
+  private ScheduledExecutorFactory executorFactory;
+
+  @JacksonInject
+  @NotNull
+  private ServiceEmitter serviceEmitter;
+
   @Override
   public HttpServerInventoryView get()
   {
@@ -60,6 +69,8 @@ public class FilteredHttpServerInventoryViewProvider implements FilteredServerIn
         druidNodeDiscoveryProvider,
         Predicates.alwaysFalse(),
         config,
+        serviceEmitter,
+        executorFactory,
         "FilteredHttpServerInventoryView"
     );
   }

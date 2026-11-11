@@ -26,10 +26,8 @@ import com.fasterxml.jackson.databind.exc.MismatchedInputException;
 import com.fasterxml.jackson.databind.exc.ValueInstantiationException;
 import org.apache.druid.java.util.common.HumanReadableBytes;
 import org.apache.druid.java.util.common.StringUtils;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.io.File;
 import java.io.IOException;
@@ -37,10 +35,6 @@ import java.io.IOException;
 public class S3OutputSerdeTest
 {
   private static final ObjectMapper MAPPER = new ObjectMapper();
-
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
-
 
   @Test
   public void sanity() throws IOException
@@ -50,7 +44,6 @@ public class S3OutputSerdeTest
                                            + "  \"prefix\": \"abc\",\n"
                                            + "  \"tempDir\": \"/tmp\",\n"
                                            + "  \"chunkSize\":104857600,\n"
-                                           + "  \"maxResultsSize\":209715200,\n"
                                            + "  \"maxRetry\": 2\n"
                                            + "}\n");
 
@@ -59,16 +52,15 @@ public class S3OutputSerdeTest
         "abc",
         new File("/tmp"),
         HumanReadableBytes.valueOf(HumanReadableBytes.parse("100Mib")),
-        HumanReadableBytes.valueOf(HumanReadableBytes.parse("200Mib")),
         2
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         json,
         MAPPER.writeValueAsString(s3OutputConfig)
     );
 
-    Assert.assertEquals(s3OutputConfig, MAPPER.readValue(json, S3OutputConfig.class));
+    Assertions.assertEquals(s3OutputConfig, MAPPER.readValue(json, S3OutputConfig.class));
   }
 
   @Test
@@ -78,12 +70,13 @@ public class S3OutputSerdeTest
                                            + "  \"bucket\": \"TEST\",\n"
                                            + "  \"tempDir\": \"/tmp\",\n"
                                            + "  \"chunkSize\":104857600,\n"
-                                           + "  \"maxResultsSize\":209715200,\n"
                                            + "  \"maxRetry\": 2\n"
                                            + "}\n");
-    expectedException.expect(MismatchedInputException.class);
-    expectedException.expectMessage("Missing required creator property 'prefix'");
-    MAPPER.readValue(json, S3OutputConfig.class);
+    final MismatchedInputException exception = Assertions.assertThrows(
+        MismatchedInputException.class,
+        () -> MAPPER.readValue(json, S3OutputConfig.class)
+    );
+    Assertions.assertTrue(exception.getMessage().contains("Missing required creator property 'prefix'"));
   }
 
   @Test
@@ -93,27 +86,13 @@ public class S3OutputSerdeTest
                                            + "  \"prefix\": \"abc\",\n"
                                            + "  \"tempDir\": \"/tmp\",\n"
                                            + "  \"chunkSize\":104857600,\n"
-                                           + "  \"maxResultsSize\":209715200,\n"
                                            + "  \"maxRetry\": 2\n"
                                            + "}\n");
-    expectedException.expect(MismatchedInputException.class);
-    expectedException.expectMessage("Missing required creator property 'bucket'");
-    MAPPER.readValue(json, S3OutputConfig.class);
-  }
-
-  @Test
-  public void noTempDir() throws JsonProcessingException
-  {
-    String json = jsonStringReadyForAssert("{\n"
-                                           + "  \"prefix\": \"abc\",\n"
-                                           + "  \"bucket\": \"TEST\",\n"
-                                           + "  \"chunkSize\":104857600,\n"
-                                           + "  \"maxResultsSize\":209715200,\n"
-                                           + "  \"maxRetry\": 2\n"
-                                           + "}\n");
-    expectedException.expect(MismatchedInputException.class);
-    expectedException.expectMessage("Missing required creator property 'tempDir'");
-    MAPPER.readValue(json, S3OutputConfig.class);
+    final MismatchedInputException exception = Assertions.assertThrows(
+        MismatchedInputException.class,
+        () -> MAPPER.readValue(json, S3OutputConfig.class)
+    );
+    Assertions.assertTrue(exception.getMessage().contains("Missing required creator property 'bucket'"));
   }
 
   @Test
@@ -130,10 +109,9 @@ public class S3OutputSerdeTest
         "abc",
         new File("/tmp"),
         null,
-        null,
         null
     );
-    Assert.assertEquals(s3OutputConfig, MAPPER.readValue(json, S3OutputConfig.class));
+    Assertions.assertEquals(s3OutputConfig, MAPPER.readValue(json, S3OutputConfig.class));
   }
 
 
@@ -146,12 +124,13 @@ public class S3OutputSerdeTest
                                            + "  \"bucket\": \"TEST\",\n"
                                            + "  \"tempDir\": \"/tmp\",\n"
                                            + "  \"chunkSize\":104,\n"
-                                           + "  \"maxResultsSize\":209715200,\n"
                                            + "  \"maxRetry\": 2\n"
                                            + "}\n");
-    expectedException.expect(ValueInstantiationException.class);
-    expectedException.expectMessage("chunkSize[104] should be >=");
-    MAPPER.readValue(json, S3OutputConfig.class);
+    final ValueInstantiationException exception = Assertions.assertThrows(
+        ValueInstantiationException.class,
+        () -> MAPPER.readValue(json, S3OutputConfig.class)
+    );
+    Assertions.assertTrue(exception.getMessage().contains("chunkSize[104] should be >="));
   }
 
   private static String jsonStringReadyForAssert(String input)

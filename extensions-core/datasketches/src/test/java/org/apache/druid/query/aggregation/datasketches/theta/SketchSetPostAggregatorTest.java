@@ -23,7 +23,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import nl.jqno.equalsverifier.EqualsVerifier;
-import org.apache.datasketches.Family;
+import org.apache.datasketches.common.Family;
 import org.apache.datasketches.theta.SetOperation;
 import org.apache.datasketches.theta.Union;
 import org.apache.druid.jackson.DefaultObjectMapper;
@@ -31,31 +31,30 @@ import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.query.aggregation.PostAggregator;
 import org.apache.druid.query.aggregation.post.FieldAccessPostAggregator;
 import org.easymock.EasyMock;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 public class SketchSetPostAggregatorTest
 {
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
 
   @Test
   public void testConstructorNumFields()
   {
-    expectedException.expect(IAE.class);
-    expectedException.expectMessage("Illegal number of fields[0], must be > 1");
-    new SketchSetPostAggregator(
-        "summary",
-        "UNION",
-        null,
-        ImmutableList.of()
-    );
+    Throwable exception = Assertions.assertThrows(IAE.class, () -> {
+      new SketchSetPostAggregator(
+          "summary",
+          "UNION",
+          null,
+          ImmutableList.of()
+      );
+    });
+    assertTrue(exception.getMessage().contains("Illegal number of fields[0], must be > 1"));
   }
 
   @Test
@@ -85,15 +84,17 @@ public class SketchSetPostAggregatorTest
     );
     List<PostAggregator> serdeTests = Arrays.asList(union, intersect, not);
 
+    DefaultObjectMapper mapper = new DefaultObjectMapper();
+    mapper.registerModules(new SketchModule().getJacksonModules());
+
     for (PostAggregator there : serdeTests) {
-      DefaultObjectMapper mapper = new DefaultObjectMapper();
-      SketchSetPostAggregator andBackAgain = mapper.readValue(
+      PostAggregator andBackAgain = mapper.readValue(
           mapper.writeValueAsString(there),
-          SketchSetPostAggregator.class
+          PostAggregator.class
       );
 
-      Assert.assertEquals(there, andBackAgain);
-      Assert.assertArrayEquals(there.getCacheKey(), andBackAgain.getCacheKey());
+      Assertions.assertEquals(there, andBackAgain);
+      Assertions.assertArrayEquals(there.getCacheKey(), andBackAgain.getCacheKey());
     }
   }
 
@@ -110,7 +111,7 @@ public class SketchSetPostAggregatorTest
         )
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "SketchSetPostAggregator{name='summary', fields=[FieldAccessPostAggregator{name='field1', fieldName='sketch'}, FieldAccessPostAggregator{name='field2', fieldName='sketch'}], func=UNION, size=16384}",
         postAgg.toString()
     );
@@ -152,7 +153,7 @@ public class SketchSetPostAggregatorTest
     );
     SketchHolder holder1 = (SketchHolder) postAgg1.compute(ImmutableMap.of());
     SketchHolder holder2 = (SketchHolder) postAgg2.compute(ImmutableMap.of());
-    Assert.assertEquals(0, postAgg1.getComparator().compare(holder1, holder2));
+    Assertions.assertEquals(0, postAgg1.getComparator().compare(holder1, holder2));
   }
 
   @Test

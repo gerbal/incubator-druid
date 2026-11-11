@@ -20,14 +20,16 @@
 package org.apache.druid.server.coordinator;
 
 import com.google.common.collect.ImmutableMap;
-import com.google.common.util.concurrent.MoreExecutors;
 import org.apache.druid.client.ImmutableDruidDataSource;
 import org.apache.druid.client.ImmutableDruidServer;
 import org.apache.druid.java.util.common.Intervals;
-import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.server.coordination.DruidServerMetadata;
 import org.apache.druid.server.coordination.ServerType;
+import org.apache.druid.server.coordinator.balancer.BalancerSegmentHolder;
+import org.apache.druid.server.coordinator.balancer.ReservoirSegmentSampler;
+import org.apache.druid.server.coordinator.loading.TestLoadQueuePeon;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 import org.joda.time.Interval;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -63,9 +65,6 @@ public class BalancerStrategyBenchmark
   private static final Interval TEST_SEGMENT_INTERVAL = Intervals.of("2012-03-15T00:00:00.000/2012-03-16T00:00:00.000");
   private static final int NUMBER_OF_SERVERS = 20;
 
-  @Param({"default", "50percentOfSegmentsToConsiderPerMove", "useBatchedSegmentSampler"})
-  private String mode;
-  
   @Param({"10000", "100000", "1000000"})
   private int numberOfSegments;
   
@@ -73,43 +72,24 @@ public class BalancerStrategyBenchmark
   private int maxSegmentsToMove;
   
   private final List<ServerHolder> serverHolders = new ArrayList<>();
-  private boolean useBatchedSegmentSampler;
   private int reservoirSize = 1;
-  private double percentOfSegmentsToConsider = 100;
-  private final BalancerStrategy balancerStrategy = new CostBalancerStrategy(
-      MoreExecutors.listeningDecorator(Execs.multiThreaded(1, "BalancerStrategyBenchmark-%d"))
-  );
 
   @Setup(Level.Trial)
   public void setup()
   {
-    switch (mode) {
-      case "50percentOfSegmentsToConsiderPerMove":
-        percentOfSegmentsToConsider = 50;
-        useBatchedSegmentSampler = false;
-        break;
-      case "useBatchedSegmentSampler":
-        reservoirSize = maxSegmentsToMove;
-        useBatchedSegmentSampler = true;
-        break;
-      default:
-    }
+    reservoirSize = maxSegmentsToMove;
     
     List<List<DataSegment>> segmentList = new ArrayList<>(NUMBER_OF_SERVERS);
     IntStream.range(0, NUMBER_OF_SERVERS).forEach(i -> segmentList.add(new ArrayList<>()));
     for (int i = 0; i < numberOfSegments; i++) {
       segmentList.get(RANDOM.nextInt(NUMBER_OF_SERVERS)).add(
-          new DataSegment(
-              "test",
-              TEST_SEGMENT_INTERVAL,
-              String.valueOf(i),
-              Collections.emptyMap(),
-              Collections.emptyList(),
-              Collections.emptyList(),
-              null,
-              0,
-              10L
-          )
+          DataSegment.builder(SegmentId.of("test", TEST_SEGMENT_INTERVAL, String.valueOf(i), 0))
+                     .loadSpec(Collections.emptyMap())
+                     .dimensions(Collections.emptyList())
+                     .metrics(Collections.emptyList())
+                     .binaryVersion(0)
+                     .size(10L)
+                     .build()
       );
     }
     
@@ -117,12 +97,12 @@ public class BalancerStrategyBenchmark
       serverHolders.add(
           new ServerHolder(
               new ImmutableDruidServer(
-                  new DruidServerMetadata("id", "host", null, 10000000L, ServerType.HISTORICAL, "hot", 1),
+                  new DruidServerMetadata("id", "host", null, 10000000L, null, ServerType.HISTORICAL, "hot", 1),
                   3000L,
                   ImmutableMap.of("test", new ImmutableDruidDataSource("test", Collections.emptyMap(), segments)),
                   segments.size()
               ),
-              new LoadQueuePeonTester()
+              new TestLoadQueuePeon()
           )
       );
     }
@@ -131,20 +111,9 @@ public class BalancerStrategyBenchmark
   @Benchmark
   public void pickSegmentsToMove(Blackhole blackhole)
   {
-    Iterator<BalancerSegmentHolder> iterator;
-    if (useBatchedSegmentSampler) {
-      iterator = balancerStrategy.pickSegmentsToMove(
-          serverHolders,
-          Collections.emptySet(),
-          reservoirSize
-      );
-    } else {
-      iterator = balancerStrategy.pickSegmentsToMove(
-          serverHolders,
-          Collections.emptySet(),
-          percentOfSegmentsToConsider
-      );
-    }
+    Iterator<BalancerSegmentHolder> iterator = ReservoirSegmentSampler
+        .pickMovableSegmentsFrom(serverHolders, reservoirSize, ServerHolder::getServedSegments, Collections.emptySet())
+        .iterator();
 
     for (int i = 0; i < maxSegmentsToMove && iterator.hasNext(); i++) {
       blackhole.consume(iterator.next());

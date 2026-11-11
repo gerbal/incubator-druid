@@ -20,6 +20,7 @@
 package org.apache.druid.query.metadata;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.Functions;
@@ -31,6 +32,7 @@ import com.google.common.collect.Sets;
 import com.google.inject.Inject;
 import org.apache.druid.common.guava.CombiningSequence;
 import org.apache.druid.data.input.impl.TimestampSpec;
+import org.apache.druid.error.DruidException;
 import org.apache.druid.java.util.common.JodaUtils;
 import org.apache.druid.java.util.common.granularity.Granularity;
 import org.apache.druid.java.util.common.guava.Comparators;
@@ -50,11 +52,14 @@ import org.apache.druid.query.aggregation.AggregatorFactoryNotMergeableException
 import org.apache.druid.query.aggregation.MetricManipulationFn;
 import org.apache.druid.query.cache.CacheKeyBuilder;
 import org.apache.druid.query.context.ResponseContext;
+import org.apache.druid.query.metadata.metadata.AggregatorMergeStrategy;
 import org.apache.druid.query.metadata.metadata.ColumnAnalysis;
 import org.apache.druid.query.metadata.metadata.SegmentAnalysis;
 import org.apache.druid.query.metadata.metadata.SegmentMetadataQuery;
+import org.apache.druid.segment.AggregateProjectionMetadata;
 import org.apache.druid.timeline.LogicalSegment;
 import org.apache.druid.timeline.SegmentId;
+import org.apache.druid.utils.CollectionUtils;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
 
@@ -71,9 +76,7 @@ import java.util.function.BinaryOperator;
 
 public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAnalysis, SegmentMetadataQuery>
 {
-  private static final TypeReference<SegmentAnalysis> TYPE_REFERENCE = new TypeReference<SegmentAnalysis>()
-  {
-  };
+  private static final TypeReference<SegmentAnalysis> TYPE_REFERENCE = new TypeReference<>() {};
   private static final byte SEGMENT_METADATA_CACHE_PREFIX = 0x4;
   private static final byte SEGMENT_METADATA_QUERY = 0x16;
   private static final Function<SegmentAnalysis, SegmentAnalysis> MERGE_TRANSFORM_FN =
@@ -101,7 +104,7 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
   @Override
   public QueryRunner<SegmentAnalysis> mergeResults(final QueryRunner<SegmentAnalysis> runner)
   {
-    return new BySegmentSkippingQueryRunner<SegmentAnalysis>(runner)
+    return new BySegmentSkippingQueryRunner<>(runner)
     {
       @Override
       public Sequence<SegmentAnalysis> doRun(
@@ -139,10 +142,10 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
   public BinaryOperator<SegmentAnalysis> createMergeFn(Query<SegmentAnalysis> query)
   {
     return (arg1, arg2) -> mergeAnalyses(
-        Iterables.getFirst(query.getDataSource().getTableNames(), null),
+        query.getDataSource().getTableNames(),
         arg1,
         arg2,
-        ((SegmentMetadataQuery) query).isLenientAggregatorMerge()
+        ((SegmentMetadataQuery) query).getAggregatorMergeStrategy()
     );
   }
 
@@ -182,10 +185,19 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
   @Override
   public CacheStrategy<SegmentAnalysis, SegmentAnalysis, SegmentMetadataQuery> getCacheStrategy(final SegmentMetadataQuery query)
   {
-    return new CacheStrategy<SegmentAnalysis, SegmentAnalysis, SegmentMetadataQuery>()
+    return getCacheStrategy(query, null);
+  }
+
+  @Override
+  public CacheStrategy<SegmentAnalysis, SegmentAnalysis, SegmentMetadataQuery> getCacheStrategy(
+      final SegmentMetadataQuery query,
+      @Nullable final ObjectMapper objectMapper
+  )
+  {
+    return new CacheStrategy<>()
     {
       @Override
-      public boolean isCacheable(SegmentMetadataQuery query, boolean willMergeRunners)
+      public boolean isCacheable(SegmentMetadataQuery query, boolean willMergeRunners, boolean segmentLevel)
       {
         return true;
       }
@@ -205,7 +217,6 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
         // need to include query "merge" and "lenientAggregatorMerge" for result level cache key
         return new CacheKeyBuilder(SEGMENT_METADATA_QUERY).appendByteArray(computeCacheKey(query))
                                                           .appendBoolean(query.isMerge())
-                                                          .appendBoolean(query.isLenientAggregatorMerge())
                                                           .build();
       }
 
@@ -254,10 +265,10 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
 
   @VisibleForTesting
   public static SegmentAnalysis mergeAnalyses(
-      @Nullable String dataSource,
+      Set<String> dataSources,
       SegmentAnalysis arg1,
       SegmentAnalysis arg2,
-      boolean lenientAggregatorMerge
+      AggregatorMergeStrategy aggregatorMergeStrategy
   )
   {
     if (arg1 == null) {
@@ -268,16 +279,31 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
       return arg1;
     }
 
-    // Swap arg1, arg2 so the later-ending interval is first. This ensures we prefer the latest column order.
-    // We're preserving it so callers can see columns in their natural order.
-    if (dataSource != null) {
+    // This is a defensive check since SegementMetadata query instantiation guarantees this
+    if (CollectionUtils.isNullOrEmpty(dataSources)) {
+      throw DruidException.defensive("SegementMetadata queries require at least one datasource.");
+    }
+
+    SegmentId mergedSegmentId = null;
+
+    // Union datasources can have multiple datasources. So we iterate through all the datasources to parse the segment id.
+    for (String dataSource : dataSources) {
       final SegmentId id1 = SegmentId.tryParse(dataSource, arg1.getId());
       final SegmentId id2 = SegmentId.tryParse(dataSource, arg2.getId());
 
-      if (id1 != null && id2 != null && id2.getIntervalEnd().isAfter(id1.getIntervalEnd())) {
-        final SegmentAnalysis tmp = arg1;
-        arg1 = arg2;
-        arg2 = tmp;
+      // Swap arg1, arg2 so the later-ending interval is first. This ensures we prefer the latest column order.
+      // We're preserving it so callers can see columns in their natural order.
+      if (id1 != null && id2 != null) {
+        if (id2.getIntervalEnd().isAfter(id1.getIntervalEnd()) ||
+            (id2.getIntervalEnd().isEqual(id1.getIntervalEnd()) && id2.getPartitionNum() > id1.getPartitionNum())) {
+          mergedSegmentId = SegmentId.merged(dataSource, id2.getInterval(), id2.getPartitionNum());
+          final SegmentAnalysis tmp = arg1;
+          arg1 = arg2;
+          arg2 = tmp;
+        } else {
+          mergedSegmentId = SegmentId.merged(dataSource, id1.getInterval(), id1.getPartitionNum());
+        }
+        break;
       }
     }
 
@@ -309,29 +335,38 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
 
     final Map<String, AggregatorFactory> aggregators = new HashMap<>();
 
-    if (lenientAggregatorMerge) {
+    if (AggregatorMergeStrategy.LENIENT == aggregatorMergeStrategy) {
       // Merge each aggregator individually, ignoring nulls
       for (SegmentAnalysis analysis : ImmutableList.of(arg1, arg2)) {
         if (analysis.getAggregators() != null) {
           for (Map.Entry<String, AggregatorFactory> entry : analysis.getAggregators().entrySet()) {
             final String aggregatorName = entry.getKey();
             final AggregatorFactory aggregator = entry.getValue();
-            AggregatorFactory merged = aggregators.get(aggregatorName);
-            if (merged != null) {
-              try {
-                merged = merged.getMergingFactory(aggregator);
-              }
-              catch (AggregatorFactoryNotMergeableException e) {
+            final boolean isMergedYet = aggregators.containsKey(aggregatorName);
+            AggregatorFactory merged;
+
+            if (!isMergedYet) {
+              merged = aggregator;
+            } else {
+              merged = aggregators.get(aggregatorName);
+
+              if (merged != null && aggregator != null) {
+                try {
+                  merged = merged.getMergingFactory(aggregator);
+                }
+                catch (AggregatorFactoryNotMergeableException e) {
+                  merged = null;
+                }
+              } else {
                 merged = null;
               }
-            } else {
-              merged = aggregator;
             }
+
             aggregators.put(aggregatorName, merged);
           }
         }
       }
-    } else {
+    } else if (AggregatorMergeStrategy.STRICT == aggregatorMergeStrategy) {
       final AggregatorFactory[] aggs1 = arg1.getAggregators() != null
                                         ? arg1.getAggregators()
                                               .values()
@@ -348,6 +383,28 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
           aggregators.put(aggregator.getName(), aggregator);
         }
       }
+    } else if (AggregatorMergeStrategy.EARLIEST == aggregatorMergeStrategy) {
+      // The segment analyses are already ordered above, where arg1 is the analysis pertaining to the latest interval
+      // followed by arg2. So for earliest strategy, the iteration order should be arg2 and arg1.
+      for (SegmentAnalysis analysis : ImmutableList.of(arg2, arg1)) {
+        if (analysis.getAggregators() != null) {
+          for (Map.Entry<String, AggregatorFactory> entry : analysis.getAggregators().entrySet()) {
+            aggregators.putIfAbsent(entry.getKey(), entry.getValue());
+          }
+        }
+      }
+    } else if (AggregatorMergeStrategy.LATEST == aggregatorMergeStrategy) {
+      // The segment analyses are already ordered above, where arg1 is the analysis pertaining to the latest interval
+      // followed by arg2. So for latest strategy, the iteration order should be arg1 and arg2.
+      for (SegmentAnalysis analysis : ImmutableList.of(arg1, arg2)) {
+        if (analysis.getAggregators() != null) {
+          for (Map.Entry<String, AggregatorFactory> entry : analysis.getAggregators().entrySet()) {
+            aggregators.putIfAbsent(entry.getKey(), entry.getValue());
+          }
+        }
+      }
+    } else {
+      throw DruidException.defensive("[%s] merge strategy is not implemented.", aggregatorMergeStrategy);
     }
 
     final TimestampSpec timestampSpec = TimestampSpec.mergeTimestampSpec(
@@ -369,7 +426,7 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
     if (arg1.getId() != null && arg2.getId() != null && arg1.getId().equals(arg2.getId())) {
       mergedId = arg1.getId();
     } else {
-      mergedId = "merged";
+      mergedId = mergedSegmentId == null ? "merged" : mergedSegmentId.toString();
     }
 
     final Boolean rollup;
@@ -380,6 +437,26 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
       rollup = null;
     }
 
+    final Map<String, AggregateProjectionMetadata> projections;
+    if (arg1.getProjections() != null && arg2.getProjections() != null) {
+      projections = new HashMap<>();
+      // Merge two maps of AggregateProjectionMetadata, returning a new map with the same keys and merged metadata.
+      // If the schemas do not match, the metadata is not merged and the key is not included in the result.
+      for (String name : Sets.intersection(arg1.getProjections().keySet(), arg2.getProjections().keySet())) {
+        AggregateProjectionMetadata spec1 = arg1.getProjections().get(name);
+        AggregateProjectionMetadata spec2 = arg2.getProjections().get(name);
+        if (spec1.getSchema().equals(spec2.getSchema())) {
+          // If the schemas are equal, we can merge the metadata
+          projections.put(
+              name,
+              new AggregateProjectionMetadata(spec1.getSchema(), spec1.getNumRows() + spec2.getNumRows())
+          );
+        }
+      }
+    } else {
+      projections = null;
+    }
+
     return new SegmentAnalysis(
         mergedId,
         newIntervals,
@@ -387,6 +464,7 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
         arg1.getSize() + arg2.getSize(),
         arg1.getNumRows() + arg2.getNumRows(),
         aggregators.isEmpty() ? null : aggregators,
+        (projections == null || projections.isEmpty()) ? null : projections,
         timestampSpec,
         queryGranularity,
         rollup
@@ -403,6 +481,7 @@ public class SegmentMetadataQueryQueryToolChest extends QueryToolChest<SegmentAn
         analysis.getSize(),
         analysis.getNumRows(),
         analysis.getAggregators(),
+        analysis.getProjections(),
         analysis.getTimestampSpec(),
         analysis.getQueryGranularity(),
         analysis.isRollup()

@@ -19,22 +19,20 @@
 
 package org.apache.druid.server.coordinator.duty;
 
-import org.apache.druid.java.util.emitter.service.ServiceEmitter;
-import org.apache.druid.java.util.emitter.service.ServiceEventBuilder;
 import org.apache.druid.metadata.MetadataSupervisorManager;
 import org.apache.druid.server.coordinator.DruidCoordinatorRuntimeParams;
+import org.apache.druid.server.coordinator.stats.CoordinatorRunStats;
+import org.apache.druid.server.coordinator.stats.Stats;
 import org.joda.time.Duration;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mock;
 import org.mockito.Mockito;
-import org.mockito.junit.MockitoJUnitRunner;
+import org.mockito.MockitoAnnotations;
 
-@RunWith(MockitoJUnitRunner.class)
 public class KillSupervisorsCustomDutyTest
 {
   @Mock
@@ -43,44 +41,42 @@ public class KillSupervisorsCustomDutyTest
   @Mock
   private DruidCoordinatorRuntimeParams mockDruidCoordinatorRuntimeParams;
 
-  @Mock
-  private ServiceEmitter mockServiceEmitter;
-
-  @Rule
-  public ExpectedException exception = ExpectedException.none();
-
   private KillSupervisorsCustomDuty killSupervisors;
+  private AutoCloseable mocks;
 
-  @Test
-  public void testConstructorFailIfRetainDurationNull()
+  @BeforeEach
+  public void setUp()
   {
-    exception.expect(IllegalArgumentException.class);
-    exception.expectMessage("(Custom Duty) Coordinator supervisor kill retainDuration must be >= 0");
-    killSupervisors = new KillSupervisorsCustomDuty(null, mockMetadataSupervisorManager);
+    mocks = MockitoAnnotations.openMocks(this);
   }
 
-  @Test
-  public void testConstructorFailIfRetainDurationInvalid()
+  @AfterEach
+  public void tearDown() throws Exception
   {
-    exception.expect(IllegalArgumentException.class);
-    exception.expectMessage("(Custom Duty) Coordinator supervisor kill retainDuration must be >= 0");
-    killSupervisors = new KillSupervisorsCustomDuty(new Duration("PT-1s"), mockMetadataSupervisorManager);
+    mocks.close();
   }
 
   @Test
   public void testConstructorSuccess()
   {
-    killSupervisors = new KillSupervisorsCustomDuty(new Duration("PT1S"), mockMetadataSupervisorManager);
-    Assert.assertNotNull(killSupervisors);
+    killSupervisors = new KillSupervisorsCustomDuty(
+        new Duration("PT1S"),
+        mockMetadataSupervisorManager
+    );
+    Assertions.assertNotNull(killSupervisors);
   }
 
   @Test
   public void testRun()
   {
-    Mockito.when(mockDruidCoordinatorRuntimeParams.getEmitter()).thenReturn(mockServiceEmitter);
-    killSupervisors = new KillSupervisorsCustomDuty(new Duration("PT1S"), mockMetadataSupervisorManager);
+    final CoordinatorRunStats runStats = new CoordinatorRunStats();
+    Mockito.when(mockDruidCoordinatorRuntimeParams.getCoordinatorStats()).thenReturn(runStats);
+    killSupervisors = new KillSupervisorsCustomDuty(
+        new Duration("PT1S"),
+        mockMetadataSupervisorManager
+    );
     killSupervisors.run(mockDruidCoordinatorRuntimeParams);
     Mockito.verify(mockMetadataSupervisorManager).removeTerminatedSupervisorsOlderThan(ArgumentMatchers.anyLong());
-    Mockito.verify(mockServiceEmitter).emit(ArgumentMatchers.any(ServiceEventBuilder.class));
+    Assertions.assertTrue(runStats.hasStat(Stats.Kill.SUPERVISOR_SPECS));
   }
 }

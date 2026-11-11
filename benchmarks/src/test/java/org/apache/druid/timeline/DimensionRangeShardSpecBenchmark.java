@@ -23,12 +23,12 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableRangeSet;
 import com.google.common.collect.Range;
 import com.google.common.collect.RangeSet;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.data.input.StringTuple;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.query.filter.InDimFilter;
+import org.apache.druid.segment.VirtualColumns;
 import org.apache.druid.timeline.partition.DimensionRangeShardSpec;
-import org.junit.Assert;
+import org.junit.jupiter.api.Assertions;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
 import org.openjdk.jmh.annotations.Fork;
@@ -74,6 +74,7 @@ public class DimensionRangeShardSpecBenchmark
   // Initial segment (null -> values)
   private final DimensionRangeShardSpec shardSpec0 = new DimensionRangeShardSpec(
       Arrays.asList("country", "city"),
+      VirtualColumns.EMPTY,
       new StringTuple(new String[]{null, null}),
       new StringTuple(new String[]{"Germany", "Munich"}),
       0,
@@ -83,6 +84,7 @@ public class DimensionRangeShardSpecBenchmark
   // Middle segment (values -> other values)
   private final DimensionRangeShardSpec shardSpec1 = new DimensionRangeShardSpec(
       Arrays.asList("country", "city"),
+      VirtualColumns.EMPTY,
       new StringTuple(new String[]{"Germany", "Munich"}),
       new StringTuple(new String[]{"United States", "New York"}),
       1,
@@ -92,6 +94,7 @@ public class DimensionRangeShardSpecBenchmark
   // End segment (values -> null)
   private final DimensionRangeShardSpec shardSpec2 = new DimensionRangeShardSpec(
       Arrays.asList("country", "city"),
+      VirtualColumns.EMPTY,
       new StringTuple(new String[]{"United States", "New York"}),
       new StringTuple(new String[]{null, null}),
       2,
@@ -101,8 +104,6 @@ public class DimensionRangeShardSpecBenchmark
   @Setup
   public void setUp()
   {
-    NullHandling.initializeForTests();
-
     final Set<String> strings5k = new HashSet<>();
 
     final Random random = new Random(0); // Random... ish.
@@ -123,24 +124,24 @@ public class DimensionRangeShardSpecBenchmark
   @Benchmark
   public void benchSinglePrunable()
   {
-    Assert.assertFalse(shardSpec0.possibleInDomain(domainSinglePrunable));
-    Assert.assertTrue(shardSpec1.possibleInDomain(domainSinglePrunable));
-    Assert.assertFalse(shardSpec2.possibleInDomain(domainSinglePrunable));
+    Assertions.assertFalse(shardSpec0.possibleInDomain(domainSinglePrunable));
+    Assertions.assertTrue(shardSpec1.possibleInDomain(domainSinglePrunable));
+    Assertions.assertFalse(shardSpec2.possibleInDomain(domainSinglePrunable));
   }
 
   @Benchmark
   public void bench5kPrunable()
   {
-    Assert.assertTrue(shardSpec0.possibleInDomain(domain5kPrunable));
-    Assert.assertTrue(shardSpec1.possibleInDomain(domain5kPrunable));
-    Assert.assertTrue(shardSpec2.possibleInDomain(domain5kPrunable));
+    Assertions.assertTrue(shardSpec0.possibleInDomain(domain5kPrunable));
+    Assertions.assertTrue(shardSpec1.possibleInDomain(domain5kPrunable));
+    Assertions.assertTrue(shardSpec2.possibleInDomain(domain5kPrunable));
   }
 
   @Benchmark
   public void benchSingleNonPrunable()
   {
-    Assert.assertTrue(shardSpec0.possibleInDomain(domainSingleNonPrunable));
-    Assert.assertTrue(shardSpec1.possibleInDomain(domainSingleNonPrunable));
-    Assert.assertTrue(shardSpec2.possibleInDomain(domainSingleNonPrunable));
+    Assertions.assertTrue(shardSpec0.possibleInDomain(domainSingleNonPrunable));
+    Assertions.assertTrue(shardSpec1.possibleInDomain(domainSingleNonPrunable));
+    Assertions.assertTrue(shardSpec2.possibleInDomain(domainSingleNonPrunable));
   }
 }

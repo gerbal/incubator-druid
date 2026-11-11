@@ -21,8 +21,6 @@ package org.apache.druid.indexing.worker.http;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.jaxrs.smile.SmileMediaTypes;
-import com.google.common.util.concurrent.FutureCallback;
-import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.inject.Inject;
 import com.sun.jersey.spi.container.ResourceFilters;
@@ -35,11 +33,10 @@ import org.apache.druid.indexing.worker.WorkerTaskManager;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.server.coordination.ChangeRequestHistory;
 import org.apache.druid.server.coordination.ChangeRequestsSnapshot;
+import org.apache.druid.server.http.AsyncRequest;
+import org.apache.druid.server.http.AsyncRequest.AsyncResponse;
 import org.apache.druid.server.http.security.StateResourceFilter;
 
-import javax.servlet.AsyncContext;
-import javax.servlet.AsyncEvent;
-import javax.servlet.AsyncListener;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import javax.ws.rs.Consumes;
@@ -51,7 +48,6 @@ import javax.ws.rs.QueryParam;
 import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
-import java.io.IOException;
 
 /**
  * Endpoints used by Overlord to Manage tasks on this Middle Manager.
@@ -85,10 +81,10 @@ public class TaskManagementResource
    * Here is how, this is used.
    *
    * (1) Client sends first request /druid/internal/v1/worker?counter=-1&timeout=<timeout>
-   * Server responds with current list of running/completed tasks and metadata. And, a <counter,hash> pair.
+   * Server responds with current list of running/completed tasks and metadata. And, a {@code <counter,hash>} pair.
    *
    * (2) Client sends subsequent requests /druid/internal/v1/worker?counter=<counter>&hash=<hash>&timeout=<timeout>
-   * Where <counter,hash> values are used from the last response. Server responds with changes since then.
+   * Where {@code <counter,hash>} values are used from the last response. Server responds with changes since then.
    *
    * This endpoint makes the client wait till either there is some update or given timeout elapses.
    *
@@ -100,7 +96,6 @@ public class TaskManagementResource
    * @param timeout after which response is sent even if there are no new segment updates.
    * @param req
    * @return null to avoid "MUST return a non-void type" warning.
-   * @throws IOException
    */
   @GET
   @Produces({MediaType.APPLICATION_JSON, SmileMediaTypes.APPLICATION_JACKSON_SMILE})
@@ -109,7 +104,7 @@ public class TaskManagementResource
       @QueryParam("hash") long hash,
       @QueryParam("timeout") long timeout,
       @Context final HttpServletRequest req
-  ) throws IOException
+  )
   {
     if (timeout <= 0) {
       sendErrorResponse(req, HttpServletResponse.SC_BAD_REQUEST, "timeout must be positive.");
@@ -125,114 +120,65 @@ public class TaskManagementResource
         )
     );
 
-    final AsyncContext asyncContext = req.startAsync();
-
-    asyncContext.addListener(
-        new AsyncListener()
-        {
-          @Override
-          public void onComplete(AsyncEvent event)
-          {
-          }
-
-          @Override
-          public void onTimeout(AsyncEvent event)
-          {
-
-            // HTTP 204 NO_CONTENT is sent to the client.
-            future.cancel(true);
-            event.getAsyncContext().complete();
-          }
-
-          @Override
-          public void onError(AsyncEvent event)
-          {
-          }
-
-          @Override
-          public void onStartAsync(AsyncEvent event)
-          {
-          }
-        }
-    );
-
-    Futures.addCallback(
-        future,
-        new FutureCallback<ChangeRequestsSnapshot>()
-        {
-          @Override
-          public void onSuccess(ChangeRequestsSnapshot result)
-          {
-            try {
-              HttpServletResponse response = (HttpServletResponse) asyncContext.getResponse();
-              response.setStatus(HttpServletResponse.SC_OK);
-              context.inputMapper.writerWithType(WorkerHolder.WORKER_SYNC_RESP_TYPE_REF)
-                                 .writeValue(asyncContext.getResponse().getOutputStream(), result);
-              asyncContext.complete();
-            }
-            catch (Exception ex) {
-              log.debug(ex, "Request timed out or closed already.");
-            }
-          }
-
-          @Override
-          public void onFailure(Throwable th)
-          {
-            try {
-              HttpServletResponse response = (HttpServletResponse) asyncContext.getResponse();
-              if (th instanceof IllegalArgumentException) {
-                response.sendError(HttpServletResponse.SC_BAD_REQUEST, th.getMessage());
-              } else {
-                response.sendError(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, th.getMessage());
-              }
-              asyncContext.complete();
-            }
-            catch (Exception ex) {
-              log.debug(ex, "Request timed out or closed already.");
-            }
-          }
-        }
-    );
-
-    asyncContext.setTimeout(timeout);
+    AsyncRequest.create(req, future, timeout)
+                .contentType(context.inputMapper, context.contentType)
+                .onTimeout(HttpServletResponse.SC_NO_CONTENT)
+                .onSuccess(
+                    result -> AsyncResponse.of(
+                        HttpServletResponse.SC_OK,
+                        result,
+                        WorkerHolder.WORKER_SYNC_RESP_TYPE_REF
+                    )
+                )
+                .onFailure(th -> th instanceof IllegalArgumentException
+                                  ? AsyncResponse.error(HttpServletResponse.SC_BAD_REQUEST, th.getMessage())
+                                  : AsyncResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, th.getMessage()))
+                .start();
     return null;
   }
 
   @POST
   @Path("/assignTask")
   @Consumes({MediaType.APPLICATION_JSON, SmileMediaTypes.APPLICATION_JACKSON_SMILE})
+  @Produces({MediaType.APPLICATION_JSON, SmileMediaTypes.APPLICATION_JACKSON_SMILE})
   public Response assignTask(Task task)
   {
+    // Sometimes assignTask API can fail when the supplied task arg can't be interpreted due to some missing extension(s).
+    // In such cases, the call produces an error response without entering the function.
+    // @Produces helps to correctly write back this error response as JSON which otherwise ends up in an empty response
+    // message due to "MessageBodyWriter not found for SingletonImmutableBiMap" error.
+    // Ref: https://github.com/apache/druid/pull/15412.
     try {
       workerTaskManager.assignTask(task);
       return Response.ok().build();
     }
-    catch (RuntimeException ex) {
+    catch (Exception ex) {
       return Response.serverError().entity(ex.getMessage()).build();
     }
   }
 
-  private void sendErrorResponse(HttpServletRequest req, int code, String error) throws IOException
+  private void sendErrorResponse(HttpServletRequest req, int code, String error)
   {
-    AsyncContext asyncContext = req.startAsync();
-    HttpServletResponse response = (HttpServletResponse) asyncContext.getResponse();
-    response.sendError(code, error);
-    asyncContext.complete();
+    AsyncRequest.completed(req, jsonMapper, AsyncResponse.error(code, error));
   }
 
   private ResponseContext createContext(String requestType)
   {
     boolean isSmile = SmileMediaTypes.APPLICATION_JACKSON_SMILE.equals(requestType);
-    return new ResponseContext(isSmile ? smileMapper : jsonMapper);
+    return isSmile
+           ? new ResponseContext(smileMapper, SmileMediaTypes.APPLICATION_JACKSON_SMILE)
+           : new ResponseContext(jsonMapper, MediaType.APPLICATION_JSON);
   }
 
   private static class ResponseContext
   {
     private final ObjectMapper inputMapper;
+    private final String contentType;
 
-    ResponseContext(ObjectMapper inputMapper)
+    ResponseContext(ObjectMapper inputMapper, String contentType)
     {
       this.inputMapper = inputMapper;
+      this.contentType = contentType;
     }
   }
 }

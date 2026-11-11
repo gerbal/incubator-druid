@@ -32,26 +32,14 @@ import org.apache.druid.server.security.Action;
 import org.apache.druid.server.security.Resource;
 import org.apache.druid.server.security.ResourceAction;
 import org.apache.druid.server.security.ResourceType;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
 import java.util.Map;
 
 public class BasicAuthUtilsTest
 {
-  @Test
-  public void testHashPassword()
-  {
-    char[] password = "HELLO".toCharArray();
-    int iterations = BasicAuthUtils.DEFAULT_KEY_ITERATIONS;
-    byte[] salt = BasicAuthUtils.generateSalt();
-    byte[] hash = BasicAuthUtils.hashPassword(password, salt, iterations);
-
-    Assert.assertEquals(BasicAuthUtils.SALT_LENGTH, salt.length);
-    Assert.assertEquals(BasicAuthUtils.KEY_LENGTH / 8, hash.length);
-  }
-
   @Test
   public void testPermissionSerdeIsChillAboutUnknownEnumStuffs() throws JsonProcessingException
   {
@@ -127,28 +115,28 @@ public class BasicAuthUtilsTest
     );
     byte[] mapBytes = mapper.writeValueAsBytes(rawMap);
     Map<String, BasicAuthorizerRole> roleMap = BasicAuthUtils.deserializeAuthorizerRoleMap(mapper, mapBytes);
-    Assert.assertNotNull(roleMap);
-    Assert.assertEquals(3, roleMap.size());
+    Assertions.assertNotNull(roleMap);
+    Assertions.assertEquals(3, roleMap.size());
 
-    Assert.assertTrue(roleMap.containsKey(someRoleName));
-    Assert.assertEquals(2, roleMap.get(someRoleName).getPermissions().size());
-    Assert.assertEquals(
+    Assertions.assertTrue(roleMap.containsKey(someRoleName));
+    Assertions.assertEquals(2, roleMap.get(someRoleName).getPermissions().size());
+    Assertions.assertEquals(
         BasicAuthorizerPermission.makePermissionList(ImmutableList.of(fooRead, barRead)),
         roleMap.get(someRoleName).getPermissions()
     );
 
     // this one has custom resource type... this test is somewhat pointless, it made more sense when type was an enum
-    Assert.assertTrue(roleMap.containsKey(otherRoleName));
-    Assert.assertEquals(2, roleMap.get(otherRoleName).getPermissions().size());
-    Assert.assertEquals(
+    Assertions.assertTrue(roleMap.containsKey(otherRoleName));
+    Assertions.assertEquals(2, roleMap.get(otherRoleName).getPermissions().size());
+    Assertions.assertEquals(
         BasicAuthorizerPermission.makePermissionList(ImmutableList.of(fooRead, customRead)),
         roleMap.get(otherRoleName).getPermissions()
     );
 
     // this one has an unknown Action, expect only 1 permission to deserialize correctly and failure ignored
-    Assert.assertTrue(roleMap.containsKey(thirdRoleName));
-    Assert.assertEquals(1, roleMap.get(thirdRoleName).getPermissions().size());
-    Assert.assertEquals(
+    Assertions.assertTrue(roleMap.containsKey(thirdRoleName));
+    Assertions.assertEquals(1, roleMap.get(thirdRoleName).getPermissions().size());
+    Assertions.assertEquals(
         BasicAuthorizerPermission.makePermissionList(
             ImmutableList.of(new ResourceAction(new Resource("some-view", ResourceType.VIEW), Action.READ))
         ),

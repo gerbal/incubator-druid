@@ -27,6 +27,8 @@ import org.apache.druid.java.util.common.lifecycle.Lifecycle;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.java.util.emitter.service.ServiceMetricEvent;
+import org.apache.druid.query.extraction.MapLookupExtractor;
+import org.apache.druid.query.lookup.LookupExtractor;
 import org.apache.druid.server.lookup.namespace.NamespaceExtractionConfig;
 import org.mapdb.DB;
 import org.mapdb.DBMaker;
@@ -34,10 +36,12 @@ import org.mapdb.HTreeMap;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 
 /**
  *
@@ -82,7 +86,8 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
         try {
           doDispose();
           // Log statement goes after doDispose(), because logging may fail (e. g. if we are in shutdownHooks).
-          log.error("OffHeapNamespaceExtractionCacheManager.disposeCache() was not called, disposed resources by the JVM");
+          log.error(
+              "OffHeapNamespaceExtractionCacheManager.disposeCache() was not called, disposed resources by the JVM");
         }
         catch (Throwable t) {
           try {
@@ -111,8 +116,10 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
 
     private void doDispose()
     {
-      if (!mmapDB.isClosed()) {
-        mmapDB.delete(mapDbKey);
+      synchronized (mmapDB) {
+        if (!mmapDB.isClosed()) {
+          mmapDB.delete(mapDbKey);
+        }
       }
       cacheCount.decrementAndGet();
     }
@@ -146,10 +153,14 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
     }
   }
 
+  /**
+   * MapDB synchronizes its state-changing methods on the {@link DB} instance. Check-and-use sequences must hold the
+   * same monitor to prevent the database from closing between the two calls.
+   */
   private final DB mmapDB;
   private final File tmpFile;
-  private AtomicLong mapDbKeyCounter = new AtomicLong(0);
-  private AtomicInteger cacheCount = new AtomicInteger(0);
+  private final AtomicLong mapDbKeyCounter = new AtomicLong(0);
+  private final AtomicInteger cacheCount = new AtomicInteger(0);
 
   @Inject
   public OffHeapNamespaceExtractionCacheManager(
@@ -160,7 +171,7 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
   {
     super(lifecycle, serviceEmitter, config);
     try {
-      tmpFile = File.createTempFile("druidMapDB", getClass().getName());
+      tmpFile = Files.createTempFile("druidMapDB", getClass().getName()).toFile();
       log.info("Using file [%s] for mapDB off heap namespace cache", tmpFile.getAbsolutePath());
     }
     catch (IOException e) {
@@ -188,13 +199,17 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
             }
 
             @Override
-            public synchronized void stop()
+            public void stop()
             {
-              if (!mmapDB.isClosed()) {
-                mmapDB.close();
-                if (!tmpFile.delete()) {
-                  log.warn("Unable to delete file at [%s]", tmpFile.getAbsolutePath());
+              final boolean shouldDelete;
+              synchronized (mmapDB) {
+                shouldDelete = !mmapDB.isClosed();
+                if (shouldDelete) {
+                  mmapDB.close();
                 }
+              }
+              if (shouldDelete && !tmpFile.delete()) {
+                log.warn("Unable to delete file at [%s]", tmpFile.getAbsolutePath());
               }
             }
           }
@@ -252,6 +267,23 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
   }
 
   @Override
+  public LookupExtractor asLookupExtractor(
+      final CacheHandler cacheHandler,
+      final boolean isOneToOne,
+      final Supplier<byte[]> cacheKeySupplier
+  )
+  {
+    return new MapLookupExtractor(cacheHandler.getCache(), isOneToOne)
+    {
+      @Override
+      public byte[] getCacheKey()
+      {
+        return cacheKeySupplier.get();
+      }
+    };
+  }
+
+  @Override
   void disposeCache(CacheHandler cacheHandler)
   {
     MapDbCacheDisposerAndCleaner disposerAndCleaner = (MapDbCacheDisposerAndCleaner) cacheHandler.id;
@@ -270,7 +302,7 @@ public class OffHeapNamespaceExtractionCacheManager extends NamespaceExtractionC
   @Override
   void monitor(ServiceEmitter serviceEmitter)
   {
-    serviceEmitter.emit(ServiceMetricEvent.builder().build("namespace/cache/count", cacheCount()));
-    serviceEmitter.emit(ServiceMetricEvent.builder().build("namespace/cache/diskSize", tmpFile.length()));
+    serviceEmitter.emit(ServiceMetricEvent.builder().setMetric("namespace/cache/count", cacheCount()));
+    serviceEmitter.emit(ServiceMetricEvent.builder().setMetric("namespace/cache/diskSize", tmpFile.length()));
   }
 }

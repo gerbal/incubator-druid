@@ -23,10 +23,13 @@ import com.google.common.base.Predicates;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.stream.Collectors;
 
 /**
+ *
  */
 public class DimFilters
 {
@@ -60,13 +63,48 @@ public class DimFilters
     return new NotDimFilter(filter);
   }
 
-  public static List<DimFilter> optimize(List<DimFilter> filters)
+  public static List<DimFilter> optimize(List<DimFilter> filters, boolean mayIncludeUnknown)
   {
-    return filterNulls(Lists.transform(filters, DimFilter::optimize));
+    return filterNulls(Lists.transform(filters, filter -> filter.optimize(mayIncludeUnknown)));
   }
 
   public static List<DimFilter> filterNulls(List<DimFilter> optimized)
   {
     return Lists.newArrayList(Iterables.filter(optimized, Predicates.notNull()));
+  }
+
+  public static DimFilter conjunction(List<DimFilter> filters)
+  {
+    switch (filters.size()) {
+      case 0:
+        return TrueDimFilter.instance();
+      case 1:
+        return filters.get(0);
+      default:
+        return and(filters);
+    }
+  }
+
+  public static DimFilter conjunction(DimFilter... filters)
+  {
+    List<DimFilter> list = Arrays.stream(filters).filter(v -> v != null && !TrueDimFilter.instance().equals(v)).collect(Collectors.toList());
+    return conjunction(list);
+  }
+
+  /**
+   * Returns the filters that the given filter is an AND of, flattening nested ANDs. Returns the filter itself if it is
+   * not an AND.
+   */
+  public static List<DimFilter> splitConjunction(final DimFilter filter)
+  {
+    if (filter instanceof AndDimFilter) {
+      final List<DimFilter> retVal = new ArrayList<>();
+      for (final DimFilter field : ((AndDimFilter) filter).getFields()) {
+        retVal.addAll(splitConjunction(field));
+      }
+      return retVal;
+    } else {
+      return List.of(filter);
+    }
   }
 }

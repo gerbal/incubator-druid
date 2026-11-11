@@ -21,9 +21,9 @@ package org.apache.druid.server;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.smile.SmileFactory;
 import com.fasterxml.jackson.jaxrs.smile.SmileMediaTypes;
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
 import com.google.inject.Provider;
 import org.apache.calcite.avatica.remote.ProtobufTranslation;
@@ -39,14 +39,17 @@ import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.jackson.JacksonUtils;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
-import org.apache.druid.query.BaseQuery;
 import org.apache.druid.query.DruidMetrics;
 import org.apache.druid.query.GenericQueryMetricsFactory;
 import org.apache.druid.query.Query;
+import org.apache.druid.query.QueryContext;
 import org.apache.druid.query.QueryInterruptedException;
 import org.apache.druid.query.QueryMetrics;
 import org.apache.druid.query.QueryToolChestWarehouse;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.server.initialization.ServerConfig;
+import org.apache.druid.server.initialization.jetty.HttpException;
+import org.apache.druid.server.initialization.jetty.ResponseIdentityHeaderHandler;
 import org.apache.druid.server.initialization.jetty.StandardResponseHeaderFilterHolder;
 import org.apache.druid.server.log.RequestLogger;
 import org.apache.druid.server.metrics.QueryCountStatsProvider;
@@ -56,16 +59,18 @@ import org.apache.druid.server.security.AuthConfig;
 import org.apache.druid.server.security.AuthenticationResult;
 import org.apache.druid.server.security.Authenticator;
 import org.apache.druid.server.security.AuthenticatorMapper;
+import org.apache.druid.server.security.AuthorizationUtils;
 import org.apache.druid.sql.http.SqlQuery;
 import org.apache.druid.sql.http.SqlResource;
+import org.eclipse.jetty.client.BytesRequestContent;
 import org.eclipse.jetty.client.HttpClient;
-import org.eclipse.jetty.client.api.Request;
-import org.eclipse.jetty.client.api.Response;
-import org.eclipse.jetty.client.api.Result;
-import org.eclipse.jetty.client.util.BytesContentProvider;
+import org.eclipse.jetty.client.Request;
+import org.eclipse.jetty.client.Response;
+import org.eclipse.jetty.client.Result;
+import org.eclipse.jetty.ee8.proxy.AsyncProxyServlet;
+import org.eclipse.jetty.http.HttpField;
 import org.eclipse.jetty.http.HttpHeader;
 import org.eclipse.jetty.http.HttpMethod;
-import org.eclipse.jetty.proxy.AsyncProxyServlet;
 
 import javax.annotation.Nullable;
 import javax.servlet.ServletException;
@@ -74,7 +79,6 @@ import javax.servlet.http.HttpServletResponse;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response.Status;
 import java.io.IOException;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
@@ -103,7 +107,9 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
   private static final String PROPERTY_SQL_ENABLE = "druid.router.sql.enable";
   private static final String PROPERTY_SQL_ENABLE_DEFAULT = "false";
 
-  private static final int CANCELLATION_TIMEOUT_MILLIS = 500;
+  private static final long CANCELLATION_TIMEOUT_MILLIS = TimeUnit.SECONDS.toMillis(5);
+  // Jetty-specific default (un-assigned) status code
+  private static final int UNASSIGNED_DEFAULT_STATUS_CODE = 0;
 
   private final AtomicLong successfulQueryCount = new AtomicLong();
   private final AtomicLong failedQueryCount = new AtomicLong();
@@ -272,7 +278,7 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
       }
     } else if (isSqlQueryEndpoint && HttpMethod.POST.is(method)) {
       try {
-        SqlQuery inputSqlQuery = objectMapper.readValue(request.getInputStream(), SqlQuery.class);
+        SqlQuery inputSqlQuery = SqlQuery.from(request, objectMapper);
         inputSqlQuery = buildSqlQueryWithId(inputSqlQuery);
         request.setAttribute(SQL_QUERY_ATTRIBUTE, inputSqlQuery);
         if (routeSqlByStrategy) {
@@ -282,8 +288,8 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
         }
         LOG.debug("Forwarding SQL query to broker [%s]", targetServer.getHost());
       }
-      catch (IOException e) {
-        handleQueryParseException(request, response, objectMapper, e, false);
+      catch (HttpException e) {
+        handleQueryParseException(request, response, e.getStatusCode().getStatusCode(), objectMapper, e, false);
         return;
       }
       catch (Exception e) {
@@ -303,18 +309,29 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
 
   /**
    * Rebuilds the {@link SqlQuery} object with sqlQueryId and queryId context parameters if not present
+   *
    * @param sqlQuery the original SqlQuery
    * @return an updated sqlQuery object with sqlQueryId and queryId context parameters
    */
   private SqlQuery buildSqlQueryWithId(SqlQuery sqlQuery)
   {
-    Map<String, Object> context = new HashMap<>(sqlQuery.getContext());
-    String sqlQueryId = (String) context.getOrDefault(BaseQuery.SQL_QUERY_ID, UUID.randomUUID().toString());
+    final QueryContext queryContext = QueryContext.of(sqlQuery.getContext());
+    final String sqlQueryId = queryContext.getOrDefault(
+        QueryContextParameters.SQL_QUERY_ID,
+        UUID.randomUUID().toString()
+    );
     // set queryId to sqlQueryId if not overridden
-    String queryId = (String) context.getOrDefault(BaseQuery.QUERY_ID, sqlQueryId);
-    context.put(BaseQuery.SQL_QUERY_ID, sqlQueryId);
-    context.put(BaseQuery.QUERY_ID, queryId);
-    return sqlQuery.withOverridenContext(context);
+    final String queryId = queryContext.getOrDefault(QueryContextParameters.QUERY_ID, sqlQueryId);
+    return sqlQuery.withOverridenContext(
+        queryContext.override(
+            QueryContext.ofMap(
+                QueryContextParameters.SQL_QUERY_ID,
+                sqlQueryId,
+                QueryContextParameters.QUERY_ID,
+                queryId
+            )
+        ).asMap()
+    );
   }
 
   /**
@@ -332,7 +349,7 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
       // issue async requests
       Response.CompleteListener completeListener = result -> {
         if (result.isFailed()) {
-          LOG.warn(
+          LOG.noStackTrace().info(
               result.getFailure(),
               "Failed to forward cancellation request to [%s]",
               server.getHost()
@@ -357,7 +374,20 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
       HttpServletRequest request,
       HttpServletResponse response,
       ObjectMapper objectMapper,
-      IOException parseException,
+      Throwable parseException,
+      boolean isNativeQuery
+  ) throws IOException
+  {
+    handleQueryParseException(request, response, HttpServletResponse.SC_BAD_REQUEST, objectMapper, parseException, isNativeQuery);
+  }
+
+  private void handleQueryParseException(
+      HttpServletRequest request,
+      HttpServletResponse response,
+      int httpStatusCode,
+      ObjectMapper objectMapper,
+      Throwable parseException,
+
       boolean isNativeQuery
   ) throws IOException
   {
@@ -367,13 +397,16 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
     // Log the error message
     final String errorMessage = exceptionToReport.getMessage() == null
                                 ? "no error message" : exceptionToReport.getMessage();
+
+    final AuthenticationResult authenticationResult = AuthorizationUtils.authenticationResultFromRequest(request);
+
     if (isNativeQuery) {
       requestLogger.logNativeQuery(
           RequestLogLine.forNative(
               null,
               DateTimes.nowUtc(),
               request.getRemoteAddr(),
-              new QueryStats(ImmutableMap.of("success", false, "exception", errorMessage))
+              buildRequestLogQueryStats(false, httpStatusCode, authenticationResult.getIdentity(), null, errorMessage)
           )
       );
     } else {
@@ -383,17 +416,49 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
               null,
               DateTimes.nowUtc(),
               request.getRemoteAddr(),
-              new QueryStats(ImmutableMap.of("success", false, "exception", errorMessage))
+              buildRequestLogQueryStats(false, httpStatusCode, authenticationResult.getIdentity(), null, errorMessage)
           )
       );
     }
 
     // Write to the response
-    response.setStatus(HttpServletResponse.SC_BAD_REQUEST);
+    response.setStatus(httpStatusCode);
     response.setContentType(MediaType.APPLICATION_JSON);
     objectMapper.writeValue(
         response.getOutputStream(),
         serverConfig.getErrorResponseTransformStrategy().transformIfNeeded(exceptionToReport)
+    );
+  }
+
+  /**
+   * Builds the {@link QueryStats} recorded in router request logs. Success paths pass {@code queryTimeMs};
+   * failure paths pass {@code exceptionMessage}. Exactly one of the two is non-null at every call site.
+   */
+  private static QueryStats buildRequestLogQueryStats(
+      boolean success,
+      int statusCode,
+      String identity,
+      @Nullable Long queryTimeMs,
+      @Nullable String exceptionMessage
+  )
+  {
+    if (exceptionMessage != null) {
+      return new QueryStats(
+          Map.of(
+              "success", success,
+              DruidMetrics.STATUS_CODE, statusCode,
+              "exception", exceptionMessage,
+              "identity", identity
+          )
+      );
+    }
+    return new QueryStats(
+        Map.of(
+            "query/time", queryTimeMs,
+            "success", success,
+            DruidMetrics.STATUS_CODE, statusCode,
+            "identity", identity
+        )
     );
   }
 
@@ -418,7 +483,7 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
 
     byte[] avaticaQuery = (byte[]) clientRequest.getAttribute(AVATICA_QUERY_ATTRIBUTE);
     if (avaticaQuery != null) {
-      proxyRequest.content(new BytesContentProvider(avaticaQuery));
+      proxyRequest.body(new BytesRequestContent(avaticaQuery));
     }
 
     final Query query = (Query) clientRequest.getAttribute(QUERY_ATTRIBUTE);
@@ -463,8 +528,12 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
     final ObjectMapper objectMapper = (ObjectMapper) clientRequest.getAttribute(OBJECTMAPPER_ATTRIBUTE);
     try {
       byte[] bytes = objectMapper.writeValueAsBytes(content);
-      proxyRequest.content(new BytesContentProvider(bytes));
-      proxyRequest.getHeaders().put(HttpHeader.CONTENT_LENGTH, String.valueOf(bytes.length));
+      Request.Content requestContent = new BytesRequestContent(bytes);
+      proxyRequest.body(requestContent);
+      proxyRequest.headers(headers -> {
+        headers.put(HttpHeader.CONTENT_LENGTH, String.valueOf(requestContent.getLength()));
+        headers.put(HttpHeader.CONTENT_TYPE, objectMapper.getFactory() instanceof SmileFactory ? SmileMediaTypes.APPLICATION_JACKSON_SMILE : MediaType.APPLICATION_JSON);
+      });
     }
     catch (JsonProcessingException e) {
       throw new RuntimeException(e);
@@ -570,8 +639,53 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
       Response serverResponse
   )
   {
+    // Response context is JSON rather than a comma-separated header value, so copy it verbatim instead of allowing
+    // Jetty's generic proxy header handling to parse it as a list.
+    final HttpField responseContext = serverResponse.getHeaders().getField(QueryResource.HEADER_RESPONSE_CONTEXT);
+    if (responseContext != null) {
+      proxyResponse.setHeader(responseContext.getName(), responseContext.getValue());
+    }
+    // When response identity headers are enabled, the outer response handler initially adds the Router identity.
+    // An upstream response must replace it with the upstream identity, or with no identity when the upstream does not
+    // provide a complete header triple.
+    ResponseIdentityHeaderHandler.rememberLocalIdentity(clientRequest, proxyResponse);
+    ResponseIdentityHeaderHandler.clearRouterIdentity(proxyResponse);
     StandardResponseHeaderFilterHolder.deduplicateHeadersInProxyServlet(proxyResponse, serverResponse);
     super.onServerResponseHeaders(clientRequest, proxyResponse, serverResponse);
+  }
+
+  @Override
+  protected void onProxyResponseFailure(
+      final HttpServletRequest clientRequest,
+      final HttpServletResponse proxyResponse,
+      final Response serverResponse,
+      final Throwable failure
+  )
+  {
+    // The error is generated by this Router, so replace any previously forwarded upstream identity with its own.
+    ResponseIdentityHeaderHandler.restoreLocalIdentity(clientRequest, proxyResponse);
+    super.onProxyResponseFailure(clientRequest, proxyResponse, serverResponse, failure);
+  }
+
+  @Override
+  protected HttpField filterServerResponseHeader(
+      HttpServletRequest clientRequest,
+      Response serverResponse,
+      HttpField field
+  )
+  {
+    if (QueryResource.HEADER_RESPONSE_CONTEXT.equalsIgnoreCase(field.getName())) {
+      return null;
+    }
+    // Identity headers must be forwarded as a triple and only when this Router has the feature enabled.
+    if (!ResponseIdentityHeaderHandler.shouldProxyIdentityHeader(
+        serverConfig.isEnableResponseIdentityHeaders(),
+        serverResponse,
+        field
+    )) {
+      return null;
+    }
+    return super.filterServerResponseHeader(clientRequest, serverResponse, field);
   }
 
   @VisibleForTesting
@@ -724,8 +838,9 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
       if (isJDBC) {
         sqlQueryId = result.getResponse().getHeaders().get(SqlResource.SQL_QUERY_ID_RESPONSE_HEADER);
       } else if (sqlQuery != null) {
-        sqlQueryId = (String) sqlQuery.getContext().getOrDefault(BaseQuery.SQL_QUERY_ID, null);
-        queryId = (String) sqlQuery.getContext().getOrDefault(BaseQuery.QUERY_ID, null);
+        final QueryContext sqlQueryContext = QueryContext.of(sqlQuery.getContext());
+        sqlQueryId = sqlQueryContext.get(QueryContextParameters.SQL_QUERY_ID);
+        queryId = sqlQueryContext.get(QueryContextParameters.QUERY_ID);
       } else if (query != null) {
         queryId = query.getId();
       }
@@ -736,13 +851,20 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
         return;
       }
 
-      boolean success = result.isSucceeded();
+      final boolean success = result.isSucceeded() && isStatusCodeSuccess(result.getResponse().getStatus());
+      final int statusCode = determineStatusCode(success, result.getResponse().getStatus());
       if (success) {
         successfulQueryCount.incrementAndGet();
       } else {
         failedQueryCount.incrementAndGet();
       }
-      emitQueryTime(requestTimeNs, success, sqlQueryId, queryId);
+
+      final AuthenticationResult authenticationResult = AuthorizationUtils.authenticationResultFromRequest(req);
+
+      // As router is simply a proxy, we don't make an effort to construct the error code from the exception ourselves.
+      // We rely on broker to set this for us if the error occurs downstream.
+      // Otherwise, if there's a router/client error, we log this as an unknown error.
+      emitQueryTime(requestTimeNs, success, sqlQueryId, queryId, statusCode, authenticationResult);
 
       //noinspection VariableNotUsedInsideIf
       if (sqlQueryId != null) {
@@ -755,14 +877,12 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
                     sqlQuery.getContext(),
                     DateTimes.nowUtc(),
                     req.getRemoteAddr(),
-                    new QueryStats(
-                        ImmutableMap.of(
-                            "query/time",
-                            TimeUnit.NANOSECONDS.toMillis(requestTimeNs),
-                            "success",
-                            success
-                            && result.getResponse().getStatus() == Status.OK.getStatusCode()
-                        )
+                    buildRequestLogQueryStats(
+                        success,
+                        statusCode,
+                        authenticationResult.getIdentity(),
+                        TimeUnit.NANOSECONDS.toMillis(requestTimeNs),
+                        null
                     )
                 )
             );
@@ -781,14 +901,12 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
                 query,
                 DateTimes.nowUtc(),
                 req.getRemoteAddr(),
-                new QueryStats(
-                    ImmutableMap.of(
-                        "query/time",
-                        TimeUnit.NANOSECONDS.toMillis(requestTimeNs),
-                        "success",
-                        success
-                        && result.getResponse().getStatus() == Status.OK.getStatusCode()
-                    )
+                buildRequestLogQueryStats(
+                    success,
+                    statusCode,
+                    authenticationResult.getIdentity(),
+                    TimeUnit.NANOSECONDS.toMillis(requestTimeNs),
+                    null
                 )
             )
         );
@@ -810,8 +928,9 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
       if (isJDBC) {
         sqlQueryId = response.getHeaders().get(SqlResource.SQL_QUERY_ID_RESPONSE_HEADER);
       } else if (sqlQuery != null) {
-        sqlQueryId = (String) sqlQuery.getContext().getOrDefault(BaseQuery.SQL_QUERY_ID, null);
-        queryId = (String) sqlQuery.getContext().getOrDefault(BaseQuery.QUERY_ID, null);
+        final QueryContext sqlQueryContext = QueryContext.of(sqlQuery.getContext());
+        sqlQueryId = sqlQueryContext.get(QueryContextParameters.SQL_QUERY_ID);
+        queryId = sqlQueryContext.get(QueryContextParameters.QUERY_ID);
       } else if (query != null) {
         queryId = query.getId();
       }
@@ -823,7 +942,13 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
       }
 
       failedQueryCount.incrementAndGet();
-      emitQueryTime(requestTimeNs, false, sqlQueryId, queryId);
+
+      // As router is simply a proxy, we don't make an effort to construct the error code from the exception ourselves.
+      // We rely on broker to set this for us if the error occurs downstream. 
+      // Otherwise, if there's a router/client error, we log this as an unknown error.
+      final int statusCode = determineStatusCode(false, response.getStatus());
+      final AuthenticationResult authenticationResult = AuthorizationUtils.authenticationResultFromRequest(req);
+      emitQueryTime(requestTimeNs, false, sqlQueryId, queryId, statusCode, authenticationResult);
 
       //noinspection VariableNotUsedInsideIf
       if (sqlQueryId != null) {
@@ -836,13 +961,12 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
                     sqlQuery.getContext(),
                     DateTimes.nowUtc(),
                     req.getRemoteAddr(),
-                    new QueryStats(
-                        ImmutableMap.of(
-                            "success",
-                            false,
-                            "exception",
-                            errorMessage == null ? "no message" : errorMessage
-                        )
+                    buildRequestLogQueryStats(
+                        false,
+                        statusCode,
+                        authenticationResult.getIdentity(),
+                        null,
+                        errorMessage == null ? "no message" : errorMessage
                     )
                 )
             );
@@ -866,13 +990,12 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
                 query,
                 DateTimes.nowUtc(),
                 req.getRemoteAddr(),
-                new QueryStats(
-                    ImmutableMap.of(
-                        "success",
-                        false,
-                        "exception",
-                        errorMessage == null ? "no message" : errorMessage
-                    )
+                buildRequestLogQueryStats(
+                    false,
+                    statusCode,
+                    authenticationResult.getIdentity(),
+                    null,
+                    errorMessage == null ? "no message" : errorMessage
                 )
             )
         );
@@ -890,7 +1013,14 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
       super.onFailure(response, failure);
     }
 
-    private void emitQueryTime(long requestTimeNs, boolean success, @Nullable String sqlQueryId, @Nullable String queryId)
+    private void emitQueryTime(
+        long requestTimeNs,
+        boolean success,
+        @Nullable String sqlQueryId,
+        @Nullable String queryId,
+        int statusCode,
+        AuthenticationResult authenticationResult
+    )
     {
       QueryMetrics queryMetrics;
       if (sqlQueryId != null) {
@@ -910,7 +1040,36 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
         );
       }
       queryMetrics.success(success);
+      queryMetrics.statusCode(statusCode);
+      queryMetrics.identity(authenticationResult.getIdentity());
       queryMetrics.reportQueryTime(requestTimeNs).emit(emitter);
     }
+  }
+
+  /**
+   * Helper method to assign reasonable status codes in ambigious cases like client/broker connection errors.
+   *
+   * @param success Whether the query was successful
+   * @param statusCode Status code reported by the broker (or {@value UNASSIGNED_DEFAULT_STATUS_CODE})
+   */
+  private static int determineStatusCode(boolean success, int statusCode)
+  {
+    if (success) {
+      if (statusCode == UNASSIGNED_DEFAULT_STATUS_CODE) {
+        statusCode = Status.OK.getStatusCode();
+      }
+    } else {
+      if (statusCode == UNASSIGNED_DEFAULT_STATUS_CODE || statusCode == Status.OK.getStatusCode()) {
+        statusCode = Status.INTERNAL_SERVER_ERROR.getStatusCode();
+      }
+    }
+    return statusCode;
+  }
+
+  /** Is status code in the 2xx range?
+   */
+  private static boolean isStatusCodeSuccess(int statusCode)
+  {
+    return statusCode >= 200 && statusCode < 300;
   }
 }

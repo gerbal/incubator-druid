@@ -20,24 +20,85 @@
 package org.apache.druid.sql.calcite.planner;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.druid.error.DruidException;
 import org.apache.druid.java.util.common.UOE;
+import org.apache.druid.query.QueryContext;
 import org.apache.druid.query.QueryContexts;
+import org.apache.druid.query.context.QueryContextParameter;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.joda.time.DateTimeZone;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 
 public class PlannerConfig
 {
+  /**
+   * @deprecated Use {@link QueryContextParameters#USE_APPROXIMATE_COUNT_DISTINCT} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
   public static final String CTX_KEY_USE_APPROXIMATE_COUNT_DISTINCT = "useApproximateCountDistinct";
-  public static final String CTX_KEY_USE_GROUPING_SET_FOR_EXACT_DISTINCT = "useGroupingSetForExactDistinct";
-  public static final String CTX_KEY_USE_APPROXIMATE_TOPN = "useApproximateTopN";
-  public static final String CTX_COMPUTE_INNER_JOIN_COST_AS_FILTER = "computeInnerJoinCostAsFilter";
-  public static final String CTX_KEY_USE_NATIVE_QUERY_EXPLAIN = "useNativeQueryExplain";
-  public static final String CTX_KEY_FORCE_EXPRESSION_VIRTUAL_COLUMNS = "forceExpressionVirtualColumns";
-  public static final String CTX_MAX_NUMERIC_IN_FILTERS = "maxNumericInFilters";
-  public static final int NUM_FILTER_NOT_USED = -1;
 
+  /**
+   * @deprecated Use {@link QueryContextParameters#USE_GROUPING_SET_FOR_EXACT_DISTINCT} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
+  public static final String CTX_KEY_USE_GROUPING_SET_FOR_EXACT_DISTINCT = "useGroupingSetForExactDistinct";
+
+  /**
+   * @deprecated Use {@link QueryContextParameters#USE_APPROXIMATE_TOP_N} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
+  public static final String CTX_KEY_USE_APPROXIMATE_TOPN = "useApproximateTopN";
+
+  /**
+   * @deprecated Use {@link QueryContextParameters#USE_LEXICOGRAPHIC_TOP_N} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
+  public static final String CTX_KEY_USE_LEXICOGRAPHIC_TOPN = "useLexicographicTopN";
+
+  /**
+   * @deprecated Use {@link QueryContextParameters#COMPUTE_INNER_JOIN_COST_AS_FILTER} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
+  public static final String CTX_COMPUTE_INNER_JOIN_COST_AS_FILTER = "computeInnerJoinCostAsFilter";
+
+  /**
+   * @deprecated Use {@link QueryContextParameters#FORCE_EXPRESSION_VIRTUAL_COLUMNS} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
+  public static final String CTX_KEY_FORCE_EXPRESSION_VIRTUAL_COLUMNS = "forceExpressionVirtualColumns";
+
+  /**
+   * @deprecated Use {@link QueryContextParameters#REQUIRE_TIME_CONDITION} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
+  public static final String CTX_REQUIRE_TIME_CONDITION = "requireTimeCondition";
+
+  /**
+   * @deprecated Use {@link QueryContextParameters#USE_NATIVE_QUERY_EXPLAIN} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
+  public static final String CTX_KEY_USE_NATIVE_QUERY_EXPLAIN = "useNativeQueryExplain";
+
+  /**
+   * @deprecated Use {@link QueryContextParameters#MAX_NUMERIC_IN_FILTERS} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
+  public static final String CTX_MAX_NUMERIC_IN_FILTERS = "maxNumericInFilters";
+
+  /**
+   * @deprecated Use {@link QueryContextParameters#MAX_PLANNING_TIME_MS} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
+  public static final String CTX_KEY_MAX_PLANNING_TIME_MS = "maxPlanningTimeMs";
+
+  public static final int NUM_FILTER_NOT_USED = -1;
+  /**
+   * Sentinel value for {@link #maxPlanningTimeMs} meaning "no planning timeout".
+   */
+  public static final long PLANNING_TIME_NOT_LIMITED = 0;
   @JsonProperty
   private int maxTopNLimit = 100_000;
 
@@ -46,6 +107,9 @@ public class PlannerConfig
 
   @JsonProperty
   private boolean useApproximateTopN = true;
+
+  @JsonProperty
+  private boolean useLexicographicTopN = false;
 
   @JsonProperty
   private boolean requireTimeCondition = false;
@@ -71,7 +135,24 @@ public class PlannerConfig
   @JsonProperty
   private int maxNumericInFilters = NUM_FILTER_NOT_USED;
 
-  private boolean serializeComplexValues = true;
+  @JsonProperty
+  private QueryContexts.PlannerStrategy nativeQuerySqlPlanningMode = QueryContexts.PlannerStrategy.COUPLED;
+
+  @JsonProperty
+  private boolean enableSysQueriesTable = false;
+
+  @JsonProperty
+  private boolean authorizeTableVisibility = true;
+
+  /**
+   * Maximum wall-clock time, in milliseconds, allowed for planning a SQL query. When exceeded, planning is aborted and
+   * the query fails with a {@link org.apache.druid.query.QueryTimeoutException}. A non-positive value (default
+   * {@link #PLANNING_TIME_NOT_LIMITED}) disables the timeout.
+   */
+  private long maxPlanningTimeMs = PLANNING_TIME_NOT_LIMITED;
+
+  @JsonProperty
+  private boolean enableCatalogDdl = false;
 
   public int getMaxNumericInFilters()
   {
@@ -98,6 +179,11 @@ public class PlannerConfig
     return useApproximateTopN;
   }
 
+  public boolean isUseLexicographicTopN()
+  {
+    return useLexicographicTopN;
+  }
+
   public boolean isRequireTimeCondition()
   {
     return requireTimeCondition;
@@ -106,11 +192,6 @@ public class PlannerConfig
   public DateTimeZone getSqlTimeZone()
   {
     return sqlTimeZone;
-  }
-
-  public boolean shouldSerializeComplexValues()
-  {
-    return serializeComplexValues;
   }
 
   public boolean isComputeInnerJoinCostAsFilter()
@@ -137,6 +218,56 @@ public class PlannerConfig
     return forceExpressionVirtualColumns;
   }
 
+  public QueryContexts.PlannerStrategy getNativeQuerySqlPlanningMode()
+  {
+    return nativeQuerySqlPlanningMode;
+  }
+
+  /**
+   * Returns whether the sys.queries table is enabled.
+   */
+  public boolean isEnableSysQueriesTable()
+  {
+    return enableSysQueriesTable;
+  }
+
+  /**
+   * Returns whether READ access is required for a table to be visible to the validator.
+   *
+   * <p>When this is set, in order to ensure that validation works properly for ingestion, INSERT and REPLACE
+   * require both READ and WRITE access. (If this property is not set, they require only WRITE.)
+   *
+   * <p>Regardless of the value of this property, READ access is required for tables to show up in
+   * the INFORMATION_SCHEMA.
+   */
+  public boolean isAuthorizeTableVisibility()
+  {
+    return authorizeTableVisibility;
+  }
+
+  /**
+   * See {@link #maxPlanningTimeMs}. Returns {@link #PLANNING_TIME_NOT_LIMITED} when planning time is unbounded.
+   */
+  public long getMaxPlanningTimeMs()
+  {
+    return maxPlanningTimeMs;
+  }
+
+  public boolean isPlanningTimeLimited()
+  {
+    return maxPlanningTimeMs > PLANNING_TIME_NOT_LIMITED;
+  }
+
+  /**
+   * Whether catalog DDL statements (CREATE TABLE, ALTER TABLE) may be executed. Off by default: the Broker's SQL
+   * endpoint is typically reachable by far more people than the Coordinator's catalog API, so enabling this widens
+   * what an existing datasource WRITE permission allows. Deliberately not overridable from the query context.
+   */
+  public boolean isEnableCatalogDdl()
+  {
+    return enableCatalogDdl;
+  }
+
   public PlannerConfig withOverrides(final Map<String, Object> queryContext)
   {
     if (queryContext.isEmpty()) {
@@ -147,43 +278,61 @@ public class PlannerConfig
         .build();
   }
 
-  @Override
-  public boolean equals(final Object o)
+  /**
+   * Returns a copy of this config with a single query context parameter applied as an override.
+   */
+  public <T> PlannerConfig withOverrides(final QueryContextParameter<T> parameter, final T value)
   {
-    if (this == o) {
-      return true;
-    }
+    return withOverrides(QueryContext.ofMap(parameter, value));
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
     if (o == null || getClass() != o.getClass()) {
       return false;
     }
-    final PlannerConfig that = (PlannerConfig) o;
-    return maxTopNLimit == that.maxTopNLimit &&
-           useApproximateCountDistinct == that.useApproximateCountDistinct &&
-           useApproximateTopN == that.useApproximateTopN &&
-           requireTimeCondition == that.requireTimeCondition &&
-           serializeComplexValues == that.serializeComplexValues &&
-           Objects.equals(sqlTimeZone, that.sqlTimeZone) &&
-           useNativeQueryExplain == that.useNativeQueryExplain &&
-           forceExpressionVirtualColumns == that.forceExpressionVirtualColumns &&
-           useGroupingSetForExactDistinct == that.useGroupingSetForExactDistinct &&
-           computeInnerJoinCostAsFilter == that.computeInnerJoinCostAsFilter &&
-           authorizeSystemTablesDirectly == that.authorizeSystemTablesDirectly &&
-           maxNumericInFilters == that.maxNumericInFilters;
+    PlannerConfig that = (PlannerConfig) o;
+    return maxTopNLimit == that.maxTopNLimit
+           && useApproximateCountDistinct == that.useApproximateCountDistinct
+           && useApproximateTopN == that.useApproximateTopN
+           && useLexicographicTopN == that.useLexicographicTopN
+           && requireTimeCondition == that.requireTimeCondition
+           && useGroupingSetForExactDistinct == that.useGroupingSetForExactDistinct
+           && computeInnerJoinCostAsFilter == that.computeInnerJoinCostAsFilter
+           && authorizeSystemTablesDirectly == that.authorizeSystemTablesDirectly
+           && useNativeQueryExplain == that.useNativeQueryExplain
+           && forceExpressionVirtualColumns == that.forceExpressionVirtualColumns
+           && maxNumericInFilters == that.maxNumericInFilters
+           && maxPlanningTimeMs == that.maxPlanningTimeMs
+           && enableSysQueriesTable == that.enableSysQueriesTable
+           && authorizeTableVisibility == that.authorizeTableVisibility
+           && enableCatalogDdl == that.enableCatalogDdl
+           && Objects.equals(sqlTimeZone, that.sqlTimeZone)
+           && Objects.equals(nativeQuerySqlPlanningMode, that.nativeQuerySqlPlanningMode);
   }
 
   @Override
   public int hashCode()
   {
-
     return Objects.hash(
         maxTopNLimit,
         useApproximateCountDistinct,
         useApproximateTopN,
+        useLexicographicTopN,
         requireTimeCondition,
         sqlTimeZone,
-        serializeComplexValues,
+        useGroupingSetForExactDistinct,
+        computeInnerJoinCostAsFilter,
+        authorizeSystemTablesDirectly,
         useNativeQueryExplain,
-        forceExpressionVirtualColumns
+        forceExpressionVirtualColumns,
+        maxNumericInFilters,
+        maxPlanningTimeMs,
+        nativeQuerySqlPlanningMode,
+        enableSysQueriesTable,
+        authorizeTableVisibility,
+        enableCatalogDdl
     );
   }
 
@@ -194,10 +343,15 @@ public class PlannerConfig
            "maxTopNLimit=" + maxTopNLimit +
            ", useApproximateCountDistinct=" + useApproximateCountDistinct +
            ", useApproximateTopN=" + useApproximateTopN +
+           ", useLexicographicTopN=" + useLexicographicTopN +
            ", requireTimeCondition=" + requireTimeCondition +
            ", sqlTimeZone=" + sqlTimeZone +
-           ", serializeComplexValues=" + serializeComplexValues +
            ", useNativeQueryExplain=" + useNativeQueryExplain +
+           ", maxPlanningTimeMs=" + maxPlanningTimeMs +
+           ", nativeQuerySqlPlanningMode=" + nativeQuerySqlPlanningMode +
+           ", enableSysQueriesTable=" + enableSysQueriesTable +
+           ", authorizeTableVisibility=" + authorizeTableVisibility +
+           ", enableCatalogDdl=" + enableCatalogDdl +
            '}';
   }
 
@@ -222,6 +376,7 @@ public class PlannerConfig
     private int maxTopNLimit;
     private boolean useApproximateCountDistinct;
     private boolean useApproximateTopN;
+    private boolean useLexicographicTopN;
     private boolean requireTimeCondition;
     private DateTimeZone sqlTimeZone;
     private boolean useGroupingSetForExactDistinct;
@@ -230,7 +385,11 @@ public class PlannerConfig
     private boolean useNativeQueryExplain;
     private boolean forceExpressionVirtualColumns;
     private int maxNumericInFilters;
-    private boolean serializeComplexValues;
+    private long maxPlanningTimeMs;
+    private QueryContexts.PlannerStrategy nativeQuerySqlPlanningMode;
+    private boolean enableSysQueriesTable;
+    private boolean authorizeTableVisibility;
+    private boolean enableCatalogDdl;
 
     public Builder(PlannerConfig base)
     {
@@ -240,6 +399,7 @@ public class PlannerConfig
       maxTopNLimit = base.getMaxTopNLimit();
       useApproximateCountDistinct = base.isUseApproximateCountDistinct();
       useApproximateTopN = base.isUseApproximateTopN();
+      useLexicographicTopN = base.isUseLexicographicTopN();
       requireTimeCondition = base.isRequireTimeCondition();
       sqlTimeZone = base.getSqlTimeZone();
       useGroupingSetForExactDistinct = base.isUseGroupingSetForExactDistinct();
@@ -248,7 +408,11 @@ public class PlannerConfig
       useNativeQueryExplain = base.isUseNativeQueryExplain();
       forceExpressionVirtualColumns = base.isForceExpressionVirtualColumns();
       maxNumericInFilters = base.getMaxNumericInFilters();
-      serializeComplexValues = base.shouldSerializeComplexValues();
+      maxPlanningTimeMs = base.getMaxPlanningTimeMs();
+      nativeQuerySqlPlanningMode = base.getNativeQuerySqlPlanningMode();
+      enableSysQueriesTable = base.isEnableSysQueriesTable();
+      authorizeTableVisibility = base.isAuthorizeTableVisibility();
+      enableCatalogDdl = base.isEnableCatalogDdl();
     }
 
     public Builder requireTimeCondition(boolean option)
@@ -269,6 +433,12 @@ public class PlannerConfig
       return this;
     }
 
+    public Builder maxPlanningTimeMs(long value)
+    {
+      this.maxPlanningTimeMs = value;
+      return this;
+    }
+
     public Builder useApproximateCountDistinct(boolean option)
     {
       this.useApproximateCountDistinct = option;
@@ -278,6 +448,12 @@ public class PlannerConfig
     public Builder useApproximateTopN(boolean option)
     {
       this.useApproximateTopN = option;
+      return this;
+    }
+
+    public Builder useLexicographicTopN(boolean option)
+    {
+      this.useLexicographicTopN = option;
       return this;
     }
 
@@ -305,58 +481,80 @@ public class PlannerConfig
       return this;
     }
 
-    public Builder serializeComplexValues(boolean option)
-    {
-      this.serializeComplexValues = option;
-      return this;
-    }
-
     public Builder useNativeQueryExplain(boolean option)
     {
       this.useNativeQueryExplain = option;
       return this;
     }
 
+    public Builder nativeQuerySqlPlanningMode(QueryContexts.PlannerStrategy mode)
+    {
+      this.nativeQuerySqlPlanningMode = mode;
+      return this;
+    }
+
+    public Builder enableSysQueriesTable(boolean option)
+    {
+      this.enableSysQueriesTable = option;
+      return this;
+    }
+
+    public Builder authorizeTableVisibility(boolean option)
+    {
+      this.authorizeTableVisibility = option;
+      return this;
+    }
+
+    public Builder enableCatalogDdl(boolean option)
+    {
+      this.enableCatalogDdl = option;
+      return this;
+    }
+
     public Builder withOverrides(final Map<String, Object> queryContext)
     {
-      useApproximateCountDistinct = QueryContexts.parseBoolean(
-          queryContext,
-          CTX_KEY_USE_APPROXIMATE_COUNT_DISTINCT,
+      final QueryContext context = QueryContext.of(queryContext);
+      useApproximateCountDistinct = context.getOrDefault(
+          QueryContextParameters.USE_APPROXIMATE_COUNT_DISTINCT,
           useApproximateCountDistinct
       );
-      useGroupingSetForExactDistinct = QueryContexts.parseBoolean(
-          queryContext,
-          CTX_KEY_USE_GROUPING_SET_FOR_EXACT_DISTINCT,
+      useGroupingSetForExactDistinct = context.getOrDefault(
+          QueryContextParameters.USE_GROUPING_SET_FOR_EXACT_DISTINCT,
           useGroupingSetForExactDistinct
       );
-      useApproximateTopN = QueryContexts.parseBoolean(
-          queryContext,
-          CTX_KEY_USE_APPROXIMATE_TOPN,
-          useApproximateTopN
+      useApproximateTopN = context.getOrDefault(QueryContextParameters.USE_APPROXIMATE_TOP_N, useApproximateTopN);
+      useLexicographicTopN = context.getOrDefault(
+          QueryContextParameters.USE_LEXICOGRAPHIC_TOP_N,
+          useLexicographicTopN
       );
-      computeInnerJoinCostAsFilter = QueryContexts.parseBoolean(
-          queryContext,
-          CTX_COMPUTE_INNER_JOIN_COST_AS_FILTER,
+      computeInnerJoinCostAsFilter = context.getOrDefault(
+          QueryContextParameters.COMPUTE_INNER_JOIN_COST_AS_FILTER,
           computeInnerJoinCostAsFilter
       );
-      useNativeQueryExplain = QueryContexts.parseBoolean(
-          queryContext,
-          CTX_KEY_USE_NATIVE_QUERY_EXPLAIN,
+      useNativeQueryExplain = context.getOrDefault(
+          QueryContextParameters.USE_NATIVE_QUERY_EXPLAIN,
           useNativeQueryExplain
       );
-      forceExpressionVirtualColumns = QueryContexts.parseBoolean(
-          queryContext,
-          CTX_KEY_FORCE_EXPRESSION_VIRTUAL_COLUMNS,
+      forceExpressionVirtualColumns = context.getOrDefault(
+          QueryContextParameters.FORCE_EXPRESSION_VIRTUAL_COLUMNS,
           forceExpressionVirtualColumns
       );
-      final int queryContextMaxNumericInFilters = QueryContexts.parseInt(
-          queryContext,
-          CTX_MAX_NUMERIC_IN_FILTERS,
+      final int queryContextMaxNumericInFilters = context.getOrDefault(
+          QueryContextParameters.MAX_NUMERIC_IN_FILTERS,
           maxNumericInFilters
       );
       maxNumericInFilters = validateMaxNumericInFilters(
           queryContextMaxNumericInFilters,
           maxNumericInFilters);
+      nativeQuerySqlPlanningMode = context.getOrDefault(
+          QueryContextParameters.PLANNER_STRATEGY,
+          nativeQuerySqlPlanningMode
+      );
+      requireTimeCondition = context.getOrDefault(
+          QueryContextParameters.REQUIRE_TIME_CONDITION,
+          requireTimeCondition
+      );
+      maxPlanningTimeMs = context.getOrDefault(QueryContextParameters.MAX_PLANNING_TIME_MS, maxPlanningTimeMs);
       return this;
     }
 
@@ -365,12 +563,12 @@ public class PlannerConfig
       // if maxNumericInFIlters through context == 0 catch exception
       // else if query context exceeds system set value throw error
       if (queryContextMaxNumericInFilters == 0) {
-        throw new UOE("[%s] must be greater than 0", CTX_MAX_NUMERIC_IN_FILTERS);
+        throw new UOE("[%s] must be greater than 0", QueryContextParameters.MAX_NUMERIC_IN_FILTERS);
       } else if (queryContextMaxNumericInFilters > systemConfigMaxNumericInFilters
                  && systemConfigMaxNumericInFilters != NUM_FILTER_NOT_USED) {
         throw new UOE(
             "Expected parameter[%s] cannot exceed system set value of [%d]",
-            CTX_MAX_NUMERIC_IN_FILTERS,
+            QueryContextParameters.MAX_NUMERIC_IN_FILTERS,
             systemConfigMaxNumericInFilters
         );
       }
@@ -388,6 +586,7 @@ public class PlannerConfig
       config.maxTopNLimit = maxTopNLimit;
       config.useApproximateCountDistinct = useApproximateCountDistinct;
       config.useApproximateTopN = useApproximateTopN;
+      config.useLexicographicTopN = useLexicographicTopN;
       config.requireTimeCondition = requireTimeCondition;
       config.sqlTimeZone = sqlTimeZone;
       config.useGroupingSetForExactDistinct = useGroupingSetForExactDistinct;
@@ -395,9 +594,55 @@ public class PlannerConfig
       config.authorizeSystemTablesDirectly = authorizeSystemTablesDirectly;
       config.useNativeQueryExplain = useNativeQueryExplain;
       config.maxNumericInFilters = maxNumericInFilters;
+      config.maxPlanningTimeMs = maxPlanningTimeMs;
       config.forceExpressionVirtualColumns = forceExpressionVirtualColumns;
-      config.serializeComplexValues = serializeComplexValues;
+      config.nativeQuerySqlPlanningMode = nativeQuerySqlPlanningMode;
+      config.enableSysQueriesTable = enableSysQueriesTable;
+      config.authorizeTableVisibility = authorizeTableVisibility;
+      config.enableCatalogDdl = enableCatalogDdl;
       return config;
     }
+  }
+
+  /**
+   * Translates {@link PlannerConfig} settings into its equivalent QueryContext map.
+   *
+   * @throws DruidException if the translation is not possible.
+   */
+  public Map<String, Object> getNonDefaultAsQueryContext()
+  {
+    Map<String, Object> overrides = new HashMap<>();
+    PlannerConfig def = new PlannerConfig();
+    if (def.useApproximateCountDistinct != useApproximateCountDistinct) {
+      overrides.put(
+          QueryContextParameters.USE_APPROXIMATE_COUNT_DISTINCT.getName(),
+          String.valueOf(useApproximateCountDistinct)
+      );
+    }
+    if (def.useGroupingSetForExactDistinct != useGroupingSetForExactDistinct) {
+      overrides.put(
+          QueryContextParameters.USE_GROUPING_SET_FOR_EXACT_DISTINCT.getName(),
+          String.valueOf(useGroupingSetForExactDistinct)
+      );
+    }
+    if (def.requireTimeCondition != requireTimeCondition) {
+      overrides.put(
+          QueryContextParameters.REQUIRE_TIME_CONDITION.getName(),
+          String.valueOf(requireTimeCondition)
+      );
+    }
+    if (def.maxPlanningTimeMs != maxPlanningTimeMs) {
+      QueryContextParameters.MAX_PLANNING_TIME_MS.set(overrides, maxPlanningTimeMs);
+    }
+
+    PlannerConfig newConfig = PlannerConfig.builder().withOverrides(overrides).build();
+    if (!equals(newConfig)) {
+      throw DruidException.defensive(
+          "Not all PlannerConfig options are not persistable as QueryContext keys!\nold: %s\nnew: %s",
+          this,
+          newConfig
+      );
+    }
+    return overrides;
   }
 }

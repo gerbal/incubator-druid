@@ -19,11 +19,10 @@
 
 package org.apache.druid.query.aggregation.constant;
 
-import org.apache.commons.lang.math.RandomUtils;
-import org.easymock.EasyMock;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.apache.commons.lang3.RandomUtils;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
 
@@ -33,38 +32,37 @@ public class LongConstantBufferAggregatorTest
   private LongConstantBufferAggregator aggregator;
   private ByteBuffer byteBuffer;
 
-  @Before
+  @BeforeEach
   public void setup()
   {
     randomVal = RandomUtils.nextLong();
     aggregator = new LongConstantBufferAggregator(randomVal);
-    byteBuffer = EasyMock.mock(ByteBuffer.class);
-    EasyMock.replay(byteBuffer);
-    EasyMock.verifyUnexpectedCalls(byteBuffer);
+    // mark byteBuffer null to verify no methods ever get called on it.
+    byteBuffer = null;
   }
 
   @Test
   public void testLong()
   {
-    Assert.assertEquals(randomVal, aggregator.getLong(byteBuffer, 0));
+    Assertions.assertEquals(randomVal, aggregator.getLong(byteBuffer, 0));
   }
 
   @Test
   public void testAggregate()
   {
     aggregator.aggregate(byteBuffer, 0);
-    Assert.assertEquals(randomVal, aggregator.getLong(byteBuffer, 0));
+    Assertions.assertEquals(randomVal, aggregator.getLong(byteBuffer, 0));
   }
 
   @Test
   public void testFloat()
   {
-    Assert.assertEquals((float) randomVal, aggregator.getFloat(byteBuffer, 0), 0.0001f);
+    Assertions.assertEquals(randomVal, aggregator.getFloat(byteBuffer, 0), 0.0001f);
   }
 
   @Test
   public void testGet()
   {
-    Assert.assertEquals(randomVal, aggregator.get(byteBuffer, 0));
+    Assertions.assertEquals(randomVal, aggregator.get(byteBuffer, 0));
   }
 }

@@ -20,20 +20,20 @@
 package org.apache.druid.query;
 
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
+import org.apache.druid.error.DruidException;
 import org.apache.druid.guice.annotations.PublicApi;
-import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.PostAggregator;
-import org.apache.druid.query.dimension.DimensionSpec;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.filter.DimFilter;
-import org.apache.druid.query.planning.DataSourceAnalysis;
+import org.apache.druid.query.planning.ExecutionVertex;
 import org.apache.druid.query.spec.MultipleSpecificSegmentSpec;
 import org.apache.druid.segment.VirtualColumn;
 import org.apache.druid.segment.VirtualColumns;
 import org.apache.druid.segment.column.ColumnHolder;
+import org.joda.time.Interval;
 
 import javax.annotation.Nullable;
 
@@ -163,35 +163,76 @@ public class Queries
       retVal = query.withDataSource(new QueryDataSource(withSpecificSegments(subQuery, descriptors)));
     } else {
       retVal = query.withQuerySegmentSpec(new MultipleSpecificSegmentSpec(descriptors));
+
+      // Verify preconditions and invariants, just in case.
+      ExecutionVertex ev = ExecutionVertex.of(retVal);
+
+      // Sanity check: query must be based on a single table.
+      ev.getBaseTableDataSource();
+
+      if (!ev.getEffectiveQuerySegmentSpec().equals(new MultipleSpecificSegmentSpec(descriptors))) {
+        // If you see the error message below, it's a bug in either this function or in DataSourceAnalysis.
+        throw DruidException
+            .defensive("Unable to apply specific segments to query with dataSource[%s]", query.getDataSource());
+      }
     }
-
-    // Verify preconditions and invariants, just in case.
-    final DataSource retDataSource = retVal.getDataSource();
-    final DataSourceAnalysis analysis = retDataSource.getAnalysis();
-
-    // Sanity check: query must be based on a single table.
-    if (!analysis.getBaseTableDataSource().isPresent()) {
-      throw new ISE("Unable to apply specific segments to non-table-based dataSource[%s]", query.getDataSource());
-    }
-
-    if (analysis.getBaseQuerySegmentSpec().isPresent()
-        && !analysis.getBaseQuerySegmentSpec().get().equals(new MultipleSpecificSegmentSpec(descriptors))) {
-      // If you see the error message below, it's a bug in either this function or in DataSourceAnalysis.
-      throw new ISE("Unable to apply specific segments to query with dataSource[%s]", query.getDataSource());
-    }
-
     return retVal;
+  }
+
+  /**
+   * Returns a {@link SegmentDescriptor} with its interval narrowed to the intervals of the lowest-level
+   * subquery of the provided {@link Query} (the same one that {@link #withSpecificSegments(Query, List)} modifies),
+   * or null if they do not overlap.
+   *
+   * <p>Data servers build each descriptor from the query's original intervals, so this normally returns
+   * {@code descriptor} unchanged. It differs only when a query engine rewrites its query to narrow the
+   * interval further.
+   */
+  @Nullable
+  public static SegmentDescriptor narrowToQuery(final SegmentDescriptor descriptor, final Query<?> query)
+  {
+    if (query.getDataSource() instanceof QueryDataSource) {
+      return narrowToQuery(descriptor, ((QueryDataSource) query.getDataSource()).getQuery());
+    }
+
+    // Query intervals are condensed, so each one overlaps a different, non-abutting part of the descriptor.
+    Interval narrowedInterval = null;
+    for (final Interval queryInterval : query.getIntervals()) {
+      final Interval overlap = descriptor.getInterval().overlap(queryInterval);
+      if (overlap != null && overlap.toDurationMillis() > 0) {
+        if (narrowedInterval != null) {
+          throw DruidException.defensive(
+              "Query intervals[%s] split segment interval[%s]",
+              query.getIntervals(),
+              descriptor.getInterval()
+          );
+        }
+        narrowedInterval = overlap;
+      }
+    }
+
+    if (narrowedInterval == null) {
+      return null;
+    } else if (narrowedInterval.equals(descriptor.getInterval())) {
+      return descriptor;
+    } else {
+      return new SegmentDescriptor(narrowedInterval, descriptor.getVersion(), descriptor.getPartitionNumber());
+    }
   }
 
   /**
    * Rewrite "query" to refer to some specific base datasource, instead of the one it currently refers to.
    *
    * Unlike the seemingly-similar {@link Query#withDataSource}, this will walk down the datasource tree and replace
-   * only the base datasource (in the sense defined in {@link DataSourceAnalysis}).
+   * only the base datasource (in the sense defined in {@link ExecutionVertex#getBaseDataSource()}).
    */
-  public static <T> Query<T> withBaseDataSource(final Query<T> query, final DataSource newBaseDataSource)
+  public static Query withBaseDataSource(final Query query, final DataSource newBaseDataSource)
   {
-    return query.withDataSource(query.getDataSource().withUpdatedDataSource(newBaseDataSource));
+    ExecutionVertex ev = ExecutionVertex.of(query);
+    if (!ev.isProcessable()) {
+      throw DruidException.defensive("Its unsafe to replace the BaseDataSource of a non-processable query [%s]", query);
+    }
+    return ev.buildQueryWithBaseDataSource(newBaseDataSource);
   }
 
   /**
@@ -206,17 +247,15 @@ public class Queries
    *
    * @param virtualColumns    virtual columns whose inputs should be included.
    * @param filter            optional filter whose inputs should be included.
-   * @param dimensions        dimension specs whose inputs should be included.
-   * @param aggregators       aggregators whose inputs should be included.
-   * @param additionalColumns additional columns to include. Each of these will be added to the returned set, unless it
+   * @param columns           additional columns to include. Each of these will be added to the returned set, unless it
    *                          refers to a virtual column, in which case the virtual column inputs will be added instead.
+   * @param aggregators       aggregators whose inputs should be included.
    */
   public static Set<String> computeRequiredColumns(
       final VirtualColumns virtualColumns,
       @Nullable final DimFilter filter,
-      final List<DimensionSpec> dimensions,
-      final List<AggregatorFactory> aggregators,
-      final List<String> additionalColumns
+      final List<String> columns,
+      final List<AggregatorFactory> aggregators
   )
   {
     final Set<String> requiredColumns = new HashSet<>();
@@ -240,9 +279,9 @@ public class Queries
       }
     }
 
-    for (DimensionSpec dimensionSpec : dimensions) {
-      if (!virtualColumns.exists(dimensionSpec.getDimension())) {
-        requiredColumns.add(dimensionSpec.getDimension());
+    for (String column : columns) {
+      if (!virtualColumns.exists(column)) {
+        requiredColumns.add(column);
       }
     }
 
@@ -254,20 +293,14 @@ public class Queries
       }
     }
 
-    for (String column : additionalColumns) {
-      if (!virtualColumns.exists(column)) {
-        requiredColumns.add(column);
-      }
-    }
-
     return requiredColumns;
   }
 
   public static <T> Query<T> withMaxScatterGatherBytes(Query<T> query, long maxScatterGatherBytesLimit)
   {
     QueryContext context = query.context();
-    if (!context.containsKey(QueryContexts.MAX_SCATTER_GATHER_BYTES_KEY)) {
-      return query.withOverriddenContext(ImmutableMap.of(QueryContexts.MAX_SCATTER_GATHER_BYTES_KEY, maxScatterGatherBytesLimit));
+    if (!context.has(QueryContextParameters.MAX_SCATTER_GATHER_BYTES)) {
+      return query.withOverriddenContext(QueryContextParameters.MAX_SCATTER_GATHER_BYTES, maxScatterGatherBytesLimit);
     }
     context.verifyMaxScatterGatherBytes(maxScatterGatherBytesLimit);
     return query;
@@ -275,11 +308,11 @@ public class Queries
 
   public static <T> Query<T> withTimeout(Query<T> query, long timeout)
   {
-    return query.withOverriddenContext(ImmutableMap.of(QueryContexts.TIMEOUT_KEY, timeout));
+    return query.withOverriddenContext(QueryContextParameters.TIMEOUT, timeout);
   }
 
   public static <T> Query<T> withDefaultTimeout(Query<T> query, long defaultTimeout)
   {
-    return query.withOverriddenContext(ImmutableMap.of(QueryContexts.DEFAULT_TIMEOUT_KEY, defaultTimeout));
+    return query.withOverriddenContext(QueryContextParameters.DEFAULT_TIMEOUT, defaultTimeout);
   }
 }

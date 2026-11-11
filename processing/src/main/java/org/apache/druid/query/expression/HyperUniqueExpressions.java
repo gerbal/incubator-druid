@@ -19,7 +19,6 @@
 
 package org.apache.druid.query.expression;
 
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.hll.HyperLogLogCollector;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.math.expr.Expr;
@@ -28,7 +27,6 @@ import org.apache.druid.math.expr.ExprMacroTable;
 import org.apache.druid.math.expr.ExprType;
 import org.apache.druid.math.expr.ExpressionType;
 import org.apache.druid.query.aggregation.cardinality.CardinalityAggregator;
-import org.apache.druid.query.aggregation.cardinality.types.StringCardinalityAggregatorColumnSelectorStrategy;
 import org.apache.druid.query.aggregation.hyperloglog.HyperUniquesAggregatorFactory;
 
 import javax.annotation.Nullable;
@@ -141,7 +139,7 @@ public class HyperUniqueExpressions
       {
         public HllExpr(List<Expr> args)
         {
-          super(NAME, args);
+          super(HllAddExprMacro.this, args);
         }
 
         @Override
@@ -163,30 +161,24 @@ public class HyperUniqueExpressions
           ExprEval input = args.get(0).eval(bindings);
           switch (input.type().getType()) {
             case STRING:
-              if (input.value() == null) {
-                if (NullHandling.replaceWithDefault()) {
-                  collector.add(
-                      CardinalityAggregator.HASH_FUNCTION.hashUnencodedChars(
-                          StringCardinalityAggregatorColumnSelectorStrategy.CARDINALITY_AGG_NULL_STRING
-                      ).asBytes()
-                  );
-                }
-              } else {
+              if (input.value() != null) {
                 collector.add(CardinalityAggregator.HASH_FUNCTION.hashUnencodedChars(input.asString()).asBytes());
               }
               break;
             case DOUBLE:
-              if (NullHandling.replaceWithDefault() || !input.isNumericNull()) {
-                collector.add(CardinalityAggregator.HASH_FUNCTION.hashLong(Double.doubleToLongBits(input.asDouble())).asBytes());
+              if (!input.isNumericNull()) {
+                collector.add(CardinalityAggregator.HASH_FUNCTION.hashLong(Double.doubleToLongBits(input.asDouble()))
+                                                                 .asBytes());
               }
               break;
             case LONG:
-              if (NullHandling.replaceWithDefault() || !input.isNumericNull()) {
+              if (!input.isNumericNull()) {
                 collector.add(CardinalityAggregator.HASH_FUNCTION.hashLong(input.asLong()).asBytes());
               }
               break;
             case COMPLEX:
-              if (TYPE.equals(input.type()) || hllType.is(ExprType.COMPLEX) && hllCollector.value() instanceof HyperLogLogCollector) {
+              if (TYPE.equals(input.type())
+                  || hllType.is(ExprType.COMPLEX) && hllCollector.value() instanceof HyperLogLogCollector) {
                 collector.fold((HyperLogLogCollector) input.value());
                 break;
               }
@@ -198,12 +190,6 @@ public class HyperUniqueExpressions
           }
 
           return ExprEval.ofComplex(TYPE, collector);
-        }
-
-        @Override
-        public Expr visit(Shuttle shuttle)
-        {
-          return shuttle.visit(apply(shuttle.visitAll(args)));
         }
 
         @Nullable
@@ -232,11 +218,11 @@ public class HyperUniqueExpressions
     {
       validationHelperCheckArgumentCount(args, 1);
 
-      class HllExpr extends ExprMacroTable.BaseScalarUnivariateMacroFunctionExpr
+      class HllExpr extends ExprMacroTable.BaseScalarMacroFunctionExpr
       {
-        public HllExpr(Expr arg)
+        public HllExpr(List<Expr> args)
         {
-          super(NAME, arg);
+          super(HllEstimateExprMacro.this, args);
         }
 
         @Override
@@ -258,12 +244,6 @@ public class HyperUniqueExpressions
           return ExprEval.ofDouble(collector.estimateCardinality());
         }
 
-        @Override
-        public Expr visit(Shuttle shuttle)
-        {
-          return shuttle.visit(apply(shuttle.visitAll(args)));
-        }
-
         @Nullable
         @Override
         public ExpressionType getOutputType(InputBindingInspector inspector)
@@ -271,7 +251,7 @@ public class HyperUniqueExpressions
           return ExpressionType.DOUBLE;
         }
       }
-      return new HllExpr(args.get(0));
+      return new HllExpr(args);
     }
   }
 
@@ -290,11 +270,11 @@ public class HyperUniqueExpressions
     {
       validationHelperCheckArgumentCount(args, 1);
 
-      class HllExpr extends ExprMacroTable.BaseScalarUnivariateMacroFunctionExpr
+      class HllExpr extends ExprMacroTable.BaseScalarMacroFunctionExpr
       {
-        public HllExpr(Expr arg)
+        public HllExpr(List<Expr> args)
         {
-          super(NAME, arg);
+          super(HllRoundEstimateExprMacro.this, args);
         }
 
         @Override
@@ -312,12 +292,6 @@ public class HyperUniqueExpressions
           return ExprEval.ofLong(collector.estimateCardinalityRound());
         }
 
-        @Override
-        public Expr visit(Shuttle shuttle)
-        {
-          return shuttle.visit(apply(shuttle.visitAll(args)));
-        }
-
         @Nullable
         @Override
         public ExpressionType getOutputType(InputBindingInspector inspector)
@@ -325,7 +299,7 @@ public class HyperUniqueExpressions
           return ExpressionType.LONG;
         }
       }
-      return new HllExpr(args.get(0));
+      return new HllExpr(args);
     }
   }
 }

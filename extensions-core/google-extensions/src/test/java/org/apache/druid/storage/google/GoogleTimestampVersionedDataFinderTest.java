@@ -19,12 +19,10 @@
 
 package org.apache.druid.storage.google;
 
-import com.google.api.client.util.DateTime;
-import com.google.api.services.storage.model.StorageObject;
 import com.google.common.collect.ImmutableList;
 import org.apache.druid.java.util.common.StringUtils;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.util.regex.Pattern;
@@ -38,21 +36,21 @@ public class GoogleTimestampVersionedDataFinderTest
     String keyPrefix = "prefix/dir/0";
 
     // object for directory prefix/dir/0/
-    final StorageObject storageObject1 = ObjectStorageIteratorTest.makeStorageObject(bucket, keyPrefix + "//", 0);
-    storageObject1.setUpdated(new DateTime(System.currentTimeMillis()));
-    final StorageObject storageObject2 = ObjectStorageIteratorTest.makeStorageObject(bucket, keyPrefix + "/v1", 1);
-    storageObject2.setUpdated(new DateTime(System.currentTimeMillis()));
-    final StorageObject storageObject3 = ObjectStorageIteratorTest.makeStorageObject(bucket, keyPrefix + "/v2", 1);
-    storageObject3.setUpdated(new DateTime(System.currentTimeMillis() + 100));
-    final StorageObject storageObject4 = ObjectStorageIteratorTest.makeStorageObject(bucket, keyPrefix + "/other", 4);
-    storageObject4.setUpdated(new DateTime(System.currentTimeMillis() + 100));
+    final GoogleStorageObjectMetadata storageObject1 = ObjectStorageIteratorTest.makeStorageObject(bucket, keyPrefix + "//", 0);
+    storageObject1.setLastUpdateTimeMillis(System.currentTimeMillis());
+    final GoogleStorageObjectMetadata storageObject2 = ObjectStorageIteratorTest.makeStorageObject(bucket, keyPrefix + "/v1", 1);
+    storageObject2.setLastUpdateTimeMillis(System.currentTimeMillis());
+    final GoogleStorageObjectMetadata storageObject3 = ObjectStorageIteratorTest.makeStorageObject(bucket, keyPrefix + "/v2", 1);
+    storageObject3.setLastUpdateTimeMillis(System.currentTimeMillis() + 100);
+    final GoogleStorageObjectMetadata storageObject4 = ObjectStorageIteratorTest.makeStorageObject(bucket, keyPrefix + "/other", 4);
+    storageObject4.setLastUpdateTimeMillis(System.currentTimeMillis() + 100);
     final GoogleStorage storage = ObjectStorageIteratorTest.makeMockClient(ImmutableList.of(storageObject1, storageObject2, storageObject3, storageObject4));
 
-    final GoogleTimestampVersionedDataFinder finder = new GoogleTimestampVersionedDataFinder(storage);
+    final GoogleTimestampVersionedDataFinder finder = new GoogleTimestampVersionedDataFinder(storage, new GoogleInputDataConfig());
     Pattern pattern = Pattern.compile("v.*");
     URI latest = finder.getLatestVersion(URI.create(StringUtils.format("gs://%s/%s", bucket, keyPrefix)), pattern);
     URI expected = URI.create(StringUtils.format("gs://%s/%s", bucket, storageObject3.getName()));
-    Assert.assertEquals(expected, latest);
+    Assertions.assertEquals(expected, latest);
   }
 
   @Test
@@ -62,20 +60,20 @@ public class GoogleTimestampVersionedDataFinderTest
     String keyPrefix = "prefix/dir/0/";
 
     // object for directory prefix/dir/0/
-    final StorageObject storageObject1 = ObjectStorageIteratorTest.makeStorageObject(bucket, keyPrefix + "/", 0);
-    storageObject1.setUpdated(new DateTime(System.currentTimeMillis()));
-    final StorageObject storageObject2 = ObjectStorageIteratorTest.makeStorageObject(bucket, keyPrefix + "v1", 1);
-    storageObject2.setUpdated(new DateTime(System.currentTimeMillis()));
-    final StorageObject storageObject3 = ObjectStorageIteratorTest.makeStorageObject(bucket, keyPrefix + "v2", 1);
-    storageObject3.setUpdated(new DateTime(System.currentTimeMillis() + 100));
-    final StorageObject storageObject4 = ObjectStorageIteratorTest.makeStorageObject(bucket, keyPrefix + "other", 4);
-    storageObject4.setUpdated(new DateTime(System.currentTimeMillis() + 100));
+    final GoogleStorageObjectMetadata storageObject1 = ObjectStorageIteratorTest.makeStorageObject(bucket, keyPrefix + "/", 0);
+    storageObject1.setLastUpdateTimeMillis(System.currentTimeMillis());
+    final GoogleStorageObjectMetadata storageObject2 = ObjectStorageIteratorTest.makeStorageObject(bucket, keyPrefix + "v1", 1);
+    storageObject2.setLastUpdateTimeMillis(System.currentTimeMillis());
+    final GoogleStorageObjectMetadata storageObject3 = ObjectStorageIteratorTest.makeStorageObject(bucket, keyPrefix + "v2", 1);
+    storageObject3.setLastUpdateTimeMillis(System.currentTimeMillis() + 100);
+    final GoogleStorageObjectMetadata storageObject4 = ObjectStorageIteratorTest.makeStorageObject(bucket, keyPrefix + "other", 4);
+    storageObject4.setLastUpdateTimeMillis(System.currentTimeMillis() + 100);
     final GoogleStorage storage = ObjectStorageIteratorTest.makeMockClient(ImmutableList.of(storageObject1, storageObject2, storageObject3, storageObject4));
 
-    final GoogleTimestampVersionedDataFinder finder = new GoogleTimestampVersionedDataFinder(storage);
+    final GoogleTimestampVersionedDataFinder finder = new GoogleTimestampVersionedDataFinder(storage, new GoogleInputDataConfig());
     Pattern pattern = Pattern.compile("v.*");
     URI latest = finder.getLatestVersion(URI.create(StringUtils.format("gs://%s/%s", bucket, keyPrefix)), pattern);
     URI expected = URI.create(StringUtils.format("gs://%s/%s", bucket, storageObject3.getName()));
-    Assert.assertEquals(expected, latest);
+    Assertions.assertEquals(expected, latest);
   }
 }

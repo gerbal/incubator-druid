@@ -34,7 +34,7 @@ Compressed big decimal is an absolute number based complex type based on big dec
 2. Accuracy: Provides greater level of accuracy in decimal arithmetic
 
 ## Operations
-To use this extension, make sure to [load](../../development/extensions.md#loading-extensions) `compressed-big-decimal` to your config file.
+To use this extension, make sure to [load](../../configuration/extensions.md#loading-extensions) `druid-compressed-bigdecimal` to your config file.
 
 ## Configuration
 There are currently no configuration properties specific to Compressed Big Decimal
@@ -61,7 +61,7 @@ There are currently no configuration properties specific to Compressed Big Decim
 |dimensions|A JSON list of [DimensionSpec](../../querying/dimensionspecs.md) (Notice that property is optional)|no|
 |limitSpec|See [LimitSpec](../../querying/limitspec.md)|no|
 |having|See [Having](../../querying/having.md)|no|
-|granularity|A period granularity; See [Period Granularities](../../querying/granularities.html#period-granularities)|yes|
+|granularity|A period granularity; See [Period Granularities](../../querying/granularities.md#period-granularities)|yes|
 |filter|See [Filters](../../querying/filters.md)|no|
 |aggregations|Aggregations forms the input to Averagers; See [Aggregations](../../querying/aggregations.md). The Aggregations must specify type, scale and size as follows for compressedBigDecimal Type ```"aggregations": [{"type": "compressedBigDecimal","name": "..","fieldName": "..","scale": [Numeric],"size": [Numeric]}```.  Please refer query example in Examples section.  |Yes|
 |postAggregations|Supports only aggregations as input; See [Post Aggregations](../../querying/post-aggregations.md)|no|
@@ -105,7 +105,7 @@ IngestionSpec syntax:
 			},
 			"metricsSpec": [{
 				"name": "saleAmount",
-				"type": *"compressedBigDecimal"*,
+				"type": "compressedBigDecimalSum",
 				"fieldName": "saleAmount"
 			}],
 			"transformSpec": {
@@ -144,6 +144,31 @@ IngestionSpec syntax:
 	}
 }
 ```
+
+SQL-based ingestion sample query:
+```sql
+
+REPLACE INTO "bigdecimal" OVERWRITE ALL
+WITH "ext" AS (
+  SELECT *
+  FROM TABLE(
+    EXTERN(
+      '{"type":"local","baseDir":""/home/user/sales/data/staging/invoice-data","filter":"invoice-001.20201208.txt"}',
+      '{"type":"csv","findColumnsFromHeader":false,"columns":["timestamp","itemName","saleAmount"]}',
+      '[{"name":"timestamp","type":"string"},{"name":"itemName","type":"string"},{"name":"saleAmount","type":"double"}]'
+    )
+  ) 
+)
+SELECT
+  TIME_PARSE(TRIM("timestamp")) AS "__time",
+  "itemName",
+  BIG_SUM("saleAmount") as amount
+FROM "ext"
+group by TIME_PARSE(TRIM("timestamp")) , itemName
+PARTITIONED BY DAY
+```
+
+
 ### Group By Query  example
 
 Calculating sales groupBy all.
@@ -159,7 +184,7 @@ Query syntax:
     ],
     "aggregations": [
         {
-            "type": "compressedBigDecimal",
+            "type": "compressedBigDecimalSum",
             "name": "saleAmount",
             "fieldName": "saleAmount",
             "scale": 9,
@@ -185,7 +210,7 @@ Result:
 } ]
 ```
 
-Had you used *doubleSum* instead of compressedBigDecimal the result would be 
+Had you used *doubleSum* instead of *compressedBigDecimalSum* the result would be 
 
 ```json
 [ {
@@ -208,7 +233,7 @@ Query syntax:
     "granularity": "ALL",
     "aggregations": [
         {
-            "type": "compressedBigDecimal",
+            "type": "compressedBigDecimalSum",
             "name": "revenue",
             "fieldName": "revenue",
             "scale": 9,
@@ -239,3 +264,17 @@ Result:
   }
 } ]
 ```
+
+### Supported Query Functions 
+
+Native aggregation functions:
+
+ * `compressedBigDecimalSum`
+ * `compressedBigDecimalMin`
+ * `compressedBigDecimalMax`
+
+SQL aggregation functions:
+ * `big_sum()`
+ * `big_min()`
+ * `big_max()`
+

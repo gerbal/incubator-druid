@@ -20,12 +20,15 @@
 package org.apache.druid.server.metrics;
 
 import com.google.inject.Inject;
+import org.apache.druid.discovery.NodeRole;
+import org.apache.druid.guice.annotations.LoadScope;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.java.util.emitter.service.ServiceMetricEvent;
 import org.apache.druid.java.util.metrics.AbstractMonitor;
 
 import java.util.Map;
 
+@LoadScope(roles = NodeRole.OVERLORD_JSON_NAME)
 public class TaskSlotCountStatsMonitor extends AbstractMonitor
 {
   private final TaskSlotCountStatsProvider statsProvider;
@@ -55,7 +58,7 @@ public class TaskSlotCountStatsMonitor extends AbstractMonitor
     if (counts != null) {
       counts.forEach((k, v) -> {
         builder.setDimension("category", k);
-        emitter.emit(builder.build(key, v));
+        emitter.emit(builder.setMetric(key, v));
       });
     }
   }

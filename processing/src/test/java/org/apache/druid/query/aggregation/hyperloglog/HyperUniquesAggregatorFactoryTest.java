@@ -22,17 +22,31 @@ package org.apache.druid.query.aggregation.hyperloglog;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.hash.HashFunction;
 import com.google.common.hash.Hashing;
+import org.apache.druid.error.DruidException;
 import org.apache.druid.hll.HyperLogLogCollector;
 import org.apache.druid.hll.VersionZeroHyperLogLogCollector;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.query.aggregation.AggregatorFactory;
+import org.apache.druid.query.aggregation.NoopAggregator;
+import org.apache.druid.query.aggregation.NoopBufferAggregator;
+import org.apache.druid.query.aggregation.NoopVectorAggregator;
+import org.apache.druid.segment.ColumnSelectorFactory;
+import org.apache.druid.segment.NilColumnValueSelector;
+import org.apache.druid.segment.TestColumnSelectorFactory;
 import org.apache.druid.segment.TestHelper;
-import org.junit.Assert;
-import org.junit.Test;
+import org.apache.druid.segment.column.ColumnCapabilitiesImpl;
+import org.apache.druid.segment.column.ColumnType;
+import org.apache.druid.segment.vector.TestVectorColumnSelectorFactory;
+import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
 import java.util.Comparator;
 import java.util.Random;
+
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class HyperUniquesAggregatorFactoryTest
 {
@@ -44,11 +58,24 @@ public class HyperUniquesAggregatorFactoryTest
 
   private final HashFunction fn = Hashing.murmur3_128();
 
+  private ColumnSelectorFactory metricFactory;
+  private VectorColumnSelectorFactory vectorFactory;
+
+  @BeforeEach
+  public void setup()
+  {
+    final ColumnCapabilitiesImpl columnCapabilities = ColumnCapabilitiesImpl.createDefault().setType(ColumnType.NESTED_DATA);
+    metricFactory = new TestColumnSelectorFactory()
+        .addCapabilities("uniques", columnCapabilities)
+        .addColumnSelector("uniques", null);
+    vectorFactory = new TestVectorColumnSelectorFactory().addCapabilities("uniques", columnCapabilities);
+  }
+
   @Test
   public void testDeserializeV0()
   {
     Object v0 = AGGREGATOR_FACTORY.deserialize(V0_BASE64);
-    Assert.assertEquals("deserialized value is VersionZeroHyperLogLogCollector", VersionZeroHyperLogLogCollector.class, v0.getClass());
+    Assertions.assertEquals(VersionZeroHyperLogLogCollector.class, v0.getClass(), "deserialized value is VersionZeroHyperLogLogCollector");
   }
 
   @Test
@@ -62,8 +89,8 @@ public class HyperUniquesAggregatorFactoryTest
     for (int i = 1; i < 100; i = i + 2) {
       collector1.add(fn.hashLong(i).asBytes());
       collector2.add(fn.hashLong(i + 1).asBytes());
-      Assert.assertEquals(1, comparator.compare(collector1, collector2));
-      Assert.assertEquals(1, Double.compare(collector1.estimateCardinality(), collector2.estimateCardinality()));
+      Assertions.assertEquals(1, comparator.compare(collector1, collector2));
+      Assertions.assertEquals(1, Double.compare(collector1.estimateCardinality(), collector2.estimateCardinality()));
     }
   }
 
@@ -86,7 +113,7 @@ public class HyperUniquesAggregatorFactoryTest
         collector2.add(fn.hashLong(rand.nextLong()).asBytes());
       }
 
-      Assert.assertEquals(
+      Assertions.assertEquals(
           Double.compare(collector1.estimateCardinality(), collector2.estimateCardinality()),
           comparator.compare(collector1, collector2)
       );
@@ -105,7 +132,7 @@ public class HyperUniquesAggregatorFactoryTest
         collector2.add(fn.hashLong(rand.nextLong()).asBytes());
       }
 
-      Assert.assertEquals(
+      Assertions.assertEquals(
           Double.compare(collector1.estimateCardinality(), collector2.estimateCardinality()),
           comparator.compare(collector1, collector2)
       );
@@ -124,7 +151,7 @@ public class HyperUniquesAggregatorFactoryTest
         collector2.add(fn.hashLong(rand.nextLong()).asBytes());
       }
 
-      Assert.assertEquals(
+      Assertions.assertEquals(
           Double.compare(collector1.estimateCardinality(), collector2.estimateCardinality()),
           comparator.compare(collector1, collector2)
       );
@@ -161,15 +188,15 @@ public class HyperUniquesAggregatorFactoryTest
       final int orderedByComparator = comparator.compare(leftCollector, rightCollector);
 
       // then, assert hyperloglog comparator behaves consistently with estimated cardinalities
-      Assert.assertEquals(
+      Assertions.assertEquals(
+          orderedByCardinality,
+          orderedByComparator,
           StringUtils.format("orderedByComparator=%d, orderedByCardinality=%d,\n" +
                              "Left={cardinality=%f, hll=%s},\n" +
                              "Right={cardinality=%f, hll=%s},\n", orderedByComparator, orderedByCardinality,
                              leftCollector.estimateCardinality(), leftCollector,
                              rightCollector.estimateCardinality(), rightCollector
-          ),
-          orderedByCardinality,
-          orderedByComparator
+          )
       );
     }
   }
@@ -182,17 +209,17 @@ public class HyperUniquesAggregatorFactoryTest
         0
     );
 
-    Assert.assertEquals(0L, HyperUniquesAggregatorFactory.estimateCardinality(null, true));
-    Assert.assertEquals(0d, HyperUniquesAggregatorFactory.estimateCardinality(null, false));
+    Assertions.assertEquals(0L, HyperUniquesAggregatorFactory.estimateCardinality(null, true));
+    Assertions.assertEquals(0d, HyperUniquesAggregatorFactory.estimateCardinality(null, false));
 
-    Assert.assertEquals(0L, HyperUniquesAggregatorFactory.estimateCardinality(emptyHyperLogLogCollector, true));
-    Assert.assertEquals(0d, HyperUniquesAggregatorFactory.estimateCardinality(emptyHyperLogLogCollector, false));
+    Assertions.assertEquals(0L, HyperUniquesAggregatorFactory.estimateCardinality(emptyHyperLogLogCollector, true));
+    Assertions.assertEquals(0d, HyperUniquesAggregatorFactory.estimateCardinality(emptyHyperLogLogCollector, false));
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         HyperUniquesAggregatorFactory.estimateCardinality(emptyHyperLogLogCollector, true).getClass(),
         HyperUniquesAggregatorFactory.estimateCardinality(null, true).getClass()
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         HyperUniquesAggregatorFactory.estimateCardinality(emptyHyperLogLogCollector, false).getClass(),
         HyperUniquesAggregatorFactory.estimateCardinality(null, false).getClass()
     );
@@ -214,6 +241,41 @@ public class HyperUniquesAggregatorFactoryTest
         AggregatorFactory.class
     );
 
-    Assert.assertEquals(factory, factory2);
+    Assertions.assertEquals(factory, factory2);
+  }
+
+  @Test
+  public void testFactorizeOnPrimitiveColumnType()
+  {
+    final ColumnCapabilitiesImpl columnCapabilities = ColumnCapabilitiesImpl.createDefault().setType(ColumnType.LONG);
+    final ColumnSelectorFactory metricFactory = new TestColumnSelectorFactory()
+        .addCapabilities("uniques", columnCapabilities)
+        .addColumnSelector("uniques", NilColumnValueSelector.instance());
+    final VectorColumnSelectorFactory vectorFactory = new TestVectorColumnSelectorFactory().addCapabilities("uniques", columnCapabilities);
+
+    Assertions.assertEquals(NoopAggregator.instance(), AGGREGATOR_FACTORY.factorize(metricFactory));
+    Assertions.assertEquals(NoopBufferAggregator.instance(), AGGREGATOR_FACTORY.factorizeBuffered(metricFactory));
+    Assertions.assertEquals(NoopVectorAggregator.instance(), AGGREGATOR_FACTORY.factorizeVector(vectorFactory));
+  }
+
+  @Test
+  public void testFactorizeOnUnsupportedComplexColumn()
+  {
+    Throwable exception = assertThrows(DruidException.class, () -> AGGREGATOR_FACTORY.factorize(metricFactory));
+    Assertions.assertEquals("Using aggregator [hyperUnique] is not supported for complex columns with type [COMPLEX<json>].", exception.getMessage());
+  }
+
+  @Test
+  public void testFactorizeBufferedOnUnsupportedComplexColumn()
+  {
+    Throwable exception = assertThrows(DruidException.class, () -> AGGREGATOR_FACTORY.factorizeBuffered(metricFactory));
+    Assertions.assertEquals("Using aggregator [hyperUnique] is not supported for complex columns with type [COMPLEX<json>].", exception.getMessage());
+  }
+
+  @Test
+  public void testFactorizeVectorOnUnsupportedComplexColumn()
+  {
+    Throwable exception = assertThrows(DruidException.class, () -> AGGREGATOR_FACTORY.factorizeVector(vectorFactory));
+    Assertions.assertEquals("Using aggregator [hyperUnique] is not supported for complex columns with type [COMPLEX<json>].", exception.getMessage());
   }
 }

@@ -22,13 +22,14 @@ package org.apache.druid.storage.hdfs;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.inject.Inject;
-import org.apache.commons.lang.StringUtils;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.druid.guice.Hdfs;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.segment.loading.DataSegmentKiller;
 import org.apache.druid.segment.loading.SegmentLoadingException;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.utils.CompressionUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
@@ -70,10 +71,10 @@ public class HdfsDataSegmentKiller implements DataSegmentKiller
     final Path segmentPath = getPath(segment);
     log.info("Killing segment[%s] mapped to path[%s]", segment.getId(), segmentPath);
 
-    try {
-      String filename = segmentPath.getName();
-      final FileSystem fs = segmentPath.getFileSystem(config);
-      if (!filename.endsWith(".zip")) {
+    try (final FileSystem fs = segmentPath.getFileSystem(config)) {
+      final String filename = segmentPath.getName();
+      final CompressionUtils.Format compressionFormat = CompressionUtils.Format.fromFileName(filename);
+      if (compressionFormat != CompressionUtils.Format.ZIP && compressionFormat != CompressionUtils.Format.LZ4) {
         throw new SegmentLoadingException("Unknown file type[%s]", segmentPath);
       } else {
 
@@ -82,17 +83,20 @@ public class HdfsDataSegmentKiller implements DataSegmentKiller
           return;
         }
 
-        // There are 3 supported path formats:
+        // There are 3 supported path formats for each segment compression format:
         //    - hdfs://nn1/hdfs_base_directory/data_source_name/interval/version/shardNum/index.zip
         //    - hdfs://nn1/hdfs_base_directory/data_source_name/interval/version/shardNum_index.zip
         //    - hdfs://nn1/hdfs_base_directory/data_source_name/interval/version/shardNum_UUID_index.zip
-        String[] zipParts = filename.split("_");
+        // The same formats with an index.lz4 suffix are also supported.
+        final String[] segmentParts = filename.split("_");
 
         Path descriptorPath = new Path(segmentPath.getParent(), "descriptor.json");
-        if (zipParts.length > 1) {
-          Preconditions.checkState(zipParts.length <= 3 &&
-                                   StringUtils.isNumeric(zipParts[0]) &&
-                                   "index.zip".equals(zipParts[zipParts.length - 1]),
+        if (segmentParts.length > 1) {
+          Preconditions.checkState(segmentParts.length <= 3 &&
+                                   StringUtils.isNumeric(segmentParts[0]) &&
+                                   ("index" + compressionFormat.getSuffix()).equals(
+                                       segmentParts[segmentParts.length - 1]
+                                   ),
                                    "Unexpected segmentPath format [%s]", segmentPath
           );
 
@@ -100,8 +104,8 @@ public class HdfsDataSegmentKiller implements DataSegmentKiller
               segmentPath.getParent(),
               org.apache.druid.java.util.common.StringUtils.format(
                   "%s_%sdescriptor.json",
-                  zipParts[0],
-                  zipParts.length == 2 ? "" : zipParts[1] + "_"
+                  segmentParts[0],
+                  segmentParts.length == 2 ? "" : segmentParts[1] + "_"
               )
           );
         }
@@ -114,7 +118,7 @@ public class HdfsDataSegmentKiller implements DataSegmentKiller
         // anymore, but we still delete them if exists.
         fs.delete(descriptorPath, false);
 
-        removeEmptyParentDirectories(fs, segmentPath, zipParts.length > 1 ? 2 : 3);
+        removeEmptyParentDirectories(fs, segmentPath, segmentParts.length > 1 ? 2 : 3);
       }
     }
     catch (IOException e) {
@@ -148,5 +152,60 @@ public class HdfsDataSegmentKiller implements DataSegmentKiller
     catch (Exception e) {
       log.makeAlert(e, "uncaught exception during segment killer").emit();
     }
+  }
+
+  @Override
+  public void killRecursively(String relativePath) throws IOException
+  {
+    final Path dirToDelete = constructHdfsDeletePath(relativePath);
+    if (dirToDelete == null) {
+      return;
+    }
+
+    final FileSystem fs = dirToDelete.getFileSystem(config);
+    if (!fs.exists(dirToDelete)) {
+      return;
+    }
+    log.info("Deleting deep storage directory[%s]", dirToDelete);
+    if (!fs.delete(dirToDelete, true)) {
+      throw new IOException("Failed to delete deep storage directory[" + dirToDelete + "].");
+    }
+  }
+
+  /**
+   * Construct a path to delete from HDFS. Returns null if the path is invalid.
+   * Replicates how {@link HdfsDataSegmentPusher#pushToPath} handles ':', by replacing that with '_'.
+   */
+  @Nullable
+  private Path constructHdfsDeletePath(String relativePath)
+  {
+    if (Strings.isNullOrEmpty(relativePath)) {
+      log.warn("Skipping deep storage directory kill: relative path is empty");
+      return null;
+    }
+    if (relativePath.charAt(0) == '/') {
+      log.warn("Skipping deep storage directory kill: relative path must not be absolute, got [%s]", relativePath);
+      return null;
+    }
+    if (relativePath.indexOf('\\') >= 0) {
+      log.warn("Skipping deep storage directory kill: backslash not allowed in path [%s]", relativePath);
+      return null;
+    }
+    for (String segment : StringUtils.splitPreserveAllTokens(relativePath, '/')) {
+      if (segment.isEmpty() || "..".equals(segment)) {
+        log.warn("Skipping deep storage directory kill: invalid path[%s]", relativePath);
+        return null;
+      }
+    }
+
+    if (storageDirectory == null) {
+      log.warn("Skipping deep storage directory kill: storage directory not configured");
+      return null;
+    }
+
+    final String hdfsRelativePath = relativePath.replace(':', '_');
+    final String storageDirectoryString = storageDirectory.toString();
+    final String sep = storageDirectoryString.endsWith(Path.SEPARATOR) ? "" : Path.SEPARATOR;
+    return new Path(storageDirectoryString + sep + hdfsRelativePath);
   }
 }

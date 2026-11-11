@@ -27,18 +27,19 @@ import org.apache.druid.jackson.SegmentizerModule;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.math.expr.ExprMacroTable;
 import org.apache.druid.query.expression.TestExprMacroTable;
+import org.apache.druid.segment.column.ColumnConfig;
 import org.apache.druid.segment.incremental.IncrementalIndex;
 import org.apache.druid.segment.loading.MMappedQueryableSegmentizerFactory;
 import org.apache.druid.segment.loading.SegmentLoadingException;
 import org.apache.druid.segment.loading.SegmentizerFactory;
 import org.apache.druid.segment.writeout.OffHeapMemorySegmentWriteOutMediumFactory;
 import org.apache.druid.testing.InitializedNullHandlingTest;
+import org.apache.druid.testing.TemporaryFolderExtension;
 import org.apache.druid.timeline.DataSegment;
-import org.junit.Assert;
-import org.junit.BeforeClass;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.File;
 import java.io.IOException;
@@ -49,16 +50,16 @@ public class CustomSegmentizerFactoryTest extends InitializedNullHandlingTest
   private static IndexIO INDEX_IO;
   private static IndexMerger INDEX_MERGER;
 
-  @Rule
-  public TemporaryFolder temporaryFolder = new TemporaryFolder();
+  @RegisterExtension
+  public final TemporaryFolderExtension temporaryFolder = TemporaryFolderExtension.testCaseScoped();
 
-  @BeforeClass
+  @BeforeAll
   public static void setup()
   {
     final ObjectMapper mapper = new DefaultObjectMapper();
     mapper.registerModule(new SegmentizerModule());
     mapper.registerSubtypes(new NamedType(CustomSegmentizerFactory.class, "customSegmentFactory"));
-    final IndexIO indexIO = new IndexIO(mapper, () -> 0);
+    final IndexIO indexIO = new IndexIO(mapper, ColumnConfig.DEFAULT);
 
     mapper.setInjectableValues(
         new InjectableValues.Std()
@@ -76,45 +77,39 @@ public class CustomSegmentizerFactoryTest extends InitializedNullHandlingTest
   @Test
   public void testDefaultSegmentizerPersist() throws IOException
   {
-    IncrementalIndex data = TestIndex.makeRealtimeIndex("druid.sample.numeric.tsv");
-    File segment = new File(temporaryFolder.newFolder(), "segment");
+    IncrementalIndex data = TestIndex.makeSampleNumericIncrementalIndex();
+    File segment = new File(temporaryFolder.newFolder("seg"), "segment");
     File persisted = INDEX_MERGER.persist(
         data,
         Intervals.of("2011-01-12T00:00:00.000Z/2011-05-01T00:00:00.000Z"),
         segment,
-        new IndexSpec(),
+        IndexSpec.getDefault(),
         null
     );
 
     File factoryJson = new File(persisted, "factory.json");
-    Assert.assertTrue(factoryJson.exists());
+    Assertions.assertTrue(factoryJson.exists());
     SegmentizerFactory factory = JSON_MAPPER.readValue(factoryJson, SegmentizerFactory.class);
-    Assert.assertTrue(factory instanceof MMappedQueryableSegmentizerFactory);
+    Assertions.assertInstanceOf(MMappedQueryableSegmentizerFactory.class, factory);
   }
 
   @Test
   public void testCustomSegmentizerPersist() throws IOException
   {
-    IncrementalIndex data = TestIndex.makeRealtimeIndex("druid.sample.numeric.tsv");
-    File segment = new File(temporaryFolder.newFolder(), "segment");
+    IncrementalIndex data = TestIndex.makeSampleNumericIncrementalIndex();
+    File segment = new File(temporaryFolder.newFolder("seg"), "segment");
     File persisted = INDEX_MERGER.persist(
         data,
         Intervals.of("2011-01-12T00:00:00.000Z/2011-05-01T00:00:00.000Z"),
         segment,
-        new IndexSpec(
-            null,
-            null,
-            null,
-            null,
-            new CustomSegmentizerFactory()
-        ),
+        IndexSpec.builder().withSegmentLoader(new CustomSegmentizerFactory()).build(),
         null
     );
 
     File factoryJson = new File(persisted, "factory.json");
-    Assert.assertTrue(factoryJson.exists());
+    Assertions.assertTrue(factoryJson.exists());
     SegmentizerFactory factory = JSON_MAPPER.readValue(factoryJson, SegmentizerFactory.class);
-    Assert.assertTrue(factory instanceof CustomSegmentizerFactory);
+    Assertions.assertInstanceOf(CustomSegmentizerFactory.class, factory);
   }
 
   private static class CustomSegmentizerFactory implements SegmentizerFactory

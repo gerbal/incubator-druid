@@ -19,42 +19,41 @@
 
 package org.apache.druid.indexing.common.task.batch.parallel;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Joiner;
 import com.google.common.collect.Iterables;
 import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.data.input.InputSource;
 import org.apache.druid.data.input.StringTuple;
 import org.apache.druid.data.input.impl.InlineInputSource;
+import org.apache.druid.data.input.impl.JsonInputFormat;
 import org.apache.druid.indexer.TaskState;
 import org.apache.druid.indexer.TaskStatus;
-import org.apache.druid.indexer.partitions.DynamicPartitionsSpec;
+import org.apache.druid.indexer.partitions.DimensionRangePartitionsSpec;
 import org.apache.druid.indexer.partitions.HashedPartitionsSpec;
-import org.apache.druid.indexer.partitions.PartitionsSpec;
 import org.apache.druid.indexer.partitions.SingleDimensionPartitionsSpec;
 import org.apache.druid.indexing.common.TaskToolbox;
 import org.apache.druid.indexing.common.stats.DropwizardRowIngestionMetersFactory;
+import org.apache.druid.indexing.common.task.TuningConfigBuilder;
 import org.apache.druid.indexing.common.task.batch.parallel.distribution.StringDistribution;
 import org.apache.druid.indexing.common.task.batch.parallel.distribution.StringSketch;
 import org.apache.druid.java.util.common.StringUtils;
-import org.apache.druid.segment.TestHelper;
 import org.apache.druid.segment.incremental.ParseExceptionHandler;
 import org.apache.druid.segment.indexing.DataSchema;
-import org.apache.druid.testing.junit.LoggerCaptureRule;
+import org.apache.druid.server.security.Action;
+import org.apache.druid.server.security.Resource;
+import org.apache.druid.server.security.ResourceAction;
+import org.apache.druid.server.security.ResourceType;
+import org.apache.druid.testing.TemporaryFolderExtension;
+import org.apache.druid.testing.junit.LoggerCaptureExtension;
 import org.apache.druid.timeline.partition.PartitionBoundaries;
 import org.apache.logging.log4j.core.LogEvent;
 import org.easymock.Capture;
 import org.easymock.EasyMock;
-import org.hamcrest.Matchers;
 import org.joda.time.Interval;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.experimental.runners.Enclosed;
-import org.junit.rules.ExpectedException;
-import org.junit.rules.TemporaryFolder;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -65,55 +64,46 @@ import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-@RunWith(Enclosed.class)
 public class PartialDimensionDistributionTaskTest
 {
-  private static final ObjectMapper OBJECT_MAPPER = ParallelIndexTestingFactory.createObjectMapper();
   private static final SingleDimensionPartitionsSpec SINGLE_DIM_PARTITIONS_SPEC =
-      new ParallelIndexTestingFactory.SingleDimensionPartitionsSpecBuilder().build();
+      new SingleDimensionPartitionsSpec(null, 1000, "dim", false);
 
   public static class ConstructorTest
   {
-    @Rule
-    public ExpectedException exception = ExpectedException.none();
-
     @Test
     public void requiresForceGuaranteedRollup()
     {
-      exception.expect(IllegalArgumentException.class);
-      exception.expectMessage("forceGuaranteedRollup must be set");
-
-      ParallelIndexTuningConfig tuningConfig = new ParallelIndexTestingFactory.TuningConfigBuilder()
-          .forceGuaranteedRollup(false)
-          .partitionsSpec(new DynamicPartitionsSpec(null, null))
+      ParallelIndexTuningConfig tuningConfig = TuningConfigBuilder
+          .forParallelIndexTask()
+          .withForceGuaranteedRollup(false)
           .build();
 
-      new PartialDimensionDistributionTaskBuilder()
-          .tuningConfig(tuningConfig)
-          .build();
+      final IllegalArgumentException exception = Assertions.assertThrows(
+          IllegalArgumentException.class,
+          () -> new PartialDimensionDistributionTaskBuilder()
+              .tuningConfig(tuningConfig)
+              .build()
+      );
+      Assertions.assertTrue(exception.getMessage().contains("forceGuaranteedRollup must be set"));
     }
 
     @Test
     public void requiresMultiDimensionPartitions()
     {
-      exception.expect(IllegalArgumentException.class);
-      exception.expectMessage("range partitionsSpec required");
-
-      PartitionsSpec partitionsSpec = new HashedPartitionsSpec(null, 1, null);
       ParallelIndexTuningConfig tuningConfig =
-          new ParallelIndexTestingFactory.TuningConfigBuilder().partitionsSpec(partitionsSpec).build();
+          TuningConfigBuilder.forParallelIndexTask()
+                             .withForceGuaranteedRollup(true)
+                             .withPartitionsSpec(new HashedPartitionsSpec(null, 1, null))
+                             .build();
 
-      new PartialDimensionDistributionTaskBuilder()
-          .tuningConfig(tuningConfig)
-          .build();
-    }
-
-    @Test
-    public void serializesDeserializes()
-    {
-      PartialDimensionDistributionTask task = new PartialDimensionDistributionTaskBuilder()
-          .build();
-      TestHelper.testSerializesDeserializes(OBJECT_MAPPER, task);
+      final IllegalArgumentException exception = Assertions.assertThrows(
+          IllegalArgumentException.class,
+          () -> new PartialDimensionDistributionTaskBuilder()
+              .tuningConfig(tuningConfig)
+              .build()
+      );
+      Assertions.assertTrue(exception.getMessage().contains("range partitionsSpec required"));
     }
 
     @Test
@@ -122,25 +112,21 @@ public class PartialDimensionDistributionTaskTest
       PartialDimensionDistributionTask task = new PartialDimensionDistributionTaskBuilder()
           .id(ParallelIndexTestingFactory.AUTOMATIC_ID)
           .build();
-      Assert.assertThat(task.getId(), Matchers.startsWith(PartialDimensionDistributionTask.TYPE));
+      Assertions.assertTrue(task.getId().startsWith(PartialDimensionDistributionTask.TYPE));
     }
   }
 
   public static class RunTaskTest
   {
-    @Rule
-    public ExpectedException exception = ExpectedException.none();
-
-    @Rule
-    public TemporaryFolder temporaryFolder = new TemporaryFolder();
-
-    @Rule
-    public LoggerCaptureRule logger = new LoggerCaptureRule(ParseExceptionHandler.class);
+    @RegisterExtension
+    private final TemporaryFolderExtension temporaryFolder = TemporaryFolderExtension.testCaseScoped();
+    @RegisterExtension
+    private final LoggerCaptureExtension logger = new LoggerCaptureExtension(ParseExceptionHandler.class);
 
     private Capture<SubTaskReport> reportCapture;
     private TaskToolbox taskToolbox;
 
-    @Before
+    @BeforeEach
     public void setup()
     {
       reportCapture = Capture.newInstance();
@@ -159,19 +145,21 @@ public class PartialDimensionDistributionTaskTest
     @Test
     public void requiresPartitionDimensions() throws Exception
     {
-      exception.expect(IllegalArgumentException.class);
-      exception.expectMessage("partitionDimensions must be specified");
-
-      ParallelIndexTuningConfig tuningConfig = new ParallelIndexTestingFactory.TuningConfigBuilder()
-          .partitionsSpec(
-              new ParallelIndexTestingFactory.SingleDimensionPartitionsSpecBuilder().partitionDimension(null).build()
-          )
-          .build();
-      PartialDimensionDistributionTask task = new PartialDimensionDistributionTaskBuilder()
-          .tuningConfig(tuningConfig)
-          .build();
-
-      task.runTask(taskToolbox);
+      final IllegalArgumentException exception = Assertions.assertThrows(
+          IllegalArgumentException.class,
+          () -> {
+            ParallelIndexTuningConfig tuningConfig = TuningConfigBuilder
+                .forParallelIndexTask()
+                .withForceGuaranteedRollup(true)
+                .withPartitionsSpec(new DimensionRangePartitionsSpec(null, null, null, false))
+                .build();
+            PartialDimensionDistributionTask task = new PartialDimensionDistributionTaskBuilder()
+                .tuningConfig(tuningConfig)
+                .build();
+            task.runTask(taskToolbox);
+          }
+      );
+      Assertions.assertTrue(exception.getMessage().contains("partitionDimensions must be specified"));
     }
 
     @Test
@@ -181,9 +169,11 @@ public class PartialDimensionDistributionTaskTest
       InputSource inlineInputSource = new InlineInputSource(
           ParallelIndexTestingFactory.createRow(invalidTimestamp, "a")
       );
-      ParallelIndexTuningConfig tuningConfig = new ParallelIndexTestingFactory.TuningConfigBuilder()
-          .partitionsSpec(SINGLE_DIM_PARTITIONS_SPEC)
-          .logParseExceptions(true)
+      ParallelIndexTuningConfig tuningConfig = TuningConfigBuilder
+          .forParallelIndexTask()
+          .withForceGuaranteedRollup(true)
+          .withPartitionsSpec(SINGLE_DIM_PARTITIONS_SPEC)
+          .withLogParseExceptions(true)
           .build();
       PartialDimensionDistributionTask task = new PartialDimensionDistributionTaskBuilder()
           .inputSource(inlineInputSource)
@@ -193,17 +183,19 @@ public class PartialDimensionDistributionTaskTest
       task.runTask(taskToolbox);
 
       List<LogEvent> logEvents = logger.getLogEvents();
-      Assert.assertEquals(1, logEvents.size());
+      Assertions.assertEquals(1, logEvents.size());
       String logMessage = logEvents.get(0).getMessage().getFormattedMessage();
-      Assert.assertThat(logMessage, Matchers.containsString("Encountered parse exception"));
+      Assertions.assertTrue(logMessage.contains("Encountered parse exception"));
     }
 
     @Test
     public void doesNotLogParseExceptionsIfDisabled() throws Exception
     {
-      ParallelIndexTuningConfig tuningConfig = new ParallelIndexTestingFactory.TuningConfigBuilder()
-          .partitionsSpec(SINGLE_DIM_PARTITIONS_SPEC)
-          .logParseExceptions(false)
+      ParallelIndexTuningConfig tuningConfig = TuningConfigBuilder
+          .forParallelIndexTask()
+          .withForceGuaranteedRollup(true)
+          .withPartitionsSpec(SINGLE_DIM_PARTITIONS_SPEC)
+          .withLogParseExceptions(false)
           .build();
       PartialDimensionDistributionTask task = new PartialDimensionDistributionTaskBuilder()
           .tuningConfig(tuningConfig)
@@ -211,24 +203,27 @@ public class PartialDimensionDistributionTaskTest
 
       task.runTask(taskToolbox);
 
-      Assert.assertEquals(Collections.emptyList(), logger.getLogEvents());
+      Assertions.assertEquals(Collections.emptyList(), logger.getLogEvents());
     }
 
     @Test
     public void failsWhenTooManyParseExceptions() throws Exception
     {
-      ParallelIndexTuningConfig tuningConfig = new ParallelIndexTestingFactory.TuningConfigBuilder()
-          .partitionsSpec(SINGLE_DIM_PARTITIONS_SPEC)
-          .maxParseExceptions(0)
+      ParallelIndexTuningConfig tuningConfig = TuningConfigBuilder
+          .forParallelIndexTask()
+          .withForceGuaranteedRollup(true)
+          .withPartitionsSpec(SINGLE_DIM_PARTITIONS_SPEC)
+          .withMaxParseExceptions(0)
           .build();
       PartialDimensionDistributionTask task = new PartialDimensionDistributionTaskBuilder()
           .tuningConfig(tuningConfig)
           .build();
 
-      exception.expect(RuntimeException.class);
-      exception.expectMessage("Max parse exceptions[0] exceeded");
-
-      task.runTask(taskToolbox);
+      final RuntimeException exception = Assertions.assertThrows(
+          RuntimeException.class,
+          () -> task.runTask(taskToolbox)
+      );
+      Assertions.assertTrue(exception.getMessage().contains("Max parse exceptions[0] exceeded"));
     }
 
     @Test
@@ -240,10 +235,11 @@ public class PartialDimensionDistributionTaskTest
       PartialDimensionDistributionTaskBuilder taskBuilder = new PartialDimensionDistributionTaskBuilder()
           .inputSource(inlineInputSource);
 
-      exception.expect(RuntimeException.class);
-      exception.expectMessage("Cannot partition on multi-value dimension [dim]");
-
-      runTask(taskBuilder);
+      final RuntimeException exception = Assertions.assertThrows(
+          RuntimeException.class,
+          () -> runTask(taskBuilder)
+      );
+      Assertions.assertTrue(exception.getMessage().contains("Cannot partition on multi-value dimension [dim]"));
     }
 
     @Test
@@ -255,9 +251,11 @@ public class PartialDimensionDistributionTaskTest
           ParallelIndexTestingFactory.createRow(timestamp, dimensionValue)
           + "\n" + ParallelIndexTestingFactory.createRow(timestamp + 1, dimensionValue)
       );
-      ParallelIndexTuningConfig tuningConfig = new ParallelIndexTestingFactory.TuningConfigBuilder()
-          .partitionsSpec(
-              new ParallelIndexTestingFactory.SingleDimensionPartitionsSpecBuilder().assumeGrouped(true).build()
+      ParallelIndexTuningConfig tuningConfig = TuningConfigBuilder
+          .forParallelIndexTask()
+          .withForceGuaranteedRollup(true)
+          .withPartitionsSpec(
+              new DimensionRangePartitionsSpec(null, 1000, Collections.singletonList("dim1"), true)
           )
           .build();
       PartialDimensionDistributionTaskBuilder taskBuilder = new PartialDimensionDistributionTaskBuilder()
@@ -266,14 +264,14 @@ public class PartialDimensionDistributionTaskTest
 
       DimensionDistributionReport report = runTask(taskBuilder);
 
-      Assert.assertEquals(ParallelIndexTestingFactory.ID, report.getTaskId());
+      Assertions.assertEquals(ParallelIndexTestingFactory.ID, report.getTaskId());
       Map<Interval, StringDistribution> intervalToDistribution = report.getIntervalToDistribution();
       StringDistribution distribution = Iterables.getOnlyElement(intervalToDistribution.values());
-      Assert.assertNotNull(distribution);
+      Assertions.assertNotNull(distribution);
       PartitionBoundaries partitions = distribution.getEvenPartitionsByMaxSize(1);
-      Assert.assertEquals(2, partitions.size());
-      Assert.assertNull(partitions.get(0));
-      Assert.assertNull(partitions.get(1));
+      Assertions.assertEquals(2, partitions.size());
+      Assertions.assertNull(partitions.get(0));
+      Assertions.assertNull(partitions.get(1));
     }
 
     @Test
@@ -285,9 +283,11 @@ public class PartialDimensionDistributionTaskTest
           ParallelIndexTestingFactory.createRow(timestamp, dimensionValue)
           + "\n" + ParallelIndexTestingFactory.createRow(timestamp + 1, dimensionValue)
       );
-      ParallelIndexTuningConfig tuningConfig = new ParallelIndexTestingFactory.TuningConfigBuilder()
-          .partitionsSpec(
-              new ParallelIndexTestingFactory.SingleDimensionPartitionsSpecBuilder().assumeGrouped(false).build()
+      ParallelIndexTuningConfig tuningConfig = TuningConfigBuilder
+          .forParallelIndexTask()
+          .withForceGuaranteedRollup(true)
+          .withPartitionsSpec(
+              new DimensionRangePartitionsSpec(null, 1000, Collections.singletonList("dim1"), false)
           )
           .build();
       PartialDimensionDistributionTaskBuilder taskBuilder = new PartialDimensionDistributionTaskBuilder()
@@ -296,14 +296,14 @@ public class PartialDimensionDistributionTaskTest
 
       DimensionDistributionReport report = runTask(taskBuilder);
 
-      Assert.assertEquals(ParallelIndexTestingFactory.ID, report.getTaskId());
+      Assertions.assertEquals(ParallelIndexTestingFactory.ID, report.getTaskId());
       Map<Interval, StringDistribution> intervalToDistribution = report.getIntervalToDistribution();
       StringDistribution distribution = Iterables.getOnlyElement(intervalToDistribution.values());
-      Assert.assertNotNull(distribution);
+      Assertions.assertNotNull(distribution);
       PartitionBoundaries partitions = distribution.getEvenPartitionsByMaxSize(1);
-      Assert.assertEquals(2, partitions.size());
-      Assert.assertNull(partitions.get(0));
-      Assert.assertNull(partitions.get(1));
+      Assertions.assertEquals(2, partitions.size());
+      Assertions.assertNull(partitions.get(0));
+      Assertions.assertNull(partitions.get(1));
     }
 
     @Test
@@ -329,9 +329,11 @@ public class PartialDimensionDistributionTaskTest
               rows.get(rows.size() - 1)
           )
       );
-      ParallelIndexTuningConfig tuningConfig = new ParallelIndexTestingFactory.TuningConfigBuilder()
-          .partitionsSpec(
-              new ParallelIndexTestingFactory.SingleDimensionPartitionsSpecBuilder().assumeGrouped(false).build()
+      ParallelIndexTuningConfig tuningConfig = TuningConfigBuilder
+          .forParallelIndexTask()
+          .withForceGuaranteedRollup(true)
+          .withPartitionsSpec(
+              new DimensionRangePartitionsSpec(null, 1000, Collections.singletonList("dim"), false)
           )
           .build();
       DataSchema dataSchema = ParallelIndexTestingFactory.createDataSchema(ParallelIndexTestingFactory.INPUT_INTERVALS);
@@ -349,18 +351,18 @@ public class PartialDimensionDistributionTaskTest
 
       DimensionDistributionReport report = runTask(taskBuilder);
 
-      Assert.assertEquals(ParallelIndexTestingFactory.ID, report.getTaskId());
+      Assertions.assertEquals(ParallelIndexTestingFactory.ID, report.getTaskId());
       Map<Interval, StringDistribution> intervalToDistribution = report.getIntervalToDistribution();
       StringDistribution distribution = Iterables.getOnlyElement(intervalToDistribution.values());
-      Assert.assertNotNull(distribution);
+      Assertions.assertNotNull(distribution);
       PartitionBoundaries partitions = distribution.getEvenPartitionsByMaxSize(1);
-      Assert.assertEquals(minBloomFilterBits + 2, partitions.size()); // 2 = min + max
+      Assertions.assertEquals(minBloomFilterBits + 2, partitions.size()); // 2 = min + max
 
       StringTuple minDimensionValue = StringTuple.create(dimensionValues.get(0));
-      Assert.assertEquals(minDimensionValue, ((StringSketch) distribution).getMin());
+      Assertions.assertEquals(minDimensionValue, ((StringSketch) distribution).getMin());
 
       StringTuple maxDimensionValue = StringTuple.create(dimensionValues.get(dimensionValues.size() - 1));
-      Assert.assertEquals(maxDimensionValue, ((StringSketch) distribution).getMax());
+      Assertions.assertEquals(maxDimensionValue, ((StringSketch) distribution).getMax());
     }
 
     @Test
@@ -371,8 +373,24 @@ public class PartialDimensionDistributionTaskTest
 
       TaskStatus taskStatus = task.runTask(taskToolbox);
 
-      Assert.assertEquals(ParallelIndexTestingFactory.ID, taskStatus.getId());
-      Assert.assertEquals(TaskState.SUCCESS, taskStatus.getStatusCode());
+      Assertions.assertEquals(ParallelIndexTestingFactory.ID, taskStatus.getId());
+      Assertions.assertEquals(TaskState.SUCCESS, taskStatus.getStatusCode());
+    }
+
+    @Test
+    public void testInputSourceResources()
+    {
+      PartialDimensionDistributionTask task = new PartialDimensionDistributionTaskBuilder()
+          .build();
+
+      Assertions.assertEquals(
+          Collections.singleton(
+              new ResourceAction(
+                  new Resource(InlineInputSource.TYPE_KEY, ResourceType.EXTERNAL),
+                  Action.READ
+              )),
+          task.getInputSourceResources()
+      );
     }
 
     private DimensionDistributionReport runTask(PartialDimensionDistributionTaskBuilder taskBuilder)
@@ -393,12 +411,16 @@ public class PartialDimensionDistributionTaskTest
 
   private static class PartialDimensionDistributionTaskBuilder
   {
-    private static final InputFormat INPUT_FORMAT = ParallelIndexTestingFactory.getInputFormat();
+    private static final InputFormat INPUT_FORMAT = new JsonInputFormat(null, null, null, null, null);
 
     private String id = ParallelIndexTestingFactory.ID;
     private InputSource inputSource = new InlineInputSource("row-with-invalid-timestamp");
-    private ParallelIndexTuningConfig tuningConfig = new ParallelIndexTestingFactory.TuningConfigBuilder()
-        .partitionsSpec(new ParallelIndexTestingFactory.SingleDimensionPartitionsSpecBuilder().build())
+    private ParallelIndexTuningConfig tuningConfig = TuningConfigBuilder
+        .forParallelIndexTask()
+        .withForceGuaranteedRollup(true)
+        .withPartitionsSpec(
+            new DimensionRangePartitionsSpec(null, 1000, Collections.singletonList("dim"), false)
+        )
         .build();
     private DataSchema dataSchema =
         ParallelIndexTestingFactory.createDataSchema(ParallelIndexTestingFactory.INPUT_INTERVALS);
@@ -445,7 +467,9 @@ public class PartialDimensionDistributionTaskTest
       Supplier<PartialDimensionDistributionTask.DedupInputRowFilter> supplier =
           dedupRowDimValueFilterSupplier == null
           ? () -> new PartialDimensionDistributionTask.DedupInputRowFilter(
-              dataSchema.getGranularitySpec().getQueryGranularity()
+              dataSchema.getGranularitySpec().getQueryGranularity(),
+              null,
+              null
           )
           : dedupRowDimValueFilterSupplier;
 

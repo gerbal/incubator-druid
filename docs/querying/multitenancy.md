@@ -24,7 +24,7 @@ sidebar_label: "Multitenancy"
   -->
 
 
-Apache Druid is often used to power user-facing data applications, where multitenancy is an important requirement. This
+Apache&circledR; Druid is often used to power user-facing data applications, where multitenancy is an important requirement. This
 document outlines Druid's multitenant storage and querying features.
 
 ## Shared datasources or datasource-per-tenant?
@@ -43,7 +43,6 @@ and expiration rules.
 Pros of shared datasources:
 
 - Each datasource requires its own JVMs for realtime indexing.
-- Each datasource requires its own YARN resources for Hadoop batch jobs.
 - Each datasource requires its own segment files on disk.
 - For these reasons it can be wasteful to have a very large number of small datasources.
 
@@ -57,7 +56,7 @@ If your multitenant cluster uses shared datasources, most of your queries will l
 dimension. These sorts of queries perform best when data is well-partitioned by tenant. There are a few ways to
 accomplish this.
 
-With batch indexing, you can use [single-dimension partitioning](../ingestion/hadoop.md#single-dimension-range-partitioning)
+With batch indexing, you can use [multi-dimension partitioning](../ingestion/native-batch.md#multi-dimension-range-partitioning)
 to partition your data by tenant_id. Druid always partitions by time first, but the secondary partition within each
 time bucket will be on tenant_id.
 
@@ -75,7 +74,7 @@ stored on this tier.
 
 ## Supporting high query concurrency
 
-Druid uses a [segment](../design/segments.md) as its fundamental unit of computation. Processes scan segments in parallel and a given process can scan `druid.processing.numThreads` concurrently. You can add more cores to a cluster to process more data in parallel and increase performance. Size your Druid segments such that any computation over any given segment should complete in at most 500ms. Use the  the [`query/segment/time`](../operations/metrics.md#historical) metric to monitor computation times.
+Druid uses a [segment](../design/segments.md) as its fundamental unit of computation. Processes scan segments in parallel and a given process can scan `druid.processing.numThreads` concurrently. You can add more cores to a cluster to process more data in parallel and increase performance. Size your Druid segments such that any computation over any given segment should complete in at most 500ms. Use the [`query/segment/time`](../operations/metrics.md#historical) metric to monitor computation times.
 
 Druid internally stores requests to scan segments in a priority queue. If a given query requires scanning
 more segments than the total number of available processors in a cluster, and many similarly expensive queries are concurrently
@@ -83,7 +82,7 @@ running, we don't want any query to be starved out. Druid's internal processing 
 This allows for a second set of segments from another query to be scanned. By keeping segment computation time very small, we ensure
 that resources are constantly being yielded, and segments pertaining to different queries are all being processed.
 
-Druid queries can optionally set a `priority` flag in the [query context](../querying/query-context.md). Queries known to be
+Druid queries can optionally set a `priority` flag in the [query context reference](../querying/query-context-reference.md). Queries known to be
 slow (download or reporting style queries) can be de-prioritized and more interactive queries can have higher priority.
 
 Broker processes can also be dedicated to a given tier. For example, one set of Broker processes can be dedicated to fast interactive queries,

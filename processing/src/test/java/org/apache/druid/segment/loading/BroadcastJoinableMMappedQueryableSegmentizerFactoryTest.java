@@ -36,17 +36,19 @@ import org.apache.druid.segment.IndexSpec;
 import org.apache.druid.segment.Segment;
 import org.apache.druid.segment.SegmentLazyLoadFailCallback;
 import org.apache.druid.segment.TestIndex;
+import org.apache.druid.segment.column.ColumnConfig;
 import org.apache.druid.segment.incremental.IncrementalIndex;
 import org.apache.druid.segment.join.table.BroadcastSegmentIndexedTable;
 import org.apache.druid.segment.join.table.IndexedTable;
 import org.apache.druid.segment.writeout.OffHeapMemorySegmentWriteOutMediumFactory;
 import org.apache.druid.testing.InitializedNullHandlingTest;
+import org.apache.druid.testing.TemporaryFolderExtension;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 import org.joda.time.Interval;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.File;
 import java.io.IOException;
@@ -59,15 +61,15 @@ public class BroadcastJoinableMMappedQueryableSegmentizerFactoryTest extends Ini
   private static final Set<String> KEY_COLUMNS =
       ImmutableSet.of("market", "longNumericNull", "doubleNumericNull", "floatNumericNull", "partial_null_column");
 
-  @Rule
-  public TemporaryFolder temporaryFolder = new TemporaryFolder();
+  @RegisterExtension
+  public final TemporaryFolderExtension temporaryFolder = TemporaryFolderExtension.testCaseScoped();
 
   @Test
   public void testSegmentizer() throws IOException, SegmentLoadingException
   {
     final ObjectMapper mapper = new DefaultObjectMapper();
     mapper.registerModule(new SegmentizerModule());
-    final IndexIO indexIO = new IndexIO(mapper, () -> 0);
+    final IndexIO indexIO = new IndexIO(mapper, ColumnConfig.DEFAULT);
     mapper.setInjectableValues(
         new InjectableValues.Std()
             .addValue(ExprMacroTable.class.getName(), TestExprMacroTable.INSTANCE)
@@ -83,45 +85,46 @@ public class BroadcastJoinableMMappedQueryableSegmentizerFactoryTest extends Ini
         KEY_COLUMNS
     );
     Interval testInterval = Intervals.of("2011-01-12T00:00:00.000Z/2011-05-01T00:00:00.000Z");
-    IncrementalIndex data = TestIndex.makeRealtimeIndex("druid.sample.numeric.tsv");
+    IncrementalIndex data = TestIndex.makeSampleNumericIncrementalIndex();
 
     List<String> columnNames = data.getColumnNames();
-    File segment = new File(temporaryFolder.newFolder(), "segment");
+    File segment = new File(temporaryFolder.newFolder("seg"), "segment");
     File persistedSegmentRoot = indexMerger.persist(
         data,
         testInterval,
         segment,
-        new IndexSpec(
-            null,
-            null,
-            null,
-            null,
-            expectedFactory
-        ),
+        IndexSpec.builder().withSegmentLoader(expectedFactory).build(),
         null
     );
 
     File factoryJson = new File(persistedSegmentRoot, "factory.json");
-    Assert.assertTrue(factoryJson.exists());
+    Assertions.assertTrue(factoryJson.exists());
     SegmentizerFactory factory = mapper.readValue(factoryJson, SegmentizerFactory.class);
-    Assert.assertTrue(factory instanceof BroadcastJoinableMMappedQueryableSegmentizerFactory);
-    Assert.assertEquals(expectedFactory, factory);
+    Assertions.assertInstanceOf(BroadcastJoinableMMappedQueryableSegmentizerFactory.class, factory);
+    Assertions.assertEquals(expectedFactory, factory);
 
     // load a segment
-    final DataSegment dataSegment = new DataSegment(
-        TABLE_NAME,
-        testInterval,
-        DateTimes.nowUtc().toString(),
-        ImmutableMap.of(),
-        columnNames,
-        ImmutableList.of(),
-        null,
-        null,
-        persistedSegmentRoot.getTotalSpace()
+    final DataSegment dataSegment = DataSegment.builder(SegmentId.of(
+                                                   TABLE_NAME,
+                                                   testInterval,
+                                                   DateTimes.nowUtc().toString(),
+                                                   null
+                                               ))
+                                               .loadSpec(ImmutableMap.of())
+                                               .dimensions(columnNames)
+                                               .metrics(ImmutableList.of())
+                                               .binaryVersion(null)
+                                               .size(persistedSegmentRoot.getTotalSpace())
+                                               .totalRows(1)
+                                               .build();
+    final Segment loaded = factory.factorize(
+        dataSegment,
+        persistedSegmentRoot,
+        false,
+        SegmentLazyLoadFailCallback.NOOP
     );
-    final Segment loaded = factory.factorize(dataSegment, persistedSegmentRoot, false, SegmentLazyLoadFailCallback.NOOP);
 
     final BroadcastSegmentIndexedTable table = (BroadcastSegmentIndexedTable) loaded.as(IndexedTable.class);
-    Assert.assertNotNull(table);
+    Assertions.assertNotNull(table);
   }
 }

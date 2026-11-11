@@ -21,6 +21,7 @@ package org.apache.druid.query.aggregation.post;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableList;
 import nl.jqno.equalsverifier.EqualsVerifier;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.math.expr.SettableObjectBinding;
@@ -35,8 +36,8 @@ import org.apache.druid.segment.TestHelper;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.testing.InitializedNullHandlingTest;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 public class ExpressionPostAggregatorTest extends InitializedNullHandlingTest
 {
@@ -49,10 +50,28 @@ public class ExpressionPostAggregatorTest extends InitializedNullHandlingTest
         "p0",
         "2 + 3",
         null,
+        null,
         TestExprMacroTable.INSTANCE
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
+        postAgg,
+        JSON_MAPPER.readValue(JSON_MAPPER.writeValueAsString(postAgg), ExpressionPostAggregator.class)
+    );
+  }
+
+  @Test
+  public void testSerdeOutputType() throws JsonProcessingException
+  {
+    ExpressionPostAggregator postAgg = new ExpressionPostAggregator(
+        "p0",
+        "2 + 3",
+        null,
+        ColumnType.LONG,
+        TestExprMacroTable.INSTANCE
+    );
+
+    Assertions.assertEquals(
         postAgg,
         JSON_MAPPER.readValue(JSON_MAPPER.writeValueAsString(postAgg), ExpressionPostAggregator.class)
     );
@@ -63,7 +82,7 @@ public class ExpressionPostAggregatorTest extends InitializedNullHandlingTest
   {
     EqualsVerifier.forClass(ExpressionPostAggregator.class)
                   .usingGetClass()
-                  .withIgnoredFields("macroTable", "finalizers", "parsed", "dependentFields", "cacheKey", "partialTypeInformation")
+                  .withIgnoredFields("finalizers", "parsed", "dependentFields", "cacheKey", "partialTypeInformation", "expressionType")
                   .verify();
   }
 
@@ -73,6 +92,7 @@ public class ExpressionPostAggregatorTest extends InitializedNullHandlingTest
     ExpressionPostAggregator postAgg = new ExpressionPostAggregator(
         "p0",
         "x + y",
+        null,
         null,
         TestExprMacroTable.INSTANCE
     );
@@ -85,9 +105,145 @@ public class ExpressionPostAggregatorTest extends InitializedNullHandlingTest
     SettableObjectBinding binding = new SettableObjectBinding().withBinding("x", 2L)
                                                                .withBinding("y", 3.0);
 
-    Assert.assertEquals(ColumnType.DOUBLE, postAgg.getType(signature));
+    Assertions.assertEquals(ColumnType.DOUBLE, postAgg.getType(signature));
 
-    Assert.assertEquals(5.0, postAgg.compute(binding.asMap()));
+    Assertions.assertEquals(5.0, postAgg.compute(binding.asMap()));
+  }
+
+  @Test
+  public void testExplicitOutputTypeAndCompute()
+  {
+    ExpressionPostAggregator postAgg = new ExpressionPostAggregator(
+        "p0",
+        "x + y",
+        null,
+        ColumnType.FLOAT,
+        TestExprMacroTable.INSTANCE
+    );
+
+    RowSignature signature = RowSignature.builder()
+                                         .add("x", ColumnType.LONG)
+                                         .add("y", ColumnType.FLOAT)
+                                         .build();
+
+    SettableObjectBinding binding = new SettableObjectBinding().withBinding("x", 2L)
+                                                               .withBinding("y", 3.0);
+
+    Assertions.assertEquals(ColumnType.FLOAT, postAgg.getType(signature));
+
+    Assertions.assertEquals(5.0f, postAgg.compute(binding.asMap()));
+  }
+
+  @Test
+  public void testExplicitOutputTypeAndComputeComparison()
+  {
+    ExpressionPostAggregator postAgg = new ExpressionPostAggregator(
+        "p0",
+        "array(x, y)",
+        null,
+        ColumnType.LONG_ARRAY,
+        TestExprMacroTable.INSTANCE
+    );
+
+    RowSignature signature = RowSignature.builder()
+                                         .add("x", ColumnType.LONG)
+                                         .add("y", ColumnType.LONG)
+                                         .build();
+
+    SettableObjectBinding binding = new SettableObjectBinding().withBinding("x", 2L)
+                                                               .withBinding("y", 3L);
+
+    SettableObjectBinding binding2 = new SettableObjectBinding().withBinding("x", 3L)
+                                                                .withBinding("y", 4L);
+
+    Assertions.assertEquals(ColumnType.LONG_ARRAY, postAgg.getType(signature));
+
+    Assertions.assertArrayEquals(new Object[]{2L, 3L}, (Object[]) postAgg.compute(binding.asMap()));
+    Assertions.assertArrayEquals(new Object[]{3L, 4L}, (Object[]) postAgg.compute(binding2.asMap()));
+
+    Assertions.assertEquals(
+        -1,
+        postAgg.getComparator().compare(postAgg.compute(binding.asMap()), postAgg.compute(binding2.asMap()))
+    );
+  }
+
+  @Test
+  public void testExplicitOutputTypeAndComputeArrayNoType()
+  {
+    ExpressionPostAggregator postAgg = new ExpressionPostAggregator(
+        "p0",
+        "array(x, y)",
+        null,
+        null,
+        TestExprMacroTable.INSTANCE
+    );
+
+    RowSignature signature = RowSignature.builder()
+                                         .add("x", ColumnType.STRING)
+                                         .add("y", ColumnType.STRING)
+                                         .build();
+
+    SettableObjectBinding binding = new SettableObjectBinding().withBinding("x", "abc")
+                                                               .withBinding("y", "def");
+
+    Assertions.assertEquals(ColumnType.STRING_ARRAY, postAgg.getType(signature));
+
+    Assertions.assertArrayEquals(new Object[]{"abc", "def"}, (Object[]) postAgg.compute(binding.asMap()));
+
+    SettableObjectBinding binding2 = new SettableObjectBinding().withBinding("x", "abc")
+                                                                .withBinding("y", "abc");
+
+    // ordering by arrays doesn't work if no outputType is specified...
+    Assertions.assertThrows(
+        ClassCastException.class,
+        () -> postAgg.getComparator().compare(postAgg.compute(binding.asMap()), postAgg.compute(binding2.asMap()))
+    );
+  }
+
+  @Test
+  public void testExplicitOutputTypeAndComputeMultiValueDimension()
+  {
+    ExpressionPostAggregator postAgg = new ExpressionPostAggregator(
+        "p0",
+        "array(x, y)",
+        null,
+        ColumnType.STRING,
+        TestExprMacroTable.INSTANCE
+    );
+
+    RowSignature signature = RowSignature.builder()
+                                         .add("x", ColumnType.STRING)
+                                         .add("y", ColumnType.STRING)
+                                         .build();
+
+    SettableObjectBinding binding = new SettableObjectBinding().withBinding("x", "abc")
+                                                               .withBinding("y", "def");
+
+    Assertions.assertEquals(ColumnType.STRING, postAgg.getType(signature));
+
+    Assertions.assertEquals(ImmutableList.of("abc", "def"), postAgg.compute(binding.asMap()));
+  }
+
+  @Test
+  public void testExplicitOutputTypeAndComputeMultiValueDimensionWithSingleElement()
+  {
+    ExpressionPostAggregator postAgg = new ExpressionPostAggregator(
+        "p0",
+        "array(x)",
+        null,
+        ColumnType.STRING,
+        TestExprMacroTable.INSTANCE
+    );
+
+    RowSignature signature = RowSignature.builder()
+                                         .add("x", ColumnType.STRING)
+                                         .build();
+
+    SettableObjectBinding binding = new SettableObjectBinding().withBinding("x", "abc");
+
+    Assertions.assertEquals(ColumnType.STRING, postAgg.getType(signature));
+
+    Assertions.assertEquals("abc", postAgg.compute(binding.asMap()));
   }
 
   @Test
@@ -97,13 +253,14 @@ public class ExpressionPostAggregatorTest extends InitializedNullHandlingTest
         "p0",
         "x + y",
         null,
+        null,
         TestExprMacroTable.INSTANCE
     );
 
     RowSignature signature = RowSignature.builder().build();
 
     // columns not existing in the output signature means they don't exist, so the output is also null
-    Assert.assertNull(postAgg.getType(signature));
+    Assertions.assertNull(postAgg.getType(signature));
   }
 
   @Test
@@ -120,14 +277,15 @@ public class ExpressionPostAggregatorTest extends InitializedNullHandlingTest
                   new FloatSumAggregatorFactory("float", "col2")
               )
               .postAggregators(
-                  new ExpressionPostAggregator("a", "double + float", null, TestExprMacroTable.INSTANCE),
-                  new ExpressionPostAggregator("b", "count + count", null, TestExprMacroTable.INSTANCE),
-                  new ExpressionPostAggregator("c", "count + double", null, TestExprMacroTable.INSTANCE),
-                  new ExpressionPostAggregator("d", "float + float", null, TestExprMacroTable.INSTANCE)
+                  new ExpressionPostAggregator("a", "double + float", null, null, TestExprMacroTable.INSTANCE),
+                  new ExpressionPostAggregator("b", "count + count", null, null, TestExprMacroTable.INSTANCE),
+                  new ExpressionPostAggregator("c", "count + double", null, null, TestExprMacroTable.INSTANCE),
+                  new ExpressionPostAggregator("d", "float + float", null, null, TestExprMacroTable.INSTANCE),
+                  new ExpressionPostAggregator("e", "float + float", null, ColumnType.FLOAT, TestExprMacroTable.INSTANCE)
               )
               .build();
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         RowSignature.builder()
                     .addTimeColumn()
                     .add("count", ColumnType.LONG)
@@ -137,6 +295,7 @@ public class ExpressionPostAggregatorTest extends InitializedNullHandlingTest
                     .add("b", ColumnType.LONG)
                     .add("c", ColumnType.DOUBLE)
                     .add("d", ColumnType.DOUBLE) // floats don't exist in expressions
+                    .add("e", ColumnType.FLOAT) // but can be explicitly specified
                     .build(),
         new TimeseriesQueryQueryToolChest().resultArraySignature(query)
     );

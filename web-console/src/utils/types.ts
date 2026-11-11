@@ -20,27 +20,16 @@ import type { IconName } from '@blueprintjs/core';
 import { IconNames } from '@blueprintjs/icons';
 import type { Column } from 'druid-query-toolkit';
 
-function getEffectiveColumnType(column: Column): string | undefined {
-  if (column.sqlType === 'TIMESTAMP') return column.sqlType;
-  return column.nativeType || column.sqlType;
+export function columnToSummary(column: Column): string {
+  const lines: string[] = [column.name];
+  if (column.sqlType) lines.push(`SQL type: ${column.sqlType}`);
+  if (column.nativeType) lines.push(`Native type: ${column.nativeType}`);
+  return lines.join('\n');
 }
 
-export function sqlTypeFromDruid(druidType: string): string {
-  druidType = druidType.toLowerCase();
-  switch (druidType) {
-    case 'string':
-      return 'VARCHAR';
-
-    case 'long':
-      return 'BIGINT';
-
-    case 'float':
-    case 'double':
-      return druidType.toUpperCase();
-
-    default:
-      return 'COMPLEX';
-  }
+function getEffectiveColumnType(column: Column): string | undefined {
+  if (column.sqlType === 'TIMESTAMP' || column.sqlType === 'BOOLEAN') return column.sqlType;
+  return column.nativeType || column.sqlType;
 }
 
 export function columnToIcon(column: Column): IconName | undefined {
@@ -52,34 +41,81 @@ export function dataTypeToIcon(dataType: string): IconName {
   const typeUpper = dataType.toUpperCase();
 
   switch (typeUpper) {
+    case 'NULL':
+      return IconNames.CIRCLE;
+
     case 'TIMESTAMP':
       return IconNames.TIME;
+
+    case 'BOOLEAN':
+      return IconNames.SEGMENTED_CONTROL;
 
     case 'VARCHAR':
     case 'STRING':
       return IconNames.FONT;
 
     case 'BIGINT':
+    case 'LONG':
+      return IconNames.NUMERICAL;
+
     case 'DECIMAL':
     case 'REAL':
-    case 'LONG':
     case 'FLOAT':
     case 'DOUBLE':
-      return IconNames.NUMERICAL;
+      return IconNames.FLOATING_POINT;
 
     case 'ARRAY<STRING>':
       return IconNames.ARRAY_STRING;
 
     case 'ARRAY<LONG>':
+      return IconNames.ARRAY_NUMERIC;
+
     case 'ARRAY<FLOAT>':
     case 'ARRAY<DOUBLE>':
-      return IconNames.ARRAY_NUMERIC;
+      return IconNames.ARRAY_FLOATING_POINT;
 
     case 'COMPLEX<JSON>':
       return IconNames.DIAGRAM_TREE;
 
-    case 'NULL':
-      return IconNames.CIRCLE;
+    case 'COMPLEX<HYPERUNIQUE>':
+    case 'COMPLEX<HLLSKETCH>':
+    case 'COMPLEX<HLLSKETCHBUILD>':
+    case 'COMPLEX<THETASKETCH>':
+    case 'COMPLEX<THETASKETCHBUILD>':
+      return IconNames.SNOWFLAKE;
+
+    case 'COMPLEX<QUANTILESDOUBLESSKETCH>':
+    case 'COMPLEX<APPROXIMATEHISTOGRAM>':
+    case 'COMPLEX<FIXEDBUCKETSHISTOGRAM>':
+    case 'COMPLEX<ARRAYOFDOUBLESSKETCH>':
+    case 'COMPLEX<MOMENTSKETCH>':
+      return IconNames.HORIZONTAL_DISTRIBUTION;
+
+    case 'COMPLEX<VARIANCE>':
+      return IconNames.ALIGNMENT_HORIZONTAL_CENTER;
+
+    case 'COMPLEX<IPADDRESS>':
+    case 'COMPLEX<IPPREFIX>':
+      return IconNames.IP_ADDRESS;
+
+    case 'COMPLEX<SERIALIZABLEPAIRLONGSTRING>':
+      return IconNames.DOUBLE_CHEVRON_RIGHT;
+
+    case 'COMPLEX<BLOOM>':
+      return IconNames.FILTER_LIST;
+
+    case 'COMPLEX<KLLDOUBLESSKETCH>':
+    case 'COMPLEX<KLLFLOATSSKETCH>':
+      return IconNames.HURRICANE;
+
+    case 'COMPLEX<COMPRESSEDBIGDECIMAL>':
+      return IconNames.SORT_NUMERICAL_DESC;
+
+    case 'COMPLEX<TEXT>':
+      return IconNames.LABEL;
+
+    case 'COMPLEX<VECTOR>':
+      return IconNames.REGRESSION_CHART;
 
     default:
       if (typeUpper.startsWith('ARRAY')) return IconNames.ARRAY;
@@ -99,6 +135,9 @@ export function dataTypeToWidth(dataType: string | undefined): number {
   switch (typeUpper) {
     case 'TIMESTAMP':
       return 180;
+
+    case 'BOOLEAN':
+      return 100;
 
     case 'VARCHAR':
     case 'STRING':

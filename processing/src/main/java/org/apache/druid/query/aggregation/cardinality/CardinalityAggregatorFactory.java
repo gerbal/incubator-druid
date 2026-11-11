@@ -53,7 +53,6 @@ import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
 
 import javax.annotation.Nullable;
 import java.nio.ByteBuffer;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
@@ -68,7 +67,7 @@ public class CardinalityAggregatorFactory extends AggregatorFactory
     return ImmutableList.copyOf(
         Lists.transform(
             fields,
-            new Function<DimensionSpec, String>()
+            new Function<>()
             {
               @Override
               public String apply(DimensionSpec input)
@@ -85,7 +84,7 @@ public class CardinalityAggregatorFactory extends AggregatorFactory
     return ImmutableList.copyOf(
         Lists.transform(
             fieldNames,
-            new Function<String, DimensionSpec>()
+            new Function<>()
             {
               @Override
               public DimensionSpec apply(String input)
@@ -233,22 +232,6 @@ public class CardinalityAggregatorFactory extends AggregatorFactory
     return new HyperUniquesAggregatorFactory(name, name, false, round);
   }
 
-  @Override
-  public List<AggregatorFactory> getRequiredColumns()
-  {
-    return fields.stream()
-                 .map(
-                     field ->
-                         new CardinalityAggregatorFactory(
-                             field.getOutputName(),
-                             null,
-                             Collections.singletonList(field),
-                             byRow,
-                             round
-                         )
-                 )
-                 .collect(Collectors.toList());
-  }
 
   @Override
   public Object deserialize(Object object)

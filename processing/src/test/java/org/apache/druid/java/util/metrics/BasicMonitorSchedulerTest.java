@@ -23,8 +23,9 @@ import com.google.common.collect.ImmutableList;
 import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.joda.time.Duration;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 
@@ -32,10 +33,10 @@ import java.util.concurrent.ScheduledExecutorService;
 
 public class BasicMonitorSchedulerTest
 {
-  private final MonitorSchedulerConfig config = new MonitorSchedulerConfig()
+  private final DruidMonitorSchedulerConfig config = new DruidMonitorSchedulerConfig()
   {
     @Override
-    public Duration getEmitterPeriod()
+    public Duration getEmissionDuration()
     {
       return Duration.millis(5);
     }
@@ -43,11 +44,17 @@ public class BasicMonitorSchedulerTest
   private ServiceEmitter emitter;
   private ScheduledExecutorService exec;
 
-  @Before
+  @BeforeEach
   public void setup()
   {
     emitter = Mockito.mock(ServiceEmitter.class);
     exec = Execs.scheduledSingleThreaded("BasicMonitorSchedulerTest");
+  }
+
+  @AfterEach
+  public void teardown()
+  {
+    exec.shutdownNow();
   }
 
   @Test

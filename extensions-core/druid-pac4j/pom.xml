@@ -29,17 +29,17 @@
   <parent>
     <groupId>org.apache.druid</groupId>
     <artifactId>druid</artifactId>
-    <version>26.0.0-SNAPSHOT</version>
+    <version>40.0.0-SNAPSHOT</version>
     <relativePath>../../pom.xml</relativePath>
   </parent>
 
   <properties>
-    <pac4j.version>3.8.3</pac4j.version>
+    <pac4j.version>5.8.0</pac4j.version>
 
-    <!-- Following must be updated along with any updates to pac4j version -->
+    <!-- Following must be updated along with any updates to pac4j version. One can find the compatible version of nimbus libraries in org.pac4j:pac4j-oidc dependencies-->
     <nimbus.lang.tag.version>1.7</nimbus.lang.tag.version>
-    <nimbus.jose.jwt.version>7.9</nimbus.jose.jwt.version>
-    <oauth2.oidc.sdk.version>6.5</oauth2.oidc.sdk.version>
+    <nimbus.jose.jwt.version>10.10</nimbus.jose.jwt.version>
+    <oauth2.oidc.sdk.version>11.38.2</oauth2.oidc.sdk.version>
   </properties>
 
   <dependencies>
@@ -63,6 +63,20 @@
     <dependency>
       <groupId>org.pac4j</groupId>
       <artifactId>pac4j-oidc</artifactId>
+      <version>${pac4j.version}</version>
+      <exclusions>
+        <!-- pac4j-oidc erroneously declares mockito as a compile time instead of test dependency -->
+        <exclusion>
+          <groupId>org.mockito</groupId>
+          <artifactId>mockito-core</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+
+    <!-- Add pac4j-javaee dependency for JEE components -->
+    <dependency>
+      <groupId>org.pac4j</groupId>
+      <artifactId>pac4j-javaee</artifactId>
       <version>${pac4j.version}</version>
     </dependency>
 
@@ -129,13 +143,28 @@
     </dependency>
 
     <dependency>
-      <groupId>junit</groupId>
-      <artifactId>junit</artifactId>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-api</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-engine</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.easymock</groupId>
       <artifactId>easymock</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.mockito</groupId>
+      <artifactId>mockito-junit-jupiter</artifactId>
       <scope>test</scope>
     </dependency>
   </dependencies>

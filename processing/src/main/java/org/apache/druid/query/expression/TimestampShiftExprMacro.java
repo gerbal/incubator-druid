@@ -27,7 +27,7 @@ import org.apache.druid.math.expr.ExpressionType;
 import org.apache.druid.math.expr.InputBindings;
 import org.apache.druid.math.expr.vector.CastToTypeVectorProcessor;
 import org.apache.druid.math.expr.vector.ExprVectorProcessor;
-import org.apache.druid.math.expr.vector.LongOutLongInFunctionVectorValueProcessor;
+import org.apache.druid.math.expr.vector.LongUnivariateLongFunctionVectorProcessor;
 import org.joda.time.Chronology;
 import org.joda.time.Period;
 import org.joda.time.chrono.ISOChronology;
@@ -52,11 +52,11 @@ public class TimestampShiftExprMacro implements ExprMacroTable.ExprMacro
     validationHelperCheckArgumentRange(args, 3, 4);
 
     if (args.stream().skip(1).allMatch(Expr::isLiteral)) {
-      return new TimestampShiftExpr(args);
+      return new TimestampShiftExpr(this, args);
     } else {
       // Use dynamic impl if any args are non-literal. Don't bother optimizing for the case where period is
       // literal but step isn't.
-      return new TimestampShiftDynamicExpr(args);
+      return new TimestampShiftDynamicExpr(this, args);
     }
   }
 
@@ -87,9 +87,9 @@ public class TimestampShiftExprMacro implements ExprMacroTable.ExprMacro
     private final Period period;
     private final int step;
 
-    TimestampShiftExpr(final List<Expr> args)
+    TimestampShiftExpr(final TimestampShiftExprMacro macro, final List<Expr> args)
     {
-      super(FN_NAME, args);
+      super(macro, args);
       period = getPeriod(args, InputBindings.nilBindings());
       chronology = getTimeZone(args, InputBindings.nilBindings());
       step = getStep(args, InputBindings.nilBindings());
@@ -101,15 +101,9 @@ public class TimestampShiftExprMacro implements ExprMacroTable.ExprMacro
     {
       ExprEval timestamp = args.get(0).eval(bindings);
       if (timestamp.isNumericNull()) {
-        return ExprEval.of(null);
+        return ExprEval.ofLong(null);
       }
       return ExprEval.of(chronology.add(period, timestamp.asLong(), step));
-    }
-
-    @Override
-    public Expr visit(Shuttle shuttle)
-    {
-      return shuttle.visit(new TimestampShiftExpr(shuttle.visitAll(args)));
     }
 
     @Override
@@ -121,18 +115,10 @@ public class TimestampShiftExprMacro implements ExprMacroTable.ExprMacro
     @Override
     public <T> ExprVectorProcessor<T> asVectorProcessor(VectorInputBindingInspector inspector)
     {
-      ExprVectorProcessor<?> processor;
-      processor = new LongOutLongInFunctionVectorValueProcessor(
+      final ExprVectorProcessor<?> processor = new LongUnivariateLongFunctionVectorProcessor(
           CastToTypeVectorProcessor.cast(args.get(0).asVectorProcessor(inspector), ExpressionType.LONG),
-          inspector.getMaxVectorSize()
-      )
-      {
-        @Override
-        public long apply(long input)
-        {
-          return chronology.add(period, input, step);
-        }
-      };
+          input -> chronology.add(period, input, step)
+      );
 
       return (ExprVectorProcessor<T>) processor;
     }
@@ -147,9 +133,9 @@ public class TimestampShiftExprMacro implements ExprMacroTable.ExprMacro
 
   private static class TimestampShiftDynamicExpr extends ExprMacroTable.BaseScalarMacroFunctionExpr
   {
-    TimestampShiftDynamicExpr(final List<Expr> args)
+    TimestampShiftDynamicExpr(final TimestampShiftExprMacro macro, final List<Expr> args)
     {
-      super(FN_NAME, args);
+      super(macro, args);
     }
 
     @Nonnull
@@ -158,18 +144,12 @@ public class TimestampShiftExprMacro implements ExprMacroTable.ExprMacro
     {
       ExprEval timestamp = args.get(0).eval(bindings);
       if (timestamp.isNumericNull()) {
-        return ExprEval.of(null);
+        return ExprEval.ofLong(null);
       }
       final Period period = getPeriod(args, bindings);
       final Chronology chronology = getTimeZone(args, bindings);
       final int step = getStep(args, bindings);
       return ExprEval.of(chronology.add(period, timestamp.asLong(), step));
-    }
-
-    @Override
-    public Expr visit(Shuttle shuttle)
-    {
-      return shuttle.visit(new TimestampShiftDynamicExpr(shuttle.visitAll(args)));
     }
 
     @Nullable

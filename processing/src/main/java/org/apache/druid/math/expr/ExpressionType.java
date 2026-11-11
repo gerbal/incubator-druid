@@ -23,6 +23,7 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
 import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
+import com.google.errorprone.annotations.Immutable;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.segment.column.BaseTypeSignature;
 import org.apache.druid.segment.column.ColumnType;
@@ -36,6 +37,7 @@ import javax.annotation.Nullable;
  * The type system used to process Druid expressions. This is basically {@link ColumnType}, but without
  * {@link ColumnType#FLOAT} because the expression processing system does not currently directly support them.
  */
+@Immutable
 @JsonSerialize(using = ToStringSerializer.class)
 public class ExpressionType extends BaseTypeSignature<ExprType>
 {
@@ -51,6 +53,8 @@ public class ExpressionType extends BaseTypeSignature<ExprType>
       new ExpressionType(ExprType.ARRAY, null, LONG);
   public static final ExpressionType DOUBLE_ARRAY =
       new ExpressionType(ExprType.ARRAY, null, DOUBLE);
+  public static final ExpressionType NESTED_DATA =
+      ExpressionType.fromColumnTypeStrict(ColumnType.NESTED_DATA);
   public static final ExpressionType UNKNOWN_COMPLEX =
       new ExpressionType(ExprType.COMPLEX, null, null);
 
@@ -99,6 +103,9 @@ public class ExpressionType extends BaseTypeSignature<ExprType>
           return LONG_ARRAY;
         case DOUBLE:
           return DOUBLE_ARRAY;
+        case ARRAY:
+        case COMPLEX:
+          return elementType;
       }
     }
     return elementType;
@@ -134,6 +141,9 @@ public class ExpressionType extends BaseTypeSignature<ExprType>
             return DOUBLE_ARRAY;
           case STRING:
             return STRING_ARRAY;
+          case ARRAY:
+          case COMPLEX:
+            break;
         }
         return ExpressionTypeFactory.getInstance().ofArray(fromColumnTypeStrict(valueType.getElementType()));
       case COMPLEX:
@@ -171,6 +181,9 @@ public class ExpressionType extends BaseTypeSignature<ExprType>
             return DOUBLE_ARRAY;
           case STRING:
             return STRING_ARRAY;
+          case ARRAY:
+          case COMPLEX:
+            break;
         }
         return ExpressionTypeFactory.getInstance().ofArray(fromColumnType(valueType.getElementType()));
       case COMPLEX:

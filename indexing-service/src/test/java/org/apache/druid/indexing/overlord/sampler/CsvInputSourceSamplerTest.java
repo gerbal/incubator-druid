@@ -35,8 +35,8 @@ import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.segment.indexing.DataSchema;
 import org.apache.druid.testing.InitializedNullHandlingTest;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
@@ -47,14 +47,11 @@ public class CsvInputSourceSamplerTest extends InitializedNullHandlingTest
   {
     final TimestampSpec timestampSpec = new TimestampSpec(null, null, DateTimes.of("1970"));
     final DimensionsSpec dimensionsSpec = new DimensionsSpec(null);
-    final DataSchema dataSchema = new DataSchema(
-        "sampler",
-        timestampSpec,
-        dimensionsSpec,
-        null,
-        null,
-        null
-    );
+    final DataSchema dataSchema = DataSchema.builder()
+                                            .withDataSource("sampler")
+                                            .withTimestamp(timestampSpec)
+                                            .withDimensions(dimensionsSpec)
+                                            .build();
 
     final List<String> strCsvRows = ImmutableList.of(
         "FirstName,LastName,Number,Gender",
@@ -64,7 +61,7 @@ public class CsvInputSourceSamplerTest extends InitializedNullHandlingTest
         "Michael,Jackson,,Male"
     );
     final InputSource inputSource = new InlineInputSource(String.join("\n", strCsvRows));
-    final InputFormat inputFormat = new CsvInputFormat(null, null, null, true, 0);
+    final InputFormat inputFormat = new CsvInputFormat(null, null, null, true, 0, null);
     final InputSourceSampler inputSourceSampler = new InputSourceSampler(new DefaultObjectMapper());
 
     final SamplerResponse response = inputSourceSampler.sample(
@@ -74,10 +71,10 @@ public class CsvInputSourceSamplerTest extends InitializedNullHandlingTest
         null
     );
 
-    Assert.assertEquals(4, response.getNumRowsRead());
-    Assert.assertEquals(4, response.getNumRowsIndexed());
-    Assert.assertEquals(4, response.getData().size());
-    Assert.assertEquals(
+    Assertions.assertEquals(4, response.getNumRowsRead());
+    Assertions.assertEquals(4, response.getNumRowsIndexed());
+    Assertions.assertEquals(4, response.getData().size());
+    Assertions.assertEquals(
         ImmutableList.of(
             new StringDimensionSchema("FirstName"),
             new StringDimensionSchema("LastName"),
@@ -86,7 +83,7 @@ public class CsvInputSourceSamplerTest extends InitializedNullHandlingTest
         ),
         response.getLogicalDimensions()
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         RowSignature.builder()
                     .add("__time", ColumnType.LONG)
                     .add("FirstName", ColumnType.STRING)
@@ -99,7 +96,7 @@ public class CsvInputSourceSamplerTest extends InitializedNullHandlingTest
 
     List<SamplerResponseRow> data = response.getData();
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         new SamplerResponseRow(
             new SamplerTestUtils.MapAllowingNullValuesBuilder<String, Object>()
                 .put("Number", null)
@@ -119,7 +116,7 @@ public class CsvInputSourceSamplerTest extends InitializedNullHandlingTest
         ),
         data.get(0)
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         new SamplerResponseRow(
             new SamplerTestUtils.MapAllowingNullValuesBuilder<String, Object>()
                 .put("Number", null)
@@ -139,7 +136,7 @@ public class CsvInputSourceSamplerTest extends InitializedNullHandlingTest
         ),
         data.get(1)
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         new SamplerResponseRow(
             new SamplerTestUtils.MapAllowingNullValuesBuilder<String, Object>()
                 .put("Number", null)
@@ -159,7 +156,7 @@ public class CsvInputSourceSamplerTest extends InitializedNullHandlingTest
         ),
         data.get(2)
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         new SamplerResponseRow(
             new SamplerTestUtils.MapAllowingNullValuesBuilder<String, Object>()
                 .put("Number", null)

@@ -19,13 +19,13 @@
 
 package org.apache.druid.segment.virtual;
 
-import com.google.common.collect.ImmutableList;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.io.Closer;
 import org.apache.druid.math.expr.ExpressionType;
 import org.apache.druid.query.expression.TestExprMacroTable;
+import org.apache.druid.segment.CursorBuildSpec;
 import org.apache.druid.segment.QueryableIndex;
-import org.apache.druid.segment.QueryableIndexStorageAdapter;
+import org.apache.druid.segment.QueryableIndexCursorFactory;
 import org.apache.druid.segment.VirtualColumns;
 import org.apache.druid.segment.column.ColumnCapabilities;
 import org.apache.druid.segment.column.ColumnType;
@@ -37,11 +37,12 @@ import org.apache.druid.segment.vector.VectorCursor;
 import org.apache.druid.segment.vector.VectorObjectSelector;
 import org.apache.druid.segment.vector.VectorValueSelector;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 import org.apache.druid.timeline.partition.LinearShardSpec;
-import org.junit.AfterClass;
-import org.junit.Assert;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 
@@ -52,17 +53,14 @@ public class ExpressionVectorSelectorsCastTest
   private static QueryableIndex INDEX;
   private static Closer CLOSER;
 
-  @BeforeClass
+  @BeforeAll
   public static void setupClass()
   {
     CLOSER = Closer.create();
 
     final GeneratorSchemaInfo schemaInfo = GeneratorBasicSchemas.SCHEMA_MAP.get("expression-testbench");
 
-    final DataSegment dataSegment = DataSegment.builder()
-                                               .dataSource("foo")
-                                               .interval(schemaInfo.getDataInterval())
-                                               .version("1")
+    final DataSegment dataSegment = DataSegment.builder(SegmentId.of("foo", schemaInfo.getDataInterval(), "1", 0))
                                                .shardSpec(new LinearShardSpec(0))
                                                .size(0)
                                                .build();
@@ -73,7 +71,7 @@ public class ExpressionVectorSelectorsCastTest
     );
   }
 
-  @AfterClass
+  @AfterAll
   public static void teardownClass() throws IOException
   {
     CLOSER.close();
@@ -106,25 +104,18 @@ public class ExpressionVectorSelectorsCastTest
   )
   {
     final VirtualColumns virtualColumns = VirtualColumns.create(
-        ImmutableList.of(
-            new ExpressionVirtualColumn(
-                "v",
-                "cast(" + column + ", '" + ExpressionType.fromColumnType(castTo) + "')",
-                castTo,
-                TestExprMacroTable.INSTANCE
-            )
+        new ExpressionVirtualColumn(
+            "v",
+            "cast(" + column + ", '" + ExpressionType.fromColumnType(castTo) + "')",
+            castTo,
+            TestExprMacroTable.INSTANCE
         )
     );
-    final QueryableIndexStorageAdapter storageAdapter = new QueryableIndexStorageAdapter(index);
-    VectorCursor cursor = storageAdapter.makeVectorCursor(
-        null,
-        index.getDataInterval(),
-        virtualColumns,
-        false,
-        512,
-        null
-    );
-    closer.register(cursor);
+    final QueryableIndexCursorFactory cursorFactory = new QueryableIndexCursorFactory(index);
+    final CursorBuildSpec buildSpec = CursorBuildSpec.builder()
+                                                     .setVirtualColumns(virtualColumns)
+                                                     .build();
+    VectorCursor cursor = closer.register(cursorFactory.makeCursorHolder(buildSpec)).asVectorCursor();
 
     ColumnCapabilities capabilities = INDEX.getColumnCapabilities(column);
 
@@ -158,9 +149,9 @@ public class ExpressionVectorSelectorsCastTest
           long[] castLongs = castSelector.getLongVector();
           for (int i = 0; i < selector.getCurrentVectorSize(); i++) {
             if (nulls != null) {
-              Assert.assertEquals(nulls[i], castNulls[i]);
+              Assertions.assertEquals(nulls[i], castNulls[i]);
             }
-            Assert.assertEquals(longs[i], castLongs[i]);
+            Assertions.assertEquals(longs[i], castLongs[i]);
           }
           break;
         case DOUBLE:
@@ -170,9 +161,9 @@ public class ExpressionVectorSelectorsCastTest
           double[] castDoubles = castSelector.getDoubleVector();
           for (int i = 0; i < selector.getCurrentVectorSize(); i++) {
             if (nulls != null) {
-              Assert.assertEquals(nulls[i], castNulls[i]);
+              Assertions.assertEquals(nulls[i], castNulls[i]);
             }
-            Assert.assertEquals(doubles[i], castDoubles[i], 0.0);
+            Assertions.assertEquals(doubles[i], castDoubles[i], 0.0);
           }
           break;
 
@@ -183,13 +174,13 @@ public class ExpressionVectorSelectorsCastTest
           float[] castFloats = castSelector.getFloatVector();
           for (int i = 0; i < selector.getCurrentVectorSize(); i++) {
             if (nulls != null) {
-              Assert.assertEquals(nulls[i], castNulls[i]);
+              Assertions.assertEquals(nulls[i], castNulls[i]);
             }
-            Assert.assertEquals(floats[i], castFloats[i], 0.0);
+            Assertions.assertEquals(floats[i], castFloats[i], 0.0);
           }
           break;
         default:
-          Assert.fail("this shouldn't happen");
+          Assertions.fail("this shouldn't happen");
           return;
       }
 
@@ -212,13 +203,13 @@ public class ExpressionVectorSelectorsCastTest
         case STRING:
           Object[] objects = objectSelector.getObjectVector();
           Object[] otherObjects = castSelector.getObjectVector();
-          Assert.assertEquals(objectSelector.getCurrentVectorSize(), castSelector.getCurrentVectorSize());
+          Assertions.assertEquals(objectSelector.getCurrentVectorSize(), castSelector.getCurrentVectorSize());
           for (int i = 0; i < objectSelector.getCurrentVectorSize(); i++) {
-            Assert.assertEquals(objects[i], otherObjects[i]);
+            Assertions.assertEquals(objects[i], otherObjects[i]);
           }
           break;
         default:
-          Assert.fail("this shouldn't happen");
+          Assertions.fail("this shouldn't happen");
           return;
       }
 

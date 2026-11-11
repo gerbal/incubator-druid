@@ -21,6 +21,7 @@ package org.apache.druid.storage.s3;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import jakarta.validation.Valid;
 
 /**
  * General configurations for Amazon S3 storage.
@@ -36,17 +37,34 @@ public class S3StorageConfig
   @JsonProperty("sse")
   private final ServerSideEncryption serverSideEncryption;
 
+  /**
+   * S3 transfer config.
+   *
+   * @see S3StorageDruidModule#configure
+   */
+  @JsonProperty("transfer")
+  @Valid
+  private final S3TransferConfig s3TransferConfig;
+
   @JsonCreator
   public S3StorageConfig(
-      @JsonProperty("sse") ServerSideEncryption serverSideEncryption
+      @JsonProperty("sse") ServerSideEncryption serverSideEncryption,
+      @JsonProperty("transfer") S3TransferConfig s3TransferConfig
   )
   {
     this.serverSideEncryption = serverSideEncryption == null ? new NoopServerSideEncryption() : serverSideEncryption;
+    this.s3TransferConfig = s3TransferConfig == null ? new S3TransferConfig() : s3TransferConfig;
   }
 
   @JsonProperty("sse")
   public ServerSideEncryption getServerSideEncryption()
   {
     return serverSideEncryption;
+  }
+
+  @JsonProperty("transfer")
+  public S3TransferConfig getS3TransferConfig()
+  {
+    return s3TransferConfig;
   }
 }

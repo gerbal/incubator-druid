@@ -27,7 +27,10 @@ import com.jayway.jsonpath.JsonPath;
 import com.jayway.jsonpath.Option;
 import com.jayway.jsonpath.spi.json.JsonProvider;
 import com.jayway.jsonpath.spi.mapper.JacksonMappingProvider;
+import net.thisptr.jackson.jq.BuiltinFunctionLoader;
 import net.thisptr.jackson.jq.JsonQuery;
+import net.thisptr.jackson.jq.Scope;
+import net.thisptr.jackson.jq.Versions;
 import net.thisptr.jackson.jq.exception.JsonQueryException;
 import org.apache.druid.data.input.impl.FastJacksonJsonNodeJsonProvider;
 import org.apache.druid.java.util.common.StringUtils;
@@ -46,6 +49,7 @@ import java.util.function.Function;
 public class JSONFlattenerMaker implements ObjectFlatteners.FlattenerMaker<JsonNode>
 {
   private static final JsonProvider JSON_PROVIDER = new FastJacksonJsonNodeJsonProvider();
+  private static final Scope JSON_QUERY_SCOPE = createJsonQueryScope();
 
   private static final Configuration JSONPATH_CONFIGURATION =
       Configuration.builder()
@@ -53,6 +57,13 @@ public class JSONFlattenerMaker implements ObjectFlatteners.FlattenerMaker<JsonN
                    .mappingProvider(new JacksonMappingProvider())
                    .options(EnumSet.of(Option.SUPPRESS_EXCEPTIONS))
                    .build();
+
+  private static Scope createJsonQueryScope()
+  {
+    final Scope scope = Scope.newEmptyScope();
+    BuiltinFunctionLoader.getInstance().loadFunctions(Versions.JQ_1_6, scope);
+    return scope;
+  }
 
   private final CharsetEncoder enc = StandardCharsets.UTF_8.newEncoder();
   private final boolean keepNullValues;
@@ -78,7 +89,7 @@ public class JSONFlattenerMaker implements ObjectFlatteners.FlattenerMaker<JsonN
                          .filter(
                              entry -> {
                                final JsonNode val = entry.getValue();
-                               // If the keepNullValues is set on the JSONParseSpec then null values should not be filtered out
+                               // If the keepNullValues is set on the JsonInputFormat then null values should not be filtered out
                                return !(val.isObject() || (!keepNullValues && val.isNull()) || (val.isArray() && !isFlatList(val)));
                              }
                          )
@@ -102,10 +113,12 @@ public class JSONFlattenerMaker implements ObjectFlatteners.FlattenerMaker<JsonN
   public Function<JsonNode, Object> makeJsonQueryExtractor(final String expr)
   {
     try {
-      final JsonQuery jsonQuery = JsonQuery.compile(expr);
+      final JsonQuery jsonQuery = JsonQuery.compile(expr, Versions.JQ_1_6);
       return jsonNode -> {
         try {
-          return finalizeConversionForMap(jsonQuery.apply(jsonNode).get(0));
+          final List<JsonNode> output = new ArrayList<>();
+          jsonQuery.apply(JSON_QUERY_SCOPE, jsonNode, output::add);
+          return finalizeConversionForMap(output.get(0));
         }
         catch (JsonQueryException e) {
           throw new RuntimeException(e);
@@ -203,17 +216,51 @@ public class JSONFlattenerMaker implements ObjectFlatteners.FlattenerMaker<JsonN
     return null;
   }
 
+  /**
+   * Fix up a string so it can round-trip through UTF-8 encoding without loss of fidelity. This comes up when a string
+   * has surrogates (e.g. \uD900) that appear in invalid positions, such as alone rather than as part of a
+   * surrogate pair.
+   *
+   * This operation is useful because when a string cannot round-trip properly, it can cause it to sort differently
+   * relative to other strings after an encode/decode round-trip. This causes incorrect ordering in cases where strings
+   * are sorted, then encoded, then decoded again.
+   *
+   * @param s   string, or null
+   * @param enc UTF-8 encoder
+   *
+   * @return the original string, or a fixed version that can round-trip properly
+   */
   @Nullable
-  private static String charsetFix(String s, CharsetEncoder enc)
+  static String charsetFix(@Nullable String s, CharsetEncoder enc)
   {
-    if (s != null && !enc.canEncode(s)) {
-      // Some whacky characters are in this string (e.g. \uD900). These are problematic because they are decodeable
-      // by new String(...) but will not encode into the same character. This dance here will replace these
-      // characters with something more sane.
+    if (s != null && !isBmp(s) && !enc.canEncode(s)) {
+      // Note: the check isBmp isn't necessary for correct behavior, but it improves performance in the common case
+      // where all characters are in BMP. It short-circuits "enc.canEncode", which is a slow operation. The short
+      // circuit is valid because if every char in a string is in BMP, it is definitely encodable as UTF-8.
+
+      // This dance here will replace the original string with one that can be round-tripped.
       return StringUtils.fromUtf8(StringUtils.toUtf8(s));
     } else {
       return s;
     }
+  }
+
+  /**
+   * Returns whether every character in a string is in BMP (basic multilingual plane).
+   */
+  private static boolean isBmp(String s)
+  {
+    for (int i = 0; i < s.length(); i++) {
+      final char c = s.charAt(i);
+
+      // All 16-bit code units are either valid code points, or surrogates. So if this char is not a surrogate,
+      // it must represent a code point in BMP.
+      if (Character.isSurrogate(c)) {
+        return false;
+      }
+    }
+
+    return true;
   }
 
   private static boolean isFlatList(JsonNode list)

@@ -33,14 +33,14 @@ and `druid.tlsPort` properties on each process. Please see `Configuration` secti
 
 ## Jetty server configuration
 
-Apache Druid uses Jetty as its embedded web server. 
+Apache&circledR; Druid uses Jetty as its embedded web server. 
 
 To get familiar with TLS/SSL, along with related concepts like keys and certificates,
 read [Configuring Secure Protocols](https://www.eclipse.org/jetty/documentation/jetty-12/operations-guide/index.html#og-protocols-ssl) in the Jetty documentation.
-To get more in-depth knowledge of TLS/SSL support in Java in general, refer to the [Java Secure Socket Extension (JSSE) Reference Guide](http://docs.oracle.com/javase/8/docs/technotes/guides/security/jsse/JSSERefGuide.html).
-The [Class SslContextFactory](https://www.eclipse.org/jetty/javadoc/jetty-11/org/eclipse/jetty/util/ssl/SslContextFactory.html)
+To get more in-depth knowledge of TLS/SSL support in Java in general, refer to the [Java Secure Socket Extension (JSSE) Reference Guide](https://docs.oracle.com/en/java/javase/17/security/java-secure-socket-extension-jsse-reference-guide.html).
+The [Class SslContextFactory](https://javadoc.jetty.org/jetty-12/org/eclipse/jetty/util/ssl/SslContextFactory.html)
 reference doc can help in understanding TLS/SSL configurations listed below. Finally, [Java Cryptography Architecture
-Standard Algorithm Name Documentation for JDK 8](http://docs.oracle.com/javase/8/docs/technotes/guides/security/StandardNames.html) lists all possible
+Standard Algorithm Name Documentation for JDK 17](https://docs.oracle.com/en/java/javase/17/docs/specs/security/standard-names.html) lists all possible
 values for the configs below, among others provided by Java implementation.
 
 |Property|Description|Default|Required|
@@ -51,6 +51,7 @@ values for the configs below, among others provided by Java implementation.
 |`druid.server.https.keyStorePassword`|The [Password Provider](../operations/password-provider.md) or String password for the Key Store.|none|yes|
 |`druid.server.https.reloadSslContext`| Should Druid server detect Key Store file change and reload.|false|no|
 |`druid.server.https.reloadSslContextSeconds`| How frequently should Druid server scan for Key Store file change.|60|yes|
+|`druid.server.https.forceApplyConfig`|Whether to apply TLS server configs even if an existing `SslContextFactory.Server` instance is bound.|false|no|
 
 The following table contains configuration options related to client certificate authentication.
 
@@ -79,13 +80,13 @@ The following table contains non-mandatory advanced configuration options, use c
 ## Internal communication over TLS
 
 Whenever possible Druid processes will use HTTPS to talk to each other. To enable this communication Druid's HttpClient needs to
-be configured with a proper [SSLContext](http://docs.oracle.com/javase/8/docs/api/javax/net/ssl/SSLContext.html) that is able
+be configured with a proper [SSLContext](https://docs.oracle.com/en/java/javase/17/docs/api/java.base/javax/net/ssl/SSLContext.html) that is able
 to validate the Server Certificates, otherwise communication will fail.
 
 Since, there are various ways to configure SSLContext, by default, Druid looks for an instance of SSLContext Guice binding
-while creating the HttpClient. This binding can be achieved writing a [Druid extension](../development/extensions.md)
+while creating the HttpClient. This binding can be achieved writing a [Druid extension](../configuration/extensions.md)
 which can provide an instance of SSLContext. Druid comes with a simple extension present [here](../development/extensions-core/simple-client-sslcontext.md)
-which should be useful enough for most simple cases, see [this](../development/extensions.md#loading-extensions) for how to include extensions.
+which should be useful enough for most simple cases, see [this](../configuration/extensions.md#loading-extensions) for how to include extensions.
 If this extension does not satisfy the requirements then please follow the extension [implementation](https://github.com/apache/druid/tree/master/extensions-core/simple-client-sslcontext)
 to create your own extension.
 

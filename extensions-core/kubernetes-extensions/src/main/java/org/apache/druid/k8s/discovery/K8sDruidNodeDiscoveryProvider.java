@@ -43,8 +43,8 @@ import java.net.SocketTimeoutException;
 import java.util.Collection;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 @ManageLifecycle
@@ -57,7 +57,7 @@ public class K8sDruidNodeDiscoveryProvider extends DruidNodeDiscoveryProvider
 
   private final K8sApiClient k8sApiClient;
 
-  private ExecutorService listenerExecutor;
+  private ScheduledExecutorService listenerExecutor;
 
   private final ConcurrentHashMap<NodeRole, NodeRoleWatcher> nodeTypeWatchers = new ConcurrentHashMap<>();
 
@@ -115,7 +115,7 @@ public class K8sDruidNodeDiscoveryProvider extends DruidNodeDiscoveryProvider
     return nodeTypeWatchers.computeIfAbsent(
         nodeType,
         nType -> {
-          LOGGER.info("Creating NodeRoleWatcher for nodeRole [%s].", nType);
+          LOGGER.info("Creating NodeRoleWatcher for role[%s].", nType);
           NodeRoleWatcher nodeRoleWatcher = new NodeRoleWatcher(
               listenerExecutor,
               nType,
@@ -127,7 +127,7 @@ public class K8sDruidNodeDiscoveryProvider extends DruidNodeDiscoveryProvider
           if (startAfterCreation) {
             nodeRoleWatcher.start();
           }
-          LOGGER.info("Created NodeRoleWatcher for nodeRole [%s].", nType);
+          LOGGER.info("Created NodeRoleWatcher for role[%s].", nType);
           return nodeRoleWatcher;
         }
     );
@@ -145,7 +145,7 @@ public class K8sDruidNodeDiscoveryProvider extends DruidNodeDiscoveryProvider
 
       // This is single-threaded to ensure that all listener calls are executed precisely in the oder of add/remove
       // event occurences.
-      listenerExecutor = Execs.singleThreaded("K8sDruidNodeDiscoveryProvider-ListenerExecutor");
+      listenerExecutor = Execs.scheduledSingleThreaded("K8sDruidNodeDiscoveryProvider-ListenerExecutor");
 
       LOGGER.info("started");
 
@@ -187,7 +187,6 @@ public class K8sDruidNodeDiscoveryProvider extends DruidNodeDiscoveryProvider
 
     private final LifecycleLock lifecycleLock = new LifecycleLock();
 
-    private final AtomicReference<Closeable> watchRef = new AtomicReference<>();
     private static final Closeable STOP_MARKER = () -> {};
 
     private final NodeRole nodeRole;
@@ -196,7 +195,7 @@ public class K8sDruidNodeDiscoveryProvider extends DruidNodeDiscoveryProvider
     private final long watcherErrorRetryWaitMS;
 
     NodeRoleWatcher(
-        ExecutorService listenerExecutor,
+        ScheduledExecutorService listenerExecutor,
         NodeRole nodeRole,
         PodInfo podInfo,
         K8sDiscoveryConfig discoveryConfig,
@@ -209,7 +208,7 @@ public class K8sDruidNodeDiscoveryProvider extends DruidNodeDiscoveryProvider
       this.k8sApiClient = k8sApiClient;
 
       this.nodeRole = nodeRole;
-      this.baseNodeRoleWatcher = new BaseNodeRoleWatcher(listenerExecutor, nodeRole);
+      this.baseNodeRoleWatcher = BaseNodeRoleWatcher.create(listenerExecutor, nodeRole);
 
       this.watcherErrorRetryWaitMS = watcherErrorRetryWaitMS;
     }
@@ -220,11 +219,11 @@ public class K8sDruidNodeDiscoveryProvider extends DruidNodeDiscoveryProvider
       boolean cacheInitialized = false;
 
       if (!lifecycleLock.awaitStarted()) {
-        LOGGER.error("Lifecycle not started, Exited Watch for NodeRole [%s].", nodeRole);
+        LOGGER.error("Lifecycle not started, Exited Watch for role[%s].", nodeRole);
         return;
       }
 
-      while (lifecycleLock.awaitStarted(1, TimeUnit.MILLISECONDS)) {
+      while (lifecycleLock.isStarted()) {
         try {
           DiscoveryDruidNodeList list = k8sApiClient.listPods(podInfo.getPodNamespace(), labelSelector, nodeRole);
           baseNodeRoleWatcher.resetNodes(list.getDruidNodes());
@@ -235,73 +234,84 @@ public class K8sDruidNodeDiscoveryProvider extends DruidNodeDiscoveryProvider
           }
 
           keepWatching(
-              podInfo.getPodNamespace(),
               labelSelector,
               list.getResourceVersion()
           );
         }
         catch (Throwable ex) {
-          LOGGER.error(ex, "Expection while watching for NodeRole [%s].", nodeRole);
+          LOGGER.error(ex, "Exception while watching for role[%s].", nodeRole);
 
-          // Wait a little before trying again.
-          sleep(watcherErrorRetryWaitMS);
+          if (lifecycleLock.isStarted()) {
+            // If not stopped, wait a little before trying again.
+            sleep(watcherErrorRetryWaitMS);
+          }
         }
       }
 
-      LOGGER.info("Exited Watch for NodeRole [%s].", nodeRole);
+      LOGGER.info("Exited Watch for role[%s].", nodeRole);
     }
 
-    private void keepWatching(String namespace, String labelSelector, String resourceVersion)
+    private void keepWatching(String labelSelector, String resourceVersion)
     {
       String nextResourceVersion = resourceVersion;
-      while (lifecycleLock.awaitStarted(1, TimeUnit.MILLISECONDS)) {
-        try {
-          WatchResult iter =
-              k8sApiClient.watchPods(podInfo.getPodNamespace(), labelSelector, nextResourceVersion, nodeRole);
 
+      while (lifecycleLock.isStarted()) {
+        try (WatchResult iter = k8sApiClient.watchPods(podInfo.getPodNamespace(), labelSelector, nextResourceVersion, nodeRole)) {
           if (iter == null) {
             // history not available, we need to start from scratch
             return;
           }
 
-          try {
-            while (iter.hasNext()) {
-              Watch.Response<DiscoveryDruidNodeAndResourceVersion> item = iter.next();
-              if (item != null && item.type != null && item.object != null) {
-                switch (item.type) {
-                  case WatchResult.ADDED:
-                    baseNodeRoleWatcher.childAdded(item.object.getNode());
-                    break;
-                  case WatchResult.DELETED:
-                    baseNodeRoleWatcher.childRemoved(item.object.getNode());
-                    break;
-                  default:
-                }
+          while (iter.hasNext()) {
+            Watch.Response<DiscoveryDruidNodeAndResourceVersion> item = iter.next();
 
-                // This should be updated after the action has been dealt with successfully
-                nextResourceVersion = item.object.getResourceVersion();
-
-              } else {
-                // Try again by starting the watch from the beginning. This can happen if the
-                // watch goes bad.
-                LOGGER.debug("Received NULL item while watching node type [%s]. Restarting watch.", this.nodeRole);
-                return;
-              }
+            if (item == null || item.type == null || item.object == null) {
+              LOGGER.debug("Received NULL item while watching role[%s]. Restarting watch.", this.nodeRole);
+              return;
             }
-          }
-          finally {
-            iter.close();
+
+            switch (item.type) {
+              case WatchResult.ADDED:
+                baseNodeRoleWatcher.childAdded(item.object.getNode());
+                break;
+              case WatchResult.DELETED:
+              case WatchResult.NOT_READY:
+                // Use skipIfUnknown=true for all k8s discovery removals.
+                // DELETED can fire after NOT_READY (so the service is already removed), or before ADDED (pod deleted before becoming ready).
+                // NOT_READY can repeat during CrashLoopBackOff. None of these warrant the error-level logging that
+                // comes with trying to remove an unknown service.
+                baseNodeRoleWatcher.childRemoved(item.object.getNode(), true);
+                break;
+              default:
+            }
+
+            // This should be updated after the action has been dealt with successfully
+            nextResourceVersion = item.object.getResourceVersion();
           }
 
+          LOGGER.trace("Watch closed normally for role[%s]", this.nodeRole);
+          return;
+        }
+        catch (ChannelResetException ex) {
+          LOGGER.debug("Watch stream terminated normally for role[%s], restarting", this.nodeRole);
+          // Apply the same backoff as other retry paths below: a persistently reset stream
+          // (flaky proxy, LB idle timeout shorter than expected) would otherwise cause an
+          // unbounded relist/watch loop against the API server.
+          sleep(watcherErrorRetryWaitMS);
+          return;
         }
         catch (SocketTimeoutException ex) {
           // socket read timeout can happen normally due to k8s not having anything new to push leading to socket
           // read timeout, so no error log
-          sleep(watcherErrorRetryWaitMS);
+          if (lifecycleLock.isStarted()) {
+            sleep(watcherErrorRetryWaitMS);
+          }
         }
         catch (Throwable ex) {
-          LOGGER.error(ex, "Error while watching node type [%s]", this.nodeRole);
-          sleep(watcherErrorRetryWaitMS);
+          LOGGER.error(ex, "Error while watching role[%s]", this.nodeRole);
+          if (lifecycleLock.isStarted()) {
+            sleep(watcherErrorRetryWaitMS);
+          }
         }
       }
     }
@@ -323,11 +333,11 @@ public class K8sDruidNodeDiscoveryProvider extends DruidNodeDiscoveryProvider
       }
 
       try {
-        LOGGER.info("Starting NodeRoleWatcher for [%s]...", nodeRole);
+        LOGGER.info("Starting NodeRoleWatcher for role[%s]...", nodeRole);
         this.watchExecutor = Execs.singleThreaded(this.getClass().getName() + nodeRole.getJsonName());
         watchExecutor.submit(this::watch);
         lifecycleLock.started();
-        LOGGER.info("Started NodeRoleWatcher for [%s].", nodeRole);
+        LOGGER.info("Started NodeRoleWatcher for role[%s].", nodeRole);
       }
       finally {
         lifecycleLock.exitStart();
@@ -342,18 +352,18 @@ public class K8sDruidNodeDiscoveryProvider extends DruidNodeDiscoveryProvider
       }
 
       try {
-        LOGGER.info("Stopping NodeRoleWatcher for [%s]...", nodeRole);
+        LOGGER.info("Stopping NodeRoleWatcher for role[%s]...", nodeRole);
         // STOP_MARKER cannot throw exceptions on close(), so this is OK.
         CloseableUtils.closeAndSuppressExceptions(STOP_MARKER, e -> {});
         watchExecutor.shutdownNow();
 
         if (!watchExecutor.awaitTermination(15, TimeUnit.SECONDS)) {
-          LOGGER.warn("Failed to stop watchExecutor for NodeRoleWatcher[%s]", nodeRole);
+          LOGGER.warn("Failed to stop watchExecutor for role[%s]", nodeRole);
         }
-        LOGGER.info("Stopped NodeRoleWatcher for [%s].", nodeRole);
+        LOGGER.info("Stopped NodeRoleWatcher for role[%s].", nodeRole);
       }
       catch (Exception ex) {
-        LOGGER.error(ex, "Failed to stop NodeRoleWatcher for [%s].", nodeRole);
+        LOGGER.error(ex, "Failed to stop NodeRoleWatcher for role[%s].", nodeRole);
       }
     }
 

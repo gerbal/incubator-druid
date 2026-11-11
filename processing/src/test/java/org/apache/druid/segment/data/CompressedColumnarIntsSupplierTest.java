@@ -25,10 +25,10 @@ import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.io.Closer;
 import org.apache.druid.segment.CompressedPools;
 import org.apache.druid.utils.CloseableUtils;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -36,6 +36,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.IntBuffer;
 import java.nio.channels.Channels;
+import java.util.Arrays;
 import java.util.Random;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadLocalRandom;
@@ -54,7 +55,7 @@ public class CompressedColumnarIntsSupplierTest extends CompressionStrategyTest
   private CompressedColumnarIntsSupplier supplier;
   private int[] vals;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
     closer = Closer.create();
@@ -64,7 +65,7 @@ public class CompressedColumnarIntsSupplierTest extends CompressionStrategyTest
     vals = null;
   }
 
-  @After
+  @AfterEach
   public void tearDown() throws Exception
   {
     closer.close();
@@ -106,9 +107,9 @@ public class CompressedColumnarIntsSupplierTest extends CompressionStrategyTest
     theSupplier.writeTo(Channels.newChannel(baos), null);
 
     final byte[] bytes = baos.toByteArray();
-    Assert.assertEquals(theSupplier.getSerializedSize(), bytes.length);
+    Assertions.assertEquals(theSupplier.getSerializedSize(), bytes.length);
 
-    supplier = CompressedColumnarIntsSupplier.fromByteBuffer(ByteBuffer.wrap(bytes), ByteOrder.nativeOrder());
+    supplier = CompressedColumnarIntsSupplier.fromByteBuffer(ByteBuffer.wrap(bytes), ByteOrder.nativeOrder(), null);
     columnarInts = supplier.get();
   }
 
@@ -128,16 +129,16 @@ public class CompressedColumnarIntsSupplierTest extends CompressionStrategyTest
   {
     setupSimple(5);
 
-    Assert.assertEquals(4, supplier.getBaseIntBuffers().size());
+    Assertions.assertEquals(4, supplier.getBaseIntBuffers().size());
     assertIndexMatchesVals();
 
     // test powers of 2
     setupSimple(4);
-    Assert.assertEquals(4, supplier.getBaseIntBuffers().size());
+    Assertions.assertEquals(4, supplier.getBaseIntBuffers().size());
     assertIndexMatchesVals();
 
     setupSimple(32);
-    Assert.assertEquals(1, supplier.getBaseIntBuffers().size());
+    Assertions.assertEquals(1, supplier.getBaseIntBuffers().size());
     assertIndexMatchesVals();
   }
 
@@ -147,23 +148,25 @@ public class CompressedColumnarIntsSupplierTest extends CompressionStrategyTest
     final int maxChunkSize = CompressedPools.BUFFER_SIZE / Long.BYTES;
 
     setupLargeChunks(maxChunkSize, 10 * maxChunkSize);
-    Assert.assertEquals(10, supplier.getBaseIntBuffers().size());
+    Assertions.assertEquals(10, supplier.getBaseIntBuffers().size());
     assertIndexMatchesVals();
 
     setupLargeChunks(maxChunkSize, 10 * maxChunkSize + 1);
-    Assert.assertEquals(11, supplier.getBaseIntBuffers().size());
+    Assertions.assertEquals(11, supplier.getBaseIntBuffers().size());
     assertIndexMatchesVals();
 
     setupLargeChunks(maxChunkSize - 1, 10 * (maxChunkSize - 1) + 1);
-    Assert.assertEquals(11, supplier.getBaseIntBuffers().size());
+    Assertions.assertEquals(11, supplier.getBaseIntBuffers().size());
     assertIndexMatchesVals();
   }
 
-  @Test(expected = IllegalArgumentException.class)
+  @Test
   public void testChunkTooBig() throws Exception
   {
-    final int maxChunkSize = CompressedPools.BUFFER_SIZE / Integer.BYTES;
-    setupLargeChunks(maxChunkSize + 1, 10 * (maxChunkSize + 1));
+    Assertions.assertThrows(IllegalArgumentException.class, () -> {
+      final int maxChunkSize = CompressedPools.BUFFER_SIZE / Integer.BYTES;
+      setupLargeChunks(maxChunkSize + 1, 10 * (maxChunkSize + 1));
+    });
   }
 
   @Test
@@ -171,7 +174,7 @@ public class CompressedColumnarIntsSupplierTest extends CompressionStrategyTest
   {
     setupSimpleWithSerde(5);
 
-    Assert.assertEquals(4, supplier.getBaseIntBuffers().size());
+    Assertions.assertEquals(4, supplier.getBaseIntBuffers().size());
     assertIndexMatchesVals();
   }
 
@@ -182,7 +185,7 @@ public class CompressedColumnarIntsSupplierTest extends CompressionStrategyTest
   {
     setupSimple(5);
 
-    final AtomicReference<String> reason = new AtomicReference<String>("none");
+    final AtomicReference<String> reason = new AtomicReference<>("none");
 
     final int numRuns = 1000;
     final CountDownLatch startLatch = new CountDownLatch(1);
@@ -275,27 +278,32 @@ public class CompressedColumnarIntsSupplierTest extends CompressionStrategyTest
     }
 
     if (failureHappened.get()) {
-      Assert.fail("Failure happened.  Reason: " + reason.get());
+      Assertions.fail("Failure happened.  Reason: " + reason.get());
     }
   }
 
   private void assertIndexMatchesVals()
   {
-    Assert.assertEquals(vals.length, columnarInts.size());
+    Assertions.assertEquals(vals.length, columnarInts.size());
 
     // sequential access
     int[] indices = new int[vals.length];
     for (int i = 0, size = columnarInts.size(); i < size; ++i) {
-      Assert.assertEquals(vals[i], columnarInts.get(i), 0.0);
+      Assertions.assertEquals(vals[i], columnarInts.get(i), 0.0);
       indices[i] = i;
     }
+
+    int[] offsetValues = new int[columnarInts.size() + 1];
+    columnarInts.get(offsetValues, 1, 0, columnarInts.size());
+    Assertions.assertEquals(0, offsetValues[0]);
+    Assertions.assertArrayEquals(vals, Arrays.copyOfRange(offsetValues, 1, offsetValues.length));
 
     // random access, limited to 1000 elements for large lists (every element would take too long)
     IntArrays.shuffle(indices, ThreadLocalRandom.current());
     final int limit = Math.min(columnarInts.size(), 1000);
     for (int i = 0; i < limit; ++i) {
       int k = indices[i];
-      Assert.assertEquals(vals[k], columnarInts.get(k), 0.0);
+      Assertions.assertEquals(vals[k], columnarInts.get(k), 0.0);
     }
   }
 }

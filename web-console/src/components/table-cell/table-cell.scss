@@ -16,10 +16,11 @@
  * limitations under the License.
  */
 
-@import '../../variables';
+@use '../../variables' as *;
 
 .table-cell {
   padding: $table-cell-v-padding $table-cell-h-padding;
+  white-space: pre;
 
   &.null,
   &.empty {

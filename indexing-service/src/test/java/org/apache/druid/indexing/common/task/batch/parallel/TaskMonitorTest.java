@@ -19,9 +19,9 @@
 
 package org.apache.druid.indexing.common.task.batch.parallel;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
-import org.apache.druid.client.indexing.NoopOverlordClient;
 import org.apache.druid.client.indexing.TaskStatusResponse;
 import org.apache.druid.data.input.InputSplit;
 import org.apache.druid.indexer.RunnerTaskState;
@@ -31,18 +31,28 @@ import org.apache.druid.indexer.TaskStatus;
 import org.apache.druid.indexer.TaskStatusPlus;
 import org.apache.druid.indexing.common.TaskToolbox;
 import org.apache.druid.indexing.common.task.NoopTask;
+import org.apache.druid.indexing.common.task.NoopTestTaskReportFileWriter;
 import org.apache.druid.indexing.common.task.batch.parallel.TaskMonitor.SubTaskCompleteEvent;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.concurrent.Execs;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.apache.druid.java.util.metrics.StubServiceEmitter;
+import org.apache.druid.rpc.indexing.NoopOverlordClient;
+import org.apache.druid.segment.IndexIO;
+import org.apache.druid.segment.IndexMergerV9;
+import org.apache.druid.segment.TestHelper;
+import org.apache.druid.segment.column.ColumnConfig;
+import org.apache.druid.segment.writeout.TmpFileSegmentWriteOutMediumFactory;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import javax.annotation.Nullable;
+
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
@@ -61,17 +71,18 @@ public class TaskMonitorTest
   private final TaskMonitor<TestTask, SimpleSubTaskReport> monitor = new TaskMonitor<>(
       new TestOverlordClient(),
       3,
-      SPLIT_NUM
+      SPLIT_NUM,
+      0
   );
 
-  @Before
+  @BeforeEach
   public void setup()
   {
     tasks.clear();
     monitor.start(100);
   }
 
-  @After
+  @AfterEach
   public void teardown()
   {
     monitor.stop();
@@ -91,11 +102,11 @@ public class TaskMonitorTest
       // # of threads of taskRunner is 5, so the expected max timeout is 2 sec. We additionally wait three more seconds
       // here to make sure the test passes.
       final SubTaskCompleteEvent<TestTask> result = futures.get(i).get(1, TimeUnit.SECONDS);
-      Assert.assertEquals("supervisorId", result.getSpec().getSupervisorTaskId());
-      Assert.assertEquals("specId" + i, result.getSpec().getId());
-      Assert.assertNotNull(result.getLastStatus());
-      Assert.assertEquals(TaskState.SUCCESS, result.getLastStatus().getStatusCode());
-      Assert.assertEquals(TaskState.SUCCESS, result.getLastState());
+      Assertions.assertEquals("supervisorId", result.getSpec().getSupervisorTaskId());
+      Assertions.assertEquals("specId" + i, result.getSpec().getId());
+      Assertions.assertNotNull(result.getLastStatus());
+      Assertions.assertEquals(TaskState.SUCCESS, result.getLastStatus().getStatusCode());
+      Assertions.assertEquals(TaskState.SUCCESS, result.getLastState());
     }
   }
 
@@ -125,21 +136,21 @@ public class TaskMonitorTest
       // # of threads of taskRunner is 5, and each task is expected to be run 3 times (with 2 retries), so the expected
       // max timeout is 6 sec. We additionally wait 4 more seconds here to make sure the test passes.
       final SubTaskCompleteEvent<TestTask> result = futures.get(i).get(2, TimeUnit.SECONDS);
-      Assert.assertEquals("supervisorId", result.getSpec().getSupervisorTaskId());
-      Assert.assertEquals("specId" + i, result.getSpec().getId());
+      Assertions.assertEquals("supervisorId", result.getSpec().getSupervisorTaskId());
+      Assertions.assertEquals("specId" + i, result.getSpec().getId());
 
-      Assert.assertNotNull(result.getLastStatus());
-      Assert.assertEquals(TaskState.SUCCESS, result.getLastStatus().getStatusCode());
-      Assert.assertEquals(TaskState.SUCCESS, result.getLastState());
+      Assertions.assertNotNull(result.getLastStatus());
+      Assertions.assertEquals(TaskState.SUCCESS, result.getLastStatus().getStatusCode());
+      Assertions.assertEquals(TaskState.SUCCESS, result.getLastState());
 
       final TaskHistory<TestTask> taskHistory = monitor.getCompleteSubTaskSpecHistory(specs.get(i).getId());
-      Assert.assertNotNull(taskHistory);
+      Assertions.assertNotNull(taskHistory);
 
       final List<TaskStatusPlus> attemptHistory = taskHistory.getAttemptHistory();
-      Assert.assertNotNull(attemptHistory);
-      Assert.assertEquals(3, attemptHistory.size());
-      Assert.assertEquals(TaskState.FAILED, attemptHistory.get(0).getStatusCode());
-      Assert.assertEquals(TaskState.FAILED, attemptHistory.get(1).getStatusCode());
+      Assertions.assertNotNull(attemptHistory);
+      Assertions.assertEquals(3, attemptHistory.size());
+      Assertions.assertEquals(TaskState.FAILED, attemptHistory.get(0).getStatusCode());
+      Assertions.assertEquals(TaskState.FAILED, attemptHistory.get(1).getStatusCode());
     }
   }
 
@@ -169,21 +180,41 @@ public class TaskMonitorTest
       // # of threads of taskRunner is 5, and each task is expected to be run 3 times (with 2 retries), so the expected
       // max timeout is 6 sec. We additionally wait 4 more seconds here to make sure the test passes.
       final SubTaskCompleteEvent<TestTask> result = futures.get(i).get(2, TimeUnit.SECONDS);
-      Assert.assertEquals("supervisorId", result.getSpec().getSupervisorTaskId());
-      Assert.assertEquals("specId" + i, result.getSpec().getId());
+      Assertions.assertEquals("supervisorId", result.getSpec().getSupervisorTaskId());
+      Assertions.assertEquals("specId" + i, result.getSpec().getId());
 
-      Assert.assertNotNull(result.getLastStatus());
-      Assert.assertEquals(TaskState.SUCCESS, result.getLastStatus().getStatusCode());
-      Assert.assertEquals(TaskState.SUCCESS, result.getLastState());
+      Assertions.assertNotNull(result.getLastStatus());
+      Assertions.assertEquals(TaskState.SUCCESS, result.getLastStatus().getStatusCode());
+      Assertions.assertEquals(TaskState.SUCCESS, result.getLastState());
 
       final TaskHistory<TestTask> taskHistory = monitor.getCompleteSubTaskSpecHistory(specs.get(i).getId());
-      Assert.assertNotNull(taskHistory);
+      Assertions.assertNotNull(taskHistory);
 
       final List<TaskStatusPlus> attemptHistory = taskHistory.getAttemptHistory();
-      Assert.assertNotNull(attemptHistory);
-      Assert.assertEquals(1, attemptHistory.size());
-      Assert.assertEquals(TaskState.SUCCESS, attemptHistory.get(0).getStatusCode());
+      Assertions.assertNotNull(attemptHistory);
+      Assertions.assertEquals(1, attemptHistory.size());
+      Assertions.assertEquals(TaskState.SUCCESS, attemptHistory.get(0).getStatusCode());
     }
+  }
+
+  @Test
+  public void testTimeout() throws InterruptedException, ExecutionException, TimeoutException
+  {
+    TaskMonitor<TestTask, SimpleSubTaskReport> timeoutMonitor = new TaskMonitor<>(
+            new TestOverlordClient(),
+            0,
+            1,
+            10L
+    );
+    timeoutMonitor.start(50);
+    ListenableFuture<SubTaskCompleteEvent<TestTask>> future = timeoutMonitor.submit(
+            new TestTaskSpec("timeoutSpec", "groupId", "supervisorId", null, new IntegerInputSplit(0), 100L, 0, false)
+    );
+    SubTaskCompleteEvent<TestTask> result = future.get(1, TimeUnit.SECONDS);
+    Assertions.assertNotNull(result.getLastStatus());
+    Assertions.assertEquals(TaskState.FAILED, result.getLastStatus().getStatusCode());
+    Assertions.assertEquals(TaskState.FAILED, result.getLastState());
+    timeoutMonitor.stop();
   }
 
   private class TestTaskSpec extends SubTaskSpec<TestTask>
@@ -231,7 +262,7 @@ public class TaskMonitorTest
 
     TestTask(String id, long runTime, boolean shouldFail, boolean throwUnknownTypeIdError)
     {
-      super(id, null, "testDataSource", runTime, 0, null, null, null);
+      super(id, null, "testDataSource", runTime, 0, null);
       this.shouldFail = shouldFail;
       this.throwUnknownTypeIdError = throwUnknownTypeIdError;
     }
@@ -244,7 +275,7 @@ public class TaskMonitorTest
     }
 
     @Override
-    public void cleanUp(TaskToolbox toolbox, boolean failure)
+    public void cleanUp(TaskToolbox toolbox, TaskStatus taskStatus)
     {
       // do nothing
     }
@@ -264,6 +295,8 @@ public class TaskMonitorTest
 
   private class TestOverlordClient extends NoopOverlordClient
   {
+    private final Set<String> cancelled = ConcurrentHashMap.newKeySet();
+
     @Override
     public ListenableFuture<Void> runTask(String taskId, Object taskObject)
     {
@@ -272,13 +305,29 @@ public class TaskMonitorTest
       if (task.throwUnknownTypeIdError) {
         throw new RuntimeException(new ISE("Could not resolve type id 'test_task_id'"));
       }
-      taskRunner.submit(() -> tasks.put(task.getId(), task.run(null).getStatusCode()));
+      TaskToolbox taskToolbox = makeToolbox();
+      taskRunner.submit(() -> tasks.put(task.getId(), task.run(taskToolbox).getStatusCode()));
       return Futures.immediateFuture(null);
+    }
+
+    private TaskToolbox makeToolbox()
+    {
+      ObjectMapper jsonMapper = TestHelper.JSON_MAPPER;
+      IndexIO indexIO = new IndexIO(jsonMapper, ColumnConfig.DEFAULT);
+      return new TaskToolbox.Builder()
+          .indexIO(indexIO)
+          .emitter(new StubServiceEmitter())
+          .indexMerger(new IndexMergerV9(jsonMapper, indexIO, TmpFileSegmentWriteOutMediumFactory.instance(), false))
+          .taskReportFileWriter(new NoopTestTaskReportFileWriter())
+          .build();
     }
 
     @Override
     public ListenableFuture<TaskStatusResponse> taskStatus(String taskId)
     {
+      final TaskState state = cancelled.contains(taskId)
+              ? TaskState.FAILED
+              : tasks.get(taskId);
       final TaskStatusResponse retVal = new TaskStatusResponse(
           taskId,
           new TaskStatusPlus(
@@ -287,7 +336,7 @@ public class TaskMonitorTest
               "testTask",
               DateTimes.EPOCH,
               DateTimes.EPOCH,
-              tasks.get(taskId),
+              state,
               RunnerTaskState.RUNNING,
               -1L,
               TaskLocation.unknown(),
@@ -297,6 +346,13 @@ public class TaskMonitorTest
       );
 
       return Futures.immediateFuture(retVal);
+    }
+
+    @Override
+    public ListenableFuture<Void> cancelTask(String taskId)
+    {
+      cancelled.add(taskId);
+      return Futures.immediateFuture(null);
     }
   }
 

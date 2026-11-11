@@ -231,6 +231,16 @@ public final class SegmentId implements Comparable<SegmentId>
     }
   }
 
+
+  /**
+   * Creates a merged SegmentId for the given data source, interval and partition number. Used when segments are
+   * merged.
+   */
+  public static SegmentId merged(String dataSource, Interval interval, int partitionNum)
+  {
+    return of(dataSource, interval, "merged", partitionNum);
+  }
+
   /**
    * Creates a dummy SegmentId with the given data source. This method is useful in benchmark and test code.
    */
@@ -318,9 +328,16 @@ public final class SegmentId implements Comparable<SegmentId>
     return of(dataSource, newInterval, version, partitionNum);
   }
 
+  /**
+   * Returns a descriptor that references the entire time range of the segment.
+   */
   public SegmentDescriptor toDescriptor()
   {
-    return new SegmentDescriptor(Intervals.utc(interval.getStartMillis(), interval.getEndMillis()), version, partitionNum);
+    return new SegmentDescriptor(
+        Intervals.utc(interval.getStartMillis(), interval.getEndMillis()),
+        version,
+        partitionNum
+    );
   }
 
   @Override

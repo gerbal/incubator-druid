@@ -19,9 +19,12 @@
 
 package org.apache.druid.indexing.common.task;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonSubTypes.Type;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import org.apache.druid.guice.PeonProcessingModule;
+import org.apache.druid.indexer.TaskIdStatus;
 import org.apache.druid.indexer.TaskIdentifier;
 import org.apache.druid.indexer.TaskInfo;
 import org.apache.druid.indexer.TaskStatus;
@@ -36,10 +39,21 @@ import org.apache.druid.indexing.common.task.batch.parallel.PartialGenericSegmen
 import org.apache.druid.indexing.common.task.batch.parallel.PartialHashSegmentGenerateTask;
 import org.apache.druid.indexing.common.task.batch.parallel.PartialRangeSegmentGenerateTask;
 import org.apache.druid.indexing.common.task.batch.parallel.SinglePhaseSubTask;
+import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.common.UOE;
 import org.apache.druid.query.Query;
+import org.apache.druid.query.QueryContexts;
 import org.apache.druid.query.QueryRunner;
+import org.apache.druid.server.coordination.BroadcastDatasourceLoadingSpec;
+import org.apache.druid.server.lookup.cache.LookupLoadingSpec;
+import org.apache.druid.server.security.Resource;
+import org.apache.druid.server.security.ResourceAction;
+import org.apache.druid.server.security.ResourceType;
 
+import javax.annotation.Nonnull;
 import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 
 /**
  * Represents a task that can run on a worker. The general contracts surrounding Tasks are:
@@ -55,25 +69,23 @@ import java.util.Map;
  */
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type")
 @JsonSubTypes(value = {
-    @Type(name = "kill", value = KillUnusedSegmentsTask.class),
-    @Type(name = "move", value = MoveTask.class),
-    @Type(name = "archive", value = ArchiveTask.class),
-    @Type(name = "restore", value = RestoreTask.class),
-    @Type(name = "index", value = IndexTask.class),
+    @Type(name = KillUnusedSegmentsTask.TYPE, value = KillUnusedSegmentsTask.class),
+    @Type(name = MoveTask.TYPE, value = MoveTask.class),
+    @Type(name = ArchiveTask.TYPE, value = ArchiveTask.class),
+    @Type(name = RestoreTask.TYPE, value = RestoreTask.class),
+    @Type(name = IndexTask.TYPE, value = IndexTask.class),
     @Type(name = ParallelIndexSupervisorTask.TYPE, value = ParallelIndexSupervisorTask.class),
     @Type(name = SinglePhaseSubTask.TYPE, value = SinglePhaseSubTask.class),
     // for backward compatibility
     @Type(name = SinglePhaseSubTask.OLD_TYPE_NAME, value = LegacySinglePhaseSubTask.class),
+    @Type(name = HadoopIndexTaskStub.TYPE, value = HadoopIndexTaskStub.class),
     @Type(name = PartialHashSegmentGenerateTask.TYPE, value = PartialHashSegmentGenerateTask.class),
     @Type(name = PartialDimensionCardinalityTask.TYPE, value = PartialDimensionCardinalityTask.class),
     @Type(name = PartialRangeSegmentGenerateTask.TYPE, value = PartialRangeSegmentGenerateTask.class),
     @Type(name = PartialDimensionDistributionTask.TYPE, value = PartialDimensionDistributionTask.class),
     @Type(name = PartialGenericSegmentMergeTask.TYPE, value = PartialGenericSegmentMergeTask.class),
-    @Type(name = "index_hadoop", value = HadoopIndexTask.class),
-    @Type(name = "index_realtime", value = RealtimeIndexTask.class),
-    @Type(name = "index_realtime_appenderator", value = AppenderatorDriverRealtimeIndexTask.class),
-    @Type(name = "noop", value = NoopTask.class),
-    @Type(name = "compact", value = CompactionTask.class)
+    @Type(name = NoopTask.TYPE, value = NoopTask.class),
+    @Type(name = CompactionTask.TYPE, value = CompactionTask.class)
 })
 public interface Task
 {
@@ -107,7 +119,19 @@ public interface Task
    */
   default int getPriority()
   {
-    return getContextValue(Tasks.PRIORITY_KEY, Tasks.DEFAULT_TASK_PRIORITY);
+    return QueryContexts.getAsInt(
+        Tasks.PRIORITY_KEY,
+        getContextValue(Tasks.PRIORITY_KEY),
+        getDefaultPriority()
+    );
+  }
+
+  /**
+   * Default value for {@link Tasks#PRIORITY_KEY} if not specified in the task context.
+   */
+  default int getDefaultPriority()
+  {
+    return Tasks.DEFAULT_TASK_PRIORITY;
   }
 
   /**
@@ -139,6 +163,23 @@ public interface Task
   String getDataSource();
 
   /**
+   * @return The types of {@link org.apache.druid.data.input.InputSource} that the task uses. Empty set is returned if
+   * the task does not use any. Users can be given permission to access particular types of
+   * input sources but not others, using the
+   * {@link org.apache.druid.server.security.AuthConfig#enableInputSourceSecurity} config.
+   * @throws UnsupportedOperationException if the given task type does not suppoert input source based security
+   */
+  @JsonIgnore
+  @Nonnull
+  default Set<ResourceAction> getInputSourceResources() throws UOE
+  {
+    throw new UOE(StringUtils.format(
+        "Task type [%s], does not support input source based security",
+        getType()
+    ));
+  }
+
+  /**
    * Returns query runners for this task. If this task is not meant to answer queries over its datasource, this method
    * should return null.
    *
@@ -149,9 +190,13 @@ public interface Task
   <T> QueryRunner<T> getQueryRunner(Query<T> query);
 
   /**
-   * @return true if this Task type is queryable, such as streaming ingestion tasks
+   * Declares which resources provided by {@link PeonProcessingModule} this task actually needs. The default
+   * implementation has all the optional items disabled.
    */
-  boolean supportsQueries();
+  default PeonProcessingModule.Config getPeonProcessingModuleConfig()
+  {
+    return new PeonProcessingModule.Config();
+  }
 
   /**
    * Returns an extra classpath that should be prepended to the default classpath when running this task. If no
@@ -199,8 +244,8 @@ public interface Task
    * - When the task is executed by an indexer, {@link org.apache.druid.indexing.overlord.ThreadingTaskRunner#shutdown}
    *   calls this method directly.
    *
-   * If the task has some resources to clean up on abnormal exit, e.g., sub tasks of parallel indexing task
-   * or Hadoop jobs spawned by Hadoop indexing tasks, those resource cleanups should be done in this method.
+   * If the task has some resources to clean up on abnormal exit, e.g., sub tasks of parallel indexing task,
+   * those resource cleanups should be done in this method.
    *
    * @param taskConfig TaskConfig for this task
    */
@@ -219,6 +264,32 @@ public interface Task
    */
   TaskStatus run(TaskToolbox toolbox) throws Exception;
 
+  /**
+   * Performs cleanup operations after the task execution.
+   * This method is intended to be overridden by tasks that need to perform
+   * specific cleanup actions upon task completion or termination.
+   *
+   * @param toolbox Toolbox for this task
+   * @param taskStatus Provides the final status of the task, indicating if the task
+   *                   was successful, failed, or was killed.
+   * @throws Exception If any error occurs during the cleanup process.
+   */
+  default void cleanUp(TaskToolbox toolbox, TaskStatus taskStatus) throws Exception
+  {
+  }
+
+  /**
+   * Waits for the cleanup operations to finish.
+   * This method can be overridden by tasks that need to ensure that certain cleanup
+   * operations have completed before proceeding further.
+   *
+   * @return true if the cleanup completed successfully, false otherwise.
+   */
+  default boolean waitForCleanupToFinish()
+  {
+    return true;
+  }
+
   default Map<String, Object> addToContext(String key, Object val)
   {
     getContext().put(key, val);
@@ -232,6 +303,11 @@ public interface Task
   }
 
   Map<String, Object> getContext();
+
+  default Optional<Resource> getDestinationResource()
+  {
+    return Optional.of(new Resource(getDataSource(), ResourceType.DATASOURCE));
+  }
 
   default <ContextValueType> ContextValueType getContextValue(String key)
   {
@@ -249,14 +325,33 @@ public interface Task
     return new TaskIdentifier(this.getId(), this.getGroupId(), this.getType());
   }
 
-  static TaskInfo<TaskIdentifier, TaskStatus> toTaskIdentifierInfo(TaskInfo<Task, TaskStatus> taskInfo)
+  static TaskIdStatus toTaskIdentifierInfo(TaskInfo taskInfo)
   {
-    return new TaskInfo<>(
-        taskInfo.getId(),
-        taskInfo.getCreatedTime(),
+    return new TaskIdStatus(
+        taskInfo.getTask().getMetadata(),
         taskInfo.getStatus(),
         taskInfo.getDataSource(),
-        taskInfo.getTask().getMetadata()
+        taskInfo.getCreatedTime()
     );
+  }
+
+  /**
+   * Specifies the list of lookups to load for this task. Tasks load ALL lookups by default.
+   * This behaviour can be overridden by passing parameters {@link LookupLoadingSpec#CTX_LOOKUP_LOADING_MODE}
+   * and {@link LookupLoadingSpec#CTX_LOOKUPS_TO_LOAD} in the task context.
+   */
+  default LookupLoadingSpec getLookupLoadingSpec()
+  {
+    return LookupLoadingSpec.createFromContext(getContext(), LookupLoadingSpec.ALL);
+  }
+
+  /**
+   * Specifies the list of broadcast datasources to load for this task. Tasks load ALL broadcast datasources by default.
+   * This behavior can be overridden by passing parameters {@link BroadcastDatasourceLoadingSpec#CTX_BROADCAST_DATASOURCE_LOADING_MODE}
+   * and {@link BroadcastDatasourceLoadingSpec#CTX_BROADCAST_DATASOURCES_TO_LOAD} in the task context.
+   */
+  default BroadcastDatasourceLoadingSpec getBroadcastDatasourceLoadingSpec()
+  {
+    return BroadcastDatasourceLoadingSpec.createFromContext(getContext(), BroadcastDatasourceLoadingSpec.ALL);
   }
 }

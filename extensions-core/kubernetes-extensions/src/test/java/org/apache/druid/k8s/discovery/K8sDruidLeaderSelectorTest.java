@@ -24,10 +24,14 @@ import org.apache.druid.discovery.DruidLeaderSelector;
 import org.apache.druid.discovery.NodeRole;
 import org.apache.druid.server.DruidNode;
 import org.joda.time.Duration;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 public class K8sDruidLeaderSelectorTest
 {
@@ -42,7 +46,8 @@ public class K8sDruidLeaderSelectorTest
 
   private final String lockResourceName = "druid-leader-election";
 
-  @Test(timeout = 5_000)
+  @Test
+  @Timeout(value = 5_000, unit = TimeUnit.MILLISECONDS)
   public void testLeaderElection_HappyPath() throws Exception
   {
     K8sDruidLeaderSelector leaderSelector = new K8sDruidLeaderSelector(
@@ -74,12 +79,17 @@ public class K8sDruidLeaderSelectorTest
                   stopLeadingHook.run();
                 }
               }
+
+              @Override
+              public void close()
+              {
+              }
             };
           }
         }
     );
 
-    Assert.assertEquals(testNode1.getDruidNode().getHostAndPortToUse(), leaderSelector.getCurrentLeader());
+    Assertions.assertEquals(testNode1.getDruidNode().getHostAndPortToUse(), leaderSelector.getCurrentLeader());
 
     CountDownLatch becomeLeaderLatch = new CountDownLatch(1);
     CountDownLatch stopBeingLeaderLatch = new CountDownLatch(1);
@@ -106,7 +116,8 @@ public class K8sDruidLeaderSelectorTest
     stopBeingLeaderLatch.await();
   }
 
-  @Test(timeout = 5_000)
+  @Test
+  @Timeout(value = 5_000, unit = TimeUnit.MILLISECONDS)
   public void testLeaderElection_LeaderElectorExits() throws Exception
   {
     K8sDruidLeaderSelector leaderSelector = new K8sDruidLeaderSelector(
@@ -146,12 +157,17 @@ public class K8sDruidLeaderSelectorTest
                   }
                 }
               }
+
+              @Override
+              public void close()
+              {
+              }
             };
           }
         }
     );
 
-    Assert.assertEquals(testNode1.getDruidNode().getHostAndPortToUse(), leaderSelector.getCurrentLeader());
+    Assertions.assertEquals(testNode1.getDruidNode().getHostAndPortToUse(), leaderSelector.getCurrentLeader());
 
     CountDownLatch becomeLeaderLatch = new CountDownLatch(2);
     CountDownLatch stopBeingLeaderLatch = new CountDownLatch(2);
@@ -176,5 +192,75 @@ public class K8sDruidLeaderSelectorTest
     becomeLeaderLatch.await();
     leaderSelector.unregisterListener();
     stopBeingLeaderLatch.await();
+  }
+
+  @Test
+  @Timeout(value = 5_000, unit = TimeUnit.MILLISECONDS)
+  public void testLeaderElection_unregisterReleasesLockAfterStoppingLeadership() throws Exception
+  {
+    final List<String> events = new CopyOnWriteArrayList<>();
+
+    K8sDruidLeaderSelector leaderSelector = new K8sDruidLeaderSelector(
+        testNode1.getDruidNode(),
+        lockResourceName,
+        discoveryConfig.getCoordinatorLeaderElectionConfigMapNamespace(),
+        discoveryConfig,
+        new K8sLeaderElectorFactory()
+        {
+          @Override
+          public K8sLeaderElector create(String candidateId, String namespace, String lockResourceName)
+          {
+            return new K8sLeaderElector()
+            {
+              @Override
+              public String getCurrentLeader()
+              {
+                return testNode1.getDruidNode().getHostAndPortToUse();
+              }
+
+              @Override
+              public void run(Runnable startLeadingHook, Runnable stopLeadingHook)
+              {
+                startLeadingHook.run();
+                try {
+                  Thread.sleep(Long.MAX_VALUE);
+                }
+                catch (InterruptedException ex) {
+                  stopLeadingHook.run();
+                }
+              }
+
+              @Override
+              public void close()
+              {
+                events.add("close");
+              }
+            };
+          }
+        }
+    );
+
+    CountDownLatch becomeLeaderLatch = new CountDownLatch(1);
+
+    leaderSelector.registerListener(
+        new DruidLeaderSelector.Listener()
+        {
+          @Override
+          public void becomeLeader()
+          {
+            becomeLeaderLatch.countDown();
+          }
+
+          @Override
+          public void stopBeingLeader()
+          {
+            events.add("stopBeingLeader");
+          }
+        }
+    );
+
+    becomeLeaderLatch.await();
+    leaderSelector.unregisterListener();
+    Assertions.assertEquals(List.of("stopBeingLeader", "close"), events);
   }
 }

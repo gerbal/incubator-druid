@@ -21,20 +21,37 @@ package org.apache.druid.math.expr;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
 import org.apache.druid.annotations.SubclassesMustOverrideEqualsAndHashCode;
 import org.apache.druid.java.util.common.Cacheable;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.math.expr.vector.ExprVectorProcessor;
 import org.apache.druid.query.cache.CacheKeyBuilder;
+import org.apache.druid.query.filter.ColumnIndexSelector;
+import org.apache.druid.segment.ColumnInspector;
+import org.apache.druid.segment.column.ColumnCapabilities;
+import org.apache.druid.segment.column.ColumnIndexSupplier;
+import org.apache.druid.segment.column.ColumnType;
+import org.apache.druid.segment.filter.Filters;
+import org.apache.druid.segment.index.AllFalseBitmapColumnIndex;
+import org.apache.druid.segment.index.AllTrueBitmapColumnIndex;
+import org.apache.druid.segment.index.AllUnknownBitmapColumnIndex;
+import org.apache.druid.segment.index.BitmapColumnIndex;
+import org.apache.druid.segment.index.semantic.DictionaryEncodedValueIndex;
+import org.apache.druid.segment.serde.NoIndexesColumnIndexSupplier;
+import org.apache.druid.segment.virtual.ExpressionSelectors;
 
 import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Base interface of Druid expression language abstract syntax tree nodes. All {@link Expr} implementations are
@@ -116,6 +133,26 @@ public interface Expr extends Cacheable
   }
 
   /**
+   * Replaces {@link IdentifierExpr} whose {@link IdentifierExpr#binding} are present as a key in the supplied map with
+   * the map value.
+   */
+  default Expr rewriteBindings(Map<String, String> rewriteMap)
+  {
+    return visit(expr -> {
+      if (expr instanceof IdentifierExpr identifier) {
+        final String replacement = rewriteMap.get(identifier.binding);
+        if (replacement != null) {
+          if (Objects.equals(identifier.identifier, identifier.binding)) {
+            return new IdentifierExpr(replacement, replacement);
+          }
+          return new IdentifierExpr(identifier.identifier, replacement);
+        }
+      }
+      return expr;
+    });
+  }
+
+  /**
    * Evaluate the {@link Expr} with the bindings which supply {@link IdentifierExpr} with their values, producing an
    * {@link ExprEval} with the result.
    */
@@ -166,12 +203,28 @@ public interface Expr extends Cacheable
    * Check if an expression can be 'vectorized', for a given set of inputs. If this method returns true,
    * {@link #asVectorProcessor} is expected to produce a {@link ExprVectorProcessor} which can evaluate values in batches
    * to use with vectorized query engines.
-   *
-   * @param inspector
+   * <p>
+   * Note that this method is insufficient by itself for determining to use vector processors, as it only checks whether
+   * the expression tree itself supports vectorization, but ignores schema-level constraints that
+   * {@link org.apache.druid.segment.virtual.ExpressionPlanner} enforces.
+   * <p>
+   * Most callers should instead prefer to use
+   * {@link org.apache.druid.segment.virtual.ExpressionPlanner#plan(ColumnInspector, Expr)} and check for
+   * {@link org.apache.druid.segment.virtual.ExpressionPlan.Trait#VECTORIZABLE} on the resulting plan.
    */
   default boolean canVectorize(InputBindingInspector inspector)
   {
     return false;
+  }
+
+  /**
+   * Possibly convert the {@link Expr} into an optimized, possibly not thread-safe {@link Expr}. Does not convert
+   * child {@link Expr}. Most callers should use {@link Expr#singleThreaded(Expr, InputBindingInspector)} to convert
+   * an entire tree, which delegates to this method to translate individual nodes.
+   */
+  default Expr asSingleThreaded(InputBindingInspector inspector)
+  {
+    return this;
   }
 
   /**
@@ -185,10 +238,144 @@ public interface Expr extends Cacheable
     throw Exprs.cannotVectorize(this);
   }
 
+  /**
+   * Allows an {@link Expr} to provide an {@link ColumnIndexSupplier} given access to the underlying
+   * {@link ColumnIndexSupplier} and {@link org.apache.druid.segment.column.ColumnHolder} of the base table.
+   * <p>
+   * The default implementation provides an index supplier if there is a single input column, and that column can
+   * provide {@link DictionaryEncodedValueIndex}, then the expression can provide
+   * {@link org.apache.druid.segment.index.semantic.DruidPredicateIndexes} that apply a predicate.
+   * <p>
+   * This method has the same null contract as {@link ColumnIndexSelector#getIndexSupplier(String)}, and should only
+   * return null if the column is completely null and the {@link Expr} produces a null constant in the missing column
+   * case. Otherwise, if no index supplier can be provided, this method should return
+   * {@link NoIndexesColumnIndexSupplier#getInstance()}.
+   */
+  @Nullable
+  default ColumnIndexSupplier asColumnIndexSupplier(
+      ColumnIndexSelector columnIndexSelector,
+      @Nullable ColumnType outputType
+  )
+  {
+    final Expr.BindingAnalysis details = analyzeInputs();
+    if (details.getRequiredBindings().size() == 1) {
+      // Single-column expression. We can use bitmap indexes if this column has an index and the expression can
+      // map over the values of the index.
+      final String column = Iterables.getOnlyElement(details.getRequiredBindings());
+
+      final ColumnIndexSupplier delegateIndexSupplier = columnIndexSelector.getIndexSupplier(column);
+      if (delegateIndexSupplier == null) {
+        // if the column doesn't exist, check to see if the expression evaluates to a non-null result... if so, we might
+        // need to make a value matcher anyway
+        if (eval(InputBindings.nilBindings()).value() != null) {
+          return NoIndexesColumnIndexSupplier.getInstance();
+        }
+        return null;
+      }
+      final DictionaryEncodedValueIndex<?> delegateRawIndex = delegateIndexSupplier.as(
+          DictionaryEncodedValueIndex.class
+      );
+
+      final ColumnCapabilities capabilities = columnIndexSelector.getColumnCapabilities(column);
+      if (!ExpressionSelectors.canMapOverDictionary(details, capabilities)) {
+        // for mvds, expression might need to evaluate entire row, but we don't have those handy, so fall back to
+        // not using indexes
+        return NoIndexesColumnIndexSupplier.getInstance();
+      }
+      final ExpressionType inputType = ExpressionType.fromColumnTypeStrict(capabilities);
+      final ColumnType outType;
+      if (outputType == null) {
+        outType = ExpressionType.toColumnType(getOutputType(InputBindings.inspectorForColumn(column, inputType)));
+      } else {
+        outType = outputType;
+      }
+
+      if (delegateRawIndex != null && outputType != null) {
+        return new ExpressionPredicateIndexSupplier(
+            this,
+            column,
+            inputType,
+            outType,
+            delegateRawIndex
+        );
+      }
+    }
+    return NoIndexesColumnIndexSupplier.getInstance();
+  }
+
+  /**
+   * Allows an {@link Expr} to be computed into a {@link BitmapColumnIndex}. The supplied {@link ColumnIndexSelector}
+   * provides access to underlying {@link ColumnIndexSupplier} and even
+   * {@link org.apache.druid.segment.column.ColumnHolder}. Coupled with
+   * {@link #asColumnIndexSupplier(ColumnIndexSelector, ColumnType)}, which allows {@link Expr} to provide indexes of
+   * their own, it allows for a system of composing additional indexes on top of any base column structures.
+   * <p>
+   * For example, {@link BinEqExpr} where one argument is a constant, can use the
+   * {@link org.apache.druid.segment.index.semantic.ValueIndexes} if present of the non-constant arguments' index
+   * supplier.
+   * <p>
+   * If this method returns null, it means that an index could not be produced for this {@link Expr}.
+   */
+  @Nullable
+  default BitmapColumnIndex asBitmapColumnIndex(ColumnIndexSelector selector)
+  {
+    final Expr.BindingAnalysis details = analyzeInputs();
+    if (details.getRequiredBindings().isEmpty()) {
+      if (details.isNonDeterministic()) {
+        return null;
+      }
+      // Constant expression.
+      final ExprEval<?> eval = eval(InputBindings.nilBindings());
+      if (eval.value() == null) {
+        return new AllUnknownBitmapColumnIndex(selector);
+      }
+      if (eval.asBoolean()) {
+        return new AllTrueBitmapColumnIndex(selector);
+      }
+      return new AllFalseBitmapColumnIndex(selector.getBitmapFactory());
+    } else if (details.getRequiredBindings().size() == 1) {
+      // Single-column expression. We can use bitmap indexes if this column has an index and the expression can
+      // map over the values of the index.
+      final String column = Iterables.getOnlyElement(details.getRequiredBindings());
+
+      // we use a default 'all false' capabilities here because if the column has a bitmap index, but the capabilities
+      // are null, it means that the column is missing and should take the single valued path, while truly unknown
+      // things will not have a bitmap index available
+      final ColumnCapabilities capabilities = selector.getColumnCapabilities(column);
+      if (ExpressionSelectors.canMapOverDictionary(details, capabilities)) {
+        return Filters.makePredicateIndex(
+            column,
+            selector,
+            new ExpressionDruidPredicateFactory(this, capabilities)
+        );
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Decorates the {@link CacheKeyBuilder} for the default implementation of {@link #getCacheKey()}. The default cache
+   * key implementation includes the output of {@link #stringify()} and then uses a {@link Shuttle} to call this method
+   * on all children. The stringified representation is sufficient for most expressions, but for any which rely on
+   * external state that might change, this method allows the cache key to change when the state does, even if the
+   * expression itself is otherwise the same.
+   */
+  default void decorateCacheKeyBuilder(CacheKeyBuilder builder)
+  {
+    // no op
+  }
+
   @Override
   default byte[] getCacheKey()
   {
-    return new CacheKeyBuilder(Exprs.EXPR_CACHE_KEY).appendString(stringify()).build();
+    CacheKeyBuilder builder = new CacheKeyBuilder(Exprs.EXPR_CACHE_KEY).appendString(stringify());
+    // delegate to the child expressions through shuttle
+    Shuttle keyShuttle = expr -> {
+      expr.decorateCacheKeyBuilder(builder);
+      return expr;
+    };
+    this.visit(keyShuttle);
+    return builder.build();
   }
 
   /**
@@ -224,7 +411,7 @@ public interface Expr extends Cacheable
         if (argType == null) {
           continue;
         }
-        numeric &= argType.isNumeric();
+        numeric = numeric && argType.isNumeric();
       }
       return numeric;
     }
@@ -265,7 +452,7 @@ public interface Expr extends Cacheable
         if (currentType == null) {
           currentType = argType;
         }
-        allSame &= Objects.equals(argType, currentType);
+        allSame = allSame && Objects.equals(argType, currentType);
       }
       return allSame;
     }
@@ -302,7 +489,7 @@ public interface Expr extends Cacheable
         if (argType == null) {
           continue;
         }
-        scalar &= argType.isPrimitive();
+        scalar = scalar && argType.isPrimitive();
       }
       return scalar;
     }
@@ -330,7 +517,7 @@ public interface Expr extends Cacheable
     {
       boolean canVectorize = true;
       for (Expr arg : args) {
-        canVectorize &= arg.canVectorize(this);
+        canVectorize = canVectorize && arg.canVectorize(this);
       }
       return canVectorize;
     }
@@ -371,7 +558,7 @@ public interface Expr extends Cacheable
    */
   interface VectorInputBinding extends VectorInputBindingInspector
   {
-    <T> T[] getObjectVector(String name);
+    Object[] getObjectVector(String name);
 
     long[] getLongVector(String name);
 
@@ -440,8 +627,8 @@ public interface Expr extends Cacheable
    * @see Parser#applyUnappliedBindings
    * @see Parser#applyUnapplied
    * @see Parser#liftApplyLambda
-   * @see org.apache.druid.segment.virtual.ExpressionSelectors#makeDimensionSelector
-   * @see org.apache.druid.segment.virtual.ExpressionSelectors#makeColumnValueSelector
+   * @see ExpressionSelectors#makeDimensionSelector
+   * @see ExpressionSelectors#makeColumnValueSelector
    */
   @SuppressWarnings("JavadocReference")
   class BindingAnalysis
@@ -453,15 +640,16 @@ public interface Expr extends Cacheable
     private final ImmutableSet<IdentifierExpr> arrayVariables;
     private final boolean hasInputArrays;
     private final boolean isOutputArray;
+    private final boolean isNonDeterministic;
 
     public BindingAnalysis()
     {
-      this(ImmutableSet.of(), ImmutableSet.of(), ImmutableSet.of(), false, false);
+      this(ImmutableSet.of(), ImmutableSet.of(), ImmutableSet.of(), false, false, false);
     }
 
     BindingAnalysis(IdentifierExpr expr)
     {
-      this(ImmutableSet.of(expr), ImmutableSet.of(), ImmutableSet.of(), false, false);
+      this(ImmutableSet.of(expr), ImmutableSet.of(), ImmutableSet.of(), false, false, false);
     }
 
     private BindingAnalysis(
@@ -469,7 +657,8 @@ public interface Expr extends Cacheable
         ImmutableSet<IdentifierExpr> scalarVariables,
         ImmutableSet<IdentifierExpr> arrayVariables,
         boolean hasInputArrays,
-        boolean isOutputArray
+        boolean isOutputArray,
+        boolean isNonDeterministic
     )
     {
       this.freeVariables = freeVariables;
@@ -477,6 +666,54 @@ public interface Expr extends Cacheable
       this.arrayVariables = arrayVariables;
       this.hasInputArrays = hasInputArrays;
       this.isOutputArray = isOutputArray;
+      this.isNonDeterministic = isNonDeterministic;
+    }
+
+    /**
+     * Create an instance by combining a collection of other instances.
+     */
+    public static BindingAnalysis collect(final Collection<BindingAnalysis> others)
+    {
+      if (others.isEmpty()) {
+        return EMTPY;
+      } else if (others.size() == 1) {
+        return Iterables.getOnlyElement(others);
+      } else {
+        final ImmutableSet.Builder<IdentifierExpr> freeVariables = ImmutableSet.builder();
+        final ImmutableSet.Builder<IdentifierExpr> scalarVariables = ImmutableSet.builder();
+        final ImmutableSet.Builder<IdentifierExpr> arrayVariables = ImmutableSet.builder();
+
+        boolean hasInputArrays = false;
+        boolean isOutputArray = false;
+        boolean isNonDeterministic = false;
+
+        for (final BindingAnalysis other : others) {
+          hasInputArrays = hasInputArrays || other.hasInputArrays;
+          isOutputArray = isOutputArray || other.isOutputArray;
+          isNonDeterministic = isNonDeterministic || other.isNonDeterministic;
+
+          freeVariables.addAll(other.freeVariables);
+          scalarVariables.addAll(other.scalarVariables);
+          arrayVariables.addAll(other.arrayVariables);
+        }
+
+        return new BindingAnalysis(
+            freeVariables.build(),
+            scalarVariables.build(),
+            arrayVariables.build(),
+            hasInputArrays,
+            isOutputArray,
+            isNonDeterministic
+        );
+      }
+    }
+
+    /**
+     * Create an instance by combining a collection of analyses from {@link Expr#analyzeInputs()}.
+     */
+    public static BindingAnalysis collectExprs(final Collection<Expr> exprs)
+    {
+      return collect(exprs.stream().map(Expr::analyzeInputs).collect(Collectors.toList()));
     }
 
     /**
@@ -562,24 +799,23 @@ public interface Expr extends Cacheable
     }
 
     /**
-     * Combine with {@link BindingAnalysis} from {@link Expr#analyzeInputs()}
+     * Returns true if the expression tree contains non-deterministic expressions (e.g. now()) whose value may change
+     * between evaluations and must not be folded into a constant.
      */
-    public BindingAnalysis with(Expr other)
+    public boolean isNonDeterministic()
     {
-      return with(other.analyzeInputs());
+      return isNonDeterministic;
     }
 
-    /**
-     * Combine (union) another {@link BindingAnalysis}
-     */
-    public BindingAnalysis with(BindingAnalysis other)
+    public BindingAnalysis withNonDeterministic()
     {
       return new BindingAnalysis(
-          ImmutableSet.copyOf(Sets.union(freeVariables, other.freeVariables)),
-          ImmutableSet.copyOf(Sets.union(scalarVariables, other.scalarVariables)),
-          ImmutableSet.copyOf(Sets.union(arrayVariables, other.arrayVariables)),
-          hasInputArrays || other.hasInputArrays,
-          isOutputArray || other.isOutputArray
+          freeVariables,
+          scalarVariables,
+          arrayVariables,
+          hasInputArrays,
+          isOutputArray,
+          true
       );
     }
 
@@ -601,7 +837,8 @@ public interface Expr extends Cacheable
           ImmutableSet.copyOf(Sets.union(scalarVariables, moreScalars)),
           arrayVariables,
           hasInputArrays,
-          isOutputArray
+          isOutputArray,
+          isNonDeterministic
       );
     }
 
@@ -609,7 +846,7 @@ public interface Expr extends Cacheable
      * Add set of arguments as {@link BindingAnalysis#arrayVariables} that are *directly* {@link IdentifierExpr},
      * else they are ignored.
      */
-    BindingAnalysis withArrayArguments(Set<Expr> arrayArguments)
+    public BindingAnalysis withArrayArguments(Set<Expr> arrayArguments)
     {
       Set<IdentifierExpr> arrayIdentifiers = new HashSet<>();
       for (Expr expr : arrayArguments) {
@@ -623,35 +860,38 @@ public interface Expr extends Cacheable
           scalarVariables,
           ImmutableSet.copyOf(Sets.union(arrayVariables, arrayIdentifiers)),
           hasInputArrays || !arrayArguments.isEmpty(),
-          isOutputArray
+          isOutputArray,
+          isNonDeterministic
       );
     }
 
     /**
      * Copy, setting if an expression has array inputs
      */
-    BindingAnalysis withArrayInputs(boolean hasArrays)
+    public BindingAnalysis withArrayInputs(boolean hasArrays)
     {
       return new BindingAnalysis(
           freeVariables,
           scalarVariables,
           arrayVariables,
           hasArrays || !arrayVariables.isEmpty(),
-          isOutputArray
+          isOutputArray,
+          isNonDeterministic
       );
     }
 
     /**
      * Copy, setting if an expression produces an array output
      */
-    BindingAnalysis withArrayOutput(boolean isOutputArray)
+    public BindingAnalysis withArrayOutput(boolean isOutputArray)
     {
       return new BindingAnalysis(
           freeVariables,
           scalarVariables,
           arrayVariables,
           hasInputArrays,
-          isOutputArray
+          isOutputArray,
+          isNonDeterministic
       );
     }
 
@@ -666,7 +906,8 @@ public interface Expr extends Cacheable
           ImmutableSet.copyOf(scalarVariables.stream().filter(x -> !lambda.contains(x.getIdentifier())).iterator()),
           ImmutableSet.copyOf(arrayVariables.stream().filter(x -> !lambda.contains(x.getIdentifier())).iterator()),
           hasInputArrays,
-          isOutputArray
+          isOutputArray,
+          isNonDeterministic
       );
     }
 
@@ -682,5 +923,16 @@ public interface Expr extends Cacheable
       }
       return results;
     }
+  }
+
+
+  /**
+   * Returns the single-threaded version of the given expression tree.
+   *
+   * Nested expressions in the subtree are also optimized.
+   */
+  static Expr singleThreaded(Expr expr, InputBindingInspector inspector)
+  {
+    return expr.visit(node -> node.asSingleThreaded(inspector));
   }
 }

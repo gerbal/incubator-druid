@@ -19,167 +19,174 @@
 
 package org.apache.druid.server.coordinator;
 
-import com.google.common.collect.ImmutableList;
 import org.apache.druid.audit.AuditInfo;
 import org.apache.druid.java.util.common.DateTimes;
+import org.apache.druid.segment.TestDataSource;
 import org.joda.time.DateTime;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.mockito.Answers;
-import org.mockito.Mock;
-import org.mockito.Mockito;
-import org.mockito.junit.MockitoJUnitRunner;
+import org.joda.time.Period;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
-@RunWith(MockitoJUnitRunner.class)
+import java.util.List;
+
 public class DataSourceCompactionConfigHistoryTest
 {
-  private static final String DATASOURCE = "DATASOURCE";
-  private static final String DATASOURCE_2 = "DATASOURCE_2";
-  private static final String DATASOURCE_NOT_EXISTS = "DATASOURCE_NOT_EXISTS";
-  private static final double COMPACTION_TASK_SLOT_RATIO = 0.1;
-  private static final int MAX_COMPACTION_TASK_SLOTS = 9;
-  private static final boolean USE_AUTO_SCALE_SLOTS = false;
-  private static final DateTime AUDIT_TIME = DateTimes.of(2023, 1, 13, 9, 0);
-  private static final DateTime AUDIT_TIME_2 = DateTimes.of(2023, 1, 13, 9, 30);
-  private static final DateTime AUDIT_TIME_3 = DateTimes.of(2023, 1, 13, 10, 0);
+  private final AuditInfo auditInfo = new AuditInfo("author", "identity", "comment", "ip");
+  private final DataSourceCompactionConfig wikiCompactionConfig
+      = InlineSchemaDataSourceCompactionConfig.builder().forDataSource(TestDataSource.WIKI).build();
 
-  @Mock
-  private CoordinatorCompactionConfig compactionConfig;
-  @Mock(answer = Answers.RETURNS_MOCKS)
-  private DataSourceCompactionConfig configForDataSource;
-  @Mock(answer = Answers.RETURNS_MOCKS)
-  private DataSourceCompactionConfig configForDataSourceWithChange;
-  @Mock(answer = Answers.RETURNS_MOCKS)
-  private DataSourceCompactionConfig configForDataSource2;
-  @Mock(answer = Answers.RETURNS_DEEP_STUBS)
-  private AuditInfo auditInfo;
-  @Mock(answer = Answers.RETURNS_DEEP_STUBS)
-  private AuditInfo auditInfo2;
-  @Mock(answer = Answers.RETURNS_DEEP_STUBS)
-  private AuditInfo auditInfo3;
+  private DataSourceCompactionConfigHistory wikiAuditHistory;
 
-  private DataSourceCompactionConfigHistory target;
-
-  @Before
-  public void setUp()
+  @BeforeEach
+  public void setup()
   {
-    Mockito.when(compactionConfig.getCompactionTaskSlotRatio()).thenReturn(COMPACTION_TASK_SLOT_RATIO);
-    Mockito.when(compactionConfig.getMaxCompactionTaskSlots()).thenReturn(MAX_COMPACTION_TASK_SLOTS);
-    Mockito.when(compactionConfig.isUseAutoScaleSlots()).thenReturn(USE_AUTO_SCALE_SLOTS);
-    Mockito.when(configForDataSource.getDataSource()).thenReturn(DATASOURCE);
-    Mockito.when(configForDataSourceWithChange.getDataSource()).thenReturn(DATASOURCE);
-    Mockito.when(configForDataSource2.getDataSource()).thenReturn(DATASOURCE_2);
-    Mockito.when(compactionConfig.getCompactionConfigs())
-           .thenReturn(ImmutableList.of(configForDataSource, configForDataSource2));
-    target = new DataSourceCompactionConfigHistory(DATASOURCE);
+    wikiAuditHistory = new DataSourceCompactionConfigHistory(TestDataSource.WIKI);
   }
 
   @Test
-  public void testAddCompactionConfigShouldAddToHistory()
+  public void testAddDatasourceConfigShouldAddToHistory()
   {
-    target.add(compactionConfig, auditInfo, AUDIT_TIME);
-    Assert.assertEquals(1, target.getHistory().size());
-    DataSourceCompactionConfigAuditEntry auditEntry = target.getHistory().get(0);
-    Assert.assertEquals(DATASOURCE, auditEntry.getCompactionConfig().getDataSource());
-    Assert.assertEquals(auditInfo, auditEntry.getAuditInfo());
-    Assert.assertEquals(AUDIT_TIME, auditEntry.getAuditTime());
+    final DateTime auditTime = DateTimes.nowUtc();
+    wikiAuditHistory.add(
+        DruidCompactionConfig.empty().withDatasourceConfig(wikiCompactionConfig),
+        auditInfo,
+        auditTime
+    );
+
+    Assertions.assertEquals(1, wikiAuditHistory.getEntries().size());
+    DataSourceCompactionConfigAuditEntry auditEntry = wikiAuditHistory.getEntries().get(0);
+    Assertions.assertEquals(wikiCompactionConfig, auditEntry.getCompactionConfig());
+    Assertions.assertEquals(auditInfo, auditEntry.getAuditInfo());
+    Assertions.assertEquals(auditTime, auditEntry.getAuditTime());
   }
 
   @Test
-  public void testAddAndDeleteCompactionConfigShouldAddBothToHistory()
+  public void testAddDeleteDatasourceConfigShouldAddBothToHistory()
   {
-    target.add(compactionConfig, auditInfo, AUDIT_TIME);
-    Mockito.when(compactionConfig.getCompactionConfigs()).thenReturn(ImmutableList.of(configForDataSource2));
-    target.add(compactionConfig, auditInfo2, AUDIT_TIME_2);
-    Assert.assertEquals(2, target.getHistory().size());
-    DataSourceCompactionConfigAuditEntry auditEntry = target.getHistory().get(0);
-    Assert.assertEquals(DATASOURCE, auditEntry.getCompactionConfig().getDataSource());
-    Assert.assertEquals(auditInfo, auditEntry.getAuditInfo());
-    Assert.assertEquals(AUDIT_TIME, auditEntry.getAuditTime());
-    auditEntry = target.getHistory().get(1);
-    Assert.assertEquals(null, auditEntry.getCompactionConfig());
-    Assert.assertEquals(auditInfo2, auditEntry.getAuditInfo());
-    Assert.assertEquals(AUDIT_TIME_2, auditEntry.getAuditTime());
+    final DateTime auditTime = DateTimes.nowUtc();
+    wikiAuditHistory.add(
+        DruidCompactionConfig.empty().withDatasourceConfig(wikiCompactionConfig),
+        auditInfo,
+        auditTime
+    );
+    wikiAuditHistory.add(DruidCompactionConfig.empty(), auditInfo, auditTime.plusHours(2));
+
+    final List<DataSourceCompactionConfigAuditEntry> entries = wikiAuditHistory.getEntries();
+    Assertions.assertEquals(2, entries.size());
+
+    final DataSourceCompactionConfigAuditEntry firstEntry = entries.get(0);
+    Assertions.assertEquals(wikiCompactionConfig, firstEntry.getCompactionConfig());
+    Assertions.assertEquals(auditInfo, firstEntry.getAuditInfo());
+    Assertions.assertEquals(auditTime, firstEntry.getAuditTime());
+
+    final DataSourceCompactionConfigAuditEntry secondEntry = entries.get(1);
+    Assertions.assertNull(secondEntry.getCompactionConfig());
+    Assertions.assertEquals(firstEntry.getGlobalConfig(), secondEntry.getGlobalConfig());
+    Assertions.assertEquals(auditInfo, secondEntry.getAuditInfo());
+    Assertions.assertEquals(auditTime.plusHours(2), secondEntry.getAuditTime());
   }
 
   @Test
-  public void testAddAndDeleteAnotherCompactionConfigShouldNotAddToHistory()
+  public void testAddDeleteAnotherDatasourceConfigShouldNotAddToHistory()
   {
-    target.add(compactionConfig, auditInfo, AUDIT_TIME);
-    Mockito.when(compactionConfig.getCompactionConfigs()).thenReturn(ImmutableList.of(configForDataSource));
-    target.add(compactionConfig, auditInfo2, AUDIT_TIME_2);
-    Assert.assertEquals(1, target.getHistory().size());
-    DataSourceCompactionConfigAuditEntry auditEntry = target.getHistory().get(0);
-    Assert.assertEquals(DATASOURCE, auditEntry.getCompactionConfig().getDataSource());
-    Assert.assertEquals(auditInfo, auditEntry.getAuditInfo());
-    Assert.assertEquals(AUDIT_TIME, auditEntry.getAuditTime());
+    final DataSourceCompactionConfig koalaCompactionConfig
+        = InlineSchemaDataSourceCompactionConfig.builder().forDataSource(TestDataSource.KOALA).build();
+
+    wikiAuditHistory.add(
+        DruidCompactionConfig.empty().withDatasourceConfig(koalaCompactionConfig),
+        auditInfo,
+        DateTimes.nowUtc()
+    );
+    wikiAuditHistory.add(DruidCompactionConfig.empty(), auditInfo, DateTimes.nowUtc());
+
+    Assertions.assertTrue(wikiAuditHistory.getEntries().isEmpty());
   }
 
   @Test
-  public void testAddDeletedAddCompactionConfigShouldAddAllToHistory()
+  public void testAddDeleteAddDatasourceConfigShouldAddAllToHistory()
   {
-    target.add(compactionConfig, auditInfo, AUDIT_TIME);
-    Mockito.when(compactionConfig.getCompactionConfigs()).thenReturn(ImmutableList.of(configForDataSource2));
-    target.add(compactionConfig, auditInfo2, AUDIT_TIME_2);
-    Mockito.when(compactionConfig.getCompactionConfigs())
-           .thenReturn(ImmutableList.of(configForDataSourceWithChange, configForDataSource2));
-    target.add(compactionConfig, auditInfo3, AUDIT_TIME_3);
-    Assert.assertEquals(3, target.getHistory().size());
-    DataSourceCompactionConfigAuditEntry auditEntry = target.getHistory().get(0);
-    Assert.assertEquals(DATASOURCE, auditEntry.getCompactionConfig().getDataSource());
-    Assert.assertEquals(auditInfo, auditEntry.getAuditInfo());
-    Assert.assertEquals(AUDIT_TIME, auditEntry.getAuditTime());
-    auditEntry = target.getHistory().get(2);
-    Assert.assertEquals(configForDataSourceWithChange, auditEntry.getCompactionConfig());
-    Assert.assertEquals(auditInfo3, auditEntry.getAuditInfo());
-    Assert.assertEquals(AUDIT_TIME_3, auditEntry.getAuditTime());
+    final DateTime auditTime = DateTimes.nowUtc();
+    wikiAuditHistory.add(
+        DruidCompactionConfig.empty().withDatasourceConfig(wikiCompactionConfig),
+        auditInfo,
+        auditTime
+    );
+    wikiAuditHistory.add(
+        DruidCompactionConfig.empty(),
+        auditInfo,
+        auditTime.plusHours(2)
+    );
+    wikiAuditHistory.add(
+        DruidCompactionConfig.empty().withDatasourceConfig(wikiCompactionConfig),
+        auditInfo,
+        auditTime.plusHours(3)
+    );
+
+    final List<DataSourceCompactionConfigAuditEntry> entries = wikiAuditHistory.getEntries();
+    Assertions.assertEquals(3, entries.size());
+
+    final DataSourceCompactionConfigAuditEntry firstEntry = entries.get(0);
+    final DataSourceCompactionConfigAuditEntry thirdEntry = entries.get(2);
+    Assertions.assertTrue(firstEntry.hasSameConfig(thirdEntry));
   }
 
   @Test
-  public void testAddAndChangeCompactionConfigShouldAddBothToHistory()
+  public void testAddModifyDatasourceConfigShouldAddBothToHistory()
   {
-    target.add(compactionConfig, auditInfo, AUDIT_TIME);
-    Mockito.when(compactionConfig.getCompactionConfigs()).thenReturn(ImmutableList.of(configForDataSourceWithChange));
-    target.add(compactionConfig, auditInfo2, AUDIT_TIME_2);
-    Assert.assertEquals(2, target.getHistory().size());
-    DataSourceCompactionConfigAuditEntry auditEntry = target.getHistory().get(0);
-    Assert.assertEquals(DATASOURCE, auditEntry.getCompactionConfig().getDataSource());
-    Assert.assertEquals(auditInfo, auditEntry.getAuditInfo());
-    Assert.assertEquals(AUDIT_TIME, auditEntry.getAuditTime());
-    auditEntry = target.getHistory().get(1);
-    Assert.assertEquals(DATASOURCE, auditEntry.getCompactionConfig().getDataSource());
-    Assert.assertEquals(auditInfo2, auditEntry.getAuditInfo());
-    Assert.assertEquals(AUDIT_TIME_2, auditEntry.getAuditTime());
+    final DateTime auditTime = DateTimes.nowUtc();
+    wikiAuditHistory.add(
+        DruidCompactionConfig.empty().withDatasourceConfig(wikiCompactionConfig),
+        auditInfo,
+        auditTime
+    );
+
+
+    final DataSourceCompactionConfig updatedWikiConfig
+        = InlineSchemaDataSourceCompactionConfig.builder()
+                                                .forDataSource(TestDataSource.WIKI)
+                                                .withSkipOffsetFromLatest(Period.hours(5))
+                                                .build();
+    wikiAuditHistory.add(
+        DruidCompactionConfig.empty().withDatasourceConfig(updatedWikiConfig),
+        auditInfo,
+        auditTime.plusHours(3)
+    );
+
+    final List<DataSourceCompactionConfigAuditEntry> entries = wikiAuditHistory.getEntries();
+    Assertions.assertEquals(2, entries.size());
+
+    final DataSourceCompactionConfigAuditEntry firstEntry = entries.get(0);
+    final DataSourceCompactionConfigAuditEntry secondEntry = entries.get(1);
+    Assertions.assertEquals(firstEntry.getGlobalConfig(), secondEntry.getGlobalConfig());
+
+    Assertions.assertEquals(wikiCompactionConfig, firstEntry.getCompactionConfig());
+    Assertions.assertEquals(updatedWikiConfig, secondEntry.getCompactionConfig());
+    Assertions.assertFalse(firstEntry.hasSameConfig(secondEntry));
   }
 
   @Test
-  public void testAddAndChangeGlobalSettingsShouldAddTwice()
+  public void testAddAndModifyClusterConfigShouldAddTwice()
   {
-    target.add(compactionConfig, auditInfo, AUDIT_TIME);
-    int newMaxTaskSlots = MAX_COMPACTION_TASK_SLOTS - 1;
-    Mockito.when(compactionConfig.getMaxCompactionTaskSlots()).thenReturn(newMaxTaskSlots);
-    target.add(compactionConfig, auditInfo2, AUDIT_TIME_2);
-    Assert.assertEquals(2, target.getHistory().size());
-    DataSourceCompactionConfigAuditEntry auditEntry = target.getHistory().get(0);
-    Assert.assertEquals(DATASOURCE, auditEntry.getCompactionConfig().getDataSource());
-    Assert.assertEquals(auditInfo, auditEntry.getAuditInfo());
-    Assert.assertEquals(AUDIT_TIME, auditEntry.getAuditTime());
-    Assert.assertEquals(MAX_COMPACTION_TASK_SLOTS, auditEntry.getGlobalConfig().getMaxCompactionTaskSlots());
-    auditEntry = target.getHistory().get(1);
-    Assert.assertEquals(DATASOURCE, auditEntry.getCompactionConfig().getDataSource());
-    Assert.assertEquals(auditInfo2, auditEntry.getAuditInfo());
-    Assert.assertEquals(AUDIT_TIME_2, auditEntry.getAuditTime());
-    Assert.assertEquals(newMaxTaskSlots, auditEntry.getGlobalConfig().getMaxCompactionTaskSlots());
-  }
+    final DruidCompactionConfig originalConfig
+        = DruidCompactionConfig.empty().withDatasourceConfig(wikiCompactionConfig);
 
-  @Test
-  public void testAddCompactionConfigDoesNotHaveDataSourceWithNoHistoryShouldNotAdd()
-  {
-    target = new DataSourceCompactionConfigHistory(DATASOURCE_NOT_EXISTS);
-    target.add(compactionConfig, auditInfo, AUDIT_TIME);
-    Assert.assertTrue(target.getHistory().isEmpty());
-  }
+    wikiAuditHistory.add(originalConfig, auditInfo, DateTimes.nowUtc());
 
+    final DruidCompactionConfig updatedConfig = originalConfig.withClusterConfig(
+        new ClusterCompactionConfig(0.2, null, null, null, null, null)
+    );
+    wikiAuditHistory.add(updatedConfig, auditInfo, DateTimes.nowUtc());
+
+    final List<DataSourceCompactionConfigAuditEntry> entries = wikiAuditHistory.getEntries();
+    Assertions.assertEquals(2, entries.size());
+
+    final DataSourceCompactionConfigAuditEntry firstEntry = entries.get(0);
+    final DataSourceCompactionConfigAuditEntry secondEntry = entries.get(1);
+    Assertions.assertEquals(secondEntry.getCompactionConfig(), firstEntry.getCompactionConfig());
+
+    Assertions.assertEquals(originalConfig.clusterConfig(), firstEntry.getGlobalConfig());
+    Assertions.assertEquals(updatedConfig.clusterConfig(), secondEntry.getGlobalConfig());
+    Assertions.assertFalse(firstEntry.hasSameConfig(secondEntry));
+  }
 }

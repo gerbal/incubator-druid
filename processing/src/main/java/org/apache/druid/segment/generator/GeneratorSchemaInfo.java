@@ -19,12 +19,18 @@
 
 package org.apache.druid.segment.generator;
 
+import com.google.common.collect.ImmutableMap;
 import org.apache.druid.data.input.impl.DimensionSchema;
 import org.apache.druid.data.input.impl.DimensionsSpec;
 import org.apache.druid.query.aggregation.AggregatorFactory;
+import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
+import org.apache.druid.timeline.partition.LinearShardSpec;
 import org.joda.time.Interval;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public class GeneratorSchemaInfo
@@ -62,6 +68,20 @@ public class GeneratorSchemaInfo
     return new DimensionsSpec(specs);
   }
 
+  public DimensionsSpec getDimensionsSpecExcludeAggs()
+  {
+    final Set<String> metricsInputs = new HashSet<>();
+    for (AggregatorFactory agg : aggs) {
+      metricsInputs.addAll(agg.requiredFields());
+    }
+    List<DimensionSchema> specs = getColumnSchemas().stream()
+                                                    .filter(x -> !x.isMetric() && !metricsInputs.contains(x.getName()))
+                                                    .map(GeneratorColumnSchema::getDimensionSchema)
+                                                    .collect(Collectors.toList());
+
+    return new DimensionsSpec(specs);
+  }
+
   public List<AggregatorFactory> getAggs()
   {
     return aggs;
@@ -80,6 +100,16 @@ public class GeneratorSchemaInfo
   public boolean isWithRollup()
   {
     return withRollup;
+  }
+
+  public DataSegment makeSegmentDescriptor(final String dataSource)
+  {
+    return DataSegment.builder(SegmentId.of(dataSource, getDataInterval(), "1", 0))
+                      .loadSpec(ImmutableMap.of())
+                      .shardSpec(new LinearShardSpec(0))
+                      .binaryVersion(null)
+                      .size(0)
+                      .build();
   }
 
   @Override

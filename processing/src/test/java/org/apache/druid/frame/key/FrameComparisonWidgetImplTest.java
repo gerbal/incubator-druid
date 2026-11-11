@@ -26,16 +26,15 @@ import org.apache.druid.frame.FrameType;
 import org.apache.druid.frame.field.FieldReaders;
 import org.apache.druid.frame.testutil.FrameSequenceBuilder;
 import org.apache.druid.java.util.common.guava.Sequences;
+import org.apache.druid.segment.CursorFactory;
 import org.apache.druid.segment.RowBasedSegment;
-import org.apache.druid.segment.StorageAdapter;
 import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.testing.InitializedNullHandlingTest;
-import org.apache.druid.timeline.SegmentId;
 import org.hamcrest.MatcherAssert;
 import org.hamcrest.Matchers;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.List;
@@ -44,31 +43,216 @@ import java.util.stream.Collectors;
 
 public class FrameComparisonWidgetImplTest extends InitializedNullHandlingTest
 {
-  private Frame frame;
+  private Frame frameWithoutComplexColumns;
+  private Frame frameWithComplexColumns;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
-    final StorageAdapter rowBasedAdapter = new RowBasedSegment<>(
-        SegmentId.dummy("test"),
-        Sequences.simple(RowKeyComparatorTest.ALL_KEY_OBJECTS),
+    final CursorFactory rowBasedAdapterWithoutComplexColumn = new RowBasedSegment<>(
+        Sequences.simple(ByteRowKeyComparatorTest.KEY_OBJECTS_WITHOUT_COMPLEX_COLUMN),
         columnName -> {
-          final int idx = RowKeyComparatorTest.SIGNATURE.getColumnNames().indexOf(columnName);
+          final int idx = ByteRowKeyComparatorTest.NO_COMPLEX_SIGNATURE.getColumnNames().indexOf(columnName);
           if (idx < 0) {
             return row -> null;
           } else {
             return row -> row[idx];
           }
         },
-        RowKeyComparatorTest.SIGNATURE
-    ).asStorageAdapter();
+        ByteRowKeyComparatorTest.NO_COMPLEX_SIGNATURE
+    ).as(CursorFactory.class);
 
-    frame = Iterables.getOnlyElement(
-        FrameSequenceBuilder.fromAdapter(rowBasedAdapter)
-                            .frameType(FrameType.ROW_BASED)
+    frameWithoutComplexColumns = Iterables.getOnlyElement(
+        FrameSequenceBuilder.fromCursorFactory(rowBasedAdapterWithoutComplexColumn)
+                            .frameType(FrameType.latestRowBased())
                             .frames()
                             .toList()
     );
+
+    final CursorFactory rowBasedAdapterWithComplexColumn = new RowBasedSegment<>(
+        Sequences.simple(ByteRowKeyComparatorTest.ALL_KEY_OBJECTS),
+        columnName -> {
+          final int idx = ByteRowKeyComparatorTest.SIGNATURE.getColumnNames().indexOf(columnName);
+          if (idx < 0) {
+            return row -> null;
+          } else {
+            return row -> row[idx];
+          }
+        },
+        ByteRowKeyComparatorTest.SIGNATURE
+    ).as(CursorFactory.class);
+
+    frameWithComplexColumns = Iterables.getOnlyElement(
+        FrameSequenceBuilder.fromCursorFactory(rowBasedAdapterWithComplexColumn)
+                            .frameType(FrameType.latestRowBased())
+                            .frames()
+                            .toList()
+    );
+  }
+
+  @Test
+  public void test_noComplexColumns_isPartiallyNullKey_someColumns()
+  {
+    final List<KeyColumn> keyColumns = ImmutableList.of(
+        new KeyColumn("1", KeyOrder.ASCENDING),
+        new KeyColumn("2", KeyOrder.ASCENDING),
+        new KeyColumn("3", KeyOrder.ASCENDING)
+    );
+
+    final FrameComparisonWidget widget = createComparisonWidget(
+        frameWithoutComplexColumns,
+        keyColumns,
+        ByteRowKeyComparatorTest.NO_COMPLEX_SIGNATURE
+    );
+
+    for (int i = 0; i < frameWithoutComplexColumns.numRows(); i++) {
+      final boolean isAllNonNull =
+          Arrays.stream(ByteRowKeyComparatorTest.KEY_OBJECTS_WITHOUT_COMPLEX_COLUMN.get(i))
+                .limit(3)
+                .allMatch(Objects::nonNull);
+
+      // null key part, if any, is always the second one (1)
+      Assertions.assertTrue(widget.hasNonNullKeyParts(i, new int[0]));
+      Assertions.assertTrue(widget.hasNonNullKeyParts(i, new int[]{0, 2}));
+      Assertions.assertEquals(isAllNonNull, widget.hasNonNullKeyParts(i, new int[]{0, 1, 2}));
+      Assertions.assertEquals(isAllNonNull, widget.hasNonNullKeyParts(i, new int[]{1}));
+    }
+  }
+
+  @Test
+  public void test_noComplexColumns_isPartiallyNullKey_allColumns()
+  {
+    final List<KeyColumn> keyColumns = ImmutableList.of(
+        new KeyColumn("1", KeyOrder.ASCENDING),
+        new KeyColumn("2", KeyOrder.ASCENDING),
+        new KeyColumn("3", KeyOrder.ASCENDING),
+        new KeyColumn("4", KeyOrder.ASCENDING)
+    );
+
+    final FrameComparisonWidget widget = createComparisonWidget(
+        frameWithoutComplexColumns,
+        keyColumns,
+        ByteRowKeyComparatorTest.NO_COMPLEX_SIGNATURE
+    );
+
+    for (int i = 0; i < frameWithoutComplexColumns.numRows(); i++) {
+      final boolean isAllNonNull =
+          Arrays.stream(ByteRowKeyComparatorTest.KEY_OBJECTS_WITHOUT_COMPLEX_COLUMN.get(i)).allMatch(Objects::nonNull);
+      Assertions.assertEquals(isAllNonNull, widget.hasNonNullKeyParts(i, new int[]{0, 1, 2, 3}));
+    }
+  }
+
+  @Test
+  public void test_noComplexColumns_readKey_someColumns()
+  {
+    final List<KeyColumn> keyColumns = ImmutableList.of(
+        new KeyColumn("1", KeyOrder.ASCENDING),
+        new KeyColumn("2", KeyOrder.ASCENDING),
+        new KeyColumn("3", KeyOrder.ASCENDING)
+    );
+
+    final FrameComparisonWidget widget = createComparisonWidget(
+        frameWithoutComplexColumns,
+        keyColumns,
+        ByteRowKeyComparatorTest.NO_COMPLEX_SIGNATURE
+    );
+
+    final RowSignature signature =
+        RowSignature.builder()
+                    .add("1", ByteRowKeyComparatorTest.NO_COMPLEX_SIGNATURE.getColumnType("1").orElse(null))
+                    .add("2", ByteRowKeyComparatorTest.NO_COMPLEX_SIGNATURE.getColumnType("2").orElse(null))
+                    .add("3", ByteRowKeyComparatorTest.NO_COMPLEX_SIGNATURE.getColumnType("3").orElse(null))
+                    .build();
+
+    for (int i = 0; i < frameWithoutComplexColumns.numRows(); i++) {
+      final Object[] expectedKeyArray = new Object[keyColumns.size()];
+      System.arraycopy(
+          ByteRowKeyComparatorTest.KEY_OBJECTS_WITHOUT_COMPLEX_COLUMN.get(i),
+          0,
+          expectedKeyArray,
+          0,
+          keyColumns.size()
+      );
+      Assertions.assertEquals(
+          KeyTestUtils.createKey(signature, FrameType.latestRowBased(), expectedKeyArray),
+          widget.readKey(i)
+      );
+    }
+  }
+
+  @Test
+  public void test_noComplexColumns_readKey_allColumns()
+  {
+    final List<KeyColumn> keyColumns = ImmutableList.of(
+        new KeyColumn("1", KeyOrder.ASCENDING),
+        new KeyColumn("2", KeyOrder.ASCENDING),
+        new KeyColumn("3", KeyOrder.ASCENDING),
+        new KeyColumn("4", KeyOrder.ASCENDING)
+    );
+
+    final FrameComparisonWidget widget = createComparisonWidget(
+        frameWithoutComplexColumns,
+        keyColumns,
+        ByteRowKeyComparatorTest.NO_COMPLEX_SIGNATURE
+    );
+
+    for (int i = 0; i < frameWithoutComplexColumns.numRows(); i++) {
+      Assertions.assertEquals(
+          KeyTestUtils.createKey(
+              ByteRowKeyComparatorTest.NO_COMPLEX_SIGNATURE,
+              FrameType.latestRowBased(),
+              ByteRowKeyComparatorTest.KEY_OBJECTS_WITHOUT_COMPLEX_COLUMN.get(i)
+          ),
+          widget.readKey(i)
+      );
+    }
+  }
+
+  @Test
+  public void test_noComplexColumns_compare_frameToKey()
+  {
+    final List<KeyColumn> keyColumns = ImmutableList.of(
+        new KeyColumn("1", KeyOrder.ASCENDING),
+        new KeyColumn("2", KeyOrder.ASCENDING),
+        new KeyColumn("3", KeyOrder.ASCENDING),
+        new KeyColumn("4", KeyOrder.ASCENDING)
+    );
+
+    final FrameComparisonWidget widget = createComparisonWidget(
+        frameWithoutComplexColumns,
+        keyColumns,
+        ByteRowKeyComparatorTest.NO_COMPLEX_SIGNATURE
+    );
+
+    // Compare self-to-self should be equal.
+    for (int i = 0; i < frameWithoutComplexColumns.numRows(); i++) {
+      Assertions.assertEquals(
+          0,
+          widget.compare(
+              i,
+              KeyTestUtils.createKey(
+                  ByteRowKeyComparatorTest.NO_COMPLEX_SIGNATURE,
+                  FrameType.latestRowBased(),
+                  ByteRowKeyComparatorTest.KEY_OBJECTS_WITHOUT_COMPLEX_COLUMN.get(i)
+              )
+          )
+      );
+    }
+
+    // Check some other comparators.
+    final RowKey firstKey = KeyTestUtils.createKey(
+        ByteRowKeyComparatorTest.NO_COMPLEX_SIGNATURE,
+        FrameType.latestRowBased(),
+        ByteRowKeyComparatorTest.KEY_OBJECTS_WITHOUT_COMPLEX_COLUMN.get(0)
+    );
+
+    MatcherAssert.assertThat(widget.compare(0, firstKey), Matchers.equalTo(0));
+    MatcherAssert.assertThat(widget.compare(1, firstKey), Matchers.lessThan(0));
+    MatcherAssert.assertThat(widget.compare(2, firstKey), Matchers.lessThan(0));
+    MatcherAssert.assertThat(widget.compare(3, firstKey), Matchers.greaterThan(0));
+    MatcherAssert.assertThat(widget.compare(4, firstKey), Matchers.greaterThan(0));
+    MatcherAssert.assertThat(widget.compare(5, firstKey), Matchers.greaterThan(0));
+    MatcherAssert.assertThat(widget.compare(6, firstKey), Matchers.greaterThan(0));
   }
 
   @Test
@@ -80,12 +264,24 @@ public class FrameComparisonWidgetImplTest extends InitializedNullHandlingTest
         new KeyColumn("3", KeyOrder.ASCENDING)
     );
 
-    final FrameComparisonWidget widget = createComparisonWidget(keyColumns);
+    final FrameComparisonWidget widget = createComparisonWidget(
+        frameWithComplexColumns,
+        keyColumns,
+        ByteRowKeyComparatorTest.SIGNATURE
+    );
 
-    for (int i = 0; i < frame.numRows(); i++) {
-      final boolean isPartiallyNull =
-          Arrays.stream(RowKeyComparatorTest.ALL_KEY_OBJECTS.get(i)).limit(3).anyMatch(Objects::isNull);
-      Assert.assertEquals(isPartiallyNull, widget.isPartiallyNullKey(i));
+    for (int i = 0; i < frameWithComplexColumns.numRows(); i++) {
+      final boolean isAllNonNull =
+          Arrays.stream(ByteRowKeyComparatorTest.ALL_KEY_OBJECTS.get(i)).limit(3).allMatch(Objects::nonNull);
+
+      // Only second is non-null throughout
+      Assertions.assertTrue(widget.hasNonNullKeyParts(i, new int[]{1}));
+      Assertions.assertTrue(widget.hasNonNullKeyParts(i, new int[]{1}));
+      Assertions.assertEquals(isAllNonNull, widget.hasNonNullKeyParts(i, new int[]{0, 1, 2}));
+      Assertions.assertEquals(
+          isAllNonNull,
+          widget.hasNonNullKeyParts(i, new int[]{0}) && widget.hasNonNullKeyParts(i, new int[]{2})
+      );
     }
   }
 
@@ -96,15 +292,23 @@ public class FrameComparisonWidgetImplTest extends InitializedNullHandlingTest
         new KeyColumn("1", KeyOrder.ASCENDING),
         new KeyColumn("2", KeyOrder.ASCENDING),
         new KeyColumn("3", KeyOrder.ASCENDING),
-        new KeyColumn("4", KeyOrder.ASCENDING)
+        new KeyColumn("4", KeyOrder.ASCENDING),
+        new KeyColumn("5", KeyOrder.ASCENDING),
+        new KeyColumn("6", KeyOrder.ASCENDING),
+        new KeyColumn("7", KeyOrder.ASCENDING),
+        new KeyColumn("8", KeyOrder.ASCENDING)
     );
 
-    final FrameComparisonWidget widget = createComparisonWidget(keyColumns);
+    final FrameComparisonWidget widget = createComparisonWidget(
+        frameWithComplexColumns,
+        keyColumns,
+        ByteRowKeyComparatorTest.SIGNATURE
+    );
 
-    for (int i = 0; i < frame.numRows(); i++) {
-      final boolean isPartiallyNull =
-          Arrays.stream(RowKeyComparatorTest.ALL_KEY_OBJECTS.get(i)).anyMatch(Objects::isNull);
-      Assert.assertEquals(isPartiallyNull, widget.isPartiallyNullKey(i));
+    for (int i = 0; i < frameWithoutComplexColumns.numRows(); i++) {
+      final boolean isAllNonNull =
+          Arrays.stream(ByteRowKeyComparatorTest.ALL_KEY_OBJECTS.get(i)).allMatch(Objects::nonNull);
+      Assertions.assertEquals(isAllNonNull, widget.hasNonNullKeyParts(i, new int[]{0, 1, 2, 3, 4, 5, 6, 7}));
     }
   }
 
@@ -117,20 +321,24 @@ public class FrameComparisonWidgetImplTest extends InitializedNullHandlingTest
         new KeyColumn("3", KeyOrder.ASCENDING)
     );
 
-    final FrameComparisonWidget widget = createComparisonWidget(keyColumns);
+    final FrameComparisonWidget widget = createComparisonWidget(
+        frameWithComplexColumns,
+        keyColumns,
+        ByteRowKeyComparatorTest.SIGNATURE
+    );
 
     final RowSignature signature =
         RowSignature.builder()
-                    .add("1", RowKeyComparatorTest.SIGNATURE.getColumnType("1").orElse(null))
-                    .add("2", RowKeyComparatorTest.SIGNATURE.getColumnType("2").orElse(null))
-                    .add("3", RowKeyComparatorTest.SIGNATURE.getColumnType("3").orElse(null))
+                    .add("1", ByteRowKeyComparatorTest.SIGNATURE.getColumnType("1").orElse(null))
+                    .add("2", ByteRowKeyComparatorTest.SIGNATURE.getColumnType("2").orElse(null))
+                    .add("3", ByteRowKeyComparatorTest.SIGNATURE.getColumnType("3").orElse(null))
                     .build();
 
-    for (int i = 0; i < frame.numRows(); i++) {
+    for (int i = 0; i < frameWithComplexColumns.numRows(); i++) {
       final Object[] expectedKeyArray = new Object[keyColumns.size()];
-      System.arraycopy(RowKeyComparatorTest.ALL_KEY_OBJECTS.get(i), 0, expectedKeyArray, 0, keyColumns.size());
-      Assert.assertEquals(
-          KeyTestUtils.createKey(signature, expectedKeyArray),
+      System.arraycopy(ByteRowKeyComparatorTest.ALL_KEY_OBJECTS.get(i), 0, expectedKeyArray, 0, keyColumns.size());
+      Assertions.assertEquals(
+          KeyTestUtils.createKey(signature, FrameType.latestRowBased(), expectedKeyArray),
           widget.readKey(i)
       );
     }
@@ -143,14 +351,26 @@ public class FrameComparisonWidgetImplTest extends InitializedNullHandlingTest
         new KeyColumn("1", KeyOrder.ASCENDING),
         new KeyColumn("2", KeyOrder.ASCENDING),
         new KeyColumn("3", KeyOrder.ASCENDING),
-        new KeyColumn("4", KeyOrder.ASCENDING)
+        new KeyColumn("4", KeyOrder.ASCENDING),
+        new KeyColumn("5", KeyOrder.ASCENDING),
+        new KeyColumn("6", KeyOrder.ASCENDING),
+        new KeyColumn("7", KeyOrder.ASCENDING),
+        new KeyColumn("8", KeyOrder.ASCENDING)
     );
 
-    final FrameComparisonWidget widget = createComparisonWidget(keyColumns);
+    final FrameComparisonWidget widget = createComparisonWidget(
+        frameWithComplexColumns,
+        keyColumns,
+        ByteRowKeyComparatorTest.SIGNATURE
+    );
 
-    for (int i = 0; i < frame.numRows(); i++) {
-      Assert.assertEquals(
-          KeyTestUtils.createKey(RowKeyComparatorTest.SIGNATURE, RowKeyComparatorTest.ALL_KEY_OBJECTS.get(i)),
+    for (int i = 0; i < frameWithComplexColumns.numRows(); i++) {
+      Assertions.assertEquals(
+          KeyTestUtils.createKey(
+              ByteRowKeyComparatorTest.SIGNATURE,
+              FrameType.latestRowBased(),
+              ByteRowKeyComparatorTest.ALL_KEY_OBJECTS.get(i)
+          ),
           widget.readKey(i)
       );
     }
@@ -163,20 +383,29 @@ public class FrameComparisonWidgetImplTest extends InitializedNullHandlingTest
         new KeyColumn("1", KeyOrder.ASCENDING),
         new KeyColumn("2", KeyOrder.ASCENDING),
         new KeyColumn("3", KeyOrder.ASCENDING),
-        new KeyColumn("4", KeyOrder.ASCENDING)
+        new KeyColumn("4", KeyOrder.ASCENDING),
+        new KeyColumn("5", KeyOrder.ASCENDING),
+        new KeyColumn("6", KeyOrder.ASCENDING),
+        new KeyColumn("7", KeyOrder.ASCENDING),
+        new KeyColumn("8", KeyOrder.ASCENDING)
     );
 
-    final FrameComparisonWidget widget = createComparisonWidget(keyColumns);
+    final FrameComparisonWidget widget = createComparisonWidget(
+        frameWithComplexColumns,
+        keyColumns,
+        ByteRowKeyComparatorTest.SIGNATURE
+    );
 
     // Compare self-to-self should be equal.
-    for (int i = 0; i < frame.numRows(); i++) {
-      Assert.assertEquals(
+    for (int i = 0; i < frameWithComplexColumns.numRows(); i++) {
+      Assertions.assertEquals(
           0,
           widget.compare(
               i,
               KeyTestUtils.createKey(
-                  RowKeyComparatorTest.SIGNATURE,
-                  RowKeyComparatorTest.ALL_KEY_OBJECTS.get(i)
+                  ByteRowKeyComparatorTest.SIGNATURE,
+                  FrameType.latestRowBased(),
+                  ByteRowKeyComparatorTest.ALL_KEY_OBJECTS.get(i)
               )
           )
       );
@@ -184,30 +413,46 @@ public class FrameComparisonWidgetImplTest extends InitializedNullHandlingTest
 
     // Check some other comparators.
     final RowKey firstKey = KeyTestUtils.createKey(
-        RowKeyComparatorTest.SIGNATURE,
-        RowKeyComparatorTest.ALL_KEY_OBJECTS.get(0)
+        ByteRowKeyComparatorTest.SIGNATURE,
+        FrameType.latestRowBased(),
+        ByteRowKeyComparatorTest.ALL_KEY_OBJECTS.get(0)
     );
 
     MatcherAssert.assertThat(widget.compare(0, firstKey), Matchers.equalTo(0));
     MatcherAssert.assertThat(widget.compare(1, firstKey), Matchers.lessThan(0));
-    MatcherAssert.assertThat(widget.compare(2, firstKey), Matchers.lessThan(0));
+    MatcherAssert.assertThat(widget.compare(2, firstKey), Matchers.greaterThan(0));
     MatcherAssert.assertThat(widget.compare(3, firstKey), Matchers.greaterThan(0));
     MatcherAssert.assertThat(widget.compare(4, firstKey), Matchers.greaterThan(0));
     MatcherAssert.assertThat(widget.compare(5, firstKey), Matchers.greaterThan(0));
     MatcherAssert.assertThat(widget.compare(6, firstKey), Matchers.greaterThan(0));
+    MatcherAssert.assertThat(widget.compare(7, firstKey), Matchers.greaterThan(0));
+    MatcherAssert.assertThat(widget.compare(8, firstKey), Matchers.greaterThan(0));
+
+    final RowKey eighthKey = KeyTestUtils.createKey(
+        ByteRowKeyComparatorTest.SIGNATURE,
+        FrameType.latestRowBased(),
+        ByteRowKeyComparatorTest.ALL_KEY_OBJECTS.get(7)
+    );
+
+    MatcherAssert.assertThat(widget.compare(8, eighthKey), Matchers.lessThan(0));
   }
 
-  private FrameComparisonWidget createComparisonWidget(final List<KeyColumn> keyColumns)
+  private FrameComparisonWidget createComparisonWidget(
+      final Frame frame,
+      final List<KeyColumn> keyColumns,
+      final RowSignature rowSignature
+  )
   {
     return FrameComparisonWidgetImpl.create(
         frame,
-        RowKeyComparatorTest.SIGNATURE,
+        rowSignature,
         keyColumns,
         keyColumns.stream().map(
             keyColumn ->
                 FieldReaders.create(
                     keyColumn.columnName(),
-                    RowKeyComparatorTest.SIGNATURE.getColumnType(keyColumn.columnName()).get()
+                    rowSignature.getColumnType(keyColumn.columnName()).get(),
+                    FrameType.latestRowBased()
                 )
         ).collect(Collectors.toList())
     );

@@ -25,36 +25,30 @@ import {
   Intent,
   Tab,
   Tabs,
+  TabsExpander,
 } from '@blueprintjs/core';
 import { IconNames } from '@blueprintjs/icons';
 import * as JSONBig from 'json-bigint-native';
+import type { JSX } from 'react';
 import React from 'react';
-import AceEditor from 'react-ace';
 
-import { Loader } from '../../../components';
+import { CodeEditor, Loader } from '../../../components';
 import type { DruidEngine, QueryContext, QueryWithContext } from '../../../druid-models';
 import { isEmptyContext } from '../../../druid-models';
+import { hjson } from '../../../editor-languages/hjson';
 import { useQueryManager } from '../../../hooks';
 import { Api } from '../../../singletons';
 import type { QueryExplanation } from '../../../utils';
 import {
   deepGet,
-  formatSignature,
+  formatColumnMappingsAndSignature,
   getDruidErrorMessage,
   nonEmptyArray,
   queryDruidSql,
+  wrapInExplainIfNeeded,
 } from '../../../utils';
 
 import './explain-dialog.scss';
-
-function isExplainQuery(query: string): boolean {
-  return /^\s*EXPLAIN\sPLAN\sFOR/im.test(query);
-}
-
-function wrapInExplainIfNeeded(query: string): string {
-  if (isExplainQuery(query)) return query;
-  return `EXPLAIN PLAN FOR ${query}`;
-}
 
 export interface QueryContextEngine extends QueryWithContext {
   engine: DruidEngine;
@@ -72,7 +66,8 @@ export const ExplainDialog = React.memo(function ExplainDialog(props: ExplainDia
   const { queryWithContext, onClose, openQueryLabel, onOpenQuery, mandatoryQueryContext } = props;
 
   const [explainState] = useQueryManager<QueryContextEngine, QueryExplanation[] | string>({
-    processQuery: async queryWithContext => {
+    initQuery: queryWithContext,
+    processQuery: async (queryWithContext, signal) => {
       const { engine, queryString, queryContext, wrapQueryLimit } = queryWithContext;
 
       let context: QueryContext | undefined;
@@ -93,13 +88,22 @@ export const ExplainDialog = React.memo(function ExplainDialog(props: ExplainDia
       };
 
       let result: any[];
-      try {
-        result =
-          engine === 'sql-msq-task'
-            ? (await Api.instance.post(`/druid/v2/sql/task`, payload)).data
-            : await queryDruidSql(payload);
-      } catch (e) {
-        throw new Error(getDruidErrorMessage(e));
+      switch (engine) {
+        case 'sql-native':
+        case 'sql-msq-dart':
+          result = await queryDruidSql(payload, signal);
+          break;
+
+        case 'sql-msq-task':
+          try {
+            result = (await Api.instance.post(`/druid/v2/sql/task`, payload, { signal })).data;
+          } catch (e) {
+            throw new Error(getDruidErrorMessage(e));
+          }
+          break;
+
+        default:
+          throw new Error(`Explain not supported for engine ${engine}`);
       }
 
       const plan = deepGet(result, '0.PLAN');
@@ -113,7 +117,6 @@ export const ExplainDialog = React.memo(function ExplainDialog(props: ExplainDia
         return plan;
       }
     },
-    initQuery: queryWithContext,
   });
 
   let content: JSX.Element;
@@ -125,30 +128,24 @@ export const ExplainDialog = React.memo(function ExplainDialog(props: ExplainDia
     return (
       <div className="query-explanation">
         <FormGroup className="query-group">
-          <AceEditor
-            mode="hjson"
-            theme="solarized_dark"
+          <CodeEditor
+            language={hjson()}
             className="query-string"
-            name="ace-editor"
-            fontSize={13}
-            width="100%"
-            height="100%"
-            showGutter
-            showPrintMargin={false}
-            value={queryString}
             readOnly
+            showLineNumbers
+            value={queryString}
           />
         </FormGroup>
         <FormGroup className="signature-group" label="Signature">
-          <InputGroup defaultValue={formatSignature(queryExplanation)} readOnly />
+          <InputGroup defaultValue={formatColumnMappingsAndSignature(queryExplanation)} readOnly />
         </FormGroup>
         {openQueryLabel && (
           <Button
             className="open-query"
             text={openQueryLabel}
-            rightIcon={IconNames.ARROW_TOP_RIGHT}
+            endIcon={IconNames.ARROW_TOP_RIGHT}
             intent={Intent.PRIMARY}
-            minimal
+            variant="minimal"
             onClick={() => {
               onOpenQuery(queryString);
               onClose();
@@ -179,7 +176,7 @@ export const ExplainDialog = React.memo(function ExplainDialog(props: ExplainDia
               panel={renderQueryExplanation(queryExplanation)}
             />
           ))}
-          <Tabs.Expander />
+          <TabsExpander />
         </Tabs>
       );
     }

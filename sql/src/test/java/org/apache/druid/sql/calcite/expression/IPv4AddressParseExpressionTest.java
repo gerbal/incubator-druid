@@ -25,15 +25,17 @@ import org.apache.druid.math.expr.ExpressionValidationException;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.sql.calcite.expression.builtin.IPv4AddressParseOperatorConversion;
-import org.junit.Before;
-import org.junit.Test;
+import org.apache.druid.sql.calcite.util.CalciteTestBase;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
-public class IPv4AddressParseExpressionTest extends ExpressionTestBase
+public class IPv4AddressParseExpressionTest extends CalciteTestBase
 {
   private static final String VALID = "192.168.0.1";
   private static final long EXPECTED = 3232235521L;
@@ -46,7 +48,7 @@ public class IPv4AddressParseExpressionTest extends ExpressionTestBase
   private IPv4AddressParseOperatorConversion target;
   private ExpressionTestHelper testHelper;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
     target = new IPv4AddressParseOperatorConversion();
@@ -56,28 +58,32 @@ public class IPv4AddressParseExpressionTest extends ExpressionTestBase
   @Test
   public void testTooFewArgs()
   {
-    expectException(ExpressionValidationException.class, "requires 1 argument");
-
-    testExpression(
-        Collections.emptyList(),
-        buildExpectedExpression(),
-        IGNORE_EXPECTED_RESULT
+    Throwable t = Assertions.assertThrows(
+        ExpressionValidationException.class,
+        () -> testExpression(
+            Collections.emptyList(),
+            expectedIpv4ParseFunctionCall(),
+            IGNORE_EXPECTED_RESULT
+        )
     );
+    Assertions.assertEquals("Function[ipv4_parse] requires 1 argument", t.getMessage());
   }
 
   @Test
   public void testTooManyArgs()
   {
-    expectException(ExpressionValidationException.class, "requires 1 argument");
-
-    testExpression(
-        Arrays.asList(
-            testHelper.getConstantNull(),
-            testHelper.getConstantNull()
-        ),
-        buildExpectedExpression(null, null),
-        IGNORE_EXPECTED_RESULT
+    Throwable t = Assertions.assertThrows(
+        ExpressionValidationException.class,
+        () -> testExpression(
+            Arrays.asList(
+                testHelper.getConstantNull(),
+                testHelper.getConstantNull()
+            ),
+            expectedIpv4ParseFunctionCall(null, null),
+            IGNORE_EXPECTED_RESULT
+        )
     );
+    Assertions.assertEquals("Function[ipv4_parse] requires 1 argument", t.getMessage());
   }
 
   @Test
@@ -85,7 +91,7 @@ public class IPv4AddressParseExpressionTest extends ExpressionTestBase
   {
     testExpression(
         testHelper.getConstantNull(),
-        buildExpectedExpression((String) null),
+        expectedIpv4ParseFunctionCall((String) null),
         null
     );
   }
@@ -96,7 +102,7 @@ public class IPv4AddressParseExpressionTest extends ExpressionTestBase
     String variableNameWithInvalidType = VAR;
     testExpression(
         testHelper.makeInputRef(variableNameWithInvalidType),
-        buildExpectedExpression(testHelper.makeVariable(variableNameWithInvalidType)),
+        expectedIpv4ParseFunctionCall(testHelper.makeVariable(variableNameWithInvalidType)),
         null
     );
   }
@@ -107,7 +113,7 @@ public class IPv4AddressParseExpressionTest extends ExpressionTestBase
     String notIpAddress = "druid.apache.org";
     testExpression(
         testHelper.makeLiteral(notIpAddress),
-        buildExpectedExpression(notIpAddress),
+        expectedIpv4ParseFunctionCall(notIpAddress),
         null
     );
   }
@@ -118,7 +124,7 @@ public class IPv4AddressParseExpressionTest extends ExpressionTestBase
     String ipv6Compatible = "::192.168.0.1";
     testExpression(
         testHelper.makeLiteral(ipv6Compatible),
-        buildExpectedExpression(ipv6Compatible),
+        expectedIpv4ParseFunctionCall(ipv6Compatible),
         null
     );
   }
@@ -129,7 +135,7 @@ public class IPv4AddressParseExpressionTest extends ExpressionTestBase
     String ipv6Mapped = "::ffff:192.168.0.1";
     testExpression(
         testHelper.makeLiteral(ipv6Mapped),
-        buildExpectedExpression(ipv6Mapped),
+        expectedIpv4ParseFunctionCall(ipv6Mapped),
         null
     );
   }
@@ -139,7 +145,7 @@ public class IPv4AddressParseExpressionTest extends ExpressionTestBase
   {
     testExpression(
         testHelper.makeLiteral(VALID),
-        buildExpectedExpression(VALID),
+        expectedIpv4ParseFunctionCall(VALID),
         EXPECTED
     );
   }
@@ -150,7 +156,7 @@ public class IPv4AddressParseExpressionTest extends ExpressionTestBase
     String unsignedInt = "3232235521";
     testExpression(
         testHelper.makeLiteral(unsignedInt),
-        buildExpectedExpression(unsignedInt),
+        expectedIpv4ParseFunctionCall(unsignedInt),
         null
     );
   }
@@ -161,7 +167,7 @@ public class IPv4AddressParseExpressionTest extends ExpressionTestBase
     long tooLow = -1L;
     testExpression(
         testHelper.makeLiteral(tooLow),
-        buildExpectedExpression(tooLow),
+        expectedIpv4ParseFunctionCall(tooLow),
         null
     );
   }
@@ -172,7 +178,7 @@ public class IPv4AddressParseExpressionTest extends ExpressionTestBase
     long lowest = 0L;
     testExpression(
         testHelper.makeLiteral(lowest),
-        buildExpectedExpression(lowest),
+        expectedIpv4ParseFunctionCall(lowest),
         lowest
     );
   }
@@ -182,7 +188,7 @@ public class IPv4AddressParseExpressionTest extends ExpressionTestBase
   {
     testExpression(
         testHelper.makeLiteral(EXPECTED),
-        buildExpectedExpression(EXPECTED),
+        expectedIpv4ParseFunctionCall(EXPECTED),
         EXPECTED
     );
   }
@@ -193,7 +199,7 @@ public class IPv4AddressParseExpressionTest extends ExpressionTestBase
     long highest = 0xff_ff_ff_ffL;
     testExpression(
         testHelper.makeLiteral(highest),
-        buildExpectedExpression(highest),
+        expectedIpv4ParseFunctionCall(highest),
         highest
     );
   }
@@ -204,7 +210,7 @@ public class IPv4AddressParseExpressionTest extends ExpressionTestBase
     long tooHigh = 0x1_00_00_00_00L;
     testExpression(
         testHelper.makeLiteral(tooHigh),
-        buildExpectedExpression(tooHigh),
+        expectedIpv4ParseFunctionCall(tooHigh),
         null
     );
   }
@@ -224,11 +230,11 @@ public class IPv4AddressParseExpressionTest extends ExpressionTestBase
       final Object expectedResult
   )
   {
-    testHelper.testExpressionString(target.calciteOperator(), exprs, expectedExpression, expectedResult);
+    testHelper.testExpression(target.calciteOperator(), exprs, expectedExpression, expectedResult);
   }
 
-  private DruidExpression buildExpectedExpression(Object... args)
+  private DruidExpression expectedIpv4ParseFunctionCall(Object... args)
   {
-    return testHelper.buildExpectedExpression(target.getDruidFunctionName(), args);
+    return testHelper.expectedFunctionCall(ColumnType.LONG, target.getDruidFunctionName(), args);
   }
 }

@@ -21,22 +21,17 @@ package org.apache.druid.indexing.common.task.batch.parallel.iterator;
 
 import org.apache.druid.data.input.HandlingInputRowIterator;
 import org.apache.druid.data.input.InputRow;
+import org.apache.druid.indexer.granularity.GranularitySpec;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.parsers.CloseableIterator;
-import org.apache.druid.segment.indexing.granularity.GranularitySpec;
 import org.easymock.EasyMock;
 import org.joda.time.DateTime;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.experimental.runners.Enclosed;
-import org.junit.rules.ExpectedException;
-import org.junit.runner.RunWith;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
 import java.util.List;
 
-@RunWith(Enclosed.class)
 public class DefaultIndexTaskInputRowIteratorBuilderTest
 {
   public static class BuildTest
@@ -44,29 +39,28 @@ public class DefaultIndexTaskInputRowIteratorBuilderTest
     private static final CloseableIterator<InputRow> ITERATOR = EasyMock.mock(CloseableIterator.class);
     private static final GranularitySpec GRANULARITY_SPEC = EasyMock.mock(GranularitySpec.class);
 
-    @Rule
-    public ExpectedException exception = ExpectedException.none();
-
     @Test
     public void requiresDelegate()
     {
-      exception.expect(NullPointerException.class);
-      exception.expectMessage("delegate required");
-
-      new DefaultIndexTaskInputRowIteratorBuilder()
-          .granularitySpec(GRANULARITY_SPEC)
-          .build();
+      final NullPointerException exception = Assertions.assertThrows(
+          NullPointerException.class,
+          () -> new DefaultIndexTaskInputRowIteratorBuilder()
+              .granularitySpec(GRANULARITY_SPEC)
+              .build()
+      );
+      Assertions.assertTrue(exception.getMessage().contains("delegate required"));
     }
 
     @Test
     public void requiresGranularitySpec()
     {
-      exception.expect(NullPointerException.class);
-      exception.expectMessage("granularitySpec required");
-
-      new DefaultIndexTaskInputRowIteratorBuilder()
-          .delegate(ITERATOR)
-          .build();
+      final NullPointerException exception = Assertions.assertThrows(
+          NullPointerException.class,
+          () -> new DefaultIndexTaskInputRowIteratorBuilder()
+              .delegate(ITERATOR)
+              .build()
+      );
+      Assertions.assertTrue(exception.getMessage().contains("granularitySpec required"));
     }
 
     @Test
@@ -86,9 +80,6 @@ public class DefaultIndexTaskInputRowIteratorBuilderTest
             DefaultIndexTaskInputRowIteratorBuilder::new
         );
     private static final InputRow NO_NEXT_INPUT_ROW = null;
-
-    @Rule
-    public ExpectedException exception = ExpectedException.none();
 
     @Test
     public void invokesAppendedHandlersLast()
@@ -112,7 +103,7 @@ public class DefaultIndexTaskInputRowIteratorBuilderTest
               NO_NEXT_INPUT_ROW
           );
 
-      Assert.assertEquals(
+      Assertions.assertEquals(
           Collections.singletonList(IndexTaskInputRowIteratorBuilderTestingFactory.HandlerTester.Handler.APPENDED),
           handlerInvocationHistory
       );
@@ -133,7 +124,7 @@ public class DefaultIndexTaskInputRowIteratorBuilderTest
       List<IndexTaskInputRowIteratorBuilderTestingFactory.HandlerTester.Handler> handlerInvocationHistory =
           HANDLER_TESTER.invokeHandlers(inputRowIterator, granularitySpec, inputRow);
 
-      Assert.assertEquals(Collections.emptyList(), handlerInvocationHistory);
+      Assertions.assertEquals(Collections.emptyList(), handlerInvocationHistory);
     }
   }
 }

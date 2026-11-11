@@ -1,0 +1,73 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`AlertDialog matches snapshot 1`] = `
+<div
+  class="bp6-portal"
+>
+  <div
+    aria-live="polite"
+    class="bp6-overlay bp6-overlay-open bp6-overlay-scroll-container"
+  >
+    <div
+      class="bp6-overlay-start-focus-trap bp6-overlay-appear bp6-overlay-appear-active"
+      tabindex="0"
+    />
+    <div
+      class="bp6-overlay-backdrop bp6-overlay-appear bp6-overlay-appear-active"
+    />
+    <div
+      class="bp6-dialog-container bp6-overlay-content bp6-overlay-appear bp6-overlay-appear-active"
+      tabindex="0"
+    >
+      <div
+        aria-modal="true"
+        class="bp6-dialog bp6-alert alert-dialog"
+        role="dialog"
+      >
+        <div
+          class="bp6-alert-body"
+        >
+          <div
+            class="bp6-alert-contents"
+          >
+            <p>
+              Blah blah
+            </p>
+            <p>
+              Foo bar
+            </p>
+          </div>
+        </div>
+        <div
+          class="bp6-alert-footer"
+        >
+          <button
+            class="bp6-button bp6-intent-primary"
+            type="button"
+          >
+            <span
+              class="bp6-button-text"
+            >
+              Run it anyway
+            </span>
+          </button>
+          <button
+            class="bp6-button"
+            type="button"
+          >
+            <span
+              class="bp6-button-text"
+            >
+              Cancel
+            </span>
+          </button>
+        </div>
+      </div>
+    </div>
+    <div
+      class="bp6-overlay-end-focus-trap bp6-overlay-appear bp6-overlay-appear-active"
+      tabindex="0"
+    />
+  </div>
+</div>
+`;

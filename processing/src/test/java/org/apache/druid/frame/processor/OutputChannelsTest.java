@@ -23,13 +23,11 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import it.unimi.dsi.fastutil.ints.IntSet;
 import it.unimi.dsi.fastutil.ints.IntSets;
+import org.apache.druid.error.DruidException;
 import org.apache.druid.frame.allocation.HeapMemoryAllocator;
 import org.apache.druid.frame.channel.BlockingQueueFrameChannel;
-import org.hamcrest.CoreMatchers;
-import org.hamcrest.MatcherAssert;
-import org.junit.Assert;
-import org.junit.Test;
-import org.junit.internal.matchers.ThrowableMessageMatcher;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
 
@@ -40,10 +38,9 @@ public class OutputChannelsTest
   {
     final OutputChannels channels = OutputChannels.none();
 
-    Assert.assertEquals(IntSets.emptySet(), channels.getPartitionNumbers());
-    Assert.assertEquals(Collections.emptyList(), channels.getAllChannels());
-    Assert.assertEquals(Collections.emptyList(), channels.getChannelsForPartition(0));
-    Assert.assertTrue(channels.areReadableChannelsReady());
+    Assertions.assertEquals(IntSets.emptySet(), channels.getPartitionNumbers());
+    Assertions.assertEquals(Collections.emptyList(), channels.getAllChannels());
+    Assertions.assertEquals(Collections.emptyList(), channels.getChannelsForPartition(0));
   }
 
   @Test
@@ -51,11 +48,10 @@ public class OutputChannelsTest
   {
     final OutputChannels channels = OutputChannels.wrap(ImmutableList.of(OutputChannel.nil(1)));
 
-    Assert.assertEquals(IntSet.of(1), channels.getPartitionNumbers());
-    Assert.assertEquals(1, channels.getAllChannels().size());
-    Assert.assertEquals(Collections.emptyList(), channels.getChannelsForPartition(0));
-    Assert.assertEquals(1, channels.getChannelsForPartition(1).size());
-    Assert.assertTrue(channels.areReadableChannelsReady());
+    Assertions.assertEquals(IntSet.of(1), channels.getPartitionNumbers());
+    Assertions.assertEquals(1, channels.getAllChannels().size());
+    Assertions.assertEquals(Collections.emptyList(), channels.getChannelsForPartition(0));
+    Assertions.assertEquals(1, channels.getChannelsForPartition(1).size());
   }
 
   @Test
@@ -74,31 +70,46 @@ public class OutputChannelsTest
     );
 
     final OutputChannels readOnlyChannels = channels.readOnly();
-    Assert.assertEquals(IntSet.of(1), readOnlyChannels.getPartitionNumbers());
-    Assert.assertEquals(1, readOnlyChannels.getAllChannels().size());
-    Assert.assertEquals(1, channels.getChannelsForPartition(1).size());
-    Assert.assertTrue(channels.areReadableChannelsReady());
+    Assertions.assertEquals(IntSet.of(1), readOnlyChannels.getPartitionNumbers());
+    Assertions.assertEquals(1, readOnlyChannels.getAllChannels().size());
+    Assertions.assertEquals(1, channels.getChannelsForPartition(1).size());
 
-    final IllegalStateException e = Assert.assertThrows(
-        IllegalStateException.class,
+    final DruidException e = Assertions.assertThrows(
+        DruidException.class,
         () -> Iterables.getOnlyElement(readOnlyChannels.getAllChannels()).getWritableChannel()
     );
 
-    MatcherAssert.assertThat(
-        e,
-        ThrowableMessageMatcher.hasMessage(CoreMatchers.equalTo(
-            "Writable channel is not available. The output channel might be marked as read-only, hence no writes are allowed."))
-    );
+    Assertions.assertTrue(e.getMessage().startsWith("Writable channel is not available."));
 
-    final IllegalStateException e2 = Assert.assertThrows(
-        IllegalStateException.class,
+    final DruidException e2 = Assertions.assertThrows(
+        DruidException.class,
         () -> Iterables.getOnlyElement(readOnlyChannels.getAllChannels()).getFrameMemoryAllocator()
     );
 
-    MatcherAssert.assertThat(
-        e2,
-        ThrowableMessageMatcher.hasMessage(CoreMatchers.equalTo(
-            "Frame allocator is not available. The output channel might be marked as read-only, hence memory allocator is not required."))
+    Assertions.assertTrue(e2.getMessage().startsWith("Frame memory allocator is not available."));
+  }
+
+  @Test
+  public void test_sanityCheck()
+  {
+    final OutputChannels channelsDuplicatedPartition = OutputChannels.wrap(ImmutableList.of(
+        OutputChannel.nil(1),
+        OutputChannel.nil(1)
+    ));
+    final IllegalStateException e = Assertions.assertThrows(
+        IllegalStateException.class,
+        channelsDuplicatedPartition::verifySingleChannel
     );
+    Assertions.assertEquals("Expected one channel for partition [1], but got [2]", e.getMessage());
+
+    final OutputChannels channelsNegativePartition = OutputChannels.wrap(ImmutableList.of(OutputChannel.nil(-1)));
+    final IllegalStateException e2 = Assertions.assertThrows(
+        IllegalStateException.class,
+        channelsNegativePartition::verifySingleChannel
+    );
+    Assertions.assertEquals("Expected partitionNumber >= 0, but got [-1]", e2.getMessage());
+
+    final OutputChannels channels = OutputChannels.wrap(ImmutableList.of(OutputChannel.nil(1), OutputChannel.nil(2)));
+    Assertions.assertEquals(channels, channels.verifySingleChannel());
   }
 }

@@ -22,11 +22,13 @@ package org.apache.druid.server.initialization;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Iterators;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.inject.Binder;
 import com.google.inject.Injector;
 import com.google.inject.Key;
 import com.google.inject.Module;
+import io.netty.handler.codec.http.HttpMethod;
 import org.apache.druid.guice.GuiceInjectors;
 import org.apache.druid.guice.Jerseys;
 import org.apache.druid.guice.JsonConfigProvider;
@@ -44,13 +46,18 @@ import org.apache.druid.server.initialization.jetty.JettyBindings;
 import org.apache.druid.server.initialization.jetty.JettyServerInitializer;
 import org.apache.druid.server.security.AuthTestUtils;
 import org.apache.druid.server.security.AuthorizerMapper;
+import org.eclipse.jetty.ee8.servlets.QoSFilter;
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.util.thread.QueuedThreadPool;
-import org.jboss.netty.handler.codec.http.HttpMethod;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.Timeout.ThreadMode;
 
+import javax.servlet.FilterConfig;
+import javax.servlet.ServletContext;
 import java.net.URL;
+import java.util.Enumeration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
@@ -95,13 +102,14 @@ public class JettyQosTest extends BaseJettyTest
   public void testNumThreads()
   {
     // Just make sure the injector stuff for this test is actually working.
-    Assert.assertEquals(
+    Assertions.assertEquals(
         10,
         ((QueuedThreadPool) server.getThreadPool()).getMaxThreads()
     );
   }
 
-  @Test(timeout = 120_000L)
+  @Test
+  @Timeout(value = 120, threadMode = ThreadMode.SEPARATE_THREAD)
   public void testQoS() throws Exception
   {
     final int fastThreads = 20;
@@ -191,6 +199,60 @@ public class JettyQosTest extends BaseJettyTest
     fastPool.shutdown();
 
     // check that fast requests finished quickly
-    Assert.assertTrue(fastElapsed.get() / fastCount.get() < 500);
+    Assertions.assertTrue(fastElapsed.get() / fastCount.get() < 500);
+  }
+
+  @Test
+  public void testQoSFilterMaxTimeout()
+  {
+    QoSFilter filter = new QoSFilter();
+    JettyBindings.QosFilterHolder qosFilterHolder = new JettyBindings.QosFilterHolder(new String[]{"/slow/*"}, 1,
+                                                                                      Long.MAX_VALUE
+    );
+    filter.init(new QoSFilterConfig(qosFilterHolder));
+    Assertions.assertEquals(Integer.MAX_VALUE, filter.getSuspendMs());
+  }
+
+  @Test
+  public void testQoSFilterNoTimeout()
+  {
+    QoSFilter filter = new QoSFilter();
+    JettyBindings.QosFilterHolder qosFilterHolder = new JettyBindings.QosFilterHolder(new String[]{"/slow/*"}, 1);
+    filter.init(new QoSFilterConfig(qosFilterHolder));
+    Assertions.assertEquals(-1, filter.getSuspendMs());
+  }
+
+  private static class QoSFilterConfig implements FilterConfig
+  {
+    private JettyBindings.QosFilterHolder qosFilterHolder;
+
+    public QoSFilterConfig(JettyBindings.QosFilterHolder qosFilterHolder)
+    {
+      this.qosFilterHolder = qosFilterHolder;
+    }
+
+    @Override
+    public String getFilterName()
+    {
+      return "dummy";
+    }
+
+    @Override
+    public ServletContext getServletContext()
+    {
+      return null;
+    }
+
+    @Override
+    public String getInitParameter(String name)
+    {
+      return qosFilterHolder.getInitParameters().get(name);
+    }
+
+    @Override
+    public Enumeration<String> getInitParameterNames()
+    {
+      return Iterators.asEnumeration(qosFilterHolder.getInitParameters().keySet().iterator());
+    }
   }
 }

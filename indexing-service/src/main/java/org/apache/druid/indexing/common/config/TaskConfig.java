@@ -21,75 +21,37 @@ package org.apache.druid.indexing.common.config;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
-import org.apache.commons.io.IOUtils;
-import org.apache.commons.lang3.EnumUtils;
-import org.apache.druid.java.util.common.ISE;
-import org.apache.druid.java.util.common.logger.Logger;
+import org.apache.druid.common.config.Configs;
+import org.apache.druid.common.utils.IdUtils;
 import org.apache.druid.segment.loading.StorageLocationConfig;
-import org.apache.druid.utils.CollectionUtils;
+import org.apache.druid.segment.realtime.appenderator.TaskDirectory;
 import org.joda.time.Period;
 
 import javax.annotation.Nullable;
 import java.io.File;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Paths;
 import java.util.Collections;
 import java.util.List;
 
 /**
  * Configurations for ingestion tasks. These configurations can be applied per middleManager, indexer, or overlord.
- *
+ * <p>
  * See {@link org.apache.druid.indexing.overlord.config.DefaultTaskConfig} if you want to apply the same configuration
  * to all tasks submitted to the overlord.
  */
-public class TaskConfig
+public class TaskConfig implements TaskDirectory
 {
-  private static final Logger log = new Logger(TaskConfig.class);
-  private static final String HADOOP_LIB_VERSIONS = "hadoop.indexer.libs.version";
-  public static final List<String> DEFAULT_DEFAULT_HADOOP_COORDINATES;
-
-  static {
-    try {
-      DEFAULT_DEFAULT_HADOOP_COORDINATES =
-          ImmutableList.copyOf(Lists.newArrayList(IOUtils.toString(
-              TaskConfig.class.getResourceAsStream("/"
-                                                   + HADOOP_LIB_VERSIONS),
-              StandardCharsets.UTF_8
-          ).split(",")));
-
-    }
-    catch (Exception e) {
-      throw new ISE(e, "Unable to read file %s from classpath ", HADOOP_LIB_VERSIONS);
-    }
-  }
-
-  // This enum controls processing mode of batch ingestion "segment creation" phase (i.e. appenderator logic)
-  public enum BatchProcessingMode
-  {
-    OPEN_SEGMENTS, /* mmap segments, legacy code */
-    CLOSED_SEGMENTS, /* Do not mmap segments but keep most other legacy code */
-    CLOSED_SEGMENTS_SINKS /* Most aggressive memory optimization, do not mmap segments and eliminate sinks, etc. */
-  }
-
-  public static final BatchProcessingMode BATCH_PROCESSING_MODE_DEFAULT = BatchProcessingMode.CLOSED_SEGMENTS;
-
   private static final Period DEFAULT_DIRECTORY_LOCK_TIMEOUT = new Period("PT10M");
   private static final Period DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT = new Period("PT5M");
   private static final boolean DEFAULT_STORE_EMPTY_COLUMNS = true;
+  private static final long DEFAULT_TMP_STORAGE_BYTES_PER_TASK = -1;
+  private static final boolean DEFAULT_VIRTUAL_STORAGE_PARTIAL_DOWNLOADS_ENABLED = true;
 
   @JsonProperty
   private final String baseDir;
 
   @JsonProperty
-  private final String hadoopWorkingPath;
-
-  @JsonProperty
-  private final int defaultRowFlushBoundary;
-
-  @JsonProperty
-  private final List<String> defaultHadoopCoordinates;
+  private final File baseTaskDir;
 
   @JsonProperty
   private final boolean restoreTasksOnRestart;
@@ -107,93 +69,93 @@ public class TaskConfig
   private final boolean ignoreTimestampSpecForDruidInputSource;
 
   @JsonProperty
-  private final boolean batchMemoryMappedIndex;
-
-  @JsonProperty
-  private final BatchProcessingMode batchProcessingMode;
-
-  @JsonProperty
   private final boolean storeEmptyColumns;
 
   @JsonProperty
   private final boolean encapsulatedTask;
 
-  @Deprecated
-  @JsonProperty("baseTaskDir")
-  private final String baseTaskDirPath;
-
-  // Use multiple base files for tasks instead of a single one
   @JsonProperty
-  private final List<String> baseTaskDirPaths;
+  private final long tmpStorageBytesPerTask;
+
+  @JsonProperty
+  private final boolean buildV10;
+
+  @JsonProperty
+  private final boolean virtualStoragePartialDownloadsEnabled;
 
   @JsonCreator
   public TaskConfig(
       @JsonProperty("baseDir") String baseDir,
-      @Deprecated @JsonProperty("baseTaskDir") String baseTaskDirPath,
-      @JsonProperty("hadoopWorkingPath") String hadoopWorkingPath,
-      @JsonProperty("defaultRowFlushBoundary") Integer defaultRowFlushBoundary,
-      @JsonProperty("defaultHadoopCoordinates") List<String> defaultHadoopCoordinates,
+      @JsonProperty("baseTaskDir") String baseTaskDir,
       @JsonProperty("restoreTasksOnRestart") boolean restoreTasksOnRestart,
       @JsonProperty("gracefulShutdownTimeout") Period gracefulShutdownTimeout,
       @JsonProperty("directoryLockTimeout") Period directoryLockTimeout,
       @JsonProperty("shuffleDataLocations") List<StorageLocationConfig> shuffleDataLocations,
       @JsonProperty("ignoreTimestampSpecForDruidInputSource") boolean ignoreTimestampSpecForDruidInputSource,
-      @JsonProperty("batchMemoryMappedIndex") boolean batchMemoryMappedIndex, // deprecated, only set to true to fall back to older behavior
-      @JsonProperty("batchProcessingMode") String batchProcessingMode,
       @JsonProperty("storeEmptyColumns") @Nullable Boolean storeEmptyColumns,
       @JsonProperty("encapsulatedTask") boolean enableTaskLevelLogPush,
-      @JsonProperty("baseTaskDirPaths") @Nullable List<String> baseTaskDirPaths
+      @JsonProperty("tmpStorageBytesPerTask") @Nullable Long tmpStorageBytesPerTask,
+      @JsonProperty("buildV10") boolean buildV10,
+      @JsonProperty("virtualStoragePartialDownloadsEnabled") @Nullable Boolean virtualStoragePartialDownloadsEnabled
   )
   {
-    this.baseDir = baseDir == null ? System.getProperty("java.io.tmpdir") : baseDir;
-    // This is usually on HDFS or similar, so we can't use java.io.tmpdir
-    this.hadoopWorkingPath = hadoopWorkingPath == null ? "/tmp/druid-indexing" : hadoopWorkingPath;
-    this.defaultRowFlushBoundary = defaultRowFlushBoundary == null ? 75000 : defaultRowFlushBoundary;
-    this.defaultHadoopCoordinates = defaultHadoopCoordinates == null
-                                    ? DEFAULT_DEFAULT_HADOOP_COORDINATES
-                                    : defaultHadoopCoordinates;
+    this.baseDir = Configs.valueOrDefault(baseDir, System.getProperty("java.io.tmpdir"));
+    this.baseTaskDir = new File(defaultDir(baseTaskDir, "persistent/task"));
     this.restoreTasksOnRestart = restoreTasksOnRestart;
-    this.gracefulShutdownTimeout = gracefulShutdownTimeout == null
-                                   ? DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT
-                                   : gracefulShutdownTimeout;
-    this.directoryLockTimeout = directoryLockTimeout == null
-                                ? DEFAULT_DIRECTORY_LOCK_TIMEOUT
-                                : directoryLockTimeout;
-    if (shuffleDataLocations == null) {
-      this.shuffleDataLocations = Collections.singletonList(
-          new StorageLocationConfig(new File(defaultDir(null, "intermediary-segments")), null, null)
-      );
-    } else {
-      this.shuffleDataLocations = shuffleDataLocations;
-    }
+    this.gracefulShutdownTimeout = Configs.valueOrDefault(
+        gracefulShutdownTimeout,
+        DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT
+    );
+    this.directoryLockTimeout = Configs.valueOrDefault(
+        directoryLockTimeout,
+        DEFAULT_DIRECTORY_LOCK_TIMEOUT
+    );
+    this.shuffleDataLocations = Configs.valueOrDefault(
+        shuffleDataLocations,
+        Collections.singletonList(
+            new StorageLocationConfig(new File(defaultDir(null, "intermediary-segments")), null, null)
+        )
+    );
+
     this.ignoreTimestampSpecForDruidInputSource = ignoreTimestampSpecForDruidInputSource;
-
-    this.batchMemoryMappedIndex = batchMemoryMappedIndex;
-
     this.encapsulatedTask = enableTaskLevelLogPush;
-    // Conflict resolution. Assume that if batchMemoryMappedIndex is set (since false is the default) that
-    // the user changed it intentionally to use legacy, in this case oveeride batchProcessingMode and also
-    // set it to legacy else just use batchProcessingMode and don't pay attention to batchMemoryMappedIndexMode:
-    if (batchMemoryMappedIndex) {
-      this.batchProcessingMode = BatchProcessingMode.OPEN_SEGMENTS;
-    } else if (EnumUtils.isValidEnum(BatchProcessingMode.class, batchProcessingMode)) {
-      this.batchProcessingMode = BatchProcessingMode.valueOf(batchProcessingMode);
-    } else {
-      // batchProcessingMode input string is invalid, log & use the default.
-      this.batchProcessingMode = BatchProcessingMode.CLOSED_SEGMENTS; // Default
-      log.warn("Batch processing mode argument value is null or not valid:[%s], defaulting to[%s] ",
-               batchProcessingMode, this.batchProcessingMode
-      );
-    }
-    log.debug("Batch processing mode:[%s]", this.batchProcessingMode);
-    this.storeEmptyColumns = storeEmptyColumns == null ? DEFAULT_STORE_EMPTY_COLUMNS : storeEmptyColumns;
 
-    this.baseTaskDirPath = baseTaskDirPath;
-    if (CollectionUtils.isNullOrEmpty(baseTaskDirPaths)) {
-      String baseTaskFile = defaultDir(baseTaskDirPath, "persistent/task");
-      baseTaskDirPaths = Collections.singletonList(baseTaskFile);
-    }
-    this.baseTaskDirPaths = ImmutableList.copyOf(baseTaskDirPaths);
+    this.storeEmptyColumns = Configs.valueOrDefault(storeEmptyColumns, DEFAULT_STORE_EMPTY_COLUMNS);
+    this.tmpStorageBytesPerTask = Configs.valueOrDefault(tmpStorageBytesPerTask, DEFAULT_TMP_STORAGE_BYTES_PER_TASK);
+    this.buildV10 = buildV10;
+    this.virtualStoragePartialDownloadsEnabled = Configs.valueOrDefault(
+        virtualStoragePartialDownloadsEnabled,
+        DEFAULT_VIRTUAL_STORAGE_PARTIAL_DOWNLOADS_ENABLED
+    );
+  }
+
+  private TaskConfig(
+      String baseDir,
+      File baseTaskDir,
+      boolean restoreTasksOnRestart,
+      Period gracefulShutdownTimeout,
+      Period directoryLockTimeout,
+      List<StorageLocationConfig> shuffleDataLocations,
+      boolean ignoreTimestampSpecForDruidInputSource,
+      boolean storeEmptyColumns,
+      boolean encapsulatedTask,
+      long tmpStorageBytesPerTask,
+      boolean buildV10,
+      boolean virtualStoragePartialDownloadsEnabled
+  )
+  {
+    this.baseDir = baseDir;
+    this.baseTaskDir = baseTaskDir;
+    this.restoreTasksOnRestart = restoreTasksOnRestart;
+    this.gracefulShutdownTimeout = gracefulShutdownTimeout;
+    this.directoryLockTimeout = directoryLockTimeout;
+    this.shuffleDataLocations = shuffleDataLocations;
+    this.ignoreTimestampSpecForDruidInputSource = ignoreTimestampSpecForDruidInputSource;
+    this.storeEmptyColumns = storeEmptyColumns;
+    this.encapsulatedTask = encapsulatedTask;
+    this.tmpStorageBytesPerTask = tmpStorageBytesPerTask;
+    this.buildV10 = buildV10;
+    this.virtualStoragePartialDownloadsEnabled = virtualStoragePartialDownloadsEnabled;
   }
 
   @JsonProperty
@@ -202,35 +164,40 @@ public class TaskConfig
     return baseDir;
   }
 
-  @Deprecated
-  @JsonProperty("baseTaskDir")
-  public String getBaseTaskDirPath()
+  @JsonProperty
+  public File getBaseTaskDir()
   {
-    return baseTaskDirPath;
+    return baseTaskDir;
   }
 
-  @JsonProperty
-  public List<String> getBaseTaskDirPaths()
+  @Override
+  public File getTaskDir(String taskId)
   {
-    return baseTaskDirPaths;
+    return new File(baseTaskDir, IdUtils.validateId("task ID", taskId));
   }
 
-  @JsonProperty
-  public String getHadoopWorkingPath()
+  @Override
+  public File getTaskWorkDir(String taskId)
   {
-    return hadoopWorkingPath;
+    return new File(getTaskDir(taskId), "work");
   }
 
-  @JsonProperty
-  public int getDefaultRowFlushBoundary()
+  @Override
+  public File getTaskLogFile(String taskId)
   {
-    return defaultRowFlushBoundary;
+    return new File(getTaskDir(taskId), "log");
   }
 
-  @JsonProperty
-  public List<String> getDefaultHadoopCoordinates()
+  @Override
+  public File getTaskTempDir(String taskId)
   {
-    return defaultHadoopCoordinates;
+    return new File(getTaskDir(taskId), "temp");
+  }
+
+  @Override
+  public File getTaskLockFile(String taskId)
+  {
+    return new File(getTaskDir(taskId), "lock");
   }
 
   @JsonProperty
@@ -264,22 +231,6 @@ public class TaskConfig
   }
 
   @JsonProperty
-  public BatchProcessingMode getBatchProcessingMode()
-  {
-    return batchProcessingMode;
-  }
-
-  /**
-   * Do not use in code! use {@link TaskConfig#getBatchProcessingMode() instead}
-   */
-  @Deprecated
-  @JsonProperty
-  public boolean getbatchMemoryMappedIndex()
-  {
-    return batchMemoryMappedIndex;
-  }
-
-  @JsonProperty
   public boolean isStoreEmptyColumns()
   {
     return storeEmptyColumns;
@@ -291,6 +242,24 @@ public class TaskConfig
     return encapsulatedTask;
   }
 
+  @JsonProperty
+  public long getTmpStorageBytesPerTask()
+  {
+    return tmpStorageBytesPerTask;
+  }
+
+  @JsonProperty
+  public boolean buildV10()
+  {
+    return buildV10;
+  }
+
+  @JsonProperty
+  public boolean isVirtualStoragePartialDownloadsEnabled()
+  {
+    return virtualStoragePartialDownloadsEnabled;
+  }
+
   private String defaultDir(@Nullable String configParameter, final String defaultVal)
   {
     if (configParameter == null) {
@@ -300,4 +269,39 @@ public class TaskConfig
     return configParameter;
   }
 
+  public TaskConfig withBaseTaskDir(File baseTaskDir)
+  {
+    return new TaskConfig(
+        baseDir,
+        baseTaskDir,
+        restoreTasksOnRestart,
+        gracefulShutdownTimeout,
+        directoryLockTimeout,
+        shuffleDataLocations,
+        ignoreTimestampSpecForDruidInputSource,
+        storeEmptyColumns,
+        encapsulatedTask,
+        tmpStorageBytesPerTask,
+        buildV10,
+        virtualStoragePartialDownloadsEnabled
+    );
+  }
+
+  public TaskConfig withTmpStorageBytesPerTask(long tmpStorageBytesPerTask)
+  {
+    return new TaskConfig(
+        baseDir,
+        baseTaskDir,
+        restoreTasksOnRestart,
+        gracefulShutdownTimeout,
+        directoryLockTimeout,
+        shuffleDataLocations,
+        ignoreTimestampSpecForDruidInputSource,
+        storeEmptyColumns,
+        encapsulatedTask,
+        tmpStorageBytesPerTask,
+        buildV10,
+        virtualStoragePartialDownloadsEnabled
+    );
+  }
 }

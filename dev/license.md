@@ -27,12 +27,10 @@ includes not only Druid itself but also all the dependencies of Druid, its `LICE
 As a result, the contents of those files are different and managed separately for source code and binary packages.
 Please read the sections below to understand how we manage the licenses and what to update when you want to add new dependencies.
 
-
 ### Licenses for source code packages
 
 The licenses for source code packages are maintained _manually_ in [the `LICENSE` file](https://github.com/apache/druid/blob/master/LICENSE). 
 The notices can be found in [the `NOTICE` file`](https://github.com/apache/druid/blob/master/NOTICE) similarly.
-
 
 ### Licenses for binary packages
 
@@ -41,7 +39,6 @@ All licenses (for both source code and binary releases) should be registered in 
 [`generate-binary-license.py`](https://github.com/apache/druid/blob/master/distribution/bin/generate-binary-license.py)
 and [`generate-binary-notice.py`](https://github.com/apache/druid/blob/master/distribution/bin/generate-binary-notice.py)
 will generate the `LICENSE` and `NOTICE` files automatically based on the registry.
-
 
 ### Adding licenses
 
@@ -91,11 +88,10 @@ source_paths:
   - processing/src/main/java/org/apache/druid/segment/filter/cnf/CalciteCnfHelper.java
 ```
 
-
 #### When you add a new library dependency into Druid
 
 This requires you to update the [the `licenses.yaml` file](https://github.com/apache/druid/blob/master/licenses.yaml).
-For example, to add `aws-java-sdk-core` as a new depdency, you need to add the following entry.
+For example, to add `aws-java-sdk-core` as a new dependency, you need to add the following entry.
 
 ```yaml
 name: AWS SDK for Java
@@ -122,7 +118,23 @@ notice: |
   The licenses for these third party components are included in LICENSE.txt
 ```
 
+If the library is under a [Category B](https://www.apache.org/legal/resolved.html#category-b) (weak copyleft) license
+such as CDDL, EPL, MPL or the SIL Open Font License, also add a `homepage` field with the URL of the project's homepage.
+`generate-binary-license.py` lists these libraries in the README of the binary package and fails if the homepage is missing.
+
 ### Updating licenses
 
 When you update the version of existing dependencies, you need to update the version not only in the `pom.xml` file but
 also in the `licenses.yaml` file.
+
+`distribution/bin/refresh-license-versions.py` makes that edit from the Maven dependency reports, and lists the entries
+it cannot update on its own, such as an entry whose libraries moved to different versions. It also lists libraries that
+appear in no report while the rest of their entry ships at the entry's version, so you can remove them:
+
+```
+distribution/bin/generate-license-dependency-reports.py . target --clean-maven-artifact-transfer --parallel 2
+distribution/bin/refresh-license-versions.py licenses.yaml target/license-reports
+```
+
+If you leave a version as it is, PR CI only prints a warning, provided the version it replaced is registered with the
+same license. Release builds still fail on these. A dependency that is new, or whose license changed, fails PR CI too.

@@ -25,15 +25,14 @@ import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.Pair;
 import org.apache.druid.query.cache.CacheKeyBuilder;
 import org.apache.druid.query.dimension.DimensionSpec;
+import org.apache.druid.query.filter.ColumnIndexSelector;
 import org.apache.druid.segment.ColumnInspector;
-import org.apache.druid.segment.ColumnSelector;
 import org.apache.druid.segment.ColumnSelectorFactory;
 import org.apache.druid.segment.ColumnValueSelector;
 import org.apache.druid.segment.DimensionSelector;
 import org.apache.druid.segment.VirtualColumn;
 import org.apache.druid.segment.column.ColumnCapabilities;
 import org.apache.druid.segment.column.ColumnCapabilitiesImpl;
-import org.apache.druid.segment.column.ColumnHolder;
 import org.apache.druid.segment.column.ColumnIndexSupplier;
 import org.apache.druid.segment.vector.MultiValueDimensionVectorSelector;
 import org.apache.druid.segment.vector.SingleValueDimensionVectorSelector;
@@ -189,13 +188,12 @@ public class FallbackVirtualColumn implements VirtualColumn
 
   @Nullable
   @Override
-  public ColumnIndexSupplier getIndexSupplier(String columnName, ColumnSelector columnSelector)
+  public ColumnIndexSupplier getIndexSupplier(
+      String columnName,
+      ColumnIndexSelector indexSelector
+  )
   {
-    final ColumnHolder columnHolder = columnSelector.getColumnHolder(columnToUse(columnSelector).getDimension());
-    if (columnHolder == null) {
-      return null;
-    }
-    return columnHolder.getIndexSupplier();
+    return indexSelector.getIndexSupplier(columnToUse(indexSelector).getDimension());
   }
 
   @SuppressWarnings("ConstantConditions")

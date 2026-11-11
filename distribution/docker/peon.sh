@@ -37,13 +37,17 @@
 #
 # - DRUID_CONFIG_COMMON -- full path to a file for druid 'common' properties
 # - DRUID_CONFIG_${service} -- full path to a file for druid 'service' properties
+# - DRUID_ADDITIONAL_CLASSPATH -- a list of colon-separated paths that will be added to the classpath of druid processes.
+#                                 These paths can include jars, additional configuration folders (such as HDFS config), etc.
+#                                 It is important to ensure that these paths must exist in the environment druid runs in if they are not part of the distribution.
 
 # This script is very similar to druid.sh, used exclusively for the kubernetes-overlord-extension.
+# Specifically, it is used by K8sTaskAdapter and PodTemplateTaskAdapter to start up Peon tasks.
 
 set -e
 SERVICE="overlord"
 
-echo "$(date -Is) startup service $SERVICE"
+echo "$(date -Is) startup service peon"
 
 # We put all the config in /tmp/conf to allow for a
 # read-only root filesystem
@@ -75,9 +79,9 @@ setKey() {
     service_conf=$(getConfPath $service)/runtime.properties
     # Delete from all
     sed -ri "/$key=/d" $COMMON_CONF_DIR/common.runtime.properties
-    [ -f $service_conf ] && sed -ri "/$key=/d" $service_conf
-    [ -f $service_conf ] && echo -e "\n$key=$value" >>$service_conf
-    [ -f $service_conf ] || echo -e "\n$key=$value" >>$COMMON_CONF_DIR/common.runtime.properties
+    [ -f "$service_conf" ] && sed -ri "/$key=/d" $service_conf
+    [ -f "$service_conf" ] && printf '\n%s=%s\n' "$key" "$value" >> "$service_conf"
+    [ -f "$service_conf" ] || printf '\n%s=%s\n' "$key" "$value" >> "$COMMON_CONF_DIR/common.runtime.properties"
 
     echo "Setting $key=$value in $service_conf"
 }
@@ -97,8 +101,16 @@ then
     setKey _common druid.zk.service.host "${ZOOKEEPER}"
 fi
 
-DRUID_SET_HOST=${DRUID_SET_HOST:-1}
-if [ "${DRUID_SET_HOST}" = "1" ]
+if [ -z "${KUBERNETES_SERVICE_HOST}" ]
+then
+  # Running outside kubernetes, use IP addresses
+  DRUID_SET_HOST_IP=${DRUID_SET_HOST_IP:-1}
+else
+  # Running in kubernetes, so use canonical names
+  DRUID_SET_HOST_IP=${DRUID_SET_HOST_IP:-0}
+fi
+
+if [ "${DRUID_SET_HOST_IP}" = "1" ]
 then
     setKey $SERVICE druid.host $(ip r get 1 | awk '{print $7;exit}')
 fi
@@ -107,7 +119,7 @@ env | grep ^druid_ | while read evar;
 do
     # Can't use IFS='=' to parse since var might have = in it (e.g. password)
     val=$(echo "$evar" | sed -e 's?[^=]*=??')
-    var=$(echo "$evar" | sed -e 's?^\([^=]*\)=.*?\1?g' -e 's?_?.?g')
+    var=$(echo "$evar" | sed -e 's?^\([^=]*\)=.*?\1?g' -e 's?__?%UNDERSCORE%?g' -e 's?_?.?g' -e 's?%UNDERSCORE%?_?g')
     setKey $SERVICE "$var" "$val"
 done
 
@@ -143,13 +155,27 @@ then
     echo "$DRUID_LOG4J" >$COMMON_CONF_DIR/log4j2.xml
 fi
 
-DRUID_DIRS_TO_CREATE=${DRUID_DIRS_TO_CREATE-'var/tmp var/druid/segments var/druid/indexing-logs var/druid/task var/druid/hadoop-tmp var/druid/segment-cache'}
+DRUID_DIRS_TO_CREATE=${DRUID_DIRS_TO_CREATE-'var/tmp var/druid/segments var/druid/indexing-logs var/druid/task var/druid/segment-cache'}
 if [ -n "${DRUID_DIRS_TO_CREATE}" ]
 then
     mkdir -p ${DRUID_DIRS_TO_CREATE}
 fi
 
-# take the ${TASK_JSON} environment variable and base64 decode, unzip and throw it in ${TASK_DIR}/task.json
-mkdir -p ${TASK_DIR}; echo ${TASK_JSON} | base64 -d | gzip -d > ${TASK_DIR}/task.json;
+# take the ${TASK_JSON} environment variable and base64 decode, unzip and throw it in ${TASK_DIR}/task.json.
+# If TASK_JSON is not set, CliPeon will pull the task.json file from deep storage.
+mkdir -p "${TASK_DIR}"; [ -n "$TASK_JSON" ] && echo "${TASK_JSON}" | base64 -d | gzip -d > "${TASK_DIR}/task.json";
 
-exec java ${JAVA_OPTS} -cp $COMMON_CONF_DIR:$SERVICE_CONF_DIR:lib/*: org.apache.druid.cli.Main internal peon $@
+# Combine options from jvm.config and those given as JAVA_OPTS
+# If a value is specified in both then JAVA_OPTS will take precedence when using OpenJDK
+# However this behavior is not part of the spec and is thus implementation specific
+if [ -f "$SERVICE_CONF_DIR/jvm.config" ]; then
+    JAVA_OPTS="$(cat $SERVICE_CONF_DIR/jvm.config | xargs) $JAVA_OPTS"
+fi
+
+# Start peon using CliPeon, with variables `Main internal peon TASK_DIR ATTEMPT_ID`
+if [ -n "$TASK_ID" ]; then
+    # TASK_ID is set by all K8s pod adapters; older Overlords passed --taskId in "$@" instead
+    exec bin/run-java ${JAVA_OPTS} -cp $COMMON_CONF_DIR:$SERVICE_CONF_DIR:lib/*:$DRUID_ADDITIONAL_CLASSPATH org.apache.druid.cli.Main internal peon "${TASK_DIR}" 1 --taskId "${TASK_ID}" "$@"
+else
+    exec bin/run-java ${JAVA_OPTS} -cp $COMMON_CONF_DIR:$SERVICE_CONF_DIR:lib/*:$DRUID_ADDITIONAL_CLASSPATH org.apache.druid.cli.Main internal peon "${TASK_DIR}" 1 "$@"
+fi

@@ -20,9 +20,8 @@
 package org.apache.druid.client.cache;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import jakarta.validation.constraints.NotNull;
 import net.spy.memcached.DefaultConnectionFactory;
-
-import javax.validation.constraints.NotNull;
 
 public class MemcachedCacheConfig
 {
@@ -62,6 +61,15 @@ public class MemcachedCacheConfig
 
   @JsonProperty
   private String locator = "consistent";
+
+  @JsonProperty
+  private boolean enableTls = false;
+
+  @JsonProperty
+  private String clientMode = "static";
+
+  @JsonProperty
+  private boolean skipTlsHostnameVerification = true;
 
   public int getExpiration()
   {
@@ -111,5 +119,20 @@ public class MemcachedCacheConfig
   public String getLocator()
   {
     return locator;
+  }
+
+  public boolean enableTls()
+  {
+    return enableTls;
+  }
+
+  public String getClientMode()
+  {
+    return clientMode;
+  }
+
+  public boolean skipTlsHostnameVerification()
+  {
+    return skipTlsHostnameVerification;
   }
 }

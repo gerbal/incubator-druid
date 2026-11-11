@@ -26,18 +26,14 @@ import com.google.common.collect.ImmutableSet;
 import org.apache.druid.client.indexing.SamplerResponse;
 import org.apache.druid.client.indexing.SamplerSpec;
 import org.apache.druid.common.aws.AWSCredentialsConfig;
-import org.apache.druid.common.config.NullHandling;
-import org.apache.druid.data.input.impl.ByteEntity;
-import org.apache.druid.data.input.impl.DimensionsSpec;
 import org.apache.druid.data.input.impl.FloatDimensionSchema;
-import org.apache.druid.data.input.impl.InputRowParser;
-import org.apache.druid.data.input.impl.JSONParseSpec;
 import org.apache.druid.data.input.impl.JsonInputFormat;
 import org.apache.druid.data.input.impl.LongDimensionSchema;
 import org.apache.druid.data.input.impl.StringDimensionSchema;
-import org.apache.druid.data.input.impl.StringInputRowParser;
 import org.apache.druid.data.input.impl.TimestampSpec;
-import org.apache.druid.indexing.kinesis.supervisor.KinesisSupervisorIOConfig;
+import org.apache.druid.data.input.kinesis.KinesisRecordEntity;
+import org.apache.druid.indexer.granularity.UniformGranularitySpec;
+import org.apache.druid.indexing.kinesis.supervisor.KinesisIOConfigBuilder;
 import org.apache.druid.indexing.kinesis.supervisor.KinesisSupervisorSpec;
 import org.apache.druid.indexing.overlord.sampler.InputSourceSampler;
 import org.apache.druid.indexing.overlord.sampler.SamplerConfig;
@@ -48,54 +44,55 @@ import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.parsers.JSONPathSpec;
-import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
 import org.apache.druid.query.aggregation.DoubleSumAggregatorFactory;
 import org.apache.druid.segment.indexing.DataSchema;
-import org.apache.druid.segment.indexing.granularity.UniformGranularitySpec;
+import org.apache.druid.server.security.Action;
+import org.apache.druid.server.security.Resource;
+import org.apache.druid.server.security.ResourceAction;
+import org.apache.druid.server.security.ResourceType;
 import org.easymock.EasyMock;
 import org.easymock.EasyMockSupport;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import software.amazon.kinesis.retrieval.KinesisClientRecord;
 
-import java.io.IOException;
-import java.util.Arrays;
+import java.nio.ByteBuffer;
+import java.time.Instant;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 public class KinesisSamplerSpecTest extends EasyMockSupport
 {
   private static final String STREAM = "sampling";
   private static final String SHARD_ID = "1";
-  private static final DataSchema DATA_SCHEMA = new DataSchema(
-      "test_ds",
-      new TimestampSpec("timestamp", "iso", null),
-      new DimensionsSpec(
-          Arrays.asList(
-              new StringDimensionSchema("dim1"),
-              new StringDimensionSchema("dim1t"),
-              new StringDimensionSchema("dim2"),
-              new LongDimensionSchema("dimLong"),
-              new FloatDimensionSchema("dimFloat")
-          )
-      ),
-      new AggregatorFactory[]{
-          new DoubleSumAggregatorFactory("met1sum", "met1"),
-          new CountAggregatorFactory("rows")
-      },
-      new UniformGranularitySpec(Granularities.DAY, Granularities.NONE, null),
-      null
-  );
-
-  static {
-    NullHandling.initializeForTests();
-  }
+  private static final DataSchema DATA_SCHEMA =
+      DataSchema.builder()
+                .withDataSource("test_ds")
+                .withTimestamp(new TimestampSpec("timestamp", "iso", null))
+                .withDimensions(
+                    new StringDimensionSchema("dim1"),
+                    new StringDimensionSchema("dim1t"),
+                    new StringDimensionSchema("dim2"),
+                    new LongDimensionSchema("dimLong"),
+                    new FloatDimensionSchema("dimFloat")
+                )
+                .withAggregators(
+                    new DoubleSumAggregatorFactory("met1sum", "met1"),
+                    new CountAggregatorFactory("rows")
+                )
+                .withGranularity(
+                    new UniformGranularitySpec(Granularities.DAY, Granularities.NONE, null)
+                )
+                .build();
 
   private final KinesisRecordSupplier recordSupplier = mock(KinesisRecordSupplier.class);
 
-  private static List<OrderedPartitionableRecord<String, String, ByteEntity>> generateRecords(String stream)
+  private static List<OrderedPartitionableRecord<String, String, KinesisRecordEntity>> generateRecords(String stream)
   {
     return ImmutableList.of(
         new OrderedPartitionableRecord<>(stream, "1", "0", jb("2008", "a", "y", "10", "20.0", "1.0")),
@@ -111,41 +108,26 @@ public class KinesisSamplerSpecTest extends EasyMockSupport
             stream,
             "1",
             "6",
-            Collections.singletonList(new ByteEntity(StringUtils.toUtf8("unparseable")))
+            Collections.singletonList(new KinesisRecordEntity(buildKinesisClientRecord(ByteBuffer.wrap(StringUtils.toUtf8("unparseable")))))
         ),
-        new OrderedPartitionableRecord<>(stream, "1", "8", Collections.singletonList(new ByteEntity(StringUtils.toUtf8("{}"))))
+        new OrderedPartitionableRecord<>(stream, "1", "8", Collections.singletonList(new KinesisRecordEntity(buildKinesisClientRecord(ByteBuffer.wrap(StringUtils.toUtf8("{}"))))))
     );
   }
 
-  @Test(timeout = 10_000L)
+  @Test
+  @Timeout(value = 10_000L, unit = TimeUnit.MILLISECONDS)
   public void testSample() throws InterruptedException
   {
     KinesisSupervisorSpec supervisorSpec = new KinesisSupervisorSpec(
         null,
+        null,
         DATA_SCHEMA,
         null,
-        new KinesisSupervisorIOConfig(
-            STREAM,
-            new JsonInputFormat(new JSONPathSpec(true, ImmutableList.of()), ImmutableMap.of(), false, false, false),
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            true,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            false
-        ),
+        new KinesisIOConfigBuilder()
+            .withStream(STREAM)
+            .withInputFormat(new JsonInputFormat(new JSONPathSpec(true, List.of()), Map.of(), false, false, false))
+            .withUseEarliestSequenceNumber(true)
+            .build(),
         null,
         null,
         null,
@@ -171,59 +153,18 @@ public class KinesisSamplerSpecTest extends EasyMockSupport
   }
 
   @Test
-  public void testSampleWithInputRowParser() throws IOException, InterruptedException
+  public void testGetInputSourceResources()
   {
-    ObjectMapper objectMapper = new DefaultObjectMapper();
-    TimestampSpec timestampSpec = new TimestampSpec("timestamp", "iso", null);
-    DimensionsSpec dimensionsSpec = new DimensionsSpec(
-        Arrays.asList(
-            new StringDimensionSchema("dim1"),
-            new StringDimensionSchema("dim1t"),
-            new StringDimensionSchema("dim2"),
-            new LongDimensionSchema("dimLong"),
-            new FloatDimensionSchema("dimFloat")
-        )
-    );
-    InputRowParser parser = new StringInputRowParser(new JSONParseSpec(timestampSpec, dimensionsSpec, JSONPathSpec.DEFAULT, null, null), "UTF8");
-
-    DataSchema dataSchema = new DataSchema(
-        "test_ds",
-        objectMapper.readValue(objectMapper.writeValueAsBytes(parser), Map.class),
-        new AggregatorFactory[]{
-            new DoubleSumAggregatorFactory("met1sum", "met1"),
-            new CountAggregatorFactory("rows")
-        },
-        new UniformGranularitySpec(Granularities.DAY, Granularities.NONE, null),
-        null,
-        objectMapper
-    );
-
     KinesisSupervisorSpec supervisorSpec = new KinesisSupervisorSpec(
         null,
-        dataSchema,
         null,
-        new KinesisSupervisorIOConfig(
-            STREAM,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            true,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            false
-        ),
+        DATA_SCHEMA,
+        null,
+        new KinesisIOConfigBuilder()
+            .withStream(STREAM)
+            .withInputFormat(new JsonInputFormat(new JSONPathSpec(true, List.of()), Map.of(), false, false, false))
+            .withUseEarliestSequenceNumber(true)
+            .build(),
         null,
         null,
         null,
@@ -245,7 +186,14 @@ public class KinesisSamplerSpecTest extends EasyMockSupport
         null
     );
 
-    runSamplerAndCompareResponse(samplerSpec, false);
+    Assertions.assertEquals(
+        Collections.singleton(
+            new ResourceAction(new Resource(
+                KinesisIndexingServiceModule.SCHEME,
+                ResourceType.EXTERNAL
+            ), Action.READ)),
+        samplerSpec.getInputSourceResources()
+    );
   }
 
   private void runSamplerAndCompareResponse(SamplerSpec samplerSpec, boolean useInputFormat) throws InterruptedException
@@ -269,13 +217,13 @@ public class KinesisSamplerSpecTest extends EasyMockSupport
 
     verifyAll();
 
-    Assert.assertEquals(5, response.getNumRowsRead());
-    Assert.assertEquals(3, response.getNumRowsIndexed());
-    Assert.assertEquals(5, response.getData().size());
+    Assertions.assertEquals(5, response.getNumRowsRead());
+    Assertions.assertEquals(3, response.getNumRowsIndexed());
+    Assertions.assertEquals(5, response.getData().size());
 
     Iterator<SamplerResponse.SamplerResponseRow> it = response.getData().iterator();
 
-    Assert.assertEquals(new SamplerResponse.SamplerResponseRow(
+    Assertions.assertEquals(new SamplerResponse.SamplerResponseRow(
         ImmutableMap.<String, Object>builder()
             .put("timestamp", "2008")
             .put("dim1", "a")
@@ -297,7 +245,7 @@ public class KinesisSamplerSpecTest extends EasyMockSupport
         null,
         null
     ), it.next());
-    Assert.assertEquals(new SamplerResponse.SamplerResponseRow(
+    Assertions.assertEquals(new SamplerResponse.SamplerResponseRow(
         ImmutableMap.<String, Object>builder()
             .put("timestamp", "2009")
             .put("dim1", "b")
@@ -319,7 +267,7 @@ public class KinesisSamplerSpecTest extends EasyMockSupport
         null,
         null
     ), it.next());
-    Assert.assertEquals(new SamplerResponse.SamplerResponseRow(
+    Assertions.assertEquals(new SamplerResponse.SamplerResponseRow(
         ImmutableMap.<String, Object>builder()
             .put("timestamp", "2010")
             .put("dim1", "c")
@@ -341,7 +289,7 @@ public class KinesisSamplerSpecTest extends EasyMockSupport
         null,
         null
     ), it.next());
-    Assert.assertEquals(new SamplerResponse.SamplerResponseRow(
+    Assertions.assertEquals(new SamplerResponse.SamplerResponseRow(
         ImmutableMap.<String, Object>builder()
             .put("timestamp", "246140482-04-24T15:36:27.903Z")
             .put("dim1", "x")
@@ -354,33 +302,43 @@ public class KinesisSamplerSpecTest extends EasyMockSupport
         true,
         "Encountered row with timestamp[246140482-04-24T15:36:27.903Z] that cannot be represented as a long: [{timestamp=246140482-04-24T15:36:27.903Z, dim1=x, dim2=z, dimLong=10, dimFloat=20.0, met1=1.0}]"
     ), it.next());
-    Assert.assertEquals(new SamplerResponse.SamplerResponseRow(
+    Assertions.assertEquals(new SamplerResponse.SamplerResponseRow(
         null,
         null,
         true,
         "Unable to parse row [unparseable]" + (useInputFormat ? " into JSON" : "")
     ), it.next());
 
-    Assert.assertFalse(it.hasNext());
+    Assertions.assertFalse(it.hasNext());
   }
 
-  private static List<ByteEntity> jb(String ts, String dim1, String dim2, String dimLong, String dimFloat, String met1)
+  private static List<KinesisRecordEntity> jb(String ts, String dim1, String dim2, String dimLong, String dimFloat, String met1)
   {
     try {
-      return Collections.singletonList(new ByteEntity(new ObjectMapper().writeValueAsBytes(
+      return Collections.singletonList(new KinesisRecordEntity(buildKinesisClientRecord(ByteBuffer.wrap(new ObjectMapper().writeValueAsBytes(
           ImmutableMap.builder()
-                      .put("timestamp", ts)
-                      .put("dim1", dim1)
-                      .put("dim2", dim2)
-                      .put("dimLong", dimLong)
-                      .put("dimFloat", dimFloat)
-                      .put("met1", met1)
-                      .build()
-      )));
+              .put("timestamp", ts)
+              .put("dim1", dim1)
+              .put("dim2", dim2)
+              .put("dimLong", dimLong)
+              .put("dimFloat", dimFloat)
+              .put("met1", met1)
+              .build()
+      )))));
     }
     catch (Exception e) {
       throw new RuntimeException(e);
     }
+  }
+
+  private static KinesisClientRecord buildKinesisClientRecord(ByteBuffer data)
+  {
+    return KinesisClientRecord.builder()
+        .data(data)
+        .partitionKey("key")
+        .sequenceNumber("0")
+        .approximateArrivalTimestamp(Instant.now())
+        .build();
   }
 
   private class TestableKinesisSamplerSpec extends KinesisSamplerSpec

@@ -16,11 +16,31 @@
  * limitations under the License.
  */
 
-import { SqlColumn, SqlExpression, SqlFunction, SqlLiteral, SqlStar } from 'druid-query-toolkit';
+import type { SqlBase } from 'druid-query-toolkit';
+import {
+  F,
+  L,
+  SqlColumn,
+  SqlExpression,
+  SqlFunction,
+  SqlLiteral,
+  SqlQuery,
+  SqlSetStatement,
+  SqlStar,
+} from 'druid-query-toolkit';
+
+import type { LineColumn } from './general';
+import { offsetToLineColumn } from './general';
+
+export function prettyPrintSql(b: SqlBase): string {
+  return b.prettyTrim(50).toString();
+}
 
 export function timeFormatToSql(timeFormat: string): SqlExpression | undefined {
   switch (timeFormat) {
     case 'auto':
+      return SqlExpression.parse('TIME_PARSE(TRIM(?))');
+
     case 'iso':
       return SqlExpression.parse('TIME_PARSE(?)');
 
@@ -57,4 +77,133 @@ export function convertToGroupByExpression(ex: SqlExpression): SqlExpression | u
   if (newEx instanceof SqlColumn) return newEx;
 
   return newEx.as((ex.getOutputName() || 'grouped').replace(/^[a-z]+_/i, ''));
+}
+
+function extractQueryPrefix(text: string): string {
+  let q = SqlQuery.parse(text);
+
+  // The parser will parse a SELECT query with a partitionedByClause and clusteredByClause but that is not valid, remove them from the query
+  if (!q.getIngestTable() && (q.partitionedByClause || q.clusteredByClause)) {
+    q = q.changePartitionedByClause(undefined).changeClusteredByClause(undefined);
+  }
+
+  return q.toString().trimEnd();
+}
+
+export function findSqlQueryPrefix(text: string): string | undefined {
+  try {
+    return extractQueryPrefix(text);
+  } catch (e) {
+    const startOffset = e.location?.start?.offset;
+    if (typeof startOffset !== 'number') return;
+    const prefix = text.slice(0, startOffset);
+    // Try to trim to where the error came from
+    try {
+      return extractQueryPrefix(prefix);
+    } catch {
+      // Try to trim out last word
+      try {
+        const lastWord = /\b\w+$/.exec(prefix);
+        return extractQueryPrefix(lastWord ? prefix.slice(0, lastWord.index).trimEnd() : prefix);
+      } catch {
+        return;
+      }
+    }
+  }
+}
+
+export function cleanSqlQueryPrefix(text: string): string {
+  const matchReplace = /\sREPLACE$/i.exec(text);
+  if (matchReplace) {
+    // This query likely grabbed a "REPLACE" (which is not a reserved keyword) from the next query over, see if we can delete it
+    const textWithoutReplace = text.slice(0, -matchReplace[0].length).trimEnd();
+    if (SqlQuery.maybeParse(textWithoutReplace)) {
+      return textWithoutReplace;
+    }
+  }
+
+  return text;
+}
+
+export interface QuerySlice {
+  index: number;
+  startOffset: number;
+  startLineColumn: LineColumn;
+  endOffset: number;
+  endLineColumn: LineColumn;
+  sql: string;
+}
+
+export function findAllSqlQueriesInText(text: string): QuerySlice[] {
+  const found: QuerySlice[] = [];
+
+  let remainingText = text;
+  let offset = 0;
+  let m: RegExpExecArray | null = null;
+  // Have an upper bound to how many queries we might extract from a long text
+  for (let i = 0; i < 1e3; i++) {
+    m = /SET|SELECT|WITH|INSERT|REPLACE|EXPLAIN/i.exec(remainingText);
+    if (!m) break;
+
+    const sql = findSqlQueryPrefix(remainingText.slice(m.index));
+    if (sql) {
+      const endIndex = m.index + sql.length;
+      found.push({
+        index: found.length,
+        startOffset: offset + m.index,
+        startLineColumn: offsetToLineColumn(text, offset + m.index)!,
+        endOffset: offset + endIndex,
+        endLineColumn: offsetToLineColumn(text, offset + endIndex)!,
+        sql: cleanSqlQueryPrefix(sql),
+      });
+    }
+
+    let advanceBy = m.index;
+    const initialWord = m[0].toUpperCase();
+    if (sql && initialWord === 'SET') {
+      const startOfSetStatements = remainingText.slice(m.index);
+      const [setPart, queryPart] = SqlSetStatement.partitionSetStatements(
+        startOfSetStatements,
+        true,
+      );
+      advanceBy += setPart.length;
+      const nextWord = /SELECT|WITH|INSERT|REPLACE/i.exec(queryPart);
+      if (nextWord) {
+        advanceBy += nextWord[0].length;
+      }
+    } else {
+      advanceBy += initialWord.length; // Skip the initial word only
+    }
+
+    remainingText = remainingText.slice(advanceBy);
+    offset += advanceBy;
+  }
+
+  return found;
+}
+
+const GRANULARITY_TO_ALIGN_TO_DAY: Record<string, boolean> = {
+  PT2H: true,
+  PT3H: true,
+  PT4H: true,
+  PT6H: true,
+  PT8H: true,
+  PT12H: true,
+  PT24H: true,
+};
+
+/**
+ * A smart time floor that adjusts the origin for the hour granularities that divide evenly into days to make them align with days
+ */
+export function smartTimeFloor(
+  ex: SqlExpression,
+  granularity: string,
+  isUTC: boolean,
+): SqlExpression {
+  return F(
+    'TIME_FLOOR',
+    ex,
+    L(granularity),
+    !isUTC && GRANULARITY_TO_ALIGN_TO_DAY[granularity] ? F.timeFloor(ex, 'P1D') : undefined,
+  );
 }

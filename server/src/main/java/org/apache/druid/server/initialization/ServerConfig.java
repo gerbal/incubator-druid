@@ -20,20 +20,33 @@
 package org.apache.druid.server.initialization;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.databind.DeserializationContext;
+import com.fasterxml.jackson.databind.JsonDeserializer;
+import com.fasterxml.jackson.databind.JsonSerializer;
+import com.fasterxml.jackson.databind.SerializerProvider;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotNull;
 import org.apache.druid.common.exception.ErrorResponseTransformStrategy;
 import org.apache.druid.common.exception.NoErrorResponseTransformStrategy;
 import org.apache.druid.java.util.common.HumanReadableBytes;
 import org.apache.druid.java.util.common.HumanReadableBytesRange;
+import org.apache.druid.server.SubqueryGuardrailHelper;
 import org.apache.druid.utils.JvmUtils;
+import org.eclipse.jetty.http.UriCompliance;
 import org.joda.time.Period;
 
 import javax.annotation.Nullable;
-import javax.validation.constraints.Max;
-import javax.validation.constraints.Min;
-import javax.validation.constraints.NotNull;
+import java.io.IOException;
 import java.util.List;
 import java.util.Objects;
+import java.util.Properties;
 import java.util.concurrent.TimeUnit;
 import java.util.zip.Deflater;
 
@@ -57,6 +70,8 @@ public class ServerConfig
       long defaultQueryTimeout,
       long maxScatterGatherBytes,
       int maxSubqueryRows,
+      String maxSubqueryBytes,
+      boolean useNestedForUnknownTypeInSubquery,
       long maxQueryTimeout,
       int maxRequestHeaderSize,
       @NotNull Period gracefulShutdownTimeout,
@@ -68,7 +83,66 @@ public class ServerConfig
       boolean showDetailedJettyErrors,
       @NotNull ErrorResponseTransformStrategy errorResponseTransformStrategy,
       @Nullable String contentSecurityPolicy,
-      boolean enableHSTS
+      boolean enableHSTS,
+      @Nullable UriCompliance uriCompliance,
+      boolean enforceStrictSNIHostChecking
+  )
+  {
+    this(
+        numThreads,
+        queueSize,
+        enableRequestLimit,
+        maxIdleTime,
+        defaultQueryTimeout,
+        maxScatterGatherBytes,
+        maxSubqueryRows,
+        maxSubqueryBytes,
+        useNestedForUnknownTypeInSubquery,
+        maxQueryTimeout,
+        maxRequestHeaderSize,
+        gracefulShutdownTimeout,
+        unannouncePropagationDelay,
+        inflateBufferSize,
+        compressionLevel,
+        enableForwardedRequestCustomizer,
+        allowedHttpMethods,
+        showDetailedJettyErrors,
+        errorResponseTransformStrategy,
+        contentSecurityPolicy,
+        enableHSTS,
+        false,
+        uriCompliance,
+        enforceStrictSNIHostChecking,
+        true
+    );
+  }
+
+  public ServerConfig(
+      int numThreads,
+      int queueSize,
+      boolean enableRequestLimit,
+      @NotNull Period maxIdleTime,
+      long defaultQueryTimeout,
+      long maxScatterGatherBytes,
+      int maxSubqueryRows,
+      String maxSubqueryBytes,
+      boolean useNestedForUnknownTypeInSubquery,
+      long maxQueryTimeout,
+      int maxRequestHeaderSize,
+      @NotNull Period gracefulShutdownTimeout,
+      @NotNull Period unannouncePropagationDelay,
+      int inflateBufferSize,
+      int compressionLevel,
+      boolean enableForwardedRequestCustomizer,
+      @NotNull List<String> allowedHttpMethods,
+      boolean showDetailedJettyErrors,
+      @NotNull ErrorResponseTransformStrategy errorResponseTransformStrategy,
+      @Nullable String contentSecurityPolicy,
+      boolean enableHSTS,
+      boolean enableResponseIdentityHeaders,
+      @Nullable UriCompliance uriCompliance,
+      boolean enforceStrictSNIHostChecking,
+      boolean enableQueryRequestsQueuing
   )
   {
     this.numThreads = numThreads;
@@ -78,6 +152,8 @@ public class ServerConfig
     this.defaultQueryTimeout = defaultQueryTimeout;
     this.maxScatterGatherBytes = HumanReadableBytes.valueOf(maxScatterGatherBytes);
     this.maxSubqueryRows = maxSubqueryRows;
+    this.maxSubqueryBytes = maxSubqueryBytes;
+    this.useNestedForUnknownTypeInSubquery = useNestedForUnknownTypeInSubquery;
     this.maxQueryTimeout = maxQueryTimeout;
     this.maxRequestHeaderSize = maxRequestHeaderSize;
     this.gracefulShutdownTimeout = gracefulShutdownTimeout;
@@ -90,11 +166,27 @@ public class ServerConfig
     this.errorResponseTransformStrategy = errorResponseTransformStrategy;
     this.contentSecurityPolicy = contentSecurityPolicy;
     this.enableHSTS = enableHSTS;
+    this.enableResponseIdentityHeaders = enableResponseIdentityHeaders;
+    this.uriCompliance = uriCompliance != null ? uriCompliance : UriCompliance.LEGACY;
+    this.enforceStrictSNIHostChecking = enforceStrictSNIHostChecking;
+    this.enableQueryRequestsQueuing = enableQueryRequestsQueuing;
   }
 
   public ServerConfig()
   {
 
+  }
+
+  @VisibleForTesting
+  public ServerConfig(boolean enableQueryRequestsQueuing)
+  {
+    this.enableQueryRequestsQueuing = enableQueryRequestsQueuing;
+  }
+
+  @VisibleForTesting
+  public ServerConfig(@NotNull ErrorResponseTransformStrategy errorResponseTransformStrategy)
+  {
+    this.errorResponseTransformStrategy = errorResponseTransformStrategy;
   }
 
   @JsonProperty
@@ -126,6 +218,12 @@ public class ServerConfig
   private int maxSubqueryRows = 100000;
 
   @JsonProperty
+  private String maxSubqueryBytes = SubqueryGuardrailHelper.LIMIT_DISABLED_VALUE;
+
+  @JsonProperty
+  private boolean useNestedForUnknownTypeInSubquery = false;
+
+  @JsonProperty
   @Min(1)
   private long maxQueryTimeout = Long.MAX_VALUE;
 
@@ -134,7 +232,7 @@ public class ServerConfig
 
   @JsonProperty
   @NotNull
-  private Period gracefulShutdownTimeout = Period.ZERO;
+  private Period gracefulShutdownTimeout = Period.seconds(30);
 
   @JsonProperty
   @NotNull
@@ -167,7 +265,25 @@ public class ServerConfig
   private boolean enableHSTS = false;
 
   @JsonProperty
+  private boolean enableResponseIdentityHeaders = false;
+
+  @JsonProperty
+  @JsonDeserialize(using = UriComplianceDeserializer.class)
+  @JsonSerialize(using = UriComplianceSerializer.class)
+  private UriCompliance uriCompliance = UriCompliance.LEGACY;
+
+  /**
+   * This feature flag enables query requests queuing when admins want to reserve some threads for
+   * non-query requests. This feature flag is not documented and will be removed in the future.
+   */
+  @JsonProperty
+  private boolean enableQueryRequestsQueuing = true;
+
+  @JsonProperty
   private boolean showDetailedJettyErrors = true;
+
+  @JsonProperty
+  private boolean enforceStrictSNIHostChecking = true;
 
   public int getNumThreads()
   {
@@ -204,6 +320,16 @@ public class ServerConfig
     return maxSubqueryRows;
   }
 
+  public String getMaxSubqueryBytes()
+  {
+    return maxSubqueryBytes;
+  }
+
+  public boolean isuseNestedForUnknownTypeInSubquery()
+  {
+    return useNestedForUnknownTypeInSubquery;
+  }
+
   public long getMaxQueryTimeout()
   {
     return maxQueryTimeout;
@@ -222,6 +348,56 @@ public class ServerConfig
   public Period getUnannouncePropagationDelay()
   {
     return unannouncePropagationDelay;
+  }
+
+  /**
+   * Returns a copy of this config with {@link #getUnannouncePropagationDelay()} replaced by the given value.
+   */
+  public ServerConfig withUnannouncePropagationDelay(final Period newUnannouncePropagationDelay)
+  {
+    return withShutdownTimings(gracefulShutdownTimeout, newUnannouncePropagationDelay);
+  }
+
+  /**
+   * Returns a copy of this config with {@link #getGracefulShutdownTimeout()} replaced by the given value.
+   */
+  public ServerConfig withGracefulShutdownTimeout(final Period newGracefulShutdownTimeout)
+  {
+    return withShutdownTimings(newGracefulShutdownTimeout, unannouncePropagationDelay);
+  }
+
+  private ServerConfig withShutdownTimings(
+      final Period newGracefulShutdownTimeout,
+      final Period newUnannouncePropagationDelay
+  )
+  {
+    return new ServerConfig(
+        numThreads,
+        queueSize,
+        enableRequestLimit,
+        maxIdleTime,
+        defaultQueryTimeout,
+        maxScatterGatherBytes.getBytes(),
+        maxSubqueryRows,
+        maxSubqueryBytes,
+        useNestedForUnknownTypeInSubquery,
+        maxQueryTimeout,
+        maxRequestHeaderSize,
+        newGracefulShutdownTimeout,
+        newUnannouncePropagationDelay,
+        inflateBufferSize,
+        compressionLevel,
+        enableForwardedRequestCustomizer,
+        allowedHttpMethods,
+        showDetailedJettyErrors,
+        errorResponseTransformStrategy,
+        contentSecurityPolicy,
+        enableHSTS,
+        enableResponseIdentityHeaders,
+        uriCompliance,
+        enforceStrictSNIHostChecking,
+        enableQueryRequestsQueuing
+    );
   }
 
   public int getInflateBufferSize()
@@ -265,6 +441,26 @@ public class ServerConfig
     return enableHSTS;
   }
 
+  public boolean isEnableResponseIdentityHeaders()
+  {
+    return enableResponseIdentityHeaders;
+  }
+
+  public boolean isEnableQueryRequestsQueuing()
+  {
+    return enableQueryRequestsQueuing;
+  }
+
+  public UriCompliance getUriCompliance()
+  {
+    return uriCompliance;
+  }
+
+  public boolean isEnforceStrictSNIHostChecking()
+  {
+    return enforceStrictSNIHostChecking;
+  }
+
   @Override
   public boolean equals(Object o)
   {
@@ -280,6 +476,8 @@ public class ServerConfig
            enableRequestLimit == that.enableRequestLimit &&
            defaultQueryTimeout == that.defaultQueryTimeout &&
            maxSubqueryRows == that.maxSubqueryRows &&
+           Objects.equals(maxSubqueryBytes, that.maxSubqueryBytes) &&
+           useNestedForUnknownTypeInSubquery == that.useNestedForUnknownTypeInSubquery &&
            maxQueryTimeout == that.maxQueryTimeout &&
            maxRequestHeaderSize == that.maxRequestHeaderSize &&
            inflateBufferSize == that.inflateBufferSize &&
@@ -293,7 +491,11 @@ public class ServerConfig
            allowedHttpMethods.equals(that.allowedHttpMethods) &&
            errorResponseTransformStrategy.equals(that.errorResponseTransformStrategy) &&
            Objects.equals(contentSecurityPolicy, that.getContentSecurityPolicy()) &&
-           enableHSTS == that.enableHSTS;
+           enableHSTS == that.enableHSTS &&
+           enableResponseIdentityHeaders == that.enableResponseIdentityHeaders &&
+           enableQueryRequestsQueuing == that.enableQueryRequestsQueuing &&
+           Objects.equals(uriCompliance, that.uriCompliance) &&
+           enforceStrictSNIHostChecking == that.enforceStrictSNIHostChecking;
   }
 
   @Override
@@ -307,6 +509,8 @@ public class ServerConfig
         defaultQueryTimeout,
         maxScatterGatherBytes,
         maxSubqueryRows,
+        maxSubqueryBytes,
+        useNestedForUnknownTypeInSubquery,
         maxQueryTimeout,
         maxRequestHeaderSize,
         gracefulShutdownTimeout,
@@ -318,7 +522,11 @@ public class ServerConfig
         errorResponseTransformStrategy,
         showDetailedJettyErrors,
         contentSecurityPolicy,
-        enableHSTS
+        enableHSTS,
+        enableResponseIdentityHeaders,
+        enableQueryRequestsQueuing,
+        uriCompliance,
+        enforceStrictSNIHostChecking
     );
   }
 
@@ -333,6 +541,8 @@ public class ServerConfig
            ", defaultQueryTimeout=" + defaultQueryTimeout +
            ", maxScatterGatherBytes=" + maxScatterGatherBytes +
            ", maxSubqueryRows=" + maxSubqueryRows +
+           ", maxSubqueryBytes=" + maxSubqueryBytes +
+           ", useNestedForUnknownTypeInSubquery=" + useNestedForUnknownTypeInSubquery +
            ", maxQueryTimeout=" + maxQueryTimeout +
            ", maxRequestHeaderSize=" + maxRequestHeaderSize +
            ", gracefulShutdownTimeout=" + gracefulShutdownTimeout +
@@ -345,11 +555,45 @@ public class ServerConfig
            ", showDetailedJettyErrors=" + showDetailedJettyErrors +
            ", contentSecurityPolicy=" + contentSecurityPolicy +
            ", enableHSTS=" + enableHSTS +
+           ", enableResponseIdentityHeaders=" + enableResponseIdentityHeaders +
+           ", enableQueryRequestsQueuing=" + enableQueryRequestsQueuing +
+           ", uriCompliance=" + uriCompliance +
+           ", enforceStrictSNIHostChecking=" + enforceStrictSNIHostChecking +
            '}';
   }
 
   public static int getDefaultNumThreads()
   {
     return Math.max(10, (JvmUtils.getRuntimeInfo().getAvailableProcessors() * 17) / 16 + 2) + 30;
+  }
+
+  public static int getNumThreadsFromProperties(Properties properties)
+  {
+    final String value = properties.getProperty("druid.server.http.numThreads");
+    return value == null ? getDefaultNumThreads() : Integer.parseInt(value);
+  }
+
+  public static int getDefaultMaxConcurrentRequests(int numThreads)
+  {
+    return Math.max(1, Math.max(numThreads - 4, (int) (numThreads * 0.8)));
+  }
+
+  public static class UriComplianceDeserializer extends JsonDeserializer<UriCompliance>
+  {
+    @Override
+    public UriCompliance deserialize(JsonParser p, DeserializationContext ctxt) throws IOException
+    {
+      String value = p.getValueAsString();
+      return UriCompliance.valueOf(value);
+    }
+  }
+
+  public static class UriComplianceSerializer extends JsonSerializer<UriCompliance>
+  {
+    @Override
+    public void serialize(UriCompliance value, JsonGenerator gen, SerializerProvider serializers) throws IOException
+    {
+      gen.writeString(value.getName());
+    }
   }
 }

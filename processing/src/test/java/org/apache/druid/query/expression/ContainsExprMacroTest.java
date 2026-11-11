@@ -19,12 +19,11 @@
 
 package org.apache.druid.query.expression;
 
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.math.expr.ExprEval;
 import org.apache.druid.math.expr.ExpressionType;
 import org.apache.druid.math.expr.InputBindings;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 public class ContainsExprMacroTest extends MacroTestBase
 {
@@ -36,15 +35,21 @@ public class ContainsExprMacroTest extends MacroTestBase
   @Test
   public void testErrorZeroArguments()
   {
-    expectException(IllegalArgumentException.class, "Function[contains_string] requires 2 arguments");
-    eval("contains_string()", InputBindings.nilBindings());
+    assertException(
+        IllegalArgumentException.class,
+        "Function[contains_string] requires 2 arguments",
+        () -> eval("contains_string()", InputBindings.nilBindings())
+    );
   }
 
   @Test
   public void testErrorThreeArguments()
   {
-    expectException(IllegalArgumentException.class, "Function[contains_string] requires 2 arguments");
-    eval("contains_string('a', 'b', 'c')", InputBindings.nilBindings());
+    assertException(
+        IllegalArgumentException.class,
+        "Function[contains_string] requires 2 arguments",
+        () -> eval("contains_string('a', 'b', 'c')", InputBindings.nilBindings())
+    );
   }
 
   @Test
@@ -54,7 +59,7 @@ public class ContainsExprMacroTest extends MacroTestBase
         "contains_string(a, 'oba')",
         InputBindings.forInputSupplier("a", ExpressionType.STRING, () -> "foobar")
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         ExprEval.ofLongBoolean(true).value(),
         result.value()
     );
@@ -67,7 +72,7 @@ public class ContainsExprMacroTest extends MacroTestBase
         "contains_string(a, 'bar')",
         InputBindings.forInputSupplier("a", ExpressionType.STRING, () -> "foo")
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         ExprEval.ofLongBoolean(false).value(),
         result.value()
     );
@@ -76,17 +81,13 @@ public class ContainsExprMacroTest extends MacroTestBase
   @Test
   public void testNullSearch()
   {
-    if (NullHandling.sqlCompatible()) {
-      expectException(IllegalArgumentException.class, "Function[contains_string] substring must be a string literal");
-    }
-
-    final ExprEval<?> result = eval(
-        "contains_string(a, null)",
-        InputBindings.forInputSupplier("a", ExpressionType.STRING, () -> "foo")
-    );
-    Assert.assertEquals(
-        ExprEval.ofLongBoolean(true).value(),
-        result.value()
+    assertException(
+        IllegalArgumentException.class,
+        "Function[contains_string] substring must be a string literal",
+        () -> eval(
+            "contains_string(a, null)",
+            InputBindings.forInputSupplier("a", ExpressionType.STRING, () -> "foo")
+        )
     );
   }
 
@@ -97,7 +98,7 @@ public class ContainsExprMacroTest extends MacroTestBase
         "contains_string(a, '')",
         InputBindings.forInputSupplier("a", ExpressionType.STRING, () -> "foo")
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         ExprEval.ofLongBoolean(true).value(),
         result.value()
     );
@@ -106,17 +107,13 @@ public class ContainsExprMacroTest extends MacroTestBase
   @Test
   public void testNullSearchOnEmptyString()
   {
-    if (NullHandling.sqlCompatible()) {
-      expectException(IllegalArgumentException.class, "Function[contains_string] substring must be a string literal");
-    }
-
-    final ExprEval<?> result = eval(
-        "contains_string(a, null)",
-        InputBindings.forInputSupplier("a", ExpressionType.STRING, () -> "")
-    );
-    Assert.assertEquals(
-        ExprEval.ofLongBoolean(true).value(),
-        result.value()
+    assertException(
+        IllegalArgumentException.class,
+        "Function[contains_string] substring must be a string literal",
+        () -> eval(
+            "contains_string(a, null)",
+            InputBindings.forInputSupplier("a", ExpressionType.STRING, () -> "")
+        )
     );
   }
 
@@ -127,7 +124,7 @@ public class ContainsExprMacroTest extends MacroTestBase
         "contains_string(a, '')",
         InputBindings.forInputSupplier("a", ExpressionType.STRING, () -> "")
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         ExprEval.ofLongBoolean(true).value(),
         result.value()
     );
@@ -136,14 +133,10 @@ public class ContainsExprMacroTest extends MacroTestBase
   @Test
   public void testNullSearchOnNull()
   {
-    if (NullHandling.sqlCompatible()) {
-      expectException(IllegalArgumentException.class, "Function[contains_string] substring must be a string literal");
-    }
-
-    final ExprEval<?> result = eval("contains_string(a, null)", InputBindings.nilBindings());
-    Assert.assertEquals(
-        ExprEval.ofLongBoolean(true).value(),
-        result.value()
+    assertException(
+        IllegalArgumentException.class,
+        "Function[contains_string] substring must be a string literal",
+        () -> eval("contains_string(a, null)", InputBindings.nilBindings())
     );
   }
 
@@ -151,9 +144,6 @@ public class ContainsExprMacroTest extends MacroTestBase
   public void testEmptyStringSearchOnNull()
   {
     final ExprEval<?> result = eval("contains_string(a, '')", InputBindings.nilBindings());
-    Assert.assertEquals(
-        ExprEval.ofLongBoolean(!NullHandling.sqlCompatible()).value(),
-        result.value()
-    );
+    Assertions.assertNull(result.value());
   }
 }

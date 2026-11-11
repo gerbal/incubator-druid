@@ -19,6 +19,7 @@
 
 package org.apache.druid.segment.incremental;
 
+import java.util.HashMap;
 import java.util.Map;
 
 public class SimpleRowIngestionMeters implements RowIngestionMeters
@@ -26,8 +27,9 @@ public class SimpleRowIngestionMeters implements RowIngestionMeters
   private long processed;
   private long processedWithError;
   private long unparseable;
-  private long thrownAway;
+  private long filtered;
   private long processedBytes;
+  private final long[] thrownAwayByReason = new long[InputRowFilterResult.numValues()];
 
   @Override
   public long getProcessed()
@@ -80,13 +82,42 @@ public class SimpleRowIngestionMeters implements RowIngestionMeters
   @Override
   public long getThrownAway()
   {
-    return thrownAway;
+    long total = 0;
+    for (InputRowFilterResult reason : InputRowFilterResult.rejectedValues()) {
+      total += thrownAwayByReason[reason.ordinal()];
+    }
+    return total;
   }
 
   @Override
-  public void incrementThrownAway()
+  public void incrementThrownAway(InputRowFilterResult reason)
   {
-    thrownAway++;
+    ++thrownAwayByReason[reason.ordinal()];
+  }
+
+  @Override
+  public Map<String, Long> getThrownAwayByReason()
+  {
+    final Map<String, Long> result = new HashMap<>();
+    for (InputRowFilterResult reason : InputRowFilterResult.rejectedValues()) {
+      long count = thrownAwayByReason[reason.ordinal()];
+      if (count > 0) {
+        result.put(reason.getReason(), count);
+      }
+    }
+    return result;
+  }
+
+  @Override
+  public long getFiltered()
+  {
+    return filtered;
+  }
+
+  @Override
+  public void incrementFiltered()
+  {
+    filtered++;
   }
 
   @Override
@@ -96,8 +127,9 @@ public class SimpleRowIngestionMeters implements RowIngestionMeters
         processed,
         processedBytes,
         processedWithError,
-        thrownAway,
-        unparseable
+        getThrownAwayByReason(),
+        unparseable,
+        filtered
     );
   }
 
@@ -112,7 +144,12 @@ public class SimpleRowIngestionMeters implements RowIngestionMeters
     this.processed += rowIngestionMetersTotals.getProcessed();
     this.processedWithError += rowIngestionMetersTotals.getProcessedWithError();
     this.unparseable += rowIngestionMetersTotals.getUnparseable();
-    this.thrownAway += rowIngestionMetersTotals.getThrownAway();
+    this.filtered += rowIngestionMetersTotals.getFiltered();
     this.processedBytes += rowIngestionMetersTotals.getProcessedBytes();
+
+    final Map<String, Long> thrownAwayByReason = rowIngestionMetersTotals.getThrownAwayByReason();
+    for (InputRowFilterResult reason : InputRowFilterResult.rejectedValues()) {
+      this.thrownAwayByReason[reason.ordinal()] += thrownAwayByReason.getOrDefault(reason.getReason(), 0L);
+    }
   }
 }

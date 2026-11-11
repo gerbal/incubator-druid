@@ -21,19 +21,19 @@ package org.apache.druid.segment.join;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Iterables;
 import nl.jqno.equalsverifier.EqualsVerifier;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.java.util.common.IAE;
-import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.StringUtils;
-import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.math.expr.ExprMacroTable;
-import org.apache.druid.query.QueryContexts;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.expression.TestExprMacroTable;
 import org.apache.druid.query.filter.BoundDimFilter;
 import org.apache.druid.query.filter.ExpressionDimFilter;
 import org.apache.druid.query.filter.Filter;
 import org.apache.druid.query.filter.InDimFilter;
+import org.apache.druid.segment.CursorBuildSpec;
+import org.apache.druid.segment.CursorFactory;
 import org.apache.druid.segment.VirtualColumn;
 import org.apache.druid.segment.VirtualColumns;
 import org.apache.druid.segment.column.ColumnType;
@@ -52,14 +52,15 @@ import org.apache.druid.segment.join.filter.rewrite.JoinFilterRewriteConfig;
 import org.apache.druid.segment.join.lookup.LookupJoinable;
 import org.apache.druid.segment.join.table.IndexedTableJoinable;
 import org.apache.druid.segment.virtual.ExpressionVirtualColumn;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
-public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTest
+public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentCursorFactoryTest
 {
   @Test
   public void test_filterPushDown_factToRegionToCountryLeftFilterOnChannel()
@@ -76,20 +77,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         VirtualColumns.EMPTY
     );
 
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -119,8 +116,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         null,
         ImmutableSet.of()
     );
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -153,20 +150,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         VirtualColumns.EMPTY
     );
 
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -183,8 +176,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         new SelectorFilter("rtc.countryName", "United States"),
         ImmutableSet.of()
     );
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -209,20 +202,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         VirtualColumns.EMPTY
     );
 
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -249,8 +238,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -276,35 +265,29 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         VirtualColumns.EMPTY
     );
 
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
             FACT_TO_REGION_PREFIX + "regionName",
             REGION_TO_COUNTRY_PREFIX + "countryName"
         ),
-        NullHandling.sqlCompatible() ?
         ImmutableList.of(
             new Object[]{"Talk:Oswald Tilghman", null, null},
             new Object[]{"Rallicula", null, null},
             new Object[]{"Apamea abruzzorum", null, null},
             new Object[]{"Atractus flammigerus", null, null},
             new Object[]{"Agama mossambica", null, null}
-        ) :
-        ImmutableList.of() // when not running in SQL compatible mode, countryNumber does not have nulls
+        )
     );
 
     JoinFilterSplit expectedFilterSplit = new JoinFilterSplit(
@@ -320,8 +303,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -347,20 +330,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         VirtualColumns.EMPTY
     );
 
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -382,8 +361,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -401,13 +380,11 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
     );
 
     VirtualColumns virtualColumns = VirtualColumns.create(
-        ImmutableList.of(
-            new ExpressionVirtualColumn(
-                "v1",
-                "concat('virtual-column-', \"channel\")",
-                ColumnType.STRING,
-                TestExprMacroTable.INSTANCE
-            )
+        new ExpressionVirtualColumn(
+            "v1",
+            "concat('virtual-column-', \"channel\")",
+            ColumnType.STRING,
+            TestExprMacroTable.INSTANCE
         )
     );
 
@@ -417,20 +394,19 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         virtualColumns
     );
 
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            virtualColumns,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder()
+                           .setFilter(originalFilter)
+                           .setVirtualColumns(virtualColumns)
+                           .build()
         ),
         ImmutableList.of(
             "page",
@@ -461,8 +437,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -472,13 +448,11 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
     // a selector filter on an ExpressionVirtualColumn
     Filter originalFilter = new SelectorFilter("v0", "VIRGINIA");
     VirtualColumns virtualColumns = VirtualColumns.create(
-        ImmutableList.of(
-            new ExpressionVirtualColumn(
-                "v0",
-                "upper(\"r1.regionName\")",
-                ColumnType.STRING,
-                TestExprMacroTable.INSTANCE
-            )
+        new ExpressionVirtualColumn(
+            "v0",
+            "upper(\"r1.regionName\")",
+            ColumnType.STRING,
+            TestExprMacroTable.INSTANCE
         )
     );
 
@@ -491,20 +465,19 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses.getJoinableClauses(),
         virtualColumns
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses.getJoinableClauses(),
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            virtualColumns,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder()
+                           .setFilter(originalFilter)
+                           .setVirtualColumns(virtualColumns)
+                           .build()
         ),
         ImmutableList.of(
             "page",
@@ -521,8 +494,52 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
+  }
+
+  @Test
+  public void test_filterPushDown_orFilterWithPostJoinVirtualColumnIsNotPushedDown()
+  {
+    // An OR filter where one sub-filter references a base-table virtual column and the other references a
+    // post-join virtual column (defined on a join column). The entire OR must not be pushed down, because
+    // the post-join virtual column cannot be evaluated on the base table alone.
+    final Filter originalFilter = new OrFilter(
+        ImmutableList.of(
+            new SelectorFilter("v0", "virtual-column-#en.wikipedia"),
+            new SelectorFilter("v1", "VIRGINIA")
+        )
+    );
+
+    final VirtualColumns virtualColumns = VirtualColumns.create(
+        new ExpressionVirtualColumn(
+            "v0",
+            "concat('virtual-column-', \"channel\")",
+            ColumnType.STRING,
+            TestExprMacroTable.INSTANCE
+        ),
+        new ExpressionVirtualColumn(
+            "v1",
+            "upper(\"r1.regionName\")",
+            ColumnType.STRING,
+            TestExprMacroTable.INSTANCE
+        )
+    );
+
+    final JoinFilterPreAnalysis joinFilterPreAnalysis = makeDefaultConfigPreAnalysis(
+        originalFilter,
+        ImmutableList.of(factToRegion(JoinType.LEFT)),
+        virtualColumns
+    );
+
+    final JoinFilterSplit expectedFilterSplit = new JoinFilterSplit(
+        null,
+        originalFilter,
+        ImmutableSet.of()
+    );
+
+    final JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -595,20 +612,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -685,8 +698,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -722,20 +735,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -758,7 +767,7 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
 
     ExpressionVirtualColumn expectedVirtualColumn = new ExpressionVirtualColumn(
         "JOIN-FILTER-PUSHDOWN-VIRTUAL-COLUMN-0",
@@ -766,17 +775,95 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ColumnType.STRING,
         ExprMacroTable.nil()
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         expectedFilterSplit.getBaseTableFilter(),
         actualFilterSplit.getBaseTableFilter()
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         expectedFilterSplit.getJoinTableFilter(),
         actualFilterSplit.getJoinTableFilter()
     );
     ExpressionVirtualColumn actualVirtualColumn = (ExpressionVirtualColumn) actualFilterSplit.getPushDownVirtualColumns()
                                                                                              .iterator().next();
     compareExpressionVirtualColumns(expectedVirtualColumn, actualVirtualColumn);
+  }
+
+  @Test
+  public void test_filterPushDown_pushDownVirtualColumnAvoidsQueryVirtualColumnName()
+  {
+    // Like test_filterPushDown_factExpressionsToRegionToCountryLeftFilterOnChannelAndCountryName, but with a query
+    // virtual column, read only from the base table, that takes the name the pushed-down virtual column would get.
+    final String pushDownName = "JOIN-FILTER-PUSHDOWN-VIRTUAL-COLUMN-0";
+    final VirtualColumns virtualColumns = VirtualColumns.create(
+        new ExpressionVirtualColumn(pushDownName, "concat(page, 'x')", ColumnType.STRING, ExprMacroTable.nil())
+    );
+    JoinableClause factExprToRegon = new JoinableClause(
+        FACT_TO_REGION_PREFIX,
+        new IndexedTableJoinable(regionsTable),
+        JoinType.LEFT,
+        JoinConditionAnalysis.forExpression(
+            StringUtils.format(
+                "\"%sregionIsoCode\" == reverse(regionIsoCode) && \"%scountryIsoCode\" == reverse(countryIsoCode)",
+                FACT_TO_REGION_PREFIX,
+                FACT_TO_REGION_PREFIX
+            ),
+            FACT_TO_REGION_PREFIX,
+            ExprMacroTable.nil()
+        )
+    );
+    List<JoinableClause> joinableClauses = ImmutableList.of(
+        factExprToRegon,
+        regionToCountry(JoinType.LEFT)
+    );
+    Filter originalFilter = new AndFilter(
+        ImmutableList.of(
+            new SelectorFilter("channel", "#en.wikipedia"),
+            new SelectorFilter("rtc.countryName", "States United")
+        )
+    );
+
+    JoinFilterPreAnalysis joinFilterPreAnalysis = makeDefaultConfigPreAnalysis(
+        originalFilter,
+        joinableClauses,
+        virtualColumns
+    );
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
+        joinableClauses,
+        joinFilterPreAnalysis
+    );
+
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).setVirtualColumns(virtualColumns).build()
+        ),
+        ImmutableList.of(
+            "page",
+            pushDownName,
+            REGION_TO_COUNTRY_PREFIX + "countryName"
+        ),
+        ImmutableList.of(
+            new Object[]{"Old Anatolian Turkish", "Old Anatolian Turkishx", "States United"}
+        )
+    );
+
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(
+        Optional.of(
+            new AndFilter(
+                ImmutableList.of(
+                    new SelectorFilter("channel", "#en.wikipedia"),
+                    new InDimFilter("_" + pushDownName, ImmutableSet.of("SU")).toFilter()
+                )
+            )
+        ),
+        actualFilterSplit.getBaseTableFilter()
+    );
+    compareExpressionVirtualColumns(
+        new ExpressionVirtualColumn("_" + pushDownName, "reverse(countryIsoCode)", ColumnType.STRING, ExprMacroTable.nil()),
+        (ExpressionVirtualColumn) Iterables.getOnlyElement(actualFilterSplit.getPushDownVirtualColumns())
+    );
   }
 
   @Test
@@ -813,32 +900,32 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    expectedException.expect(IllegalArgumentException.class);
-    expectedException.expectMessage(
-        "Cannot build hash-join matcher on non-equi-join condition: \"r1.regionIsoCode\" == regionIsoCode && reverse(\"r1.countryIsoCode\") == countryIsoCode");
-
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
-        ),
-        ImmutableList.of(
-            "page",
-            FACT_TO_REGION_PREFIX + "regionName",
-            REGION_TO_COUNTRY_PREFIX + "countryName"
-        ),
-        ImmutableList.of(
-            new Object[]{"Old Anatolian Turkish", "Ainigriv", "States United"}
+    final IllegalArgumentException exception = Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () -> JoinTestHelper.verifyCursor(
+            cursorFactory.makeCursorHolder(
+                CursorBuildSpec.builder().setFilter(originalFilter).build()
+            ),
+            ImmutableList.of(
+                "page",
+                FACT_TO_REGION_PREFIX + "regionName",
+                REGION_TO_COUNTRY_PREFIX + "countryName"
+            ),
+            ImmutableList.of(
+                new Object[]{"Old Anatolian Turkish", "Ainigriv", "States United"}
+            )
         )
+    );
+    Assertions.assertEquals(
+        "Cannot build hash-join matcher on non-equi-join condition: "
+        + "\"r1.regionIsoCode\" == regionIsoCode && reverse(\"r1.countryIsoCode\") == countryIsoCode",
+        exception.getMessage()
     );
   }
 
@@ -866,20 +953,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -933,8 +1016,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -968,20 +1051,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            filter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(filter).build()
         ),
         ImmutableList.of(
             "page",
@@ -1013,12 +1092,12 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         )
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(
         expectedFilterSplit.getBaseTableFilter(),
         actualFilterSplit.getBaseTableFilter()
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         expectedFilterSplit.getJoinTableFilter(),
         actualFilterSplit.getJoinTableFilter()
     );
@@ -1058,20 +1137,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            filter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(filter).build()
         ),
         ImmutableList.of(
             "page",
@@ -1103,12 +1178,12 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         )
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(
         expectedFilterSplit.getBaseTableFilter(),
         actualFilterSplit.getBaseTableFilter()
     );
-    Assert.assertEquals(
+    Assertions.assertEquals(
         expectedFilterSplit.getJoinTableFilter(),
         actualFilterSplit.getJoinTableFilter()
     );
@@ -1132,20 +1207,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -1171,8 +1242,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -1190,20 +1261,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -1228,8 +1295,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -1247,20 +1314,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -1284,8 +1347,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -1303,20 +1366,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -1341,8 +1400,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -1360,20 +1419,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -1396,8 +1451,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -1415,22 +1470,18 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
     // In non-SQL-compatible mode, we get an extra row, since the 'null' countryNumber for "Talk:Oswald Tilghman"
     // is interpreted as 0 (a.k.a. Australia).
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -1439,12 +1490,7 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
             FACT_TO_COUNTRY_ON_NUMBER_PREFIX + "countryName",
             FACT_TO_COUNTRY_ON_NUMBER_PREFIX + "countryNumber"
         ),
-        NullHandling.sqlCompatible() ?
         ImmutableList.of(
-            new Object[]{"Peremptory norm", "AU", "AU", "Australia", 0L}
-        ) :
-        ImmutableList.of(
-            new Object[]{"Talk:Oswald Tilghman", null, "AU", "Australia", 0L},
             new Object[]{"Peremptory norm", "AU", "AU", "Australia", 0L}
         )
     );
@@ -1460,8 +1506,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -1479,22 +1525,18 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
     // In non-SQL-compatible mode, we get an extra row, since the 'null' countryNumber for "Talk:Oswald Tilghman"
     // is interpreted as 0 (a.k.a. Australia).
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -1502,12 +1544,7 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
             FACT_TO_COUNTRY_ON_NUMBER_PREFIX + "k",
             FACT_TO_COUNTRY_ON_NUMBER_PREFIX + "v"
         ),
-        NullHandling.sqlCompatible() ?
         ImmutableList.of(
-            new Object[]{"Peremptory norm", "AU", "0", "Australia"}
-        ) :
-        ImmutableList.of(
-            new Object[]{"Talk:Oswald Tilghman", null, "0", "Australia"},
             new Object[]{"Peremptory norm", "AU", "0", "Australia"}
         )
     );
@@ -1523,8 +1560,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -1542,20 +1579,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -1578,8 +1611,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -1597,20 +1630,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -1632,8 +1661,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -1651,20 +1680,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            filter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(filter).build()
         ),
         ImmutableList.of(
             "page",
@@ -1690,8 +1715,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -1709,20 +1734,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            filter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(filter).build()
         ),
         ImmutableList.of(
             "page",
@@ -1747,8 +1768,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -1766,20 +1787,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -1803,8 +1820,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -1822,20 +1839,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -1858,8 +1871,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -1889,20 +1902,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -1924,8 +1933,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -1960,20 +1969,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -1995,8 +2000,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
 
@@ -2033,33 +2038,32 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
     // This query doesn't execute because regionName is not a key column, but we can still check the
     // filter rewrites.
-    expectedException.expect(IAE.class);
-    expectedException.expectMessage(
-        "Cannot build hash-join matcher on non-key-based condition: Equality{leftExpr=user, rightColumn='regionName'}"
+    final IAE exception = Assertions.assertThrows(
+        IAE.class,
+        () -> JoinTestHelper.verifyCursor(
+            cursorFactory.makeCursorHolder(
+                CursorBuildSpec.builder().setFilter(originalFilter).build()
+            ),
+            ImmutableList.of(
+                "page",
+                FACT_TO_REGION_PREFIX + "regionName"
+            ),
+            ImmutableList.of()
+        )
     );
-
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
-        ),
-        ImmutableList.of(
-            "page",
-            FACT_TO_REGION_PREFIX + "regionName"
-        ),
-        ImmutableList.of()
+    Assertions.assertEquals(
+        "Cannot build hash-join matcher on non-key-based condition: "
+        + "Equality{leftExpr=user, rightColumn='regionName', includeNull=false}",
+        exception.getMessage()
     );
 
     JoinFilterSplit expectedFilterSplit = new JoinFilterSplit(
@@ -2073,8 +2077,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -2092,8 +2096,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
                 false,
                 true,
                 true,
-                QueryContexts.DEFAULT_ENABLE_REWRITE_JOIN_TO_FILTER,
-                QueryContexts.DEFAULT_ENABLE_JOIN_FILTER_REWRITE_MAX_SIZE
+                QueryContextParameters.ENABLE_REWRITE_JOIN_TO_FILTER.getLiteralDefault(),
+                QueryContextParameters.JOIN_FILTER_REWRITE_MAX_SIZE.getLiteralDefault()
             ),
             joinableClauses.getJoinableClauses(),
             VirtualColumns.EMPTY,
@@ -2101,20 +2105,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         )
     );
 
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses.getJoinableClauses(),
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -2132,8 +2132,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -2172,8 +2172,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
                 true,
                 false,
                 true,
-                QueryContexts.DEFAULT_ENABLE_REWRITE_JOIN_TO_FILTER,
-                QueryContexts.DEFAULT_ENABLE_JOIN_FILTER_REWRITE_MAX_SIZE
+                QueryContextParameters.ENABLE_REWRITE_JOIN_TO_FILTER.getLiteralDefault(),
+                QueryContextParameters.JOIN_FILTER_REWRITE_MAX_SIZE.getLiteralDefault()
             ),
             joinableClauses.getJoinableClauses(),
             VirtualColumns.EMPTY,
@@ -2181,20 +2181,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         )
     );
 
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses.getJoinableClauses(),
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -2240,8 +2236,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -2355,8 +2351,9 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         joinableClauses,
         VirtualColumns.EMPTY
     );
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
@@ -2375,13 +2372,13 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
       expectedVirtualColumns = ImmutableSet.of(
           new ExpressionVirtualColumn(
               rewrittenRegionIsoCodeColumnName,
-              "(upper [(lower [regionIsoCode])])",
+              "upper(lower(\"regionIsoCode\"))",
               ColumnType.STRING,
               ExprMacroTable.nil()
           ),
           new ExpressionVirtualColumn(
               rewrittenCountryIsoCodeColumnName,
-              "(upper [(lower [countryIsoCode])])",
+              "upper(lower(\"countryIsoCode\"))",
               ColumnType.STRING,
               ExprMacroTable.nil()
           )
@@ -2390,14 +2387,9 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
       expectedVirtualColumns = ImmutableSet.of();
     }
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -2493,8 +2485,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         expectedVirtualColumns
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -2518,20 +2510,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         VirtualColumns.EMPTY
     );
 
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -2555,8 +2543,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
 
@@ -2589,8 +2577,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
                 true,
                 true,
                 true,
-                QueryContexts.DEFAULT_ENABLE_REWRITE_JOIN_TO_FILTER,
-                QueryContexts.DEFAULT_ENABLE_JOIN_FILTER_REWRITE_MAX_SIZE
+                QueryContextParameters.ENABLE_REWRITE_JOIN_TO_FILTER.getLiteralDefault(),
+                QueryContextParameters.JOIN_FILTER_REWRITE_MAX_SIZE.getLiteralDefault()
             ),
             joinableClauses,
             VirtualColumns.EMPTY,
@@ -2598,20 +2586,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         )
     );
 
-    HashJoinSegmentStorageAdapter adapter = new HashJoinSegmentStorageAdapter(
-        factSegment.asStorageAdapter(),
+    HashJoinSegmentCursorFactory cursorFactory = new HashJoinSegmentCursorFactory(
+        factSegment.as(CursorFactory.class),
+        null,
         joinableClauses,
         joinFilterPreAnalysis
     );
 
-    JoinTestHelper.verifyCursors(
-        adapter.makeCursors(
-            originalFilter,
-            Intervals.ETERNITY,
-            VirtualColumns.EMPTY,
-            Granularities.ALL,
-            false,
-            null
+    JoinTestHelper.verifyCursor(
+        cursorFactory.makeCursorHolder(
+            CursorBuildSpec.builder().setFilter(originalFilter).build()
         ),
         ImmutableList.of(
             "page",
@@ -2629,8 +2613,8 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         ImmutableSet.of()
     );
 
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = split(joinFilterPreAnalysis);
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
   }
 
   @Test
@@ -2673,7 +2657,16 @@ public class JoinFilterAnalyzerTest extends BaseHashJoinSegmentStorageAdapterTes
         null,
         ImmutableSet.of()
     );
-    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis, baseTableFilter);
-    Assert.assertEquals(expectedFilterSplit, actualFilterSplit);
+    JoinFilterSplit actualFilterSplit = JoinFilterAnalyzer.splitFilter(
+        joinFilterPreAnalysis,
+        baseTableFilter
+    );
+    Assertions.assertEquals(expectedFilterSplit, actualFilterSplit);
+  }
+
+
+  private JoinFilterSplit split(JoinFilterPreAnalysis preAnalysis)
+  {
+    return JoinFilterAnalyzer.splitFilter(preAnalysis, null);
   }
 }

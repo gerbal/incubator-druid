@@ -29,6 +29,7 @@ import org.apache.druid.segment.data.CompressedColumnarDoublesSuppliers;
 
 import javax.annotation.Nullable;
 import java.nio.ByteOrder;
+import java.util.Objects;
 
 public class DoubleNumericColumnPartSerde implements ColumnPartSerde
 {
@@ -96,10 +97,11 @@ public class DoubleNumericColumnPartSerde implements ColumnPartSerde
   @Override
   public Deserializer getDeserializer()
   {
-    return (buffer, builder, columnConfig) -> {
+    return (buffer, builder, columnConfig, parent) -> {
       final Supplier<ColumnarDoubles> column = CompressedColumnarDoublesSuppliers.fromByteBuffer(
           buffer,
-          byteOrder
+          byteOrder,
+          builder.getFileMapper()
       );
       DoubleNumericColumnSupplier columnSupplier = new DoubleNumericColumnSupplier(
           column,
@@ -110,5 +112,24 @@ public class DoubleNumericColumnPartSerde implements ColumnPartSerde
              .setNumericColumnSupplier(columnSupplier);
 
     };
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    final DoubleNumericColumnPartSerde that = (DoubleNumericColumnPartSerde) o;
+    return Objects.equals(byteOrder, that.byteOrder);
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return Objects.hashCode(byteOrder);
   }
 }

@@ -53,6 +53,7 @@ public class OrderByColumnSpec
      * of an exception thrown.
      */
     private static final Map<String, Direction> STUPID_ENUM_MAP;
+
     static {
       final ImmutableMap.Builder<String, Direction> bob = ImmutableMap.builder();
       for (Direction direction : Direction.values()) {
@@ -122,7 +123,7 @@ public class OrderByColumnSpec
   {
     return Lists.transform(
         Arrays.asList(dimension),
-        new Function<String, OrderByColumnSpec>()
+        new Function<>()
         {
           @Override
           public OrderByColumnSpec apply(@Nullable String input)
@@ -142,7 +143,7 @@ public class OrderByColumnSpec
   {
     return Lists.transform(
         Arrays.asList(dimension),
-        new Function<String, OrderByColumnSpec>()
+        new Function<>()
         {
           @Override
           public OrderByColumnSpec apply(@Nullable String input)

@@ -33,11 +33,13 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Set;
 import java.util.Spliterator;
 import java.util.TreeSet;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public final class CollectionUtils
@@ -50,7 +52,7 @@ public final class CollectionUtils
    */
   public static <E> Collection<E> createLazyCollectionFromStream(Supplier<Stream<E>> sequentialStreamSupplier, int size)
   {
-    return new AbstractCollection<E>()
+    return new AbstractCollection<>()
     {
       @Override
       public Iterator<E> iterator()
@@ -124,11 +126,21 @@ public final class CollectionUtils
   }
 
   /**
+   * Creates an immutable map by mapping each entry in the given collection to
+   * a key and a value.
+   */
+  public static <E, K, V> Map<K, V> toMap(Collection<E> collection, Function<E, K> keyMapper, Function<E, V> valueMapper)
+  {
+    return collection.stream().collect(Collectors.toMap(keyMapper, valueMapper));
+  }
+
+  /**
    * Returns a LinkedHashMap with an appropriate size based on the callers expectedSize. This methods functionality
    * mirrors that of com.google.common.collect.Maps#newLinkedHashMapWithExpectedSize in Guava 19+. Thus, this method
    * can be replaced with Guava's implementation once Druid has upgraded its Guava dependency to a sufficient version.
    *
    * @param expectedSize the expected size of the LinkedHashMap
+   *
    * @return LinkedHashMap object with appropriate size based on callers expectedSize
    */
   @SuppressForbidden(reason = "java.util.LinkedHashMap#<init>(int)")
@@ -175,13 +187,34 @@ public final class CollectionUtils
   }
 
   /**
-   * Intersection of two sets: {@code C = A ∪ B}.
+   * Union of two sets: {@code C = A ∪ B}.
    */
   public static <T> Set<T> union(Set<T> left, Set<T> right)
   {
     Set<T> result = new HashSet<>(left);
     result.addAll(right);
     return result;
+  }
+
+  /**
+   * Like {@link Iterables#getOnlyElement(Iterable)}, but allows a customizable error message.
+   */
+  public static <T, I extends Iterable<T>, X extends Throwable> T getOnlyElement(
+      final I iterable,
+      final Function<? super I, ? extends X> exceptionSupplier
+  ) throws X
+  {
+    final Iterator<T> iterator = iterable.iterator();
+    try {
+      final T object = iterator.next();
+      if (iterator.hasNext()) {
+        throw exceptionSupplier.apply(iterable);
+      }
+      return object;
+    }
+    catch (NoSuchElementException e) {
+      throw exceptionSupplier.apply(iterable);
+    }
   }
 
   private CollectionUtils()

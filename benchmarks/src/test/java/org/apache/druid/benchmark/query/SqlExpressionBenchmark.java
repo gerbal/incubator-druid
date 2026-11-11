@@ -20,56 +20,21 @@
 package org.apache.druid.benchmark.query;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
-import org.apache.druid.common.config.NullHandling;
-import org.apache.druid.java.util.common.granularity.Granularities;
-import org.apache.druid.java.util.common.guava.Sequence;
-import org.apache.druid.java.util.common.io.Closer;
-import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.math.expr.ExpressionProcessing;
-import org.apache.druid.query.DruidProcessingConfig;
-import org.apache.druid.query.QueryContexts;
-import org.apache.druid.query.QueryRunnerFactoryConglomerate;
-import org.apache.druid.segment.QueryableIndex;
-import org.apache.druid.segment.generator.GeneratorBasicSchemas;
-import org.apache.druid.segment.generator.GeneratorSchemaInfo;
-import org.apache.druid.segment.generator.SegmentGenerator;
-import org.apache.druid.server.QueryStackTests;
-import org.apache.druid.server.security.AuthTestUtils;
-import org.apache.druid.sql.calcite.SqlVectorizedExpressionSanityTest;
-import org.apache.druid.sql.calcite.planner.CalciteRulesManager;
-import org.apache.druid.sql.calcite.planner.CatalogResolver;
-import org.apache.druid.sql.calcite.planner.DruidPlanner;
-import org.apache.druid.sql.calcite.planner.PlannerConfig;
-import org.apache.druid.sql.calcite.planner.PlannerFactory;
-import org.apache.druid.sql.calcite.planner.PlannerResult;
-import org.apache.druid.sql.calcite.run.SqlEngine;
-import org.apache.druid.sql.calcite.schema.DruidSchemaCatalog;
-import org.apache.druid.sql.calcite.util.CalciteTests;
-import org.apache.druid.sql.calcite.util.SpecificSegmentsQuerySegmentWalker;
-import org.apache.druid.timeline.DataSegment;
-import org.apache.druid.timeline.partition.LinearShardSpec;
-import org.openjdk.jmh.annotations.Benchmark;
-import org.openjdk.jmh.annotations.BenchmarkMode;
+import org.apache.druid.query.QueryContext;
+import org.apache.druid.query.context.QueryContextParameters;
+import org.apache.druid.query.groupby.DeferExpressionDimensions;
 import org.openjdk.jmh.annotations.Fork;
 import org.openjdk.jmh.annotations.Level;
 import org.openjdk.jmh.annotations.Measurement;
-import org.openjdk.jmh.annotations.Mode;
-import org.openjdk.jmh.annotations.OutputTimeUnit;
 import org.openjdk.jmh.annotations.Param;
 import org.openjdk.jmh.annotations.Scope;
 import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
-import org.openjdk.jmh.annotations.TearDown;
 import org.openjdk.jmh.annotations.Warmup;
-import org.openjdk.jmh.infra.Blackhole;
-
-import javax.annotation.Nullable;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Benchmark that tests various SQL queries.
@@ -78,153 +43,182 @@ import java.util.concurrent.TimeUnit;
 @Fork(value = 1)
 @Warmup(iterations = 3)
 @Measurement(iterations = 5)
-public class SqlExpressionBenchmark
+public class SqlExpressionBenchmark extends SqlBaseQueryBenchmark
 {
-  private static final Logger log = new Logger(SqlExpressionBenchmark.class);
-
-  static {
-    NullHandling.initializeForTests();
-    ExpressionProcessing.initializeForStrictBooleansTests(true);
-  }
-
-  private static final DruidProcessingConfig PROCESSING_CONFIG = new DruidProcessingConfig()
-  {
-    @Override
-    public int intermediateComputeSizeBytes()
-    {
-      return 512 * 1024 * 1024;
-    }
-
-    @Override
-    public int getNumMergeBuffers()
-    {
-      return 3;
-    }
-
-    @Override
-    public int getNumThreads()
-    {
-      return 1;
-    }
-
-    @Override
-    public boolean useParallelMergePoolConfigured()
-    {
-      return true;
-    }
-
-    @Override
-    public String getFormatString()
-    {
-      return "benchmarks-processing-%s";
-    }
-  };
-
-
   private static final List<String> QUERIES = ImmutableList.of(
       // ===========================
       // non-expression reference queries
       // ===========================
-      // 0: non-expression timeseries reference, 1 columns
-      "SELECT SUM(long1) FROM foo",
-      // 1: non-expression timeseries reference, 2 columns
-      "SELECT SUM(long1), SUM(long2) FROM foo",
+      // 0: non-expression timeseries reference, 1 column
+      "SELECT SUM(long1) FROM expressions",
+      // 1: non-expression timeseries reference, 1 column with nulls
+      "SELECT SUM(long5) FROM expressions",
       // 2: non-expression timeseries reference, 3 columns
-      "SELECT SUM(long1), SUM(long4), SUM(double1) FROM foo",
+      "SELECT SUM(long1), SUM(long4), SUM(double1) FROM expressions",
       // 3: non-expression timeseries reference, 4 columns
-      "SELECT SUM(long1), SUM(long4), SUM(double1), SUM(float3) FROM foo",
+      "SELECT SUM(long1), SUM(long4), SUM(double1), SUM(float3) FROM expressions",
       // 4: non-expression timeseries reference, 5 columns
-      "SELECT SUM(long1), SUM(long4), SUM(double1), SUM(float3), SUM(long5) FROM foo",
+      "SELECT SUM(long1), SUM(long4), SUM(double1), SUM(float3), SUM(long5) FROM expressions",
       // 5: group by non-expr with 1 agg
-      "SELECT string2, SUM(long1) FROM foo GROUP BY 1 ORDER BY 2",
+      "SELECT string2, SUM(long1) FROM expressions GROUP BY 1 ORDER BY 2",
       // 6: group by non-expr with 2 agg
-      "SELECT string2, SUM(long1), SUM(double3) FROM foo GROUP BY 1 ORDER BY 2",
+      "SELECT string2, SUM(long1), SUM(double3) FROM expressions GROUP BY 1 ORDER BY 2",
+      // 7: min/max on a nullable long column (exercises the null-aware SIMD path)
+      "SELECT MIN(long5), MAX(long5) FROM expressions",
+      // 8: min/max across long/double/float, non-null columns
+      "SELECT MIN(long1), MAX(long1), MIN(double1), MAX(double1), MIN(float3), MAX(float3) FROM expressions",
       // ===========================
       // expressions
       // ===========================
-      // 7: math op - 2 longs
-      "SELECT SUM(long1 * long2) FROM foo",
-      // 8: mixed math - 2 longs, 1 double
-      "SELECT SUM((long1 * long2) / double1) FROM foo",
-      // 9: mixed math - 2 longs, 1 double, 1 float
-      "SELECT SUM(float3 + ((long1 * long4)/double1)) FROM foo",
-      // 10: mixed math - 3 longs, 1 double, 1 float
-      "SELECT SUM(long5 - (float3 + ((long1 * long4)/double1))) FROM foo",
-      // 11: all same math op - 3 longs, 1 double, 1 float
-      "SELECT SUM(long5 * float3 * long1 * long4 * double1) FROM foo",
-      // 12: cos
-      "SELECT cos(double2) FROM foo",
-      // 13: unary negate
-      "SELECT SUM(-long4) FROM foo",
-      // 14: string long
-      "SELECT SUM(PARSE_LONG(string1)) FROM foo",
-      // 15: string longer
-      "SELECT SUM(PARSE_LONG(string3)) FROM foo",
-      // 16: time floor, non-expr col + reg agg
-      "SELECT TIME_FLOOR(__time, 'PT1H'), string2, SUM(double4) FROM foo GROUP BY 1,2 ORDER BY 3",
-      // 17: time floor, non-expr col + expr agg
-      "SELECT TIME_FLOOR(__time, 'PT1H'), string2, SUM(long1 * double4) FROM foo GROUP BY 1,2 ORDER BY 3",
-      // 18: time floor + non-expr agg (timeseries) (non-expression reference)
-      "SELECT TIME_FLOOR(__time, 'PT1H'), SUM(long1) FROM foo GROUP BY 1 ORDER BY 1",
-      // 19: time floor + expr agg (timeseries)
-      "SELECT TIME_FLOOR(__time, 'PT1H'), SUM(long1 * long4) FROM foo GROUP BY 1 ORDER BY 1",
-      // 20: time floor + non-expr agg (group by)
-      "SELECT TIME_FLOOR(__time, 'PT1H'), SUM(long1) FROM foo GROUP BY 1 ORDER BY 2",
-      // 21: time floor + expr agg (group by)
-      "SELECT TIME_FLOOR(__time, 'PT1H'), SUM(long1 * long4) FROM foo GROUP BY 1 ORDER BY 2",
-      // 22: time floor offset by 1 day + non-expr agg (group by)
-      "SELECT TIME_FLOOR(TIMESTAMPADD(DAY, -1, __time), 'PT1H'), SUM(long1) FROM foo GROUP BY 1 ORDER BY 1",
-      // 23: time floor offset by 1 day + expr agg (group by)
-      "SELECT TIME_FLOOR(TIMESTAMPADD(DAY, -1, __time), 'PT1H'), SUM(long1 * long4) FROM foo GROUP BY 1 ORDER BY 1",
-      // 24: group by long expr with non-expr agg
-      "SELECT (long1 * long2), SUM(double1) FROM foo GROUP BY 1 ORDER BY 2",
-      // 25: group by non-expr with expr agg
-      "SELECT string2, SUM(long1 * long4) FROM foo GROUP BY 1 ORDER BY 2",
-      // 26: group by string expr with non-expr agg
-      "SELECT CONCAT(string2, '-', long2), SUM(double1) FROM foo GROUP BY 1 ORDER BY 2",
-      // 27: group by string expr with expr agg
-      "SELECT CONCAT(string2, '-', long2), SUM(long1 * double4) FROM foo GROUP BY 1 ORDER BY 2",
-      // 28: group by single input string low cardinality expr with expr agg
-      "SELECT CONCAT(string2, '-', 'foo'), SUM(long1 * long4) FROM foo GROUP BY 1 ORDER BY 2",
-      // 29: group by single input string high cardinality expr with expr agg
-      "SELECT CONCAT(string3, '-', 'foo'), SUM(long1 * long4) FROM foo GROUP BY 1 ORDER BY 2",
-      // 30: logical and operator
-      "SELECT CAST(long1 as BOOLEAN) AND CAST (long2 as BOOLEAN), COUNT(*) FROM foo GROUP BY 1 ORDER BY 2",
-      // 31: isnull, notnull
-      "SELECT long5 IS NULL, long3 IS NOT NULL, count(*) FROM foo GROUP BY 1,2 ORDER BY 3",
-      // 32: time shift, non-expr col + reg agg, regular
-      "SELECT TIME_SHIFT(__time, 'PT1H', 3), string2, SUM(double4) FROM foo GROUP BY 1,2 ORDER BY 3",
-      // 33: time shift, non-expr col + expr agg, sequential low cardinality
-      "SELECT TIME_SHIFT(MILLIS_TO_TIMESTAMP(long1), 'PT1H', 1), string2, SUM(long1 * double4) FROM foo GROUP BY 1,2 ORDER BY 3",
-      // 34: time shift + non-expr agg (timeseries) (non-expression reference), zipf distribution low cardinality
-      "SELECT TIME_SHIFT(MILLIS_TO_TIMESTAMP(long2), 'PT1H', 1), string2, SUM(long1 * double4) FROM foo GROUP BY 1,2 ORDER BY 3",
-      // 35: time shift + expr agg (timeseries), zipf distribution high cardinality
-      "SELECT TIME_SHIFT(MILLIS_TO_TIMESTAMP(long3), 'PT1H', 1), string2, SUM(long1 * double4) FROM foo GROUP BY 1,2 ORDER BY 3",
-      // 36: time shift + non-expr agg (group by), uniform distribution low cardinality
-      "SELECT TIME_SHIFT(MILLIS_TO_TIMESTAMP(long4), 'PT1H', 1), string2, SUM(long1 * double4) FROM foo GROUP BY 1,2 ORDER BY 3",
-      // 37: time shift + expr agg (group by), uniform distribution high cardinality
-      "SELECT TIME_SHIFT(MILLIS_TO_TIMESTAMP(long5), 'PT1H', 1), string2, SUM(long1 * double4) FROM foo GROUP BY 1,2 ORDER BY 3",
-      // 38: LATEST aggregator
-      "SELECT LATEST(long1) FROM foo",
-      // 39: LATEST aggregator double
-      "SELECT LATEST(double4) FROM foo",
-      // 40: LATEST aggregator double
-      "SELECT LATEST(float3) FROM foo",
-      // 41: LATEST aggregator double
-      "SELECT LATEST(float3), LATEST(long1), LATEST(double4) FROM foo",
-      // 42,43: filter numeric nulls
-      "SELECT SUM(long5) FROM foo WHERE long5 IS NOT NULL",
-      "SELECT string2, SUM(long5) FROM foo WHERE long5 IS NOT NULL GROUP BY 1"
+      // 9: math op - 2 longs
+      "SELECT SUM(long1 * long2) FROM expressions",
+      // 10: mixed math - 2 longs, 1 double
+      "SELECT SUM((long1 * long2) / double1) FROM expressions",
+      // 11: mixed math - 2 longs, 1 double, 1 float
+      "SELECT SUM(float3 + ((long1 * long4)/double1)) FROM expressions",
+      // 12: mixed math - 3 longs, 1 double, 1 float
+      "SELECT SUM(long5 - (float3 + ((long1 * long4)/double1))) FROM expressions",
+      // 13: all same math op - 3 longs, 1 double, 1 float
+      "SELECT SUM(long5 * float3 * long1 * long4 * double1) FROM expressions",
+      // 14: cos
+      "SELECT cos(double2) FROM expressions",
+      // 15: unary negate
+      "SELECT SUM(-long4) FROM expressions",
+      // 16: string long
+      "SELECT SUM(PARSE_LONG(string1)) FROM expressions",
+      // 17: string longer
+      "SELECT SUM(PARSE_LONG(string3)) FROM expressions",
+      // 18: time floor, non-expr col + reg agg
+      "SELECT TIME_FLOOR(__time, 'PT1H'), string2, SUM(double4) FROM expressions GROUP BY 1,2 ORDER BY 3",
+      // 19: time floor, non-expr col + expr agg
+      "SELECT TIME_FLOOR(__time, 'PT1H'), string2, SUM(long1 * double4) FROM expressions GROUP BY 1,2 ORDER BY 3",
+      // 20: time floor + non-expr agg (timeseries) (non-expression reference)
+      "SELECT TIME_FLOOR(__time, 'PT1H'), SUM(long1) FROM expressions GROUP BY 1 ORDER BY 1",
+      // 21: time floor + expr agg (timeseries)
+      "SELECT TIME_FLOOR(__time, 'PT1H'), SUM(long1 * long4) FROM expressions GROUP BY 1 ORDER BY 1",
+      // 22: time floor + non-expr agg (group by)
+      "SELECT TIME_FLOOR(__time, 'PT1H'), SUM(long1) FROM expressions GROUP BY 1 ORDER BY 2",
+      // 23: time floor + expr agg (group by)
+      "SELECT TIME_FLOOR(__time, 'PT1H'), SUM(long1 * long4) FROM expressions GROUP BY 1 ORDER BY 2",
+      // 24: time floor offset by 1 day + non-expr agg (group by)
+      "SELECT TIME_FLOOR(TIMESTAMPADD(DAY, -1, __time), 'PT1H'), SUM(long1) FROM expressions GROUP BY 1 ORDER BY 1",
+      // 25: time floor offset by 1 day + expr agg (group by)
+      "SELECT TIME_FLOOR(TIMESTAMPADD(DAY, -1, __time), 'PT1H'), SUM(long1 * long4) FROM expressions GROUP BY 1 ORDER BY 1",
+      // 26: group by long expr with non-expr agg
+      "SELECT (long1 * long2), SUM(double1) FROM expressions GROUP BY 1 ORDER BY 2",
+      // 27: group by non-expr with expr agg
+      "SELECT string2, SUM(long1 * long4) FROM expressions GROUP BY 1 ORDER BY 2",
+      // 28: group by string expr with non-expr agg
+      "SELECT CONCAT(string2, '-', long2), SUM(double1) FROM expressions GROUP BY 1 ORDER BY 2",
+      // 29: group by string expr with expr agg
+      "SELECT CONCAT(string2, '-', long2), SUM(long1 * double4) FROM expressions GROUP BY 1 ORDER BY 2",
+      // 30: group by single input string low cardinality expr with expr agg
+      "SELECT CONCAT(string2, '-', 'expressions'), SUM(long1 * long4) FROM expressions GROUP BY 1 ORDER BY 2",
+      // 31: group by single input string high cardinality expr with expr agg
+      "SELECT CONCAT(string3, '-', 'expressions'), SUM(long1 * long4) FROM expressions GROUP BY 1 ORDER BY 2",
+      // 32: logical and operator
+      "SELECT CAST(long1 as BOOLEAN) AND CAST (long2 as BOOLEAN), COUNT(*) FROM expressions GROUP BY 1 ORDER BY 2",
+      // 33: isnull, notnull
+      "SELECT long5 IS NULL, long3 IS NOT NULL, count(*) FROM expressions GROUP BY 1,2 ORDER BY 3",
+      // 34: time shift, non-expr col + reg agg, regular
+      "SELECT TIME_SHIFT(__time, 'PT1H', 3), string2, SUM(double4) FROM expressions GROUP BY 1,2 ORDER BY 3",
+      // 35: time shift, non-expr col + expr agg, sequential low cardinality
+      "SELECT TIME_SHIFT(MILLIS_TO_TIMESTAMP(long1), 'PT1H', 1), string2, SUM(long1 * double4) FROM expressions GROUP BY 1,2 ORDER BY 3",
+      // 36: time shift + non-expr agg (timeseries) (non-expression reference), zipf distribution low cardinality
+      "SELECT TIME_SHIFT(MILLIS_TO_TIMESTAMP(long2), 'PT1H', 1), string2, SUM(long1 * double4) FROM expressions GROUP BY 1,2 ORDER BY 3",
+      // 37: time shift + expr agg (timeseries), zipf distribution high cardinality
+      "SELECT TIME_SHIFT(MILLIS_TO_TIMESTAMP(long3), 'PT1H', 1), string2, SUM(long1 * double4) FROM expressions GROUP BY 1,2 ORDER BY 3",
+      // 38: time shift + non-expr agg (group by), uniform distribution low cardinality
+      "SELECT TIME_SHIFT(MILLIS_TO_TIMESTAMP(long4), 'PT1H', 1), string2, SUM(long1 * double4) FROM expressions GROUP BY 1,2 ORDER BY 3",
+      // 39: time shift + expr agg (group by), uniform distribution high cardinality
+      "SELECT TIME_SHIFT(MILLIS_TO_TIMESTAMP(long5), 'PT1H', 1), string2, SUM(long1 * double4) FROM expressions GROUP BY 1,2 ORDER BY 3",
+      // 40,41: array element filtering
+      "SELECT string1, long1 FROM expressions WHERE ARRAY_CONTAINS(\"multi-string3\", 100) GROUP BY 1,2",
+      "SELECT string1, long1 FROM expressions WHERE ARRAY_OVERLAP(\"multi-string3\", ARRAY[100, 200]) GROUP BY 1,2",
+      // 42: regex filtering
+      "SELECT string4, COUNT(*) FROM expressions WHERE REGEXP_EXTRACT(string1, '^1') IS NOT NULL OR REGEXP_EXTRACT('Z' || string2, '^Z2') IS NOT NULL GROUP BY 1",
+      // 43: complicated filtering
+      "SELECT string2, SUM(long1) FROM expressions WHERE string1 = '1000' AND string5 LIKE '%1%' AND (string3 in ('1', '10', '20', '22', '32') AND long2 IN (1, 19, 21, 23, 25, 26, 46) AND double3 < 1010.0 AND double3 > 1000.0 AND (string4 = '1' OR REGEXP_EXTRACT(string1, '^1') IS NOT NULL OR REGEXP_EXTRACT('Z' || string2, '^Z2') IS NOT NULL)) GROUP BY 1 ORDER BY 2",
+      // 44-47: array_contains / array_overlap exprs
+      "SELECT ARRAY_CONTAINS(\"multi-string3\", 100) FROM expressions",
+      "SELECT ARRAY_CONTAINS(\"multi-string3\", ARRAY[1, 2, 10, 11, 20, 22, 30, 33, 40, 44, 50, 55, 100]) FROM expressions",
+      "SELECT ARRAY_OVERLAP(\"multi-string3\", ARRAY[1, 100]) FROM expressions",
+      "SELECT ARRAY_OVERLAP(\"multi-string3\", ARRAY[1, 2, 10, 11, 20, 22, 30, 33, 40, 44, 50, 55, 100]) FROM expressions",
+      // 48,49: filters with random orders
+      "SELECT string2, SUM(long1) FROM expressions WHERE string5 LIKE '%1%' AND string1 = '1000' GROUP BY 1 ORDER BY 2",
+      "SELECT string2, SUM(long1) FROM expressions WHERE string5 LIKE '%1%' AND (string3 in ('1', '10', '20', '22', '32') AND long2 IN (1, 19, 21, 23, 25, 26, 46) AND double3 < 1010.0 AND double3 > 1000.0 AND (string4 = '1' OR REGEXP_EXTRACT(string1, '^1') IS NOT NULL OR REGEXP_EXTRACT('Z' || string2, '^Z2') IS NOT NULL)) AND string1 = '1000' GROUP BY 1 ORDER BY 2",
+      // 50-59: nvl tests
+      // lower cardinality
+      "SELECT NVL(string2, string1), SUM(double1) FROM expressions GROUP BY 1 ORDER BY 2",
+      "SELECT NVL(string2, CONCAT(string1, '-', long2)), SUM(double1) FROM expressions GROUP BY 1 ORDER BY 2",
+      // higher cardinality
+      "SELECT NVL(string5, string3), SUM(double1) FROM expressions GROUP BY 1 ORDER BY 2",
+      "SELECT NVL(string5, CONCAT(string3, '-', long2)), SUM(double1) FROM expressions GROUP BY 1 ORDER BY 2",
+      // no lhs nulls
+      "SELECT NVL(string1, string3), SUM(double1) FROM expressions GROUP BY 1 ORDER BY 2",
+      "SELECT NVL(string1, CONCAT(string3, '-', long2)), SUM(double1) FROM expressions GROUP BY 1 ORDER BY 2",
+      // numeric
+      "SELECT NVL(long5, long3), SUM(double1) FROM expressions GROUP BY 1 ORDER BY 2",
+      "SELECT NVL(long5, long1 + long3), SUM(double1) FROM expressions GROUP BY 1 ORDER BY 2",
+      // numeric no lhs null
+      "SELECT NVL(long1, long3), SUM(double1) FROM expressions GROUP BY 1 ORDER BY 2",
+      "SELECT NVL(long1, long5 + long3), SUM(double1) FROM expressions GROUP BY 1 ORDER BY 2",
+      // 60: case
+      "SELECT CASE WHEN MOD(long1, 2) = 0 THEN -1 WHEN MOD(long1, 2) = 1 THEN long2 / MOD(long1, 2) ELSE long3 END FROM expressions GROUP BY 1",
+      // 61-63: cast
+      "SELECT CAST(string1 as BIGINT) + CAST(string3 as DOUBLE) + long3, COUNT(*) FROM expressions GROUP BY 1 ORDER BY 2",
+      "SELECT COUNT(*), SUM(CAST(string1 as BIGINT) + CAST(string3 as BIGINT)) FROM expressions WHERE double3 < 1010.0 AND double3 > 100.0",
+      "SELECT COUNT(*) FROM expressions WHERE __time >= TIMESTAMP '2000-01-01 00:00:00' AND __time < TIMESTAMP '2000-01-02 00:00:00' AND (UPPER(COALESCE(string3,'')) LIKE '1%' OR TRIM(UPPER(COALESCE(string3,''))) LIKE '1%' OR SUBSTRING(UPPER(COALESCE(string3,'')),1,1) IN ('1','2','3','4','5') OR ('X' || UPPER(COALESCE(string3,''))) LIKE 'X1%') AND (UPPER(COALESCE(string5,'')) LIKE '2%' OR TRIM(UPPER(COALESCE(string5,''))) LIKE '2%' OR SUBSTRING(UPPER(COALESCE(string5,'')),1,1) IN ('1','2','3','4','5') OR ('Y' || UPPER(COALESCE(string5,''))) LIKE 'Y2%') AND CAST(double4 * 1000 AS BIGINT) BETWEEN -850000000 AND 850000000",
+      // 64,65: unary negate on a double column (companion to 15 which does long negate)
+      "SELECT SUM(-double1) FROM expressions",
+      "SELECT SUM(-double4) FROM expressions",
+      // 66,67: unary abs on long and double columns
+      "SELECT SUM(ABS(long4)) FROM expressions",
+      "SELECT SUM(ABS(double1)) FROM expressions",
+      // 68: unary abs of a binary subtraction (composes SIMD sub with SIMD abs)
+      "SELECT SUM(ABS(long1 - long4)) FROM expressions",
+      // 69,70: unary sqrt on double and long inputs (long input exercises the SIMD widening path)
+      "SELECT SUM(SQRT(double1)) FROM expressions",
+      "SELECT SUM(SQRT(long1)) FROM expressions",
+      // 71-96: VO_MATHLIB unary ops exposed via SQL and covered by SIMD dispatch.
+      "SELECT SUM(LN(double1)) FROM expressions",
+      "SELECT SUM(LN(long1)) FROM expressions",
+      "SELECT SUM(EXP(double1)) FROM expressions",
+      "SELECT SUM(EXP(long1)) FROM expressions",
+      "SELECT SUM(LOG10(double1)) FROM expressions",
+      "SELECT SUM(LOG10(long1)) FROM expressions",
+      "SELECT SUM(CBRT(double1)) FROM expressions",
+      "SELECT SUM(CBRT(long1)) FROM expressions",
+      "SELECT SUM(SIN(double1)) FROM expressions",
+      "SELECT SUM(SIN(long1)) FROM expressions",
+      "SELECT SUM(COS(double1)) FROM expressions",
+      "SELECT SUM(COS(long1)) FROM expressions",
+      "SELECT SUM(TAN(double1)) FROM expressions",
+      "SELECT SUM(TAN(long1)) FROM expressions",
+      "SELECT SUM(ASIN(double1)) FROM expressions",
+      "SELECT SUM(ASIN(long1)) FROM expressions",
+      "SELECT SUM(ACOS(double1)) FROM expressions",
+      "SELECT SUM(ACOS(long1)) FROM expressions",
+      "SELECT SUM(ATAN(double1)) FROM expressions",
+      "SELECT SUM(ATAN(long1)) FROM expressions",
+      "SELECT SUM(SINH(double1)) FROM expressions",
+      "SELECT SUM(SINH(long1)) FROM expressions",
+      "SELECT SUM(COSH(double1)) FROM expressions",
+      "SELECT SUM(COSH(long1)) FROM expressions",
+      "SELECT SUM(TANH(double1)) FROM expressions",
+      "SELECT SUM(TANH(long1)) FROM expressions"
   );
 
-  @Param({"5000000"})
-  private int rowsPerSegment;
-
   @Param({
-      "false",
-      "force"
+      "singleString",
+      "fixedWidth",
+      "fixedWidthNonNumeric",
+      "always"
   })
-  private String vectorize;
+  private String deferExpressionDimensions;
+
+  @Param({"false", "true"})
+  private boolean useVectorApi;
 
   @Param({
       // non-expression reference
@@ -272,93 +266,96 @@ public class SqlExpressionBenchmark
       "40",
       "41",
       "42",
-      "43"
+      "43",
+      "44",
+      "45",
+      "46",
+      "47",
+      "48",
+      "49",
+      "50",
+      "51",
+      "52",
+      "53",
+      "54",
+      "55",
+      "56",
+      "57",
+      "58",
+      "59",
+      "60",
+      "61",
+      "62",
+      "63",
+      "64",
+      "65",
+      "66",
+      "67",
+      "68",
+      "69",
+      "70",
+      "71",
+      "72",
+      "73",
+      "74",
+      "75",
+      "76",
+      "77",
+      "78",
+      "79",
+      "80",
+      "81",
+      "82",
+      "83",
+      "84",
+      "85",
+      "86",
+      "87",
+      "88",
+      "89",
+      "90",
+      "91",
+      "92",
+      "93",
+      "94",
+      "95",
+      "96"
   })
   private String query;
 
-  private SqlEngine engine;
-  @Nullable
-  private PlannerFactory plannerFactory;
-  private Closer closer = Closer.create();
-
   @Setup(Level.Trial)
-  public void setup()
+  public void setupExpressionProcessing()
   {
-    final GeneratorSchemaInfo schemaInfo = GeneratorBasicSchemas.SCHEMA_MAP.get("expression-testbench");
-
-    final DataSegment dataSegment = DataSegment.builder()
-                                               .dataSource("foo")
-                                               .interval(schemaInfo.getDataInterval())
-                                               .version("1")
-                                               .shardSpec(new LinearShardSpec(0))
-                                               .size(0)
-                                               .build();
-
-    final PlannerConfig plannerConfig = new PlannerConfig();
-
-    final SegmentGenerator segmentGenerator = closer.register(new SegmentGenerator());
-    log.info("Starting benchmark setup using cacheDir[%s], rows[%,d].", segmentGenerator.getCacheDir(), rowsPerSegment);
-    final QueryableIndex index = segmentGenerator.generate(dataSegment, schemaInfo, Granularities.NONE, rowsPerSegment);
-
-    final QueryRunnerFactoryConglomerate conglomerate = QueryStackTests.createQueryRunnerFactoryConglomerate(
-        closer,
-        PROCESSING_CONFIG
-    );
-
-    final SpecificSegmentsQuerySegmentWalker walker = new SpecificSegmentsQuerySegmentWalker(conglomerate).add(
-        dataSegment,
-        index
-    );
-    closer.register(walker);
-
-    final DruidSchemaCatalog rootSchema =
-        CalciteTests.createMockRootSchema(conglomerate, walker, plannerConfig, AuthTestUtils.TEST_AUTHORIZER_MAPPER);
-    engine = CalciteTests.createMockSqlEngine(walker, conglomerate);
-    plannerFactory = new PlannerFactory(
-        rootSchema,
-        CalciteTests.createOperatorTable(),
-        CalciteTests.createExprMacroTable(),
-        plannerConfig,
-        AuthTestUtils.TEST_AUTHORIZER_MAPPER,
-        CalciteTests.getJsonMapper(),
-        CalciteTests.DRUID_SCHEMA_NAME,
-        new CalciteRulesManager(ImmutableSet.of()),
-        CalciteTests.createJoinableFactoryWrapper(),
-        CatalogResolver.NULL_RESOLVER
-    );
-
-    try {
-      SqlVectorizedExpressionSanityTest.sanityTestVectorizedSqlQueries(
-          plannerFactory,
-          QUERIES.get(Integer.parseInt(query))
-      );
-    }
-    catch (Throwable ignored) {
-      // the show must go on
+    if (useVectorApi) {
+      ExpressionProcessing.initializeForVectorApiTests();
+    } else {
+      ExpressionProcessing.initializeForTests();
     }
   }
 
-  @TearDown(Level.Trial)
-  public void tearDown() throws Exception
+  @Override
+  public String getQuery()
   {
-    closer.close();
+    return QUERIES.get(Integer.parseInt(query));
   }
 
-  @Benchmark
-  @BenchmarkMode(Mode.AverageTime)
-  @OutputTimeUnit(TimeUnit.MILLISECONDS)
-  public void querySql(Blackhole blackhole) throws Exception
+  @Override
+  public List<String> getDatasources()
   {
-    final Map<String, Object> context = ImmutableMap.of(
-        QueryContexts.VECTORIZE_KEY, vectorize,
-        QueryContexts.VECTORIZE_VIRTUAL_COLUMNS_KEY, vectorize
-    );
-    final String sql = QUERIES.get(Integer.parseInt(query));
-    try (final DruidPlanner planner = plannerFactory.createPlannerForTesting(engine, sql, context)) {
-      final PlannerResult plannerResult = planner.plan();
-      final Sequence<Object[]> resultSequence = plannerResult.run().getResults();
-      final Object[] lastRow = resultSequence.accumulate(null, (accumulated, in) -> in);
-      blackhole.consume(lastRow);
-    }
+    return ImmutableList.of(SqlBenchmarkDatasets.EXPRESSIONS);
+  }
+
+  @Override
+  protected Map<String, Object> getContext()
+  {
+    final Map<String, Object> context = QueryContext.builder()
+        .put(QueryContextParameters.VECTORIZE, vectorizeContext)
+        .put(QueryContextParameters.VECTORIZE_VIRTUAL_COLUMNS, vectorizeContext)
+        .put(
+            QueryContextParameters.DEFER_EXPRESSION_DIMENSIONS,
+            DeferExpressionDimensions.fromString(deferExpressionDimensions)
+        )
+        .toMap();
+    return context;
   }
 }

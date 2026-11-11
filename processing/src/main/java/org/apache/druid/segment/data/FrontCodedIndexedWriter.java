@@ -20,12 +20,13 @@
 package org.apache.druid.segment.data;
 
 import com.google.common.primitives.Ints;
-import org.apache.druid.common.config.NullHandling;
+import org.apache.druid.error.DruidException;
 import org.apache.druid.io.Channels;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.StringUtils;
-import org.apache.druid.java.util.common.io.smoosh.FileSmoosher;
+import org.apache.druid.segment.column.TypeStrategies;
+import org.apache.druid.segment.file.SegmentFileBuilder;
 import org.apache.druid.segment.writeout.SegmentWriteOutMedium;
 import org.apache.druid.segment.writeout.WriteOutBytes;
 
@@ -102,7 +103,7 @@ public class FrontCodedIndexedWriter implements DictionaryWriter<byte[]>
   }
 
   @Override
-  public void write(@Nullable byte[] value) throws IOException
+  public int write(@Nullable byte[] value) throws IOException
   {
     if (prevObject != null && compareNullableUtf8UsingJavaStringOrdering(prevObject, value) >= 0) {
       throw new ISE(
@@ -114,8 +115,11 @@ public class FrontCodedIndexedWriter implements DictionaryWriter<byte[]>
     }
 
     if (value == null) {
+      if (numWritten != 0) {
+        throw DruidException.defensive("Null must come first, got it at cardinality[%,d]!=0", numWritten);
+      }
       hasNulls = true;
-      return;
+      return 0;
     }
 
     // if the bucket buffer is full, write the bucket
@@ -143,8 +147,9 @@ public class FrontCodedIndexedWriter implements DictionaryWriter<byte[]>
 
     bucketBuffer[numWritten % bucketSize] = value;
 
-    ++numWritten;
+    int retVal = numWritten++;
     prevObject = value;
+    return retVal + (hasNulls ? 1 : 0);
   }
 
 
@@ -164,7 +169,7 @@ public class FrontCodedIndexedWriter implements DictionaryWriter<byte[]>
   }
 
   @Override
-  public void writeTo(WritableByteChannel channel, FileSmoosher smoosher) throws IOException
+  public void writeTo(WritableByteChannel channel, SegmentFileBuilder fileBuilder) throws IOException
   {
     if (!isClosed) {
       flush();
@@ -172,7 +177,7 @@ public class FrontCodedIndexedWriter implements DictionaryWriter<byte[]>
     resetScratch();
     scratch.put(version);
     scratch.put((byte) bucketSize);
-    scratch.put(hasNulls ? NullHandling.IS_NULL_BYTE : NullHandling.IS_NOT_NULL_BYTE);
+    scratch.put(hasNulls ? TypeStrategies.IS_NULL_BYTE : TypeStrategies.IS_NOT_NULL_BYTE);
     VByte.writeInt(scratch, numWritten);
     VByte.writeInt(scratch, Ints.checkedCast(headerOut.size() + valuesOut.size()));
     scratch.flip();
@@ -217,17 +222,24 @@ public class FrontCodedIndexedWriter implements DictionaryWriter<byte[]>
       bucketBuffer.clear();
       final ByteBuffer valueBuffer = version == FrontCodedIndexed.V1
                                      ? getFromBucketV1(bucketBuffer, relativeIndex, bucketSize)
-                                     : FrontCodedIndexed.getFromBucketV0(bucketBuffer, relativeIndex);
+                                     : FrontCodedIndexed.FrontCodedV0.getValueFromBucket(bucketBuffer, relativeIndex);
       final byte[] valueBytes = new byte[valueBuffer.limit() - valueBuffer.position()];
       valueBuffer.get(valueBytes);
       return valueBytes;
     }
   }
 
+  @Override
+  public int getCardinality()
+  {
+    return numWritten + (hasNulls ? 1 : 0);
+  }
+
   private long getBucketOffset(int index) throws IOException
   {
     getOffsetBuffer.clear();
     headerOut.readFully(index * (long) Integer.BYTES, getOffsetBuffer);
+    getOffsetBuffer.clear();
     return getOffsetBuffer.getInt(0);
   }
 
@@ -407,15 +419,15 @@ public class FrontCodedIndexedWriter implements DictionaryWriter<byte[]>
     return StringUtils.compareUtf8UsingJavaStringOrdering(b1, b2);
   }
 
-
   /**
-   * same as {@link FrontCodedIndexed#getFromBucketV1(ByteBuffer, int)} but without re-using prefixLength and buffer position
-   * arrays so has more overhead/garbage creation than the instance method.
+   * same as {@link FrontCodedIndexed.FrontCodedV1#getFromBucket(ByteBuffer, int)} but
+   * without re-using prefixLength and buffer position arrays so has more overhead/garbage creation than the instance
+   * method.
    *
    * Note: adding the unwindPrefixLength and unwindBufferPosition arrays as arguments and having
-   * {@link FrontCodedIndexed#getFromBucketV1(ByteBuffer, int)} call this static method added 5-10ns of overhead
-   * compared to having its own copy of the code, presumably due to the overhead of an additional method call and extra
-   * arguments.
+   * {@link FrontCodedIndexed.FrontCodedV1#getFromBucket(ByteBuffer, int)} call this static method added 5-10ns of
+   * overhead compared to having its own copy of the code, presumably due to the overhead of an additional method call
+   * and extra arguments.
    *
    * As such, since the writer is the only user of this method, it has been copied here...
    */

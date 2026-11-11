@@ -256,7 +256,7 @@ class PartialDimensionDistributionParallelIndexTaskRunner
 
   private File createDistributionsDir()
   {
-    File taskTempDir = getToolbox().getDirTracker().getTaskTempDir(getTaskId());
+    File taskTempDir = getToolbox().getConfig().getTaskTempDir(getTaskId());
     File distributionsDir = new File(taskTempDir, "dimension_distributions");
     try {
       FileUtils.mkdirp(distributionsDir);
@@ -295,7 +295,7 @@ class PartialDimensionDistributionParallelIndexTaskRunner
       ParallelIndexIngestionSpec subTaskIngestionSpec
   )
   {
-    return new SubTaskSpec<PartialDimensionDistributionTask>(
+    return new SubTaskSpec<>(
         id,
         groupId,
         supervisorTaskId,

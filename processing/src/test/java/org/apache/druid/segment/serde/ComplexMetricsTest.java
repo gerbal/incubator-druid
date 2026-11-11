@@ -21,58 +21,51 @@ package org.apache.druid.segment.serde;
 
 import org.apache.druid.query.aggregation.SerializablePairLongStringComplexMetricSerde;
 import org.apache.druid.query.aggregation.hyperloglog.HyperUniquesSerde;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 public class ComplexMetricsTest
 {
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
 
   @Test
   public void testRegister()
   {
-    ComplexMetrics.registerSerde("hyperUnique", new HyperUniquesSerde());
+    ComplexMetrics.registerSerde(HyperUniquesSerde.TYPE_NAME, new HyperUniquesSerde());
 
-    ComplexMetricSerde serde = ComplexMetrics.getSerdeForType("hyperUnique");
-    Assert.assertNotNull(serde);
-    Assert.assertTrue(serde instanceof HyperUniquesSerde);
+    ComplexMetricSerde serde = ComplexMetrics.getSerdeForType(HyperUniquesSerde.TYPE_NAME);
+    Assertions.assertNotNull(serde);
+    Assertions.assertTrue(serde instanceof HyperUniquesSerde);
   }
 
   @Test
   public void testRegisterDuplicate()
   {
-    ComplexMetrics.registerSerde("hyperUnique", new HyperUniquesSerde());
+    ComplexMetrics.registerSerde(HyperUniquesSerde.TYPE_NAME, new HyperUniquesSerde());
 
-    ComplexMetricSerde serde = ComplexMetrics.getSerdeForType("hyperUnique");
-    Assert.assertNotNull(serde);
-    Assert.assertTrue(serde instanceof HyperUniquesSerde);
+    ComplexMetricSerde serde = ComplexMetrics.getSerdeForType(HyperUniquesSerde.TYPE_NAME);
+    Assertions.assertNotNull(serde);
+    Assertions.assertTrue(serde instanceof HyperUniquesSerde);
 
-    ComplexMetrics.registerSerde("hyperUnique", new HyperUniquesSerde());
+    ComplexMetrics.registerSerde(HyperUniquesSerde.TYPE_NAME, new HyperUniquesSerde());
 
-    serde = ComplexMetrics.getSerdeForType("hyperUnique");
-    Assert.assertNotNull(serde);
-    Assert.assertTrue(serde instanceof HyperUniquesSerde);
+    serde = ComplexMetrics.getSerdeForType(HyperUniquesSerde.TYPE_NAME);
+    Assertions.assertNotNull(serde);
+    Assertions.assertTrue(serde instanceof HyperUniquesSerde);
   }
 
   @Test
   public void testConflicting()
   {
-    ComplexMetrics.registerSerde("hyperUnique", new HyperUniquesSerde());
+    ComplexMetrics.registerSerde(HyperUniquesSerde.TYPE_NAME, new HyperUniquesSerde());
 
-    ComplexMetricSerde serde = ComplexMetrics.getSerdeForType("hyperUnique");
-    Assert.assertNotNull(serde);
-    Assert.assertTrue(serde instanceof HyperUniquesSerde);
+    ComplexMetricSerde serde = ComplexMetrics.getSerdeForType(HyperUniquesSerde.TYPE_NAME);
+    Assertions.assertNotNull(serde);
+    Assertions.assertTrue(serde instanceof HyperUniquesSerde);
 
-    expectedException.expect(IllegalStateException.class);
-    expectedException.expectMessage("Incompatible serializer for type[hyperUnique] already exists. Expected [org.apache.druid.query.aggregation.SerializablePairLongStringComplexMetricSerde], found [org.apache.druid.query.aggregation.hyperloglog.HyperUniquesSerde");
-
-    ComplexMetrics.registerSerde("hyperUnique", new SerializablePairLongStringComplexMetricSerde());
-
-    serde = ComplexMetrics.getSerdeForType("hyperUnique");
-    Assert.assertNotNull(serde);
-    Assert.assertTrue(serde instanceof HyperUniquesSerde);
+    IllegalStateException e = Assertions.assertThrows(
+        IllegalStateException.class,
+        () -> ComplexMetrics.registerSerde(HyperUniquesSerde.TYPE_NAME, new SerializablePairLongStringComplexMetricSerde())
+    );
+    Assertions.assertTrue(e.getMessage().contains("Incompatible serializer for type[hyperUnique] already exists."));
   }
 }

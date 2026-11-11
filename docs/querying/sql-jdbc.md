@@ -1,7 +1,7 @@
 ---
 id: sql-jdbc
-title: "SQL JDBC driver API"
-sidebar_label: "JDBC driver API"
+title: "Druid JDBC driver"
+sidebar_label: "JDBC driver"
 ---
 
 <!--
@@ -23,179 +23,239 @@ sidebar_label: "JDBC driver API"
   ~ under the License.
   -->
 
-> Apache Druid supports two query languages: Druid SQL and [native queries](querying.md).
-> This document describes the SQL language.
+<!-- docs/tutorials/tutorial-jdbc.md redirects here -->
 
+The Druid JDBC driver provides connectivity to Apache Druid using the
+[SQL HTTP API](../api-reference/sql-api.md) at `/druid/v2/sql/`. You can use it from Java code, or from any
+BI or SQL tool that accepts a third-party JDBC driver.
 
-You can make [Druid SQL](./sql.md) queries using the [Avatica JDBC driver](https://calcite.apache.org/avatica/downloads/). We recommend using Avatica JDBC driver version 1.17.0 or later. Note that as of the time of this writing, Avatica 1.17.0, the latest version, does not support passing connection string parameters from the URL to Druid, so you must pass them using a `Properties` object. Once you've downloaded the Avatica client jar, add it to your classpath and use the connect string `jdbc:avatica:remote:url=http://BROKER:8082/druid/v2/sql/avatica/`.
+## Install
 
-When using the JDBC connector for the [examples](#examples) or in general, it's helpful to understand the parts of the connect string stored in the `url` variable:
+The driver is published to Maven Central as a single JAR with its dependencies bundled in:
 
-  - `jdbc:avatica:remote:url=` is prepended to the hostname and port.
-  - The hostname and port number for your Druid deployment depends on whether you want to connect to the Router or a specific Broker. For more information, see [Connection stickiness](#connection-stickiness). In the case of the quickstart deployment, the hostname and port are `http://localhost:8888`, which connects to the Router running on your local machine.
-  - The SQL endpoint in Druid for the Avatica driver is  `/druid/v2/sql/avatica/`.
+```xml
+<dependency>
+  <groupId>org.apache.druid</groupId>
+  <artifactId>druid-jdbc-driver</artifactId>
+  <version>${druid.version}</version>
+</dependency>
+```
 
-Example code:
+The driver requires a minimum of Java 17. It is not part of the Druid distribution tarball.
+
+For a third-party tool, download the JAR from
+[Maven Central](https://repo1.maven.org/maven2/org/apache/druid/druid-jdbc-driver/) and register it with the tool.
+If the tool requires a driver class, use `org.apache.druid.jdbc.DruidJdbcDriver`.
+
+## Connection URL
+
+The driver accepts URLs of the following form:
+
+```
+jdbc:druid:https://host:port/druid/v2/sql/?param=value&param=value
+```
+
+| Component | Description |
+|---|---|
+| Prefix | `jdbc:druid:` followed by an HTTP or HTTPS URL. |
+| Scheme | `http` or `https`. Required. |
+| Host | Hostname or IP address of a Druid Router or Broker. Required. |
+| Port | Port of the Router or Broker. Defaults to 80 for `http` and 443 for `https`. |
+| Path | Path of the SQL endpoint, normally `/druid/v2/sql/`. |
+| Parameters | Optional [driver parameters](#driver-parameters) and [query context parameters](#query-context-parameters), in standard URL query string form. URL-encode any values that contain reserved characters such as `&`, `=`, or `#`. |
+
+Credentials in the `user:password@host` form are rejected. Pass them as [driver parameters](#driver-parameters)
+instead.
+
+Some examples:
+
+```
+# Router on the default quickstart port.
+jdbc:druid:http://localhost:8888/druid/v2/sql/
+
+# HTTPS on the default port (443).
+jdbc:druid:https://druid.example.com/druid/v2/sql/
+
+# Basic authentication.
+jdbc:druid:http://localhost:8888/druid/v2/sql/?authentication=basic&user=admin&password=secret
+
+# Setting query context parameters.
+jdbc:druid:http://localhost:8888/druid/v2/sql/?timeout=60000&sqlTimeZone=Etc/UTC
+```
+
+## Connection parameters
+
+You can supply connection parameters either as a query string in the JDBC URL or connection properties. When writing
+Java code, you can specify the connection properties using `Properties` passed to `DriverManager.getConnection`.
+When the same name appears in both, the URL takes precedence.
+
+### Driver parameters
+
+The driver interprets certain connection parameters itself. All other connection parameters are sent to Druid as
+[query context parameters](#query-context-parameters).
+
+| Parameter | Description | Default |
+|---|---|---|
+| `authentication` | Authentication scheme: `basic` or `basicRaw`. See [Authentication](#authentication). Values are case-sensitive. | `basic` if `user` or `password` is set; otherwise no credentials are sent |
+| `user` | Username. Only used when `authentication` is `basic`. | None |
+| `password` | Password, or the credential token when `authentication` is `basicRaw`. | None |
+| `verifyTls` | Whether to validate the server's TLS certificate chain on HTTPS connections. | `true` |
+
+### Query context parameters
+
+Any parameter that isn't in the table above is passed to Druid as a [query context parameter](sql-query-context.md)
+on every query issued by the connection. For example, `?timeout=60000&sqlTimeZone=America/Los_Angeles` sets a 60
+second server-side query timeout and makes Druid compute time values in the `America/Los_Angeles` time zone.
+
+Query context parameters can also be supplied using [`SET` statements](#set-statements), which take precedence
+over properties supplied in the JDBC URL or connection properties.
+
+## Authentication
+
+When configured with authentication, the driver sends credentials with every request as an HTTP `Authorization` header.
+It sends no header at all when `authentication`, `user`, and `password` are all unset.
+
+`authentication=basic` performs standard HTTP basic authentication: the driver joins `user` and `password` with a
+colon and base64-encodes the result. Use this with Druid's
+[basic security](../development/extensions-core/druid-basic-security.md) extension. This is also the default scheme
+when you set `user` or `password` without setting `authentication`.
+
+`authentication=basicRaw` sends `Authorization: Basic <password>`, using the value of `password` verbatim as the
+already-encoded credential, and ignores `user`. `password` is required. Use this when you already hold an encoded
+credential or a token issued by a custom authenticator.
+
+Whenever possible, supply credentials using connection properties rather than the JDBC URL. This helps prevent them from
+being logged or stored in configuration files.
+
+## SET statements
+
+The driver accepts `SET` statements, which set [query context parameters](sql-query-context.md) for all subsequent
+queries on the same connection. `SET` statements are handled entirely within the driver and generate no requests to
+Druid.
+
+```sql
+SET timeout = 60000;
+SET sqlTimeZone = 'America/Los_Angeles';
+SET engine = 'msq-dart';
+```
+
+Values use SQL literal syntax: single quotes for strings, unquoted numbers, and `true`, `false`, `null`, or
+`unknown` in any capitalization.
+
+You can send several `SET` statements in one JDBC call, optionally followed by one regular query, separated by
+semicolons. Only one non-`SET` statement is allowed per call, and it must come last, such as:
+
+```sql
+SET timeout = 60000;
+SET sqlTimeZone = 'Etc/UTC';
+SELECT COUNT(*) FROM wikipedia
+```
+
+Setting a parameter to `NULL` undoes any earlier `SET` of that parameter on the same connection.
+The value then falls back to whatever the JDBC URL or connection properties supplied, if anything.
+
+Prepared statements cannot be used for `SET`.
+
+## Driver behavior
+
+### Connections exist only in the driver
+
+Druid does not maintain per-connection server-side state. A JDBC `Connection` is a client-side object that holds a
+URL, credentials, an HTTP client, and any context parameters set by `SET` statements. Each query is an independent
+HTTP request.
+
+This has a few practical consequences:
+
+- You do not need connection stickiness or a sticky load balancer.
+- A Broker restart does not invalidate a connection. In-flight queries fail, but later queries succeed.
+- Idle connections consume no server resources. They are not free on the client side, though: each `Connection` owns
+  an HTTP client, and therefore its own socket pool and threads. Reuse connections rather than opening one per query.
+
+`DriverManager.getConnection` does issue one `SELECT 1` query to check that the endpoint is reachable and the
+credentials work, so an unreachable host or bad credentials fails at connection time rather than at first query.
+`Connection.isValid` runs the same query.
+
+### Prepared statements are prepared at execution
+
+`Connection.prepareStatement` performs no network I/O. The driver sends the SQL and the bound parameter values
+together when you execute the statement. Druid plans the query on each execution.
+
+As a result, errors you might expect from `prepareStatement`, such as syntax errors or unknown table and column
+names, surface when the statement is first executed. Re-executing a `PreparedStatement` with new parameter values
+is not cheaper than executing a fresh `Statement`.
+
+### Statements can run concurrently
+
+Because each query is a separate HTTP request, statements created from one connection are independent and can
+execute concurrently from different threads.
+
+A single `Statement` holds at most one open `ResultSet`. Executing a statement again closes the `ResultSet` from
+its previous execution, so read one result set to completion before re-executing the statement that produced it.
+
+`Statement.close`, `Statement.isClosed`, `Statement.cancel`, `ResultSet.close`, and `ResultSet.isClosed` are safe
+to call from any thread. All other methods on a statement or result set must be called from one thread at a time.
+
+### Streaming results
+
+Rows are parsed from the HTTP response as you call `ResultSet.next`, so a large result set doesn't have to fit in
+memory. `Statement.setFetchSize` is accepted and ignored, and `getFetchSize` reports `0`; there is no batched
+fetching.
+
+Because a `ResultSet` holds an open HTTP response, it is important to close it when you're done.
+Closing a `Statement` closes its current `ResultSet`, and closing a `Connection` closes all of its statements.
+
+### Timeouts and cancellation
+
+`Statement.setQueryTimeout(seconds)` sets the Druid `timeout` context parameter, and `Statement.setMaxRows(n)` sets
+`sqlOuterLimit`. These calls override values that you set explicitly in the JDBC URL or with a `SET` statement.
+Following JDBC, `0` means "no limit", so it removes any value from those other sources rather than restoring it.
+
+Both of these are server-side limits. The only client-side limit is `Connection.setNetworkTimeout`, which bounds how
+long the driver waits for a response. It has no default and no connection parameter, so it must be set on a
+`Connection` you already hold. The connect timeout is fixed at 10 seconds and cancellation requests time out after
+5 seconds.
+
+`Statement.cancel` cancels the query on the server by issuing an HTTP `DELETE` for the query's `sqlQueryId`. The
+driver generates a fresh `sqlQueryId` per query if necessary.
+
+### Metadata
+
+`DatabaseMetaData` methods that describe schemas, tables, and columns run queries against the
+[`INFORMATION_SCHEMA` tables](sql-metadata-tables.md). You can also query those tables directly. Methods that
+describe features Druid does not have, such as stored procedures, primary and foreign keys, and indexes, return
+empty result sets.
+
+`getDatabaseProductVersion`, `getDatabaseMajorVersion`, and `getDatabaseMinorVersion` query the
+[`sys.servers` table](sql-metadata-tables.md#servers-table), which may require `sys` permissions. If that query
+is not authorized, an unknown version is reported.
+
+### Unsupported features
+
+The driver rejects the following with `SQLFeatureNotSupportedException`:
+
+- Writes. `executeUpdate`, `addBatch`, and `executeBatch` are rejected, and `ResultSet` update methods throw.
+- Transactions. Auto-commit is always on, the only supported isolation level is `TRANSACTION_NONE`, and savepoints
+  are rejected.
+- Scrollable and updatable result sets. Result sets are always `TYPE_FORWARD_ONLY` and `CONCUR_READ_ONLY`, so
+  `previous`, `absolute`, `first`, and `last` throw.
+- Stored procedures, `Blob`, `Clob`, `Ref`, `RowId`, `SQLXML`, and the stream-valued getters and setters.
+
+## Example
+
+To run a query and read the results, you can use code like the following. Note that in production usage, reusing
+the `Connection` is encouraged, because each `Connection` has its own HTTP client.
 
 ```java
-// Connect to /druid/v2/sql/avatica/ on your Broker.
-String url = "jdbc:avatica:remote:url=http://localhost:8082/druid/v2/sql/avatica/";
+final String url = "jdbc:druid:http://localhost:8888/druid/v2/sql/";
 
-// Set any connection context parameters you need here
-// Or leave empty for default behavior.
-Properties connectionProperties = new Properties();
-
-try (Connection connection = DriverManager.getConnection(url, connectionProperties)) {
-  try (
-      final Statement statement = connection.createStatement();
-      final ResultSet resultSet = statement.executeQuery(query)
-  ) {
-    while (resultSet.next()) {
-      // process result set
-    }
+try (
+    Connection connection = DriverManager.getConnection(url);
+    Statement statement = connection.createStatement();
+    ResultSet resultSet = statement.executeQuery(
+        "SELECT page, COUNT(*) AS edits FROM wikipedia GROUP BY 1 ORDER BY 2 DESC LIMIT 10")
+) {
+  while (resultSet.next()) {
+    System.out.println(resultSet.getString("page") + ": " + resultSet.getLong("edits"));
   }
 }
 ```
-
-For a runnable example that includes a query that you might run, see [Examples](#examples).
-
-It is also possible to use a protocol buffers JDBC connection with Druid, this offer reduced bloat and potential performance
-improvements for larger result sets. To use it apply the following connection url instead, everything else remains the same
-```
-String url = "jdbc:avatica:remote:url=http://localhost:8082/druid/v2/sql/avatica-protobuf/;serialization=protobuf";
-```
-
-> The protobuf endpoint is also known to work with the official [Golang Avatica driver](https://github.com/apache/calcite-avatica-go)
-
-Table metadata is available over JDBC using `connection.getMetaData()` or by querying the
-["INFORMATION_SCHEMA" tables](sql-metadata-tables.md). For an example of this, see [Get the metadata for a datasource](#get-the-metadata-for-a-datasource).
-
-## Connection stickiness
-
-Druid's JDBC server does not share connection state between Brokers. This means that if you're using JDBC and have
-multiple Druid Brokers, you should either connect to a specific Broker or use a load balancer with sticky sessions
-enabled. The Druid Router process provides connection stickiness when balancing JDBC requests, and can be used to achieve
-the necessary stickiness even with a normal non-sticky load balancer. Please see the
-[Router](../design/router.md) documentation for more details.
-
-Note that the non-JDBC [JSON over HTTP](sql-api.md#submit-a-query) API is stateless and does not require stickiness.
-
-## Dynamic parameters
-
-You can use [parameterized queries](sql.md#dynamic-parameters) in JDBC code, as in this example:
-
-```java
-PreparedStatement statement = connection.prepareStatement("SELECT COUNT(*) AS cnt FROM druid.foo WHERE dim1 = ? OR dim1 = ?");
-statement.setString(1, "abc");
-statement.setString(2, "def");
-final ResultSet resultSet = statement.executeQuery();
-```
-
-## Examples
-
-<!-- docs/tutorial-jdbc.md redirects here -->
-
-The following section contains two complete samples that use the JDBC connector:
-
-- [Get the metadata for a datasource](#get-the-metadata-for-a-datasource) shows you how to query the `INFORMATION_SCHEMA` to get metadata like column names. 
-- [Query data](#query-data) runs a select query against the datasource.
-
-You can try out these examples after verifying that you meet the [prerequisites](#prerequisites).
-
-For more information about the connection options, see [Client Reference](https://calcite.apache.org/avatica/docs/client_reference.html).
-
-### Prerequisites 
-
-Make sure you meet the following requirements before trying these examples:
-
-- A supported Java version, such as Java 8
-
-- [Avatica JDBC driver](https://calcite.apache.org/avatica/downloads/). You can add the JAR  to your `CLASSPATH` directly or manage it externally, such as through Maven and a `pom.xml` file.
-
-- An available Druid instance. You can use the `micro-quickstart` configuration described in [Quickstart (local)](../tutorials/index.md). The examples assume that you are using the quickstart, so no authentication or authorization is expected unless explicitly mentioned. 
-
-- The example `wikipedia` datasource from the quickstart is loaded on your Druid instance. If you have a different datasource loaded, you can still try these examples. You'll have to update the table name and column names to match your datasource.
-
-### Get the metadata for a datasource
-
-Metadata, such as column names, is available either through the [`INFORMATION_SCHEMA`](../querying/sql-metadata-tables.md) table or through `connect.getMetaData()`. The following example uses the `INFORMATION_SCHEMA` table to retrieve and print the list of column names for the `wikipedia` datasource that you loaded during a previous tutorial.
-
-```java
-import java.sql.*;
-import java.util.Properties;
-
-public class JdbcListColumns {
-
-    public static void main(String args[]) throws SQLException
-    {
-        // Connect to /druid/v2/sql/avatica/ on your Router. 
-        // You can connect to a Broker but must configure connection stickiness if you do. 
-        String url = "jdbc:avatica:remote:url=http://localhost:8888/druid/v2/sql/avatica/";
-
-        String query = "SELECT COLUMN_NAME,* FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'wikipedia' and TABLE_SCHEMA='druid'";
-        // Set any connection context parameters you need here
-        // Or leave empty for default behavior.
-        Properties connectionProperties = new Properties();
-
-        try (Connection connection = DriverManager.getConnection(url, connectionProperties)) {
-            try (
-                    final Statement statement = connection.createStatement();
-                    final ResultSet rs = statement.executeQuery(query)
-            ) {
-                while (rs.next()) {
-                    String columnName = rs.getString("COLUMN_NAME");
-                    System.out.println(columnName);
-                }
-            }
-        } catch (SQLException e) {
-            throw new RuntimeException(e);
-        }
-
-    }
-}
-```
-
-### Query data
-
-Now that you know what columns are available, you can start querying the data. The following example queries the datasource named `wikipedia` for the timestamps and comments from Japan. It also sets the [query context parameter](../querying/sql-query-context.md) `sqlTimeZone` . Optionally,  you can also parameterize queries by using [dynamic parameters](#dynamic-parameters).
-
-```java
-import java.sql.*;
-import java.util.Properties;
-
-public class JdbcCountryAndTime {
-
-    public static void main(String args[]) throws SQLException
-    {
-        // Connect to /druid/v2/sql/avatica/ on your Router. 
-        // You can connect to a Broker but must configure connection stickiness if you do. 
-        String url = "jdbc:avatica:remote:url=http://localhost:8888/druid/v2/sql/avatica/";
-
-        //The query you want to run.
-        String query = "SELECT __time, isRobot, countryName, comment FROM wikipedia WHERE countryName='Japan'";
-        // Set any connection context parameters you need here
-        // Or leave empty for default behavior.
-        Properties connectionProperties = new Properties();
-        connectionProperties.setProperty("sqlTimeZone", "America/Los_Angeles");
-
-        try (Connection connection = DriverManager.getConnection(url, connectionProperties)) {
-            try (
-                    final Statement statement = connection.createStatement();
-                    final ResultSet rs = statement.executeQuery(query)
-            ) {
-                while (rs.next()) {
-                    Timestamp timeStamp = rs.getTimestamp("__time");
-                    String comment = rs.getString("comment");
-                    System.out.println(timeStamp);
-                    System.out.println(comment);
-                }
-            }
-        } catch (SQLException e) {
-            throw new RuntimeException(e);
-        }
-
-    }
-}
-`````
-
-

@@ -24,11 +24,9 @@ import it.unimi.dsi.fastutil.bytes.ByteArrays;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.hll.HyperLogLogCollector;
 import org.apache.druid.java.util.common.StringUtils;
-import org.apache.druid.segment.GenericColumnSerializer;
 import org.apache.druid.segment.column.ColumnBuilder;
 import org.apache.druid.segment.data.GenericIndexed;
 import org.apache.druid.segment.data.ObjectStrategy;
-import org.apache.druid.segment.writeout.SegmentWriteOutMedium;
 
 import java.nio.ByteBuffer;
 import java.util.Comparator;
@@ -95,7 +93,7 @@ public class HyperUniquesSerdeForTest extends ComplexMetricSerde
   {
     final GenericIndexed column;
     if (columnBuilder.getFileMapper() == null) {
-      column = GenericIndexed.read(byteBuffer, getObjectStrategy());
+      column = GenericIndexed.read(byteBuffer, getObjectStrategy(), null);
     } else {
       column = GenericIndexed.read(byteBuffer, getObjectStrategy(), columnBuilder.getFileMapper());
     }
@@ -118,6 +116,11 @@ public class HyperUniquesSerdeForTest extends ComplexMetricSerde
       public HyperLogLogCollector fromByteBuffer(ByteBuffer buffer, int numBytes)
       {
         final ByteBuffer readOnlyBuffer = buffer.asReadOnlyBuffer();
+        if (numBytes < 0 || numBytes > readOnlyBuffer.remaining()) {
+          throw new IllegalArgumentException(
+              StringUtils.format("Invalid numBytes[%d] for buffer remaining[%d]", numBytes, readOnlyBuffer.remaining())
+          );
+        }
         readOnlyBuffer.limit(readOnlyBuffer.position() + numBytes);
         return HyperLogLogCollector.makeCollector(readOnlyBuffer);
       }
@@ -140,16 +143,5 @@ public class HyperUniquesSerdeForTest extends ComplexMetricSerde
         return comparator.compare(o1, o2);
       }
     };
-  }
-
-  @Override
-  public GenericColumnSerializer getSerializer(SegmentWriteOutMedium segmentWriteOutMedium, String metric)
-  {
-    return LargeColumnSupportedComplexColumnSerializer.createWithColumnSize(
-        segmentWriteOutMedium,
-        metric,
-        this.getObjectStrategy(),
-        Integer.MAX_VALUE
-    );
   }
 }

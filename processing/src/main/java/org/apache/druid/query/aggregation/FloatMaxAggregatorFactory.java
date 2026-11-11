@@ -24,13 +24,13 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Supplier;
 import org.apache.druid.math.expr.ExprMacroTable;
+import org.apache.druid.math.expr.ExpressionProcessing;
+import org.apache.druid.query.aggregation.simd.SimdFloatMaxVectorAggregator;
 import org.apache.druid.segment.BaseFloatColumnValueSelector;
 import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
 import org.apache.druid.segment.vector.VectorValueSelector;
 
 import javax.annotation.Nullable;
-import java.util.Collections;
-import java.util.List;
 
 /**
  */
@@ -83,6 +83,9 @@ public class FloatMaxAggregatorFactory extends SimpleFloatAggregatorFactory
       VectorValueSelector selector
   )
   {
+    if (ExpressionProcessing.useVectorApi()) {
+      return new SimdFloatMaxVectorAggregator(selector);
+    }
     return new FloatMaxVectorAggregator(selector);
   }
 
@@ -109,12 +112,6 @@ public class FloatMaxAggregatorFactory extends SimpleFloatAggregatorFactory
   public AggregatorFactory getCombiningFactory()
   {
     return new FloatMaxAggregatorFactory(name, name, null, macroTable);
-  }
-
-  @Override
-  public List<AggregatorFactory> getRequiredColumns()
-  {
-    return Collections.singletonList(new FloatMaxAggregatorFactory(fieldName, fieldName, expression, macroTable));
   }
 
   @Override

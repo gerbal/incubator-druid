@@ -19,8 +19,9 @@
 
 package org.apache.druid.query.operator.window;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import org.apache.druid.common.config.NullHandling;
+import nl.jqno.equalsverifier.EqualsVerifier;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.DoubleSumAggregatorFactory;
 import org.apache.druid.query.aggregation.LongMaxAggregatorFactory;
@@ -31,25 +32,22 @@ import org.apache.druid.query.rowsandcols.NoAsRowsAndColumns;
 import org.apache.druid.query.rowsandcols.RowsAndColumns;
 import org.apache.druid.query.rowsandcols.column.IntArrayColumn;
 import org.apache.druid.query.rowsandcols.semantic.FramedOnHeapAggregatable;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 @SuppressWarnings("unchecked")
 public class WindowFramedAggregateProcessorTest
 {
-  static {
-    NullHandling.initializeForTests();
-  }
-
   @Test
   public void testIsPassThruWhenRACReturnsSemanticInterface()
   {
-    final WindowFrame theFrame = new WindowFrame(WindowFrame.PeerType.ROWS, true, 0, false, 0);
+    final WindowFrame theFrame = WindowFrame.rows(null, 0);
     final AggregatorFactory[] theAggs = {
         new LongMaxAggregatorFactory("cummMax", "intCol"),
         new DoubleSumAggregatorFactory("cummSum", "doubleCol")
     };
     WindowFramedAggregateProcessor proc = new WindowFramedAggregateProcessor(theFrame, theAggs);
+    Assertions.assertEquals(ImmutableList.of("cummMax", "cummSum"), proc.getOutputColumnNames());
 
     final MapOfColumnsRowsAndColumns rac = MapOfColumnsRowsAndColumns.fromMap(ImmutableMap.of(
         "yay", new IntArrayColumn(new int[]{1, 2, 3})
@@ -60,22 +58,22 @@ public class WindowFramedAggregateProcessorTest
       @Override
       public <T> T as(Class<T> clazz)
       {
-        Assert.assertEquals(clazz, FramedOnHeapAggregatable.class);
+        Assertions.assertEquals(clazz, FramedOnHeapAggregatable.class);
         return (T) (FramedOnHeapAggregatable) (frame, aggFactories) -> {
-          Assert.assertEquals(theFrame, frame);
-          Assert.assertArrayEquals(theAggs, aggFactories);
+          Assertions.assertEquals(theFrame, frame);
+          Assertions.assertArrayEquals(theAggs, aggFactories);
           return rac;
         };
       }
     });
 
-    Assert.assertSame(rac, processed);
+    Assertions.assertSame(rac, processed);
   }
 
   @Test
   public void testDoesStuffWhenNoSemanticInterfacesAvailable()
   {
-    final WindowFrame theFrame = new WindowFrame(WindowFrame.PeerType.ROWS, true, 0, false, 0);
+    final WindowFrame theFrame = WindowFrame.rows(null, 0);
     final AggregatorFactory[] theAggs = {
         new LongSumAggregatorFactory("sum", "intCol")
     };
@@ -92,5 +90,13 @@ public class WindowFramedAggregateProcessorTest
         .expectColumn("sum", new int[]{1, 3, 6})
         .allColumnsRegistered()
         .validate(processed);
+  }
+
+  @Test
+  public void testEquals()
+  {
+    EqualsVerifier.forClass(WindowFramedAggregateProcessor.class)
+        .usingGetClass()
+        .verify();
   }
 }

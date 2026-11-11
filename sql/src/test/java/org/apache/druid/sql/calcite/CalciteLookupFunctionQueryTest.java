@@ -1,0 +1,1890 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.druid.sql.calcite;
+
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
+import org.apache.druid.error.DruidException;
+import org.apache.druid.java.util.common.Intervals;
+import org.apache.druid.java.util.common.granularity.Granularities;
+import org.apache.druid.query.Druids;
+import org.apache.druid.query.InlineDataSource;
+import org.apache.druid.query.Query;
+import org.apache.druid.query.QueryContext;
+import org.apache.druid.query.QueryDataSource;
+import org.apache.druid.query.aggregation.CountAggregatorFactory;
+import org.apache.druid.query.aggregation.FilteredAggregatorFactory;
+import org.apache.druid.query.aggregation.GroupingAggregatorFactory;
+import org.apache.druid.query.aggregation.LongMinAggregatorFactory;
+import org.apache.druid.query.aggregation.LongSumAggregatorFactory;
+import org.apache.druid.query.aggregation.cardinality.CardinalityAggregatorFactory;
+import org.apache.druid.query.context.QueryContextParameters;
+import org.apache.druid.query.dimension.DefaultDimensionSpec;
+import org.apache.druid.query.dimension.ExtractionDimensionSpec;
+import org.apache.druid.query.extraction.ExtractionFn;
+import org.apache.druid.query.filter.DimFilter;
+import org.apache.druid.query.groupby.GroupByQuery;
+import org.apache.druid.query.lookup.RegisteredLookupExtractionFn;
+import org.apache.druid.query.scan.ScanQuery;
+import org.apache.druid.segment.VirtualColumn;
+import org.apache.druid.segment.VirtualColumns;
+import org.apache.druid.segment.column.ColumnType;
+import org.apache.druid.segment.column.RowSignature;
+import org.apache.druid.segment.virtual.ExpressionVirtualColumn;
+import org.apache.druid.sql.calcite.filtration.Filtration;
+import org.apache.druid.sql.calcite.util.CalciteTests;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+import javax.annotation.Nullable;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+
+public class CalciteLookupFunctionQueryTest extends BaseCalciteQueryTest
+{
+  private static final Map<String, Object> QUERY_CONTEXT =
+      QueryContext.builder()
+                  .putAll(QUERY_CONTEXT_DEFAULT)
+                  .put(QueryContextParameters.SQL_REVERSE_LOOKUP, true)
+                  .put(QueryContextParameters.MAX_OPTIMIZE_COUNT_FOR_DRUID_REVERSE_LOOKUP_RULE, 1)
+                  .toMap();
+
+  /**
+   * For tests that use the lookup extraction function rather than expressions.
+   */
+  private static final Map<String, Object> QUERY_CONTEXT_WITH_EXTRACTION_FNS =
+      QueryContext.builder()
+                  .putAll(QUERY_CONTEXT)
+                  .put(QueryContextParameters.SQL_USE_EXTRACTION_FNS, true)
+                  .toMap();
+
+  private static final String LOOKUP_EXPRESSION = "lookup(\"dim1\",'lookyloo')";
+  private static final ExtractionFn EXTRACTION_FN =
+      new RegisteredLookupExtractionFn(null, "lookyloo", false, null, null, false);
+
+  @Test
+  public void testFilterEquals()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo') = 'xabc'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQueryConstantDimension("'xabc'", equality("dim1", "abc", ColumnType.STRING)),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterLookupOfFunction()
+  {
+    cannotVectorizeUnlessFallback();
+
+    testQuery(
+        buildFilterTestSql("LOOKUP(LOWER(dim1), 'lookyloo') = 'xabc'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", "lower(\"dim1\")", ColumnType.STRING),
+            equality("v0", "abc", ColumnType.STRING)
+        ),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterFunctionOfLookup()
+  {
+    cannotVectorizeUnlessFallback();
+
+    testQuery(
+        buildFilterTestSql("LOWER(LOOKUP(dim1, 'lookyloo')) = 'xabc'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", "lower(lookup(\"dim1\",'lookyloo'))", ColumnType.STRING),
+            equality("v0", "xabc", ColumnType.STRING)
+        ),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterLookupOfConcat()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(CONCAT(dim1, 'b', dim2), 'lookyloo') = 'xabc'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQueryConstantDimension(
+            "'xa'", // dim1 must be 'a', and lookup of 'a' is 'xa'
+            and(
+                equality("dim1", "a", ColumnType.STRING),
+                equality("dim2", "c", ColumnType.STRING)
+            )
+        ),
+        ImmutableList.of()
+    );
+  }
+
+  @Test
+  public void testFilterInLookupOfConcat()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(CONCAT(dim1, 'a', dim2), 'lookyloo') IN ('xa', 'xabc')"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            or(
+                and(
+                    equality("dim1", "", ColumnType.STRING),
+                    equality("dim2", "", ColumnType.STRING)
+                ),
+                and(
+                    equality("dim1", "", ColumnType.STRING),
+                    equality("dim2", "bc", ColumnType.STRING)
+                )
+            )
+        ),
+        ImmutableList.of()
+    );
+  }
+
+  @Test
+  public void testFilterScalarInArrayLookupOfConcat()
+  {
+    testQuery(
+        buildFilterTestSql("SCALAR_IN_ARRAY(LOOKUP(CONCAT(dim1, 'a', dim2), 'lookyloo'), ARRAY['xa', 'xabc'])"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            or(
+                and(
+                    equality("dim1", "", ColumnType.STRING),
+                    equality("dim2", "", ColumnType.STRING)
+                ),
+                and(
+                    equality("dim1", "", ColumnType.STRING),
+                    equality("dim2", "bc", ColumnType.STRING)
+                )
+            )
+        ),
+        ImmutableList.of()
+    );
+  }
+
+  @Test
+  public void testFilterConcatOfLookup()
+  {
+    testQuery(
+        buildFilterTestSql("CONCAT(LOOKUP(dim1, 'lookyloo'), ' (', dim1, ')') = 'xabc (abc)'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQueryConstantDimension(
+            "'xabc'",
+            equality("dim1", "abc", ColumnType.STRING)
+        ),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterInConcatOfLookup()
+  {
+
+    // One optimize call is needed for each "IN" value, because this expression is decomposed into a sequence of
+    // [(LOOKUP(dim1, 'lookyloo') = 'xabc' AND dim1 = 'abc') OR ...]. They can't be collected and combined.
+
+    final Map<String, Object> queryContext =
+        QueryContext.builder()
+                    .putAll(QUERY_CONTEXT_DEFAULT)
+                    .put(QueryContextParameters.SQL_REVERSE_LOOKUP, true)
+                    .put(QueryContextParameters.MAX_OPTIMIZE_COUNT_FOR_DRUID_REVERSE_LOOKUP_RULE, 2)
+                    .toMap();
+
+    testQuery(
+        buildFilterTestSql("CONCAT(LOOKUP(dim1, 'lookyloo'), ' (', dim1, ')') IN ('xa (a)', 'xabc (abc)')"),
+        queryContext,
+        buildFilterTestExpectedQuery(in("dim1", ImmutableList.of("a", "abc"))),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterConcatOfLookupOfConcat()
+  {
+    testQuery(
+        buildFilterTestSql(
+            "CONCAT(LOOKUP(CONCAT(dim1, 'b', dim2), 'lookyloo'), ' (', CONCAT(dim1, 'b', dim2), ')') = 'xabc (abc)'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQueryConstantDimension(
+            "'xa'", // dim1 must be 'a', and lookup of 'a' is 'xa'
+            and(
+                equality("dim1", "a", ColumnType.STRING),
+                equality("dim2", "c", ColumnType.STRING)
+            )
+        ),
+        ImmutableList.of()
+    );
+  }
+
+  @Test
+  public void testFilterInConcatOfLookupOfConcat()
+  {
+    // One optimize call is needed for each "IN" value, because this expression is decomposed into a sequence of
+    // [(LOOKUP(dim1, 'lookyloo') = 'xabc' AND dim1 = 'abc') OR ...]. They can't be collected and combined.
+
+    final Map<String, Object> queryContext =
+        QueryContext.builder()
+                    .putAll(QUERY_CONTEXT_DEFAULT)
+                    .put(QueryContextParameters.SQL_REVERSE_LOOKUP, true)
+                    .put(QueryContextParameters.MAX_OPTIMIZE_COUNT_FOR_DRUID_REVERSE_LOOKUP_RULE, 2)
+                    .toMap();
+
+    testQuery(
+        buildFilterTestSql(
+            "CONCAT(LOOKUP(CONCAT(dim1, 'a', dim2), 'lookyloo'), ' (', CONCAT(dim1, 'a', dim2), ')')\n"
+            + "IN ('xa (a)', 'xabc (abc)')"),
+        queryContext,
+        buildFilterTestExpectedQuery(
+            or(
+                and(
+                    equality("dim1", "", ColumnType.STRING),
+                    equality("dim2", "", ColumnType.STRING)
+                ),
+                and(
+                    equality("dim1", "", ColumnType.STRING),
+                    equality("dim2", "bc", ColumnType.STRING)
+                )
+            )
+        ),
+        ImmutableList.of()
+    );
+  }
+
+  @Test
+  public void testFilterConcatOfCoalesceLookupOfConcat()
+  {
+    testQuery(
+        buildFilterTestSql(
+            "CONCAT(COALESCE(LOOKUP(CONCAT(dim1, 'b', dim2), 'lookyloo'), 'N/A'), ' (', CONCAT(dim1, 'b', dim2), ')') = 'xabc (abc)'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQueryConstantDimension(
+            "'xa'", // dim1 must be 'a', and lookup of 'a' is 'xa'
+            and(
+                equality("dim1", "a", ColumnType.STRING),
+                equality("dim2", "c", ColumnType.STRING)
+            )
+        ),
+        ImmutableList.of()
+    );
+  }
+
+  @Test
+  public void testFilterImpossibleLookupOfConcat()
+  {
+    // No keys in the lookup table begin with 'key:', so this is always false.
+    testQuery(
+        buildFilterTestSql("LOOKUP('key:' || dim1, 'lookyloo') = 'xabc'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQueryAlwaysFalse(),
+        ImmutableList.of()
+    );
+  }
+
+  @Test
+  public void testFilterChainedEquals()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(LOOKUP(dim1, 'lookyloo'), 'lookyloo-chain') = 'zabc'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQueryConstantDimension("'xabc'", equality("dim1", "abc", ColumnType.STRING)),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterEqualsLiteralFirst()
+  {
+    testQuery(
+        buildFilterTestSql("'xabc' = LOOKUP(dim1, 'lookyloo')"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQueryConstantDimension("'xabc'", equality("dim1", "abc", ColumnType.STRING)),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterEqualsAlwaysFalse()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo') = 'nonexistent'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQueryAlwaysFalse(),
+        ImmutableList.of()
+    );
+  }
+
+  @Test
+  public void testFilterIsNotDistinctFrom()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo') IS NOT DISTINCT FROM 'xabc'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQueryConstantDimension("'xabc'", equality("dim1", "abc", ColumnType.STRING)),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterMultipleIsNotDistinctFrom()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo') IS NOT DISTINCT FROM 'xabc' OR "
+                           + "LOOKUP(dim1, 'lookyloo') IS NOT DISTINCT FROM 'x6' OR "
+                           + "LOOKUP(dim1, 'lookyloo') IS NOT DISTINCT FROM 'nonexistent'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(in("dim1", Arrays.asList("6", "abc"))),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterIn()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo') IN ('xabc', 'x6', 'nonexistent')"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(in("dim1", Arrays.asList("6", "abc"))),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterScalarInArray()
+  {
+    testQuery(
+        buildFilterTestSql("SCALAR_IN_ARRAY(LOOKUP(dim1, 'lookyloo'), ARRAY['xabc', 'x6', 'nonexistent'])"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(in("dim1", Arrays.asList("6", "abc"))),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterInOverScalarInArrayThreshold()
+  {
+
+    // Set inFunctionThreshold = 1 to cause the IN to be converted to SCALAR_IN_ARRAY.
+    final Map<String, Object> queryContext =
+        QueryContext.builder()
+                    .putAll(QUERY_CONTEXT_DEFAULT)
+                    .put(QueryContextParameters.SQL_REVERSE_LOOKUP, true)
+                    .put(QueryContextParameters.IN_FUNCTION_THRESHOLD, 1)
+                    .toMap();
+
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo') IN ('xabc', 'x6', 'nonexistent')"),
+        queryContext,
+        buildFilterTestExpectedQuery(in("dim1", Arrays.asList("6", "abc"))),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterInOverMaxSize()
+  {
+
+    // Set sqlReverseLookupThreshold = 1 to stop the LOOKUP call from being reversed.
+    final Map<String, Object> queryContext =
+        QueryContext.builder()
+                    .putAll(QUERY_CONTEXT_DEFAULT)
+                    .put(QueryContextParameters.SQL_REVERSE_LOOKUP, true)
+                    .put(QueryContextParameters.SQL_REVERSE_LOOKUP_THRESHOLD, 1)
+                    .toMap();
+
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo') IN ('xabc', 'x6', 'nonexistent')"),
+        queryContext,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", LOOKUP_EXPRESSION, ColumnType.STRING),
+            in("v0", ImmutableList.of("nonexistent", "x6", "xabc"))
+        ),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterInOverMaxSize2()
+  {
+
+    // Set inSubQueryThreshold = 1 to stop the LOOKUP call from being reversed.
+    final Map<String, Object> queryContext =
+        QueryContext.builder()
+                    .putAll(QUERY_CONTEXT_DEFAULT)
+                    .put(QueryContextParameters.SQL_REVERSE_LOOKUP, true)
+                    .put(QueryContextParameters.IN_SUB_QUERY_THRESHOLD, 1)
+                    .toMap();
+
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo') = 'xabc' OR LOOKUP(dim1, 'lookyloo') = 'x6'"),
+        queryContext,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", LOOKUP_EXPRESSION, ColumnType.STRING),
+            in("v0", ImmutableList.of("x6", "xabc"))
+        ),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterInOrIsNull()
+  {
+    testQuery(
+        buildFilterTestSql(
+            "LOOKUP(dim1, 'lookyloo') IN ('xabc', 'x6', 'nonexistent') OR LOOKUP(dim1, 'lookyloo') IS NULL"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", LOOKUP_EXPRESSION, ColumnType.STRING),
+            or(
+                in("dim1", Arrays.asList("6", "abc")),
+                isNull("v0")
+            )
+        ),
+        ImmutableList.of(new Object[]{null, 5L}, new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterInAndIsNotNull()
+  {
+    // Ideally we'd be able to eliminate "AND LOOKUP(dim1, 'lookyloo') IS NOT NULL", because it's implied by
+    // "LOOKUP(dim1, 'lookyloo') IN ('xabc', 'x6', 'nonexistent')". We're not currently able to do that.
+
+    testQuery(
+        buildFilterTestSql(
+            "LOOKUP(dim1, 'lookyloo') IN ('xabc', 'x6', 'nonexistent') AND LOOKUP(dim1, 'lookyloo') IS NOT NULL"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", LOOKUP_EXPRESSION, ColumnType.STRING),
+            and(
+                in("dim1", ImmutableList.of("6", "abc")),
+                not(isNull("v0"))
+            )
+        ),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterInOrIsNullInjective()
+  {
+    testQuery(
+        buildFilterTestSql(
+            "LOOKUP(dim1, 'lookyloo121') IN ('xabc', 'x6', 'nonexistent') OR LOOKUP(dim1, 'lookyloo121') IS NULL"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            or(isNull("dim1"), equality("dim1", "abc", ColumnType.STRING))
+        ),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterNotInAndIsNotNull()
+  {
+    testQuery(
+        buildFilterTestSql(
+            "LOOKUP(dim1, 'lookyloo') NOT IN ('x6', 'nonexistent') AND LOOKUP(dim1, 'lookyloo') IS NOT NULL"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", LOOKUP_EXPRESSION, ColumnType.STRING),
+            and(
+                notNull("v0"),
+                not(in("v0", ImmutableList.of("nonexistent", "x6")))
+            )
+        ),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterInIsNotTrueAndIsNotNull()
+  {
+    testQuery(
+        buildFilterTestSql(
+            "(LOOKUP(dim1, 'lookyloo') IN ('xabc', 'x6', 'nonexistent')) IS NOT TRUE "
+            + "AND LOOKUP(dim1, 'lookyloo') IS NOT NULL"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", LOOKUP_EXPRESSION, ColumnType.STRING),
+            and(
+                not(istrue(in("dim1", ImmutableList.of("6", "abc")))),
+                notNull("v0")
+            )
+        ),
+        ImmutableList.of()
+    );
+  }
+
+  @Test
+  public void testFilterNotInAndIsNotNullInjective()
+  {
+    testQuery(
+        buildFilterTestSql(
+            "LOOKUP(dim1, 'lookyloo121') NOT IN ('xabc', 'xdef', 'nonexistent') "
+            + "AND LOOKUP(dim1, 'lookyloo121') IS NOT NULL"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            and(
+                not(isNull("dim1")),
+                not(in("dim1", ImmutableList.of("abc", "def")))
+            )
+        ),
+        ImmutableList.of(new Object[]{null, 4L})
+    );
+  }
+
+  @Test
+  public void testFilterNotInOrIsNull()
+  {
+    testQuery(
+        buildFilterTestSql(
+            "LOOKUP(dim1, 'lookyloo') NOT IN ('x6', 'nonexistent') OR LOOKUP(dim1, 'lookyloo') IS NULL"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", LOOKUP_EXPRESSION, ColumnType.STRING),
+            or(
+                isNull("v0"),
+                not(in("v0", ImmutableList.of("nonexistent", "x6")))
+            )
+        ),
+        ImmutableList.of(
+            new Object[]{null, 5L},
+            new Object[]{"xabc", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testFilterInIsNotTrueOrIsNull()
+  {
+    testQuery(
+        buildFilterTestSql(
+            "(LOOKUP(dim1, 'lookyloo') IN ('x6', 'nonexistent')) IS NOT TRUE OR LOOKUP(dim1, 'lookyloo') IS NULL"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", LOOKUP_EXPRESSION, ColumnType.STRING),
+            or(
+                not(istrue(equality("dim1", "6", ColumnType.STRING))),
+                isNull("v0")
+            )
+        ),
+        ImmutableList.of(
+            new Object[]{null, 5L},
+            new Object[]{"xabc", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testFilterNotIn()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo') NOT IN ('x6', 'nonexistent')"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", LOOKUP_EXPRESSION, ColumnType.STRING),
+            not(in("v0", ImmutableList.of("nonexistent", "x6")))
+        ),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterInIsNotTrue()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo') IN ('x6', 'nonexistent') IS NOT TRUE"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            not(istrue(equality("dim1", "6", ColumnType.STRING)))
+        ),
+        ImmutableList.of(
+            new Object[]{null, 5L},
+            new Object[]{"xabc", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testFilterNotInInjective()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo121') NOT IN ('xabc', 'xdef', 'nonexistent')"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(not(in("dim1", ImmutableList.of("abc", "def")))),
+        ImmutableList.of(new Object[]{null, 4L})
+    );
+  }
+
+  @Test
+  public void testFilterNotInWithReplaceMissingValue()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo', 'xyzzy') NOT IN ('xabc', 'x6', 'nonexistent')"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(not(in("dim1", ImmutableList.of("6", "abc")))),
+        ImmutableList.of(new Object[]{null, 5L})
+    );
+  }
+
+  @Test
+  public void testFilterInIsNotTrueWithReplaceMissingValue()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo', 'xyzzy') IN ('xabc', 'x6', 'nonexistent') IS NOT TRUE"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(not(istrue(in("dim1", ImmutableList.of("6", "abc"))))),
+        ImmutableList.of(new Object[]{null, 5L})
+    );
+  }
+
+  @Test
+  public void testFilterMvContains()
+  {
+    testQuery(
+        buildFilterTestSql("MV_CONTAINS(LOOKUP(dim1, 'lookyloo'), 'xabc')"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(equality("dim1", "abc", ColumnType.STRING)),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterMvContainsNull()
+  {
+    cannotVectorizeUnlessFallback();
+
+    testQuery(
+        buildFilterTestSql("MV_CONTAINS(LOOKUP(dim1, 'lookyloo'), NULL)"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionFilter("mv_contains(lookup(\"dim1\",'lookyloo'),null)")),
+        ImmutableList.of(new Object[]{null, 5L})
+    );
+  }
+
+  @Test
+  public void testFilterMvContainsNullInjective()
+  {
+    cannotVectorizeUnlessFallback();
+
+    testQuery(
+        buildFilterTestSql("MV_CONTAINS(LOOKUP(dim1, 'lookyloo121'), NULL)"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(expressionFilter("mv_contains(\"dim1\",null)")),
+        ImmutableList.of()
+    );
+  }
+
+  @Test
+  public void testFilterMvOverlap()
+  {
+    testQuery(
+        buildFilterTestSql("MV_OVERLAP(lookup(dim1, 'lookyloo'), ARRAY['xabc', 'x6', 'nonexistent'])"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(in("dim1", ImmutableSet.of("6", "abc"))),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterMvOverlapNull()
+  {
+    cannotVectorizeUnlessFallback();
+
+    testQuery(
+        buildFilterTestSql("MV_OVERLAP(lookup(dim1, 'lookyloo'), ARRAY['xabc', 'x6', 'nonexistent', NULL])"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionFilter("mv_overlap(lookup(\"dim1\",'lookyloo'),array('xabc','x6','nonexistent',null))")
+        ),
+        ImmutableList.of(
+            new Object[]{null, 5L},
+            new Object[]{"xabc", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testFilterMvOverlapNullInjective()
+  {
+    testQuery(
+        buildFilterTestSql("MV_OVERLAP(lookup(dim1, 'lookyloo121'), ARRAY['xabc', 'x6', 'nonexistent', NULL])"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            in("dim1", Arrays.asList(null, "abc"))
+        ),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterNotMvContains()
+  {
+    cannotVectorizeUnlessFallback();
+
+    testQuery(
+        buildFilterTestSql("NOT MV_CONTAINS(lookup(dim1, 'lookyloo'), 'xabc')"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", LOOKUP_EXPRESSION, ColumnType.STRING),
+            not(expressionFilter("mv_contains(lookup(\"dim1\",'lookyloo'),'xabc')"))
+        ),
+        ImmutableList.of(
+            new Object[]{null, 5L}
+        )
+    );
+  }
+
+  @Test
+  public void testFilterMvContainsIsNotTrue()
+  {
+    testQuery(
+        buildFilterTestSql("MV_CONTAINS(lookup(dim1, 'lookyloo'), 'xabc') IS NOT TRUE"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            not(istrue(equality("dim1", "abc", ColumnType.STRING)))
+        ),
+        ImmutableList.of(new Object[]{null, 5L})
+    );
+  }
+
+  @Test
+  public void testFilterNotMvContainsInjective()
+  {
+    testQuery(
+        buildFilterTestSql("NOT MV_CONTAINS(LOOKUP(dim1, 'lookyloo121'), 'xabc')"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(not(equality("dim1", "abc", ColumnType.STRING))),
+        ImmutableList.of(new Object[]{null, 5L})
+    );
+  }
+
+  @Test
+  public void testFilterNotMvOverlap()
+  {
+    cannotVectorizeUnlessFallback();
+
+    testQuery(
+        buildFilterTestSql("NOT MV_OVERLAP(lookup(dim1, 'lookyloo'), ARRAY['xabc', 'x6', 'nonexistent'])"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            not(expressionFilter("mv_overlap(lookup(\"dim1\",'lookyloo'),array('xabc','x6','nonexistent'))"))
+        ),
+        Collections.emptyList()
+    );
+  }
+
+  @Test
+  public void testFilterMvOverlapIsNotTrue()
+  {
+    testQuery(
+        buildFilterTestSql("MV_OVERLAP(lookup(dim1, 'lookyloo'), ARRAY['xabc', 'x6', 'nonexistent']) IS NOT TRUE"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            not(istrue(in("dim1", ImmutableList.of("6", "abc"))))
+        ),
+        ImmutableList.of(new Object[]{null, 5L})
+    );
+  }
+
+  @Test
+  public void testFilterNotMvOverlapInjective()
+  {
+    testQuery(
+        buildFilterTestSql("NOT MV_OVERLAP(lookup(dim1, 'lookyloo121'), ARRAY['xabc', 'x6', 'nonexistent'])"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(not(equality("dim1", "abc", ColumnType.STRING))),
+        ImmutableList.of(new Object[]{null, 5L})
+    );
+  }
+
+  @Test
+  public void testFilterMultipleIsDistinctFrom()
+  {
+
+    // One optimize call is needed for each "IS DISTINCT FROM", because "x IS DISTINCT FROM y" is sugar for
+    // "(x = y) IS NOT TRUE", and ReverseLookupRule doesn't peek into the "IS NOT TRUE" calls nested beneatth
+    // the "AND".
+
+    final Map<String, Object> queryContext =
+        QueryContext.builder()
+                    .putAll(QUERY_CONTEXT_DEFAULT)
+                    .put(QueryContextParameters.SQL_REVERSE_LOOKUP, true)
+                    .put(QueryContextParameters.MAX_OPTIMIZE_COUNT_FOR_DRUID_REVERSE_LOOKUP_RULE, 3)
+                    .toMap();
+
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo') IS DISTINCT FROM 'xabc' AND "
+                           + "LOOKUP(dim1, 'lookyloo') IS DISTINCT FROM 'x6' AND "
+                           + "LOOKUP(dim1, 'lookyloo') IS DISTINCT FROM 'nonexistent'"),
+        queryContext,
+        buildFilterTestExpectedQuery(
+            and(
+                not(istrue(equality("dim1", "abc", ColumnType.STRING))),
+                not(istrue(equality("dim1", "6", ColumnType.STRING)))
+            )
+        ),
+        ImmutableList.of(
+            new Object[]{null, 5L}
+        )
+    );
+  }
+
+  @Test
+  public void testFilterIsNull()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo') IS NULL"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", LOOKUP_EXPRESSION, ColumnType.STRING),
+            isNull("v0")
+        ),
+        ImmutableList.of(new Object[]{null, 5L})
+    );
+  }
+
+  @Test
+  public void testFilterIsNullInjective()
+  {
+    cannotVectorize();
+
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo121') IS NULL"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQueryConstantDimension("null", isNull("dim1")),
+        ImmutableList.of()
+    );
+  }
+
+  @Test
+  public void testFilterIsNotNull()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo') IS NOT NULL"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", LOOKUP_EXPRESSION, ColumnType.STRING),
+            not(isNull("v0"))
+        ),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterIsNotNullInjective()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo121') IS NOT NULL"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            not(isNull("dim1"))
+        ),
+        ImmutableList.of(
+            new Object[]{null, 5L},
+            new Object[]{"xabc", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testFilterNotEquals()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo') <> 'x6'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", LOOKUP_EXPRESSION, ColumnType.STRING),
+            not(equality("v0", "x6", ColumnType.STRING))
+        ),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterNotEqualsInjective()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo121') <> 'xabc'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(not(equality("dim1", "abc", ColumnType.STRING))),
+        ImmutableList.of(new Object[]{null, 5L})
+    );
+  }
+
+  @Test
+  public void testFilterEqualsIsNotTrue()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo') = 'x6' IS NOT TRUE"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            not(istrue(equality("dim1", "6", ColumnType.STRING)))
+        ),
+        ImmutableList.of(
+            new Object[]{null, 5L},
+            new Object[]{"xabc", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testFilterEqualsIsNotTrueInjective()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo121') = 'xabc' IS NOT TRUE"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            not(istrue(equality("dim1", "abc", ColumnType.STRING)))
+        ),
+        ImmutableList.of(new Object[]{null, 5L})
+    );
+  }
+
+  @Test
+  public void testFilterIsDistinctFrom()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo') IS DISTINCT FROM 'x6'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            not(istrue(equality("dim1", "6", ColumnType.STRING)))
+        ),
+        ImmutableList.of(
+            new Object[]{null, 5L},
+            new Object[]{"xabc", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testFilterIsDistinctFromReplaceMissingValueWithSameLiteral()
+  {
+    testQuery(
+        buildFilterTestSql("LOOKUP(dim1, 'lookyloo', 'x6') IS DISTINCT FROM 'x6'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", "lookup(\"dim1\",'lookyloo','x6')", ColumnType.STRING),
+            not(istrue(equality("v0", "x6", ColumnType.STRING)))
+        ),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterNotEquals2()
+  {
+    testQuery(
+        buildFilterTestSql("NOT (LOOKUP(dim1, 'lookyloo') = 'x6' OR cnt = 2)"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", LOOKUP_EXPRESSION, ColumnType.STRING),
+            and(
+                not(equality("v0", "x6", ColumnType.STRING)),
+                not(equality("cnt", 2L, ColumnType.LONG))
+            )
+        ),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterEqualsIsNotTrue2()
+  {
+    testQuery(
+        buildFilterTestSql("(LOOKUP(dim1, 'lookyloo') = 'x6' OR cnt = 2) IS NOT TRUE"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            not(istrue(or(
+                equality("dim1", "6", ColumnType.STRING),
+                equality("cnt", 2L, ColumnType.LONG)
+            )))
+        ),
+        ImmutableList.of(
+            new Object[]{null, 5L},
+            new Object[]{"xabc", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testFilterNotEquals2Injective()
+  {
+    testQuery(
+        buildFilterTestSql("NOT (LOOKUP(dim1, 'lookyloo121') = 'xdef' OR cnt = 2)"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(and(
+            not(equality("dim1", "def", ColumnType.STRING)),
+            not(equality("cnt", 2L, ColumnType.LONG))
+        )),
+        ImmutableList.of(
+            new Object[]{null, 4L},
+            new Object[]{"xabc", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testFilterCoalesceSameLiteral()
+  {
+    testQuery(
+        buildFilterTestSql("COALESCE(LOOKUP(dim1, 'lookyloo'), 'x6') = 'x6'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", "lookup(\"dim1\",'lookyloo','x6')", ColumnType.STRING),
+            equality("v0", "x6", ColumnType.STRING)
+        ),
+        ImmutableList.of(new Object[]{null, 5L})
+    );
+  }
+
+  @Test
+  public void testFilterCoalesceSameLiteralInjective()
+  {
+    cannotVectorize();
+
+    testQuery(
+        buildFilterTestSql("COALESCE(LOOKUP(dim1, 'lookyloo121'), 'x6') = 'x6'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQueryConstantDimension("null", isNull("dim1")),
+        ImmutableList.of()
+    );
+  }
+
+  @Test
+  public void testFilterInCoalesceSameLiteral()
+  {
+    testQuery(
+        buildFilterTestSql("COALESCE(LOOKUP(dim1, 'lookyloo'), 'x6') IN ('xa', 'xabc', 'x6')"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", "lookup(\"dim1\",'lookyloo','x6')", ColumnType.STRING),
+            or(
+                in("dim1", Arrays.asList("a", "abc")),
+                equality("v0", "x6", ColumnType.STRING)
+            )
+        ),
+        ImmutableList.of(new Object[]{null, 5L}, new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterInCoalesceSameLiteralInjective()
+  {
+    testQuery(
+        buildFilterTestSql("COALESCE(LOOKUP(dim1, 'lookyloo121'), 'x2') IN ('xabc', 'xdef', 'x2')"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            or(in("dim1", Arrays.asList("2", "abc", "def")), isNull("dim1"))
+        ),
+        ImmutableList.of(new Object[]{null, 2L}, new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterMvContainsCoalesceSameLiteral()
+  {
+    cannotVectorizeUnlessFallback();
+
+    testQuery(
+        buildFilterTestSql("MV_CONTAINS(COALESCE(LOOKUP(dim1, 'lookyloo'), 'x6'), 'x6')"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionFilter("mv_contains(lookup(\"dim1\",'lookyloo','x6'),'x6')")
+        ),
+        ImmutableList.of(new Object[]{null, 5L})
+    );
+  }
+
+  @Test
+  public void testFilterMvOverlapCoalesceSameLiteral()
+  {
+    cannotVectorizeUnlessFallback();
+
+    testQuery(
+        buildFilterTestSql("MV_OVERLAP(COALESCE(LOOKUP(dim1, 'lookyloo'), 'x6'), ARRAY['xabc', 'x6', 'nonexistent'])"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+
+            expressionFilter("mv_overlap(lookup(\"dim1\",'lookyloo','x6'),array('xabc','x6','nonexistent'))")
+        ),
+        ImmutableList.of(
+            new Object[]{null, 5L},
+            new Object[]{"xabc", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testFilterCoalesceSameLiteralNotEquals()
+  {
+    testQuery(
+        buildFilterTestSql("COALESCE(LOOKUP(dim1, 'lookyloo'), 'x6') <> 'x6'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", "lookup(\"dim1\",'lookyloo','x6')", ColumnType.STRING),
+            not(equality("v0", "x6", ColumnType.STRING))
+        ),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterCoalesceSameLiteralNotEqualsInjective()
+  {
+    testQuery(
+        buildFilterTestSql("COALESCE(LOOKUP(dim1, 'lookyloo121'), 'xabc') <> 'xabc'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(not(equality("dim1", "abc", ColumnType.STRING))),
+        ImmutableList.of(new Object[]{null, 5L})
+    );
+  }
+
+  @Test
+  public void testFilterCoalesceDifferentLiteral()
+  {
+    testQuery(
+        buildFilterTestSql("COALESCE(LOOKUP(dim1, 'lookyloo'), 'xyzzy') = 'x6'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQueryConstantDimension("'x6'", equality("dim1", "6", ColumnType.STRING)),
+        Collections.emptyList()
+    );
+  }
+
+  @Test
+  public void testFilterCoalesceDifferentLiteralAlwaysFalse()
+  {
+    testQuery(
+        buildFilterTestSql("COALESCE(LOOKUP(dim1, 'lookyloo'), 'xyzzy') = 'nonexistent'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQueryAlwaysFalse(),
+        Collections.emptyList()
+    );
+  }
+
+  @Test
+  public void testFilterCoalesceCastVarcharDifferentLiteral()
+  {
+    testQuery(
+        buildFilterTestSql("COALESCE(CAST(LOOKUP(dim1, 'lookyloo') AS VARCHAR), 'xyzzy') = 'x6'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQueryConstantDimension("'x6'", equality("dim1", "6", ColumnType.STRING)),
+        Collections.emptyList()
+    );
+  }
+
+  @Test
+  public void testFilterCoalesceCastBigintDifferentLiteral()
+  {
+    testQuery(
+        buildFilterTestSql("COALESCE(CAST(LOOKUP(dim1, 'lookyloo') AS BIGINT), 1) = 6"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", "nvl(CAST(lookup(\"dim1\",'lookyloo'), 'LONG'),1)", ColumnType.LONG),
+            equality("v0", 6L, ColumnType.LONG)
+        ),
+        Collections.emptyList()
+    );
+  }
+
+  @Test
+  public void testFilterMvContainsCoalesceDifferentLiteral()
+  {
+    testQuery(
+        buildFilterTestSql("MV_CONTAINS(COALESCE(LOOKUP(dim1, 'lookyloo'), 'xyzzy'), 'x6')"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(equality("dim1", "6", ColumnType.STRING)),
+        Collections.emptyList()
+    );
+  }
+
+  @Test
+  public void testFilterMvOverlapCoalesceDifferentLiteral()
+  {
+    testQuery(
+        buildFilterTestSql(
+            "MV_OVERLAP(COALESCE(LOOKUP(dim1, 'lookyloo'), 'xyzzy'), ARRAY['xabc', 'x6', 'nonexistent'])"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(in("dim1", ImmutableSet.of("6", "abc"))),
+        ImmutableList.of(new Object[]{"xabc", 1L})
+    );
+  }
+
+  @Test
+  public void testFilterCoalesceDifferentLiteralNotEquals()
+  {
+    testQuery(
+        buildFilterTestSql("COALESCE(LOOKUP(dim1, 'lookyloo'), 'xyzzy') <> 'x6'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(not(equality("dim1", "6", ColumnType.STRING))),
+        ImmutableList.of(
+            new Object[]{null, 5L},
+            new Object[]{"xabc", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testFilterCoalesceDifferentLiteralNotEqualsAlwaysTrue()
+  {
+    testQuery(
+        buildFilterTestSql("COALESCE(LOOKUP(dim1, 'lookyloo'), 'xyzzy') <> 'nonexistent'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(null),
+        ImmutableList.of(
+            new Object[]{null, 5L},
+            new Object[]{"xabc", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testFilterCoalesceSameColumn()
+  {
+    testQuery(
+        buildFilterTestSql("COALESCE(LOOKUP(dim1, 'lookyloo'), dim1) = 'x6'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", "nvl(lookup(\"dim1\",'lookyloo'),\"dim1\")", ColumnType.STRING),
+            equality("v0", "x6", ColumnType.STRING)
+        ),
+        Collections.emptyList()
+    );
+  }
+
+  @Test
+  public void testFilterInCoalesceSameColumn()
+  {
+    testQuery(
+        buildFilterTestSql("COALESCE(LOOKUP(dim1, 'lookyloo'), dim1) IN ('xabc', '10.1')"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", "nvl(lookup(\"dim1\",'lookyloo'),\"dim1\")", ColumnType.STRING),
+            in("v0", ImmutableList.of("10.1", "xabc"))
+        ),
+        ImmutableList.of(
+            new Object[]{null, 1L},
+            new Object[]{"xabc", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testFilterCoalesceFunctionOfSameColumn()
+  {
+    testQuery(
+        buildFilterTestSql("COALESCE(LOOKUP(dim1, 'lookyloo'), dim1 || '') = 'x6'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", "nvl(lookup(\"dim1\",'lookyloo'),concat(\"dim1\",''))", ColumnType.STRING),
+            equality("v0", "x6", ColumnType.STRING)
+        ),
+        Collections.emptyList()
+    );
+  }
+
+  @Test
+  public void testFilterCoalesceDifferentColumn()
+  {
+    testQuery(
+        buildFilterTestSql("COALESCE(LOOKUP(dim1, 'lookyloo'), dim2) = 'x6'"),
+        QUERY_CONTEXT,
+        buildFilterTestExpectedQuery(
+            expressionVirtualColumn("v0", "nvl(lookup(\"dim1\",'lookyloo'),\"dim2\")", ColumnType.STRING),
+            equality("v0", "x6", ColumnType.STRING)
+        ),
+        Collections.emptyList()
+    );
+  }
+
+  @Test
+  public void testFilterMaxUnapplyCount()
+  {
+    // Test to verify that "maxUnapplyCountForDruidReverseLookupRule" works properly. This ensures that the *other*
+    // tests are correctly validating that we aren't doing too many reverse lookups.
+    final DruidException e = Assertions.assertThrows(
+        DruidException.class,
+        () -> testQuery(
+            buildFilterTestSql("LOOKUP(dim1, 'lookyloo') = 'xabc' OR LOOKUP(dim2, 'lookyloo') = 'x6'"),
+            QUERY_CONTEXT,
+            ImmutableList.of(),
+            ImmutableList.of()
+        )
+    );
+
+    Assertions.assertTrue(e.getMessage().startsWith("Too many optimize calls[2]"));
+  }
+
+  @Test
+  public void testLookupReplaceMissingValueWith()
+  {
+    testQuery(
+        "SELECT\n"
+        + "  LOOKUP(dim1, 'lookyloo', 'Missing_Value'),\n"
+        + "  COALESCE(LOOKUP(dim1, 'lookyloo'), 'Missing_Value'), -- converted to the first form\n"
+        + "  LOOKUP(dim1, 'lookyloo', null) as rmvNull,\n"
+        + "  COUNT(*)\n"
+        + "FROM foo\n"
+        + "GROUP BY 1,2,3",
+        QUERY_CONTEXT,
+        ImmutableList.of(
+            GroupByQuery.builder()
+                        .setDataSource(CalciteTests.DATASOURCE1)
+                        .setInterval(querySegmentSpec(Filtration.eternity()))
+                        .setGranularity(Granularities.ALL)
+                        .setVirtualColumns(
+                            expressionVirtualColumn(
+                                "v0",
+                                "lookup(\"dim1\",'lookyloo','Missing_Value')",
+                                ColumnType.STRING
+                            ),
+                            expressionVirtualColumn("v1", "lookup(\"dim1\",'lookyloo',null)", ColumnType.STRING)
+                        )
+                        .setDimensions(
+                            dimensions(
+                                new DefaultDimensionSpec("v0", "d0", ColumnType.STRING),
+                                new DefaultDimensionSpec("v0", "d1", ColumnType.STRING),
+                                new DefaultDimensionSpec("v1", "d2", ColumnType.STRING)
+                            )
+                        )
+                        .setAggregatorSpecs(new CountAggregatorFactory("a0"))
+                        .setContext(QUERY_CONTEXT_DEFAULT)
+                        .build()
+        ),
+        ImmutableList.of(
+            new Object[]{"Missing_Value", "Missing_Value", null, 5L},
+            new Object[]{"xabc", "xabc", "xabc", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testLookupReplaceMissingValueWithExtractionFns()
+  {
+    cannotVectorize();
+
+    final RegisteredLookupExtractionFn extractionFn1 =
+        new RegisteredLookupExtractionFn(null, "lookyloo", false, "Missing_Value", null, false);
+    testQuery(
+        "SELECT\n"
+        + "  LOOKUP(dim1, 'lookyloo', 'Missing_Value'),\n"
+        + "  COALESCE(LOOKUP(dim1, 'lookyloo'), 'Missing_Value'), -- converted to the first form\n"
+        + "  LOOKUP(dim1, 'lookyloo', null) as rmvNull,\n"
+        + "  COUNT(*)\n"
+        + "FROM foo\n"
+        + "GROUP BY 1,2,3",
+        QUERY_CONTEXT_WITH_EXTRACTION_FNS,
+        ImmutableList.of(
+            GroupByQuery.builder()
+                        .setDataSource(CalciteTests.DATASOURCE1)
+                        .setInterval(querySegmentSpec(Filtration.eternity()))
+                        .setGranularity(Granularities.ALL)
+                        .setDimensions(
+                            dimensions(
+                                new ExtractionDimensionSpec(
+                                    "dim1",
+                                    "d0",
+                                    ColumnType.STRING,
+                                    extractionFn1
+                                ),
+                                new ExtractionDimensionSpec(
+                                    "dim1",
+                                    "d1",
+                                    ColumnType.STRING,
+                                    extractionFn1
+                                ),
+                                new ExtractionDimensionSpec(
+                                    "dim1",
+                                    "d2",
+                                    ColumnType.STRING,
+                                    EXTRACTION_FN
+                                )
+                            )
+                        )
+                        .setAggregatorSpecs(new CountAggregatorFactory("a0"))
+                        .setContext(QUERY_CONTEXT_WITH_EXTRACTION_FNS)
+                        .build()
+        ),
+        ImmutableList.of(
+            new Object[]{"Missing_Value", "Missing_Value", null, 5L},
+            new Object[]{"xabc", "xabc", "xabc", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testCountDistinctOfLookup()
+  {
+    testQuery(
+        "SELECT COUNT(DISTINCT LOOKUP(dim1, 'lookyloo')) FROM foo",
+        QUERY_CONTEXT,
+        ImmutableList.of(
+            Druids.newTimeseriesQueryBuilder()
+                  .dataSource(CalciteTests.DATASOURCE1)
+                  .intervals(querySegmentSpec(Filtration.eternity()))
+                  .granularity(Granularities.ALL)
+                  .virtualColumns(
+                      expressionVirtualColumn("v0", LOOKUP_EXPRESSION, ColumnType.STRING)
+                  )
+                  .aggregators(aggregators(
+                      new CardinalityAggregatorFactory(
+                          "a0",
+                          null,
+                          ImmutableList.of(new DefaultDimensionSpec("v0", "v0", ColumnType.STRING)),
+                          false,
+                          true
+                      )
+                  ))
+                  .context(QUERY_CONTEXT_DEFAULT)
+                  .build()
+        ),
+        ImmutableList.of(
+            new Object[]{1L}
+        )
+    );
+  }
+
+  @Test
+  public void testLookupOnValueThatIsNull()
+  {
+    List<Object[]> expected = ImmutableList.<Object[]>builder().add(
+        new Object[]{null, null},
+        new Object[]{null, null}
+    ).build();
+    testQuery(
+        "SELECT dim2 ,lookup(dim2,'lookyloo') from foo where dim2 is null",
+        QUERY_CONTEXT,
+        ImmutableList.of(
+            new Druids.ScanQueryBuilder()
+                .dataSource(CalciteTests.DATASOURCE1)
+                .intervals(querySegmentSpec(Filtration.eternity()))
+                .virtualColumns(
+                    expressionVirtualColumn("v0", "null", ColumnType.STRING)
+                )
+                .columnTypes(ColumnType.STRING)
+                .columns("v0")
+                .filters(isNull("dim2"))
+                .resultFormat(ScanQuery.ResultFormat.RESULT_FORMAT_COMPACTED_LIST)
+                .context(QUERY_CONTEXT_DEFAULT)
+                .build()
+        ),
+        expected
+    );
+  }
+
+  @Test
+  public void testLookupOnValueThatIsNotDistinctFromNull()
+  {
+    List<Object[]> expected = ImmutableList.<Object[]>builder().add(
+        new Object[]{null, null},
+        new Object[]{null, null}
+    ).build();
+    testQuery(
+        "SELECT dim2 ,lookup(dim2,'lookyloo') from foo where dim2 is not distinct from null",
+        QUERY_CONTEXT,
+        ImmutableList.of(
+            new Druids.ScanQueryBuilder()
+                .dataSource(CalciteTests.DATASOURCE1)
+                .intervals(querySegmentSpec(Filtration.eternity()))
+                .virtualColumns(
+                    expressionVirtualColumn("v0", "null", ColumnType.STRING)
+                )
+                .columnTypes(ColumnType.STRING)
+                .columns("v0")
+                .filters(isNull("dim2"))
+                .resultFormat(ScanQuery.ResultFormat.RESULT_FORMAT_COMPACTED_LIST)
+                .context(QUERY_CONTEXT_DEFAULT)
+                .build()
+        ),
+        expected
+    );
+  }
+
+  @SqlTestFrameworkConfig.NumMergeBuffers(3)
+  @Test
+  public void testExactCountDistinct()
+  {
+    msqIncompatible();
+    final String sqlQuery = "SELECT CAST(LOOKUP(dim1, 'lookyloo') AS VARCHAR), "
+                            + "COUNT(DISTINCT foo.dim2), "
+                            + "SUM(foo.cnt) FROM druid.foo "
+                            + "GROUP BY 1";
+
+    testQuery(
+        PLANNER_CONFIG_NO_HLL.withOverrides(
+            ImmutableMap.of(
+                QueryContextParameters.USE_GROUPING_SET_FOR_EXACT_DISTINCT.getName(),
+                "true"
+            )
+        ),
+        QUERY_CONTEXT,
+        sqlQuery,
+        CalciteTests.REGULAR_USER_AUTH_RESULT,
+        ImmutableList.of(
+            GroupByQuery.builder()
+                        .setDataSource(
+                            new QueryDataSource(
+                                GroupByQuery.builder()
+                                            .setDataSource(CalciteTests.DATASOURCE1)
+                                            .setInterval(querySegmentSpec(Filtration.eternity()))
+                                            .setGranularity(Granularities.ALL)
+                                            .setVirtualColumns(
+                                                expressionVirtualColumn(
+                                                    "v0",
+                                                    LOOKUP_EXPRESSION,
+                                                    ColumnType.STRING
+                                                )
+                                            )
+                                            .setDimensions(dimensions(
+                                                new DefaultDimensionSpec("v0", "d0", ColumnType.STRING),
+                                                new DefaultDimensionSpec("dim2", "d1", ColumnType.STRING)
+                                            ))
+                                            .setAggregatorSpecs(
+                                                aggregators(
+                                                    new LongSumAggregatorFactory("a0", "cnt"),
+                                                    new GroupingAggregatorFactory(
+                                                        "a1",
+                                                        Arrays.asList("v0", "dim2")
+                                                    )
+                                                )
+                                            )
+                                            .setSubtotalsSpec(
+                                                ImmutableList.of(
+                                                    ImmutableList.of("d0", "d1"),
+                                                    ImmutableList.of("d0")
+                                                )
+                                            )
+                                            .build()
+                            )
+                        )
+                        .setInterval(querySegmentSpec(Filtration.eternity()))
+                        .setGranularity(Granularities.ALL)
+                        .setDimensions(new DefaultDimensionSpec("d0", "_d0", ColumnType.STRING))
+                        .setAggregatorSpecs(aggregators(
+                            new FilteredAggregatorFactory(
+                                new CountAggregatorFactory("_a0"),
+                                and(
+                                    notNull("d1"),
+                                    equality("a1", 0L, ColumnType.LONG)
+                                )
+                            ),
+                            new FilteredAggregatorFactory(
+                                new LongMinAggregatorFactory("_a1", "a0"),
+                                equality("a1", 1L, ColumnType.LONG)
+                            )
+                        ))
+                        .setContext(QUERY_CONTEXT_DEFAULT)
+                        .build()
+        ),
+        ImmutableList.of(
+            new Object[]{null, 3L, 5L},
+            new Object[]{"xabc", 0L, 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testPullUpLookup()
+  {
+    testQuery(
+        "SELECT LOOKUP(dim1, 'lookyloo121'), COUNT(*) FROM druid.foo GROUP BY 1",
+        ImmutableList.of(
+            GroupByQuery.builder()
+                        .setDataSource(CalciteTests.DATASOURCE1)
+                        .setInterval(querySegmentSpec(Filtration.eternity()))
+                        .setGranularity(Granularities.ALL)
+                        .setDimensions(dimensions(new DefaultDimensionSpec("dim1", "d0", ColumnType.STRING)))
+                        .setAggregatorSpecs(aggregators(new CountAggregatorFactory("a0")))
+                        .setPostAggregatorSpecs(
+                            expressionPostAgg("p0", "lookup(\"d0\",'lookyloo121')", ColumnType.STRING))
+                        .setContext(QUERY_CONTEXT_DEFAULT)
+                        .build()
+        ),
+        ImmutableList.of(
+            new Object[]{"x", 1L},
+            new Object[]{"x1", 1L},
+            new Object[]{"x10.1", 1L},
+            new Object[]{"x2", 1L},
+            new Object[]{"xabc", 1L},
+            new Object[]{"xdef", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testPullUpAndReverseLookup()
+  {
+    testQuery(
+        "SELECT LOOKUP(dim1, 'lookyloo121'), COUNT(*)\n"
+        + "FROM druid.foo\n"
+        + "WHERE LOOKUP(dim1, 'lookyloo121') IN ('xabc', 'xdef')\n"
+        + "GROUP BY 1",
+        ImmutableList.of(
+            GroupByQuery.builder()
+                        .setDataSource(CalciteTests.DATASOURCE1)
+                        .setInterval(querySegmentSpec(Filtration.eternity()))
+                        .setGranularity(Granularities.ALL)
+                        .setDimFilter(in("dim1", ImmutableList.of("abc", "def")))
+                        .setDimensions(dimensions(new DefaultDimensionSpec("dim1", "d0", ColumnType.STRING)))
+                        .setAggregatorSpecs(aggregators(new CountAggregatorFactory("a0")))
+                        .setPostAggregatorSpecs(
+                            expressionPostAgg("p0", "lookup(\"d0\",'lookyloo121')", ColumnType.STRING))
+                        .setContext(QUERY_CONTEXT_DEFAULT)
+                        .build()
+        ),
+        ImmutableList.of(
+            new Object[]{"xabc", 1L},
+            new Object[]{"xdef", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testDontPullUpLookupWhenUsedByAggregation()
+  {
+    testQuery(
+        "SELECT LOOKUP(dim1, 'lookyloo121'), COUNT(LOOKUP(dim1, 'lookyloo121')) FROM druid.foo GROUP BY 1",
+        ImmutableList.of(
+            GroupByQuery.builder()
+                        .setDataSource(CalciteTests.DATASOURCE1)
+                        .setInterval(querySegmentSpec(Filtration.eternity()))
+                        .setGranularity(Granularities.ALL)
+                        .setVirtualColumns(
+                            expressionVirtualColumn("v0", "lookup(\"dim1\",'lookyloo121')", ColumnType.STRING)
+                        )
+                        .setDimensions(dimensions(new DefaultDimensionSpec("v0", "d0", ColumnType.STRING)))
+                        .setAggregatorSpecs(
+                            aggregators(
+                                new FilteredAggregatorFactory(
+                                    new CountAggregatorFactory("a0"),
+                                    not(isNull("v0"))
+                                )
+                            )
+                        )
+                        .setContext(QUERY_CONTEXT_DEFAULT)
+                        .build()
+        ),
+        ImmutableList.of(
+            new Object[]{"x", 1L},
+            new Object[]{"x1", 1L},
+            new Object[]{"x10.1", 1L},
+            new Object[]{"x2", 1L},
+            new Object[]{"xabc", 1L},
+            new Object[]{"xdef", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testPullUpLookupGroupOnLookupInput()
+  {
+    testQuery(
+        "SELECT dim1, LOOKUP(dim1, 'lookyloo121'), COUNT(*) FROM druid.foo GROUP BY 1, 2",
+        ImmutableList.of(
+            GroupByQuery.builder()
+                        .setDataSource(CalciteTests.DATASOURCE1)
+                        .setInterval(querySegmentSpec(Filtration.eternity()))
+                        .setGranularity(Granularities.ALL)
+                        .setDimensions(dimensions(new DefaultDimensionSpec("dim1", "d0", ColumnType.STRING)))
+                        .setAggregatorSpecs(aggregators(new CountAggregatorFactory("a0")))
+                        .setPostAggregatorSpecs(
+                            expressionPostAgg("p0", "lookup(\"d0\",'lookyloo121')", ColumnType.STRING))
+                        .setContext(QUERY_CONTEXT_DEFAULT)
+                        .build()
+        ),
+        ImmutableList.of(
+            new Object[]{"", "x", 1L},
+            new Object[]{"1", "x1", 1L},
+            new Object[]{"10.1", "x10.1", 1L},
+            new Object[]{"2", "x2", 1L},
+            new Object[]{"abc", "xabc", 1L},
+            new Object[]{"def", "xdef", 1L}
+        )
+    );
+  }
+
+  @Test
+  public void testPullUpLookupMoreDimensions()
+  {
+    testQuery(
+        "SELECT COUNT(*), dim2, dim1, LOOKUP(dim1, 'lookyloo121') FROM druid.foo GROUP BY 2, 3",
+        ImmutableList.of(
+            GroupByQuery.builder()
+                        .setDataSource(CalciteTests.DATASOURCE1)
+                        .setInterval(querySegmentSpec(Filtration.eternity()))
+                        .setGranularity(Granularities.ALL)
+                        .setDimensions(dimensions(
+                            new DefaultDimensionSpec("dim1", "d0", ColumnType.STRING),
+                            new DefaultDimensionSpec("dim2", "d1", ColumnType.STRING)
+                        ))
+                        .setAggregatorSpecs(aggregators(new CountAggregatorFactory("a0")))
+                        .setPostAggregatorSpecs(
+                            expressionPostAgg("p0", "lookup(\"d0\",'lookyloo121')", ColumnType.STRING))
+                        .setContext(QUERY_CONTEXT_DEFAULT)
+                        .build()
+        ),
+        ImmutableList.of(
+            new Object[]{1L, "a", "", "x"},
+            new Object[]{1L, "a", "1", "x1"},
+            new Object[]{1L, null, "10.1", "x10.1"},
+            new Object[]{1L, "", "2", "x2"},
+            new Object[]{1L, null, "abc", "xabc"},
+            new Object[]{1L, "abc", "def", "xdef"}
+        )
+    );
+  }
+
+  @Test
+  public void testPullUpLookupOneInjectiveOneNot()
+  {
+    testQuery(
+        "SELECT COUNT(*), LOOKUP(dim1, 'lookyloo'), LOOKUP(dim1, 'lookyloo121') FROM druid.foo GROUP BY 2, 3",
+        ImmutableList.of(
+            GroupByQuery.builder()
+                        .setDataSource(CalciteTests.DATASOURCE1)
+                        .setInterval(querySegmentSpec(Filtration.eternity()))
+                        .setGranularity(Granularities.ALL)
+                        .setVirtualColumns(
+                            expressionVirtualColumn("v0", LOOKUP_EXPRESSION, ColumnType.STRING)
+                        )
+                        .setDimensions(dimensions(
+                            new DefaultDimensionSpec("v0", "d0", ColumnType.STRING),
+                            new DefaultDimensionSpec("dim1", "d1", ColumnType.STRING)
+                        ))
+                        .setAggregatorSpecs(aggregators(new CountAggregatorFactory("a0")))
+                        .setPostAggregatorSpecs(
+                            expressionPostAgg("p0", "lookup(\"d1\",'lookyloo121')", ColumnType.STRING))
+                        .setContext(QUERY_CONTEXT_DEFAULT)
+                        .build()
+        ),
+        ImmutableList.of(
+            new Object[]{1L, null, "x"},
+            new Object[]{1L, null, "x1"},
+            new Object[]{1L, null, "x10.1"},
+            new Object[]{1L, null, "x2"},
+            new Object[]{1L, null, "xdef"},
+            new Object[]{1L, "xabc", "xabc"}
+        )
+    );
+  }
+
+  private String buildFilterTestSql(final String conditionSql)
+  {
+    return "SELECT LOOKUP(dim1, 'lookyloo'), COUNT(*) FROM foo\n"
+           + "WHERE (" + conditionSql + ") AND TIME_IN_INTERVAL(__time, '2000/3000')\n"
+           + "GROUP BY LOOKUP(dim1, 'lookyloo')";
+  }
+
+  private List<Query<?>> buildFilterTestExpectedQuery(
+      @Nullable final VirtualColumn expectedVirtualColumn,
+      @Nullable final DimFilter expectedFilter
+  )
+  {
+    final VirtualColumns virtualColumns;
+    final String groupByDimension;
+
+    if (expectedVirtualColumn != null) {
+      // The filter uses a specified virtual column. GROUP BY always uses a virtual column for LOOKUP(dim1, 'lookyloo').
+      // Determine if they are the same.
+      if (expectedVirtualColumn instanceof ExpressionVirtualColumn &&
+          LOOKUP_EXPRESSION.equals(((ExpressionVirtualColumn) expectedVirtualColumn).getExpression())) {
+        // Only need one virtual column. GROUP BY will reuse the filter's expectedVirtualColumn.
+        groupByDimension = expectedVirtualColumn.getOutputName();
+        virtualColumns = VirtualColumns.create(expectedVirtualColumn);
+      } else {
+        // Need both virtual columns: one for the filter, one for the GROUP BY.
+        groupByDimension = "v1";
+        virtualColumns = VirtualColumns.create(
+            expectedVirtualColumn,
+            expressionVirtualColumn(groupByDimension, LOOKUP_EXPRESSION, ColumnType.STRING)
+        );
+      }
+    } else {
+      // The filter does not need its own virtual column.
+      groupByDimension = "v0";
+      virtualColumns = VirtualColumns.create(expressionVirtualColumn("v0", LOOKUP_EXPRESSION, ColumnType.STRING));
+    }
+
+    return ImmutableList.of(
+        GroupByQuery.builder()
+                    .setDataSource(CalciteTests.DATASOURCE1)
+                    .setInterval(querySegmentSpec(Intervals.of("2000/3000")))
+                    .setVirtualColumns(virtualColumns)
+                    .setGranularity(Granularities.ALL)
+                    .setDimFilter(expectedFilter)
+                    .setDimensions(new DefaultDimensionSpec(groupByDimension, "d0", ColumnType.STRING))
+                    .setAggregatorSpecs(new CountAggregatorFactory("a0"))
+                    .setContext(QUERY_CONTEXT)
+                    .build()
+    );
+  }
+
+  private List<Query<?>> buildFilterTestExpectedQuery(@Nullable final DimFilter expectedFilter)
+  {
+    return buildFilterTestExpectedQuery(null, expectedFilter);
+  }
+
+  private List<Query<?>> buildFilterTestExpectedQueryConstantDimension(
+      final String expectedConstantDimension,
+      @Nullable final DimFilter expectedFilter
+  )
+  {
+    return ImmutableList.of(
+        GroupByQuery.builder()
+                    .setDataSource(CalciteTests.DATASOURCE1)
+                    .setInterval(querySegmentSpec(Intervals.of("2000/3000")))
+                    .setVirtualColumns(expressionVirtualColumn("v0", expectedConstantDimension, ColumnType.STRING))
+                    .setGranularity(Granularities.ALL)
+                    .setDimFilter(expectedFilter)
+                    .setDimensions(new DefaultDimensionSpec("v0", "d0", ColumnType.STRING))
+                    .setAggregatorSpecs(new CountAggregatorFactory("a0"))
+                    .setContext(QUERY_CONTEXT)
+                    .build()
+    );
+  }
+
+  private List<Query<?>> buildFilterTestExpectedQueryAlwaysFalse()
+  {
+    return ImmutableList.of(
+        Druids.newScanQueryBuilder()
+              .dataSource(InlineDataSource.fromIterable(
+                  ImmutableList.of(),
+                  RowSignature.builder()
+                              .add("EXPR$0", ColumnType.STRING)
+                              .add("$f1", ColumnType.LONG)
+                              .build()
+              ))
+              .intervals(querySegmentSpec(Filtration.eternity()))
+              .columns("EXPR$0", "$f1")
+              .columnTypes(ColumnType.STRING, ColumnType.LONG)
+              .resultFormat(ScanQuery.ResultFormat.RESULT_FORMAT_COMPACTED_LIST)
+              .context(QUERY_CONTEXT)
+              .build()
+    );
+  }
+}

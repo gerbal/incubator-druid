@@ -24,19 +24,31 @@ import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Supplier;
 import org.apache.druid.math.expr.ExprMacroTable;
+import org.apache.druid.math.expr.ExpressionProcessing;
+import org.apache.druid.query.aggregation.simd.SimdLongSumVectorAggregator;
 import org.apache.druid.segment.BaseLongColumnValueSelector;
 import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
 import org.apache.druid.segment.vector.VectorValueSelector;
 
 import javax.annotation.Nullable;
-import java.util.Collections;
-import java.util.List;
 
 /**
+ * A null-aware aggregator factory. Note that the nullness is handled by {@link NullableNumericAggregatorFactory}, the
+ * {@link LongSumAggregator}, {@link LongSumBufferAggregator}, and {@link LongSumVectorAggregator} only aggregates
+ * non-null values, and returns 0 if no data has been aggregated.
+ * <p>
+ * If forceNotNullable is set to true, the aggregator factory will not allow null values.
  */
 public class LongSumAggregatorFactory extends SimpleLongAggregatorFactory
 {
   private final Supplier<byte[]> cacheKey;
+
+  private final boolean forceNotNullable;
+
+  public LongSumAggregatorFactory(String name, String fieldName)
+  {
+    this(name, fieldName, null, ExprMacroTable.nil(), false);
+  }
 
   @JsonCreator
   public LongSumAggregatorFactory(
@@ -46,17 +58,30 @@ public class LongSumAggregatorFactory extends SimpleLongAggregatorFactory
       @JacksonInject ExprMacroTable macroTable
   )
   {
+    this(name, fieldName, expression, macroTable, false);
+  }
+
+  public LongSumAggregatorFactory(
+      String name,
+      String fieldName,
+      @Nullable String expression,
+      ExprMacroTable macroTable,
+      boolean forceNotNullable
+  )
+  {
     super(macroTable, name, fieldName, expression);
     this.cacheKey = AggregatorUtil.getSimpleAggregatorCacheKeySupplier(
         AggregatorUtil.LONG_SUM_CACHE_TYPE_ID,
         fieldName,
         fieldExpression
     );
+    this.forceNotNullable = forceNotNullable;
   }
 
-  public LongSumAggregatorFactory(String name, String fieldName)
+  @Override
+  public boolean forceNotNullable()
   {
-    this(name, fieldName, null, ExprMacroTable.nil());
+    return forceNotNullable;
   }
 
   @Override
@@ -83,6 +108,9 @@ public class LongSumAggregatorFactory extends SimpleLongAggregatorFactory
       VectorValueSelector selector
   )
   {
+    if (ExpressionProcessing.useVectorApi()) {
+      return new SimdLongSumVectorAggregator(selector);
+    }
     return new LongSumVectorAggregator(selector);
   }
 
@@ -108,19 +136,13 @@ public class LongSumAggregatorFactory extends SimpleLongAggregatorFactory
   @Override
   public AggregatorFactory withName(String newName)
   {
-    return new LongSumAggregatorFactory(newName, getFieldName(), getExpression(), macroTable);
+    return new LongSumAggregatorFactory(newName, getFieldName(), getExpression(), macroTable, forceNotNullable);
   }
 
   @Override
   public AggregatorFactory getCombiningFactory()
   {
-    return new LongSumAggregatorFactory(name, name, null, macroTable);
-  }
-
-  @Override
-  public List<AggregatorFactory> getRequiredColumns()
-  {
-    return Collections.singletonList(new LongSumAggregatorFactory(fieldName, fieldName, expression, macroTable));
+    return new LongSumAggregatorFactory(name, name, null, macroTable, forceNotNullable);
   }
 
   @Override
@@ -136,6 +158,7 @@ public class LongSumAggregatorFactory extends SimpleLongAggregatorFactory
            "fieldName='" + fieldName + '\'' +
            ", expression='" + expression + '\'' +
            ", name='" + name + '\'' +
+           ", forceNotNullable='" + forceNotNullable + '\'' +
            '}';
   }
 }

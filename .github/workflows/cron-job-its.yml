@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Cron Job ITs
+name: "Cron Job ITs"
 on:
   schedule: # Runs by default on master branch
     - cron: '0 3 * * *' # Runs every day at 3:00 AM UTC
@@ -22,119 +22,47 @@ on:
       - 'owasp-dependency-check-suppressions.xml'
     branches:
       - master
-      - /^\d+\.\d+\.\d+(-\S*)?$/ # release branches
+      - '[0-9]+.[0-9]+.[0-9]+' # release branches
+      - '[0-9]+.[0-9]+.[0-9]+-[A-Za-z0-9]+' # release branches
+  push:
+    branches:
+      - '[0-9]+.[0-9]+.[0-9]+' # release branches
+      - '[0-9]+.[0-9]+.[0-9]+-[A-Za-z0-9]+' # release branches
 
-  pull_request:
-    paths:
-      'owasp-dependency-check-suppressions.xml'
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.event.pull_request.head.label || github.head_ref || github.run_id }}' # group workflows only on pull_requests and not on branch commits
+  cancel-in-progress: true
 
 jobs:
-  build:
-    if: github.event_name == 'schedule'
-    name: build (jdk8)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout branch
-        uses: actions/checkout@v3
-
-      - name: Setup java
-        run: export JAVA_HOME=$JAVA_HOME_8_X64
-
-      - name: Cache Maven m2 repository
-        id: maven
-        uses: actions/cache@v3
-        with:
-          path: ~/.m2/repository
-          key: maven-${{ runner.os }}-8-${{ github.sha }}
-
-      - name: Maven build
-        id: maven_build
-        run: |
-          ./it.sh ci
-
-  integration-index-tests-middleManager:
-    strategy:
-      fail-fast: false
-      matrix:
-        testing_group: [batch-index, input-format, input-source, perfect-rollup-parallel-batch-index, kafka-index, kafka-index-slow, kafka-transactional-index, kafka-transactional-index-slow, kafka-data-format, ldap-security, realtime-index, append-ingestion, compaction]
-    uses: ./.github/workflows/reusable-standard-its.yml
-    needs: build
-    with:
-      build_jdk: 8
-      runtime_jdk: 11
-      testing_groups: -Dgroups=${{ matrix.testing_group }}
-      use_indexer: middleManager
-      group: ${{ matrix.testing_group }}
-
-  integration-index-tests-indexer:
-    strategy:
-      fail-fast: false
-      matrix:
-        testing_group: [ input-source, perfect-rollup-parallel-batch-index, kafka-index, kafka-transactional-index, kafka-index-slow, kafka-transactional-index-slow, kafka-data-format, append-ingestion, compaction ]
-    uses: ./.github/workflows/reusable-standard-its.yml
-    needs: build
-    with:
-      build_jdk: 8
-      runtime_jdk: 11
-      testing_groups: -Dgroups=${{ matrix.testing_group }}
-      use_indexer: indexer
-      group: ${{ matrix.testing_group }}
-
-  integration-query-tests-middleManager:
-    strategy:
-      fail-fast: false
-      matrix:
-        testing_group: [ query, query-retry, query-error, security, high-availability ]
-    uses: ./.github/workflows/reusable-standard-its.yml
-    needs: build
-    with:
-      build_jdk: 8
-      runtime_jdk: 11
-      testing_groups: -Dgroups=${{ matrix.testing_group }}
-      use_indexer: middleManager
-      override_config_path: ./environment-configs/test-groups/prepopulated-data
-      group: ${{ matrix.testing_group }}
-
-  integration-other-tests:
-    strategy:
-      fail-fast: false
-      matrix:
-        indexer: [ middleManager, indexer ]
-    uses: ./.github/workflows/reusable-standard-its.yml
-    needs: build
-    with:
-      build_jdk: 8
-      runtime_jdk: 11
-      testing_groups: -DexcludedGroups=batch-index,input-format,input-source,perfect-rollup-parallel-batch-index,kafka-index,query,query-retry,query-error,realtime-index,security,ldap-security,s3-deep-storage,gcs-deep-storage,azure-deep-storage,hdfs-deep-storage,s3-ingestion,kinesis-index,kinesis-data-format,kafka-transactional-index,kafka-index-slow,kafka-transactional-index-slow,kafka-data-format,hadoop-s3-to-s3-deep-storage,hadoop-s3-to-hdfs-deep-storage,hadoop-azure-to-azure-deep-storage,hadoop-azure-to-hdfs-deep-storage,hadoop-gcs-to-gcs-deep-storage,hadoop-gcs-to-hdfs-deep-storage,aliyun-oss-deep-storage,append-ingestion,compaction,high-availability,upgrade,shuffle-deep-store,custom-coordinator-duties
-      use_indexer: ${{ matrix.indexer }}
-      group: other
-
   security_vulnerabilities:
+    # Pull requests from forks get no secrets, and dependency-check fails without an NVD API key.
+    if: github.repository == 'apache/druid' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     name: security vulnerabilities
-    strategy:
-      matrix:
-        HADOOP_PROFILE: [ '', '-Phadoop3' ]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout branch
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
 
       - name: setup java
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v6
         with:
-          java-version: '8'
+          java-version: '25'
           distribution: 'zulu'
           cache: maven
 
+      - name: maven build # needed to rebuild in case of maven snapshot resolution fails
+        run: ./mvnw clean install -P dist -P skip-static-checks,skip-tests -Dmaven.javadoc.skip=true -Dcyclonedx.skip=true -Dweb.console.skip=true
+
       - name: security vulnerabilities check
         env:
-          MVN: mvn --no-snapshot-updates
-          HADOOP_PROFILE: ${{ matrix.HADOOP_PROFILE }}
+          OSS_INDEX_USERNAME: ${{ secrets.OSS_INDEX_USERNAME }}
+          OSS_INDEX_PASSWORD: ${{ secrets.OSS_INDEX_PASSWORD }}
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
-          mvn dependency-check:purge dependency-check:check ${HADOOP_PROFILE} || { echo "
+          ./mvnw -B dependency-check:purge dependency-check:check -DnvdApiKey=$NVD_API_KEY -DossIndexUsername=$OSS_INDEX_USERNAME -DossIndexPassword=$OSS_INDEX_PASSWORD || { echo "
           The OWASP dependency check has found security vulnerabilities. Please use a newer version
           of the dependency that does not have vulnerabilities. To see a report run
-          `mvn dependency-check:check`
+          './mvnw dependency-check:check'
           If the analysis has false positives,
           they can be suppressed by adding entries to owasp-dependency-check-suppressions.xml (for more
           information, see https://jeremylong.github.io/DependencyCheck/general/suppression.html).

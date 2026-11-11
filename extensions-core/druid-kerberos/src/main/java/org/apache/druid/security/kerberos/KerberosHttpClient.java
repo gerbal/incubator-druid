@@ -23,6 +23,7 @@ import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
+import io.netty.handler.codec.http.HttpHeaders;
 import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.java.util.http.client.AbstractHttpClient;
@@ -30,7 +31,6 @@ import org.apache.druid.java.util.http.client.HttpClient;
 import org.apache.druid.java.util.http.client.Request;
 import org.apache.druid.java.util.http.client.response.HttpResponseHandler;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.jboss.netty.handler.codec.http.HttpHeaders;
 import org.joda.time.Duration;
 
 import java.net.CookieManager;
@@ -99,7 +99,7 @@ public class KerberosHttpClient extends AbstractHttpClient
         );
         DruidKerberosUtil.authenticateIfRequired(internalClientPrincipal, internalClientKeytab);
         UserGroupInformation currentUser = UserGroupInformation.getCurrentUser();
-        String challenge = currentUser.doAs(new PrivilegedExceptionAction<String>()
+        String challenge = currentUser.doAs(new PrivilegedExceptionAction<>()
         {
           @Override
           public String run() throws Exception
@@ -122,7 +122,7 @@ public class KerberosHttpClient extends AbstractHttpClient
           duration
       );
 
-      Futures.addCallback(internalFuture, new FutureCallback<RetryResponseHolder<Final>>()
+      Futures.addCallback(internalFuture, new FutureCallback<>()
       {
         @Override
         public void onSuccess(RetryResponseHolder<Final> result)

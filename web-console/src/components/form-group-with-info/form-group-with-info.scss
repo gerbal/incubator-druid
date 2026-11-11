@@ -16,7 +16,7 @@
  * limitations under the License.
  */
 
-@import '../../variables';
+@use '../../variables' as *;
 
 .form-group-with-info {
   label.#{$bp-ns}-label {
@@ -33,7 +33,7 @@
     }
   }
 
-  .#{$bp-ns}-text-muted .#{$bp-ns}-popover2-target {
+  .#{$bp-ns}-text-muted .#{$bp-ns}-popover-target {
     margin-top: 0;
   }
 
@@ -45,5 +45,13 @@
       right: 0;
       top: 5px;
     }
+  }
+}
+
+.#{$bp-ns}-popover-content {
+  .code-block {
+    white-space: pre;
+    overflow: auto;
+    font-family: monospace;
   }
 }

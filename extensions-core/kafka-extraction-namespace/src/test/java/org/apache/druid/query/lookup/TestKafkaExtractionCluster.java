@@ -21,13 +21,11 @@ package org.apache.druid.query.lookup;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
 import com.google.inject.Binder;
 import com.google.inject.Injector;
 import com.google.inject.Module;
 import com.google.inject.name.Names;
-import kafka.server.KafkaConfig;
-import kafka.server.KafkaServer;
-import org.apache.curator.test.TestingCluster;
 import org.apache.druid.guice.GuiceInjectors;
 import org.apache.druid.initialization.Initialization;
 import org.apache.druid.java.util.common.ISE;
@@ -39,24 +37,29 @@ import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
-import org.apache.kafka.common.utils.Time;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
-import scala.Some;
+import org.hamcrest.CoreMatchers;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
+import org.testcontainers.kafka.KafkaContainer;
 
 import javax.annotation.Nonnull;
-import java.io.IOException;
+
+import java.io.File;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
-import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  *
@@ -67,13 +70,15 @@ public class TestKafkaExtractionCluster
   private static final String TOPIC_NAME = "testTopic";
   private static final Map<String, String> KAFKA_PROPERTIES = new HashMap<>();
 
-  @Rule
-  public TemporaryFolder temporaryFolder = new TemporaryFolder();
+  @TempDir
+  public File temporaryFolder;
 
   private final Closer closer = Closer.create();
 
-  private TestingCluster zkServer;
-  private KafkaServer kafkaServer;
+  private static final String KAFKA_IMAGE =
+      System.getProperty("druid.testing.kafka.image", "apache/kafka:4.3.0");
+
+  private KafkaContainer kafkaServer;
   private Injector injector;
   private ObjectMapper mapper;
   private KafkaLookupExtractorFactory factory;
@@ -86,26 +91,12 @@ public class TestKafkaExtractionCluster
                     StringUtils.toUtf8("abcdefg")));
   }
 
-  @Before
+  @BeforeEach
   public void setUp() throws Exception
   {
-    zkServer = new TestingCluster(1);
-    zkServer.start();
-    closer.register(() -> {
-      zkServer.stop();
-    });
-
-    kafkaServer = new KafkaServer(
-          getBrokerProperties(),
-          Time.SYSTEM,
-          Some.apply(StringUtils.format("TestingBroker[%d]-", 1)),
-          false);
-
-    kafkaServer.startup();
-    closer.register(() -> {
-      kafkaServer.shutdown();
-      kafkaServer.awaitShutdown();
-    });
+    kafkaServer = new KafkaContainer(KAFKA_IMAGE);
+    kafkaServer.start();
+    closer.register(() -> kafkaServer.stop());
     log.info("---------------------------Started Kafka Broker ---------------------------");
 
     log.info("---------------------------Publish Messages to topic-----------------------");
@@ -146,8 +137,8 @@ public class TestKafkaExtractionCluster
         mapper.writeValueAsString(kafkaLookupExtractorFactory),
         LookupExtractorFactory.class
     );
-    Assert.assertEquals(kafkaLookupExtractorFactory.getKafkaTopic(), factory.getKafkaTopic());
-    Assert.assertEquals(kafkaLookupExtractorFactory.getKafkaProperties(), factory.getKafkaProperties());
+    Assertions.assertEquals(kafkaLookupExtractorFactory.getKafkaTopic(), factory.getKafkaTopic());
+    Assertions.assertEquals(kafkaLookupExtractorFactory.getKafkaProperties(), factory.getKafkaProperties());
     factory.start();
     closer.register(() -> factory.close());
     log.info("--------------------------- started rename manager ---------------------------");
@@ -157,8 +148,7 @@ public class TestKafkaExtractionCluster
   private Map<String, String> getConsumerProperties()
   {
     final Map<String, String> props = new HashMap<>(KAFKA_PROPERTIES);
-    int port = kafkaServer.advertisedListeners().apply(0).port();
-    props.put("bootstrap.servers", StringUtils.format("127.0.0.1:%d", port));
+    props.put("bootstrap.servers", kafkaServer.getBootstrapServers());
     return props;
   }
 
@@ -171,27 +161,7 @@ public class TestKafkaExtractionCluster
     }
   }
 
-  @Nonnull
-  private KafkaConfig getBrokerProperties() throws IOException
-  {
-    final Properties serverProperties = new Properties();
-    serverProperties.putAll(KAFKA_PROPERTIES);
-    serverProperties.put("broker.id", "0");
-    serverProperties.put("zookeeper.connect", zkServer.getConnectString());
-    serverProperties.put("port", String.valueOf(ThreadLocalRandom.current().nextInt(9999) + 10000));
-    serverProperties.put("auto.create.topics.enable", "true");
-    serverProperties.put("log.dir", temporaryFolder.newFolder().getAbsolutePath());
-    serverProperties.put("num.partitions", "1");
-    serverProperties.put("offsets.topic.replication.factor", "1");
-    serverProperties.put("default.replication.factor", "1");
-    serverProperties.put("log.cleaner.enable", "true");
-    serverProperties.put("advertised.host.name", "localhost");
-    serverProperties.put("zookeeper.session.timeout.ms", "30000");
-    serverProperties.put("zookeeper.sync.time.ms", "200");
-    return new KafkaConfig(serverProperties);
-  }
-
-  @After
+  @AfterEach
   public void tearDown() throws Exception
   {
     closer.close();
@@ -201,8 +171,7 @@ public class TestKafkaExtractionCluster
   {
     final Properties kafkaProducerProperties = new Properties();
     kafkaProducerProperties.putAll(KAFKA_PROPERTIES);
-    int port = kafkaServer.advertisedListeners().apply(0).port();
-    kafkaProducerProperties.put("bootstrap.servers", StringUtils.format("127.0.0.1:%d", port));
+    kafkaProducerProperties.put("bootstrap.servers", kafkaServer.getBootstrapServers());
     kafkaProducerProperties.put("key.serializer", ByteArraySerializer.class.getName());
     kafkaProducerProperties.put("value.serializer", ByteArraySerializer.class.getName());
     kafkaProducerProperties.put("acks", "all");
@@ -220,7 +189,41 @@ public class TestKafkaExtractionCluster
     }
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  public void test_defaultRejectAllUrlsForSaslOauthBearerUrlConsumerProperty()
+  {
+    Map<String, String> properties = getConsumerProperties();
+    properties.put("sasl.mechanism", "OAUTHBEARER");
+    properties.put("security.protocol", "SASL_SSL");
+    properties.put("sasl.jaas.config", "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required;");
+    properties.put("sasl.login.callback.handler.class", "org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallbackHandler");
+
+    properties.put("sasl.oauthbearer.token.endpoint.url", "http://localhost:8080/token");
+    KafkaLookupExtractorFactory factory = new KafkaLookupExtractorFactory(
+        null,
+        TOPIC_NAME,
+        properties
+    );
+    assertThat(
+        assertThrows(KafkaException.class, factory::getConsumer),
+        CoreMatchers.instanceOf(KafkaException.class)
+    );
+
+    properties.remove("sasl.oauthbearer.token.endpoint.url");
+    properties.put("sasl.oauthbearer.jwks.endpoint.url", "http://localhost:8080/jwks");
+    factory = new KafkaLookupExtractorFactory(
+        null,
+        TOPIC_NAME,
+        properties
+    );
+    assertThat(
+        assertThrows(KafkaException.class, factory::getConsumer),
+        CoreMatchers.instanceOf(KafkaException.class)
+    );
+  }
+
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testSimpleLookup() throws Exception
   {
     try (final Producer<byte[], byte[]> producer = new KafkaProducer(makeProducerProperties())) {
@@ -260,12 +263,16 @@ public class TestKafkaExtractionCluster
       }
 
       log.info("-------------------------     Checking baz bat     -------------------------------");
-      Assert.assertEquals("bat", factory.get().apply("baz"));
-      Assert.assertEquals(Collections.singletonList("baz"), factory.get().unapply("bat"));
+      Assertions.assertEquals("bat", factory.get().apply("baz"));
+      Assertions.assertEquals(
+          Collections.singletonList("baz"),
+          Lists.newArrayList(factory.get().unapplyAll(Collections.singleton("bat")))
+      );
     }
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testLookupWithTombstone() throws Exception
   {
     try (final Producer<byte[], byte[]> producer = new KafkaProducer(makeProducerProperties())) {
@@ -309,7 +316,8 @@ public class TestKafkaExtractionCluster
     }
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testLookupWithInitTombstone() throws Exception
   {
     try (final Producer<byte[], byte[]> producer = new KafkaProducer(makeProducerProperties())) {
@@ -354,7 +362,7 @@ public class TestKafkaExtractionCluster
       }
     }
 
-    Assert.assertEquals("update check", expected, extractor.apply(key));
+    Assertions.assertEquals(expected, extractor.apply(key), "update check");
   }
 
   private void assertReverseUpdated(
@@ -365,10 +373,10 @@ public class TestKafkaExtractionCluster
   {
     final LookupExtractor extractor = factory.get();
 
-    while (!expected.equals(extractor.unapply(key))) {
+    while (!expected.equals(Lists.newArrayList(extractor.unapplyAll(Collections.singleton(key))))) {
       Thread.sleep(100);
     }
 
-    Assert.assertEquals("update check", expected, extractor.unapply(key));
+    Assertions.assertEquals(expected, Lists.newArrayList(extractor.unapplyAll(Collections.singleton(key))), "update check");
   }
 }

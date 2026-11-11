@@ -21,7 +21,6 @@ package org.apache.druid.indexing.common.task.batch.parallel;
 
 import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
-import com.google.common.collect.ImmutableMap;
 import org.apache.druid.data.input.AbstractInputSource;
 import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.data.input.InputSplit;
@@ -34,20 +33,21 @@ import org.apache.druid.indexer.TaskLocation;
 import org.apache.druid.indexer.TaskState;
 import org.apache.druid.indexer.TaskStatus;
 import org.apache.druid.indexer.TaskStatusPlus;
+import org.apache.druid.indexer.granularity.UniformGranularitySpec;
 import org.apache.druid.indexer.partitions.DynamicPartitionsSpec;
+import org.apache.druid.indexer.report.TaskReport;
 import org.apache.druid.indexing.common.TaskToolbox;
 import org.apache.druid.indexing.common.task.AbstractTask;
 import org.apache.druid.indexing.common.task.SegmentAllocators;
 import org.apache.druid.indexing.common.task.TaskResource;
+import org.apache.druid.indexing.common.task.TuningConfigBuilder;
 import org.apache.druid.indexing.common.task.batch.parallel.ParallelIndexTaskRunner.SubTaskSpecStatus;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.granularity.Granularities;
-import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.LongSumAggregatorFactory;
 import org.apache.druid.segment.indexing.DataSchema;
-import org.apache.druid.segment.indexing.granularity.UniformGranularitySpec;
 import org.apache.druid.segment.realtime.appenderator.SegmentAllocator;
 import org.apache.druid.segment.realtime.appenderator.SegmentIdWithShardSpec;
 import org.apache.druid.server.security.AuthConfig;
@@ -56,9 +56,9 @@ import org.apache.druid.timeline.DataSegment;
 import org.easymock.EasyMock;
 import org.joda.time.Duration;
 import org.joda.time.Interval;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import javax.annotation.Nullable;
 import javax.servlet.http.HttpServletRequest;
@@ -66,6 +66,7 @@ import javax.ws.rs.core.Response;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -116,19 +117,13 @@ public class ParallelIndexSupervisorTaskResourceTest extends AbstractParallelInd
     super(0.0, 0.0);
   }
 
-  @After
-  public void teardown()
-  {
-    temporaryFolder.delete();
-  }
-
-  @Test(timeout = 20000L)
+  @Test
+  @Timeout(20)
   public void testAPIs() throws Exception
   {
     task = newTask(
         Intervals.of("2017/2018"),
         new ParallelIndexIOConfig(
-            null,
             new TestInputSource(IntStream.range(0, NUM_SUB_TASKS).boxed().collect(Collectors.toList())),
             new NoopInputFormat(),
             false,
@@ -139,17 +134,17 @@ public class ParallelIndexSupervisorTaskResourceTest extends AbstractParallelInd
     Thread.sleep(1000);
 
     final SinglePhaseParallelIndexTaskRunner runner = (SinglePhaseParallelIndexTaskRunner) task.getCurrentRunner();
-    Assert.assertNotNull("runner is null", runner);
+    Assertions.assertNotNull(runner, "runner is null");
 
     // test getMode
     Response response = task.getMode(newRequest());
-    Assert.assertEquals(200, response.getStatus());
-    Assert.assertEquals("parallel", response.getEntity());
+    Assertions.assertEquals(200, response.getStatus());
+    Assertions.assertEquals("parallel", response.getEntity());
 
     // test expectedNumSucceededTasks
     response = task.getProgress(newRequest());
-    Assert.assertEquals(200, response.getStatus());
-    Assert.assertEquals(
+    Assertions.assertEquals(200, response.getStatus());
+    Assertions.assertEquals(
         NUM_SUB_TASKS,
         ((ParallelIndexingPhaseProgress) response.getEntity()).getEstimatedExpectedSucceeded()
     );
@@ -218,11 +213,11 @@ public class ParallelIndexSupervisorTaskResourceTest extends AbstractParallelInd
         buildStateMap()
     );
 
-    Assert.assertEquals(1, runningSpecs.size());
+    Assertions.assertEquals(1, runningSpecs.size());
     final String lastRunningSpecId = runningSpecs.keySet().iterator().next();
     final List<TaskStatusPlus> taskHistory = taskHistories.get(lastRunningSpecId);
     // This should be a failed task history because new tasks appear later in runningTasks.
-    Assert.assertEquals(1, taskHistory.size());
+    Assertions.assertEquals(1, taskHistory.size());
 
     // Test one more failure
     runningTasks.get(0).setState(TaskState.FAILED);
@@ -239,7 +234,7 @@ public class ParallelIndexSupervisorTaskResourceTest extends AbstractParallelInd
         failedTasks,
         buildStateMap()
     );
-    Assert.assertEquals(2, taskHistory.size());
+    Assertions.assertEquals(2, taskHistory.size());
 
     runningTasks.get(0).setState(TaskState.SUCCESS);
     succeededTasks++;
@@ -247,7 +242,7 @@ public class ParallelIndexSupervisorTaskResourceTest extends AbstractParallelInd
       Thread.sleep(100);
     }
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         TaskState.SUCCESS,
         getIndexingServiceClient().waitToFinish(task, 1000, TimeUnit.MILLISECONDS).getStatusCode()
     );
@@ -257,7 +252,7 @@ public class ParallelIndexSupervisorTaskResourceTest extends AbstractParallelInd
   private int getNumSubTasks(Function<ParallelIndexingPhaseProgress, Integer> func)
   {
     final Response response = task.getProgress(newRequest());
-    Assert.assertEquals(200, response.getStatus());
+    Assertions.assertEquals(200, response.getStatus());
     return func.apply((ParallelIndexingPhaseProgress) response.getEntity());
   }
 
@@ -285,48 +280,40 @@ public class ParallelIndexSupervisorTaskResourceTest extends AbstractParallelInd
   )
   {
     Response response = task.getProgress(newRequest());
-    Assert.assertEquals(200, response.getStatus());
+    Assertions.assertEquals(200, response.getStatus());
     final ParallelIndexingPhaseProgress monitorStatus = (ParallelIndexingPhaseProgress) response.getEntity();
 
-    // numRunningTasks
-    Assert.assertEquals(runningTasks.size(), monitorStatus.getRunning());
-
-    // numSucceededTasks
-    Assert.assertEquals(expectedSucceededTasks, monitorStatus.getSucceeded());
-
-    // numFailedTasks
-    Assert.assertEquals(expectedFailedTask, monitorStatus.getFailed());
-
-    // numCompleteTasks
-    Assert.assertEquals(expectedSucceededTasks + expectedFailedTask, monitorStatus.getComplete());
-
-    // numTotalTasks
-    Assert.assertEquals(runningTasks.size() + expectedSucceededTasks + expectedFailedTask, monitorStatus.getTotal());
+    // Verify the number of tasks in different states
+    Assertions.assertEquals(runningTasks.size(), monitorStatus.getRunning());
+    Assertions.assertEquals(expectedSucceededTasks, monitorStatus.getSucceeded());
+    Assertions.assertEquals(expectedFailedTask, monitorStatus.getFailed());
+    Assertions.assertEquals(expectedSucceededTasks + expectedFailedTask, monitorStatus.getComplete());
+    Assertions.assertEquals(runningTasks.size() + expectedSucceededTasks + expectedFailedTask, monitorStatus.getTotal());
 
     // runningSubTasks
     response = task.getRunningTasks(newRequest());
-    Assert.assertEquals(200, response.getStatus());
-    Assert.assertEquals(
+    Assertions.assertEquals(200, response.getStatus());
+    Assertions.assertEquals(
         runningTasks.stream().map(AbstractTask::getId).collect(Collectors.toSet()),
         new HashSet<>((Collection<String>) response.getEntity())
     );
 
     // subTaskSpecs
     response = task.getSubTaskSpecs(newRequest());
-    Assert.assertEquals(200, response.getStatus());
+    Assertions.assertEquals(200, response.getStatus());
     List<SubTaskSpec<SinglePhaseSubTask>> actualSubTaskSpecMap =
         (List<SubTaskSpec<SinglePhaseSubTask>>) response.getEntity();
-    Assert.assertEquals(
+    Assertions.assertEquals(
         subTaskSpecs.keySet(),
         actualSubTaskSpecMap.stream().map(SubTaskSpec::getId).collect(Collectors.toSet())
     );
 
     // runningSubTaskSpecs
     response = task.getRunningSubTaskSpecs(newRequest());
-    Assert.assertEquals(200, response.getStatus());
+    Assertions.assertEquals(200, response.getStatus());
     actualSubTaskSpecMap =
         (List<SubTaskSpec<SinglePhaseSubTask>>) response.getEntity();
-    Assert.assertEquals(
+    Assertions.assertEquals(
         runningSpecs.keySet(),
         actualSubTaskSpecMap.stream().map(SubTaskSpec::getId).collect(Collectors.toSet())
     );
@@ -337,32 +324,35 @@ public class ParallelIndexSupervisorTaskResourceTest extends AbstractParallelInd
         .stream()
         .filter(entry -> !runningSpecs.containsKey(entry.getKey()))
         .map(entry -> entry.getValue().getSpec())
+        .sorted(Comparator.comparing(SubTaskSpec::getId))
         .collect(Collectors.toList());
 
     response = task.getCompleteSubTaskSpecs(newRequest());
-    Assert.assertEquals(200, response.getStatus());
-    Assert.assertEquals(completeSubTaskSpecs, response.getEntity());
+    Assertions.assertEquals(200, response.getStatus());
+    List<SubTaskSpec<SinglePhaseSubTask>> actual = (List<SubTaskSpec<SinglePhaseSubTask>>) response.getEntity();
+    actual.sort(Comparator.comparing(SubTaskSpec::getId));
+    Assertions.assertEquals(completeSubTaskSpecs, actual);
 
     // subTaskSpec
     final String subTaskId = runningSpecs.keySet().iterator().next();
     response = task.getSubTaskSpec(subTaskId, newRequest());
-    Assert.assertEquals(200, response.getStatus());
+    Assertions.assertEquals(200, response.getStatus());
     final SubTaskSpec<SinglePhaseSubTask> subTaskSpec =
         (SubTaskSpec<SinglePhaseSubTask>) response.getEntity();
-    Assert.assertEquals(subTaskId, subTaskSpec.getId());
+    Assertions.assertEquals(subTaskId, subTaskSpec.getId());
 
     // subTaskState
     response = task.getSubTaskState(subTaskId, newRequest());
-    Assert.assertEquals(200, response.getStatus());
+    Assertions.assertEquals(200, response.getStatus());
     final SubTaskSpecStatus expectedResponse = Preconditions.checkNotNull(
         expectedSubTaskStateResponses.get(subTaskId),
         "response for task[%s]",
         subTaskId
     );
     final SubTaskSpecStatus actualResponse = (SubTaskSpecStatus) response.getEntity();
-    Assert.assertEquals(expectedResponse.getSpec().getId(), actualResponse.getSpec().getId());
-    Assert.assertEquals(expectedResponse.getCurrentStatus(), actualResponse.getCurrentStatus());
-    Assert.assertEquals(expectedResponse.getTaskHistory(), actualResponse.getTaskHistory());
+    Assertions.assertEquals(expectedResponse.getSpec().getId(), actualResponse.getSpec().getId());
+    Assertions.assertEquals(expectedResponse.getCurrentStatus(), actualResponse.getCurrentStatus());
+    Assertions.assertEquals(expectedResponse.getTaskHistory(), actualResponse.getTaskHistory());
 
     // completeSubTaskSpecAttemptHistory
     final String completeSubTaskSpecId = expectedSubTaskStateResponses
@@ -379,8 +369,8 @@ public class ParallelIndexSupervisorTaskResourceTest extends AbstractParallelInd
         .orElse(null);
     if (completeSubTaskSpecId != null) {
       response = task.getCompleteSubTaskSpecAttemptHistory(completeSubTaskSpecId, newRequest());
-      Assert.assertEquals(200, response.getStatus());
-      Assert.assertEquals(
+      Assertions.assertEquals(200, response.getStatus());
+      Assertions.assertEquals(
           expectedSubTaskStateResponses.get(completeSubTaskSpecId).getTaskHistory(),
           response.getEntity()
       );
@@ -390,6 +380,7 @@ public class ParallelIndexSupervisorTaskResourceTest extends AbstractParallelInd
   private static HttpServletRequest newRequest()
   {
     final HttpServletRequest request = EasyMock.niceMock(HttpServletRequest.class);
+    EasyMock.expect(request.getMethod()).andReturn("GET").anyTimes();
     EasyMock.expect(request.getAttribute(AuthConfig.DRUID_AUTHORIZATION_CHECKED)).andReturn(null);
     EasyMock.expect(request.getAttribute(AuthConfig.DRUID_AUTHENTICATION_RESULT))
             .andReturn(new AuthenticationResult("test", "test", "test", Collections.emptyMap()));
@@ -402,59 +393,24 @@ public class ParallelIndexSupervisorTaskResourceTest extends AbstractParallelInd
       ParallelIndexIOConfig ioConfig
   )
   {
-    // set up ingestion spec
     final ParallelIndexIngestionSpec ingestionSpec = new ParallelIndexIngestionSpec(
-        new DataSchema(
-            "dataSource",
-            DEFAULT_TIMESTAMP_SPEC,
-            DEFAULT_DIMENSIONS_SPEC,
-            new AggregatorFactory[]{
-                new LongSumAggregatorFactory("val", "val")
-            },
-            new UniformGranularitySpec(
-                Granularities.DAY,
-                Granularities.MINUTE,
-                interval == null ? null : Collections.singletonList(interval)
-            ),
-            null
-        ),
+        DataSchema.builder()
+                  .withDataSource("dataSource")
+                  .withTimestamp(DEFAULT_TIMESTAMP_SPEC)
+                  .withDimensions(DEFAULT_DIMENSIONS_SPEC)
+                  .withAggregators(new LongSumAggregatorFactory("val", "val"))
+                  .withGranularity(
+                      new UniformGranularitySpec(
+                          Granularities.DAY,
+                          Granularities.MINUTE,
+                          interval == null ? null : Collections.singletonList(interval)
+                      )
+                  )
+                  .build(),
         ioConfig,
-        new ParallelIndexTuningConfig(
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            NUM_SUB_TASKS,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null
-        )
+        TuningConfigBuilder.forParallelIndexTask().withMaxNumConcurrentSubTasks(NUM_SUB_TASKS).build()
     );
 
-    // set up test tools
     return new TestSupervisorTask(
         null,
         null,
@@ -497,7 +453,7 @@ public class ParallelIndexSupervisorTaskResourceTest extends AbstractParallelInd
     }
   }
 
-  private class TestSupervisorTask extends TestParallelIndexSupervisorTask
+  private class TestSupervisorTask extends ParallelIndexSupervisorTask
   {
     TestSupervisorTask(
         String id,
@@ -508,6 +464,7 @@ public class ParallelIndexSupervisorTaskResourceTest extends AbstractParallelInd
     {
       super(
           id,
+          null,
           taskResource,
           ingestionSchema,
           context
@@ -517,10 +474,7 @@ public class ParallelIndexSupervisorTaskResourceTest extends AbstractParallelInd
     @Override
     SinglePhaseParallelIndexTaskRunner createSinglePhaseTaskRunner(TaskToolbox toolbox)
     {
-      return new TestRunner(
-          toolbox,
-          this
-      );
+      return new TestRunner(toolbox, this);
     }
   }
 
@@ -535,10 +489,7 @@ public class ParallelIndexSupervisorTaskResourceTest extends AbstractParallelInd
     {
       super(
           toolbox,
-          supervisorTask.getId(),
-          supervisorTask.getGroupId(),
-          supervisorTask.getIngestionSchema(),
-          supervisorTask.getContext()
+          supervisorTask
       );
       this.supervisorTask = supervisorTask;
     }
@@ -556,7 +507,6 @@ public class ParallelIndexSupervisorTaskResourceTest extends AbstractParallelInd
           new ParallelIndexIngestionSpec(
               getIngestionSchema().getDataSchema(),
               new ParallelIndexIOConfig(
-                  null,
                   baseInputSource.withSplit(split),
                   getIngestionSchema().getIOConfig().getInputFormat(),
                   getIngestionSchema().getIOConfig().isAppendToExisting(),
@@ -695,20 +645,20 @@ public class ParallelIndexSupervisorTaskResourceTest extends AbstractParallelInd
           false
       );
 
-      final DataSegment segment = new DataSegment(
-          segmentIdentifier.getDataSource(),
-          segmentIdentifier.getInterval(),
-          segmentIdentifier.getVersion(),
-          null,
-          null,
-          null,
-          segmentIdentifier.getShardSpec(),
-          0,
-          1L
-      );
+      final DataSegment segment = DataSegment.builder(segmentIdentifier.asSegmentId())
+                                             .shardSpec(segmentIdentifier.getShardSpec())
+                                             .binaryVersion(0)
+                                             .size(1L)
+                                             .build();
 
       taskClient.report(
-          new PushedSegmentsReport(getId(), Collections.emptySet(), Collections.singleton(segment), ImmutableMap.of())
+          new PushedSegmentsReport(
+              getId(),
+              Collections.emptySet(),
+              Collections.singleton(segment),
+              new TaskReport.ReportMap(),
+              null
+          )
       );
       return TaskStatus.fromCode(getId(), state);
     }

@@ -20,7 +20,6 @@
 package org.apache.druid.segment.data;
 
 import org.apache.druid.collections.bitmap.ImmutableBitmap;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.query.monomorphicprocessing.RuntimeShapeInspector;
 import org.apache.druid.segment.ColumnValueSelector;
 import org.apache.druid.segment.LongColumnSelector;
@@ -47,8 +46,13 @@ public interface ColumnarLongs extends Closeable
 
   default void get(long[] out, int start, int length)
   {
+    get(out, 0, start, length);
+  }
+
+  default void get(long[] out, int offset, int start, int length)
+  {
     for (int i = 0; i < length; i++) {
-      out[i] = get(i + start);
+      out[offset + i] = get(i + start);
     }
   }
 
@@ -61,6 +65,12 @@ public interface ColumnarLongs extends Closeable
 
   @Override
   void close();
+
+  @Nullable
+  default <T> T as(Class<? extends T> clazz)
+  {
+    return null;
+  }
 
   default ColumnValueSelector<Long> makeColumnValueSelector(ReadableOffset offset, ImmutableBitmap nullValueBitmap)
   {
@@ -123,14 +133,14 @@ public interface ColumnarLongs extends Closeable
         public long getLong()
         {
           //noinspection AssertWithSideEffects (ignore null handling test initialization check side effect)
-          assert NullHandling.replaceWithDefault() || !isNull();
+          assert !isNull();
           return ColumnarLongs.this.get(offset.getOffset());
         }
 
         @Override
         public double getDouble(int offset)
         {
-          assert NullHandling.replaceWithDefault() || !nullValueBitmap.get(offset);
+          assert !nullValueBitmap.get(offset);
           return ColumnarLongs.this.get(offset);
         }
 
@@ -158,6 +168,9 @@ public interface ColumnarLongs extends Closeable
       private int id = ReadableVectorInspector.NULL_ID;
 
       private PeekableIntIterator nullIterator = nullValueBitmap.peekableIterator();
+      /**
+       * One past the highest row id of the previous batch, or -1 before the first batch.
+       */
       private int offsetMark = -1;
 
       @Nullable
@@ -198,10 +211,10 @@ public interface ColumnarLongs extends Closeable
           ColumnarLongs.this.get(longVector, offset.getStartOffset(), offset.getCurrentVectorSize());
         } else {
           final int[] offsets = offset.getOffsets();
-          if (offsets[offsets.length - 1] < offsetMark) {
+          if (offsets[0] < offsetMark) {
             nullIterator = nullValueBitmap.peekableIterator();
           }
-          offsetMark = offsets[offsets.length - 1];
+          offsetMark = offsets[offset.getCurrentVectorSize() - 1] + 1;
           ColumnarLongs.this.get(longVector, offsets, offset.getCurrentVectorSize());
         }
 

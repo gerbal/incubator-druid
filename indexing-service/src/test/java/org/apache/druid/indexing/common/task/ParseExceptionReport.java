@@ -19,7 +19,7 @@
 
 package org.apache.druid.indexing.common.task;
 
-import org.apache.druid.indexing.common.IngestionStatsAndErrorsTaskReportData;
+import org.apache.druid.indexer.report.IngestionStatsAndErrors;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -41,19 +41,20 @@ public class ParseExceptionReport
 
   @SuppressWarnings("unchecked")
   public static ParseExceptionReport forPhase(
-      IngestionStatsAndErrorsTaskReportData reportData,
+      IngestionStatsAndErrors reportData,
       String phase
   )
   {
     List<LinkedHashMap<String, Object>> events =
         (List<LinkedHashMap<String, Object>>) reportData.getUnparseableEvents().get(phase);
-
     final List<String> inputs = new ArrayList<>();
     final List<String> errorMessages = new ArrayList<>();
-    events.forEach(event -> {
-      inputs.add((String) event.get("input"));
-      errorMessages.add(((List<String>) event.get("details")).get(0));
-    });
+    if (events != null) {
+      events.forEach(event -> {
+        inputs.add((String) event.get("input"));
+        errorMessages.add(((List<String>) event.get("details")).get(0));
+      });
+    }
 
     return new ParseExceptionReport(inputs, errorMessages);
   }

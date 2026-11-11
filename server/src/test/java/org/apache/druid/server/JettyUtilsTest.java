@@ -19,19 +19,43 @@
 
 package org.apache.druid.server;
 
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 public class JettyUtilsTest
 {
   @Test
   public void testConcatenateForRewrite()
   {
-    Assert.assertEquals(
+    Assertions.assertEquals(
         "http://example.com/foo%20bar?q=baz%20qux",
         JettyUtils.concatenateForRewrite(
             "http://example.com",
             "/foo%20bar",
+            "q=baz%20qux"
+        )
+    );
+  }
+
+  @Test
+  public void testConcatenateForRewriteEmptyPath()
+  {
+    Assertions.assertNull(
+        JettyUtils.concatenateForRewrite(
+            "http://example.com",
+            "",
+            "q=baz%20qux"
+        )
+    );
+  }
+
+  @Test
+  public void testConcatenateForRewriteInvalidPath()
+  {
+    Assertions.assertNull(
+        JettyUtils.concatenateForRewrite(
+            "http://example.com",
+            "foo%20bar", // path must start with '/'
             "q=baz%20qux"
         )
     );

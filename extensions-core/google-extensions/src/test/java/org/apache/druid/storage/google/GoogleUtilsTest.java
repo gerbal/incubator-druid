@@ -22,8 +22,9 @@ package org.apache.druid.storage.google;
 import com.google.api.client.googleapis.json.GoogleJsonResponseException;
 import com.google.api.client.http.HttpHeaders;
 import com.google.api.client.http.HttpResponseException;
-import org.junit.Assert;
-import org.junit.Test;
+import com.google.cloud.storage.StorageException;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 
@@ -32,7 +33,7 @@ public class GoogleUtilsTest
   @Test
   public void test429()
   {
-    Assert.assertTrue(
+    Assertions.assertTrue(
         GoogleUtils.isRetryable(
             new GoogleJsonResponseException(
                 new HttpResponseException.Builder(429, "ignored", new HttpHeaders()),
@@ -40,27 +41,27 @@ public class GoogleUtilsTest
             )
         )
     );
-    Assert.assertTrue(
+    Assertions.assertTrue(
         GoogleUtils.isRetryable(
             new HttpResponseException.Builder(429, "ignored", new HttpHeaders()).build()
         )
     );
-    Assert.assertTrue(
+    Assertions.assertTrue(
         GoogleUtils.isRetryable(
             new HttpResponseException.Builder(500, "ignored", new HttpHeaders()).build()
         )
     );
-    Assert.assertTrue(
+    Assertions.assertTrue(
         GoogleUtils.isRetryable(
             new HttpResponseException.Builder(503, "ignored", new HttpHeaders()).build()
         )
     );
-    Assert.assertTrue(
+    Assertions.assertTrue(
         GoogleUtils.isRetryable(
             new HttpResponseException.Builder(599, "ignored", new HttpHeaders()).build()
         )
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         GoogleUtils.isRetryable(
             new GoogleJsonResponseException(
                 new HttpResponseException.Builder(404, "ignored", new HttpHeaders()),
@@ -68,14 +69,39 @@ public class GoogleUtilsTest
             )
         )
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         GoogleUtils.isRetryable(
             new HttpResponseException.Builder(404, "ignored", new HttpHeaders()).build()
         )
     );
-    Assert.assertTrue(
+    Assertions.assertTrue(
         GoogleUtils.isRetryable(
             new IOException("generic io exception")
+        )
+    );
+    Assertions.assertFalse(
+        GoogleUtils.isRetryable(
+            new StorageException(404, "ignored")
+        )
+    );
+    Assertions.assertTrue(
+        GoogleUtils.isRetryable(
+            new StorageException(429, "ignored")
+        )
+    );
+    Assertions.assertTrue(
+        GoogleUtils.isRetryable(
+            new StorageException(500, "ignored")
+        )
+    );
+    Assertions.assertTrue(
+        GoogleUtils.isRetryable(
+            new StorageException(503, "ignored")
+        )
+    );
+    Assertions.assertFalse(
+        GoogleUtils.isRetryable(
+            new StorageException(599, "ignored")
         )
     );
   }

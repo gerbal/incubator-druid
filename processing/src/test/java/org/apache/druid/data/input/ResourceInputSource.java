@@ -19,7 +19,11 @@
 
 package org.apache.druid.data.input;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import org.apache.druid.data.input.impl.InputEntityIteratingReader;
+import org.apache.druid.data.input.impl.systemfield.SystemFieldDecoratorFactory;
+import org.apache.druid.java.util.common.CloseableIterators;
 import org.apache.druid.utils.CompressionUtils;
 
 import javax.annotation.Nullable;
@@ -36,6 +40,8 @@ import java.util.Collections;
  */
 public class ResourceInputSource extends AbstractInputSource
 {
+  public static final String TYPE_KEY = "classpath";
+
   public static ResourceInputSource of(ClassLoader loader, String resourceFile)
   {
     return new ResourceInputSource(loader, resourceFile);
@@ -43,6 +49,13 @@ public class ResourceInputSource extends AbstractInputSource
 
   private final ClassLoader classLoader;
   private final String resourceFile;
+
+  @JsonCreator
+  private ResourceInputSource(
+      @JsonProperty("file") String resourceFile)
+  {
+    this(ResourceInputSource.class.getClassLoader(), resourceFile);
+  }
 
   private ResourceInputSource(ClassLoader classLoader, String resourceFile)
   {
@@ -72,7 +85,10 @@ public class ResourceInputSource extends AbstractInputSource
     return new InputEntityIteratingReader(
         inputRowSchema,
         inputFormat,
-        Collections.singletonList(new ResourceStreamEntity(classLoader, resourceFile)).iterator(),
+        CloseableIterators.withEmptyBaggage(
+            Collections.singletonList(new ResourceStreamEntity(classLoader, resourceFile)).iterator()
+        ),
+        SystemFieldDecoratorFactory.NONE,
         temporaryDirectory
     );
   }
@@ -103,8 +119,13 @@ public class ResourceInputSource extends AbstractInputSource
     @Override
     public InputStream open() throws IOException
     {
-      final InputStream resourceStream = classLoader.getResourceAsStream(resourceFile);
-      return CompressionUtils.decompress(resourceStream, resourceFile);
+      return CompressionUtils.decompress(openRaw(), resourceFile);
+    }
+
+    @Override
+    public InputStream openRaw()
+    {
+      return classLoader.getResourceAsStream(resourceFile);
     }
   }
 }

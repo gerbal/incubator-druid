@@ -23,16 +23,20 @@ import com.google.common.util.concurrent.ListeningExecutorService;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.java.util.emitter.service.ServiceMetricEvent;
 
+import javax.annotation.Nullable;
+import java.util.concurrent.ScheduledExecutorService;
+
 public class MetricsEmittingQueryProcessingPool extends ForwardingQueryProcessingPool
     implements ExecutorServiceMonitor.MetricEmitter
 {
 
   public MetricsEmittingQueryProcessingPool(
       ListeningExecutorService delegate,
+      @Nullable ScheduledExecutorService timeoutService,
       ExecutorServiceMonitor executorServiceMonitor
   )
   {
-    super(delegate);
+    super(delegate, timeoutService);
     executorServiceMonitor.add(this);
   }
 
@@ -40,7 +44,8 @@ public class MetricsEmittingQueryProcessingPool extends ForwardingQueryProcessin
   public void emitMetrics(ServiceEmitter emitter, ServiceMetricEvent.Builder metricBuilder)
   {
     if (delegate() instanceof PrioritizedExecutorService) {
-      emitter.emit(metricBuilder.build("segment/scan/pending", ((PrioritizedExecutorService) delegate()).getQueueSize()));
+      emitter.emit(metricBuilder.setMetric("segment/scan/pending", ((PrioritizedExecutorService) delegate()).getQueueSize()));
+      emitter.emit(metricBuilder.setMetric("segment/scan/active", ((PrioritizedExecutorService) delegate()).getActiveTasks()));
     }
   }
 

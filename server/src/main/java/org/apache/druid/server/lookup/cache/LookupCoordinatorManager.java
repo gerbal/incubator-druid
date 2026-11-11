@@ -36,6 +36,9 @@ import com.google.common.util.concurrent.ListenableScheduledFuture;
 import com.google.common.util.concurrent.ListeningScheduledExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.inject.Inject;
+import io.netty.handler.codec.http.HttpHeaders;
+import io.netty.handler.codec.http.HttpMethod;
+import io.netty.handler.codec.http.HttpResponse;
 import org.apache.druid.audit.AuditInfo;
 import org.apache.druid.common.config.JacksonConfigManager;
 import org.apache.druid.concurrent.LifecycleLock;
@@ -47,6 +50,7 @@ import org.apache.druid.java.util.common.IOE;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.StreamUtils;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.common.URIs;
 import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.java.util.http.client.HttpClient;
@@ -57,9 +61,6 @@ import org.apache.druid.java.util.http.client.response.SequenceInputStreamRespon
 import org.apache.druid.query.lookup.LookupsState;
 import org.apache.druid.server.http.HostAndPortWithScheme;
 import org.apache.druid.server.listener.resource.ListenerResource;
-import org.jboss.netty.handler.codec.http.HttpHeaders;
-import org.jboss.netty.handler.codec.http.HttpMethod;
-import org.jboss.netty.handler.codec.http.HttpResponse;
 
 import javax.annotation.Nullable;
 import java.io.ByteArrayOutputStream;
@@ -83,6 +84,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 /**
  * Managers {@link org.apache.druid.query.lookup.LookupExtractorFactoryContainer} specifications, distributing them
@@ -104,9 +106,7 @@ public class LookupCoordinatorManager
   private static final String LOOKUP_UPDATE_REQUEST_PATH = LOOKUP_BASE_REQUEST_PATH + "/" + "updates";
 
   private static final TypeReference<LookupsState<LookupExtractorFactoryMapContainer>> LOOKUPS_STATE_TYPE_REFERENCE =
-      new TypeReference<LookupsState<LookupExtractorFactoryMapContainer>>()
-      {
-      };
+      new TypeReference<>() {};
 
   private static final EmittingLogger LOG = new EmittingLogger(LookupCoordinatorManager.class);
 
@@ -257,10 +257,24 @@ public class LookupCoordinatorManager
 
   public boolean deleteTier(final String tier, AuditInfo auditInfo)
   {
+    return deleteTier(tier, auditInfo, ignored -> {});
+  }
+
+  /**
+   * Calls {@code checkLookups} under the same lock used to delete the tier.
+   * The callback receives null when the tier is absent.
+   */
+  public boolean deleteTier(
+      final String tier,
+      AuditInfo auditInfo,
+      Consumer<Map<String, LookupExtractorFactoryMapContainer>> checkLookups
+  )
+  {
     Preconditions.checkState(lifecycleLock.awaitStarted(5, TimeUnit.SECONDS), "not started");
 
     synchronized (this) {
       final Map<String, Map<String, LookupExtractorFactoryMapContainer>> priorSpec = getKnownLookups();
+      checkLookups.accept(priorSpec == null ? null : priorSpec.get(tier));
       if (priorSpec == null) {
         LOG.warn("Requested delete tier [%s]. But no lookups exist!", tier);
         return false;
@@ -321,7 +335,7 @@ public class LookupCoordinatorManager
     Preconditions.checkState(lifecycleLock.awaitStarted(5, TimeUnit.SECONDS), "not started");
     return Collections2.transform(
         lookupNodeDiscovery.getNodesInTier(tier),
-        new Function<HostAndPortWithScheme, HostAndPort>()
+        new Function<>()
         {
           @Override
           public HostAndPort apply(HostAndPortWithScheme input)
@@ -435,7 +449,8 @@ public class LookupCoordinatorManager
                   LOG.makeAlert(t, "Background lookup manager exited with error!").emit();
                 }
               }
-            }
+            },
+            MoreExecutors.directExecutor()
         );
 
         LOG.debug("Started");
@@ -489,9 +504,7 @@ public class LookupCoordinatorManager
     //Note: this call is idempotent, so multiple start() would not cause any problems.
     lookupMapConfigRef = configManager.watch(
         LOOKUP_CONFIG_KEY,
-        new TypeReference<Map<String, Map<String, LookupExtractorFactoryMapContainer>>>()
-        {
-        },
+        new TypeReference<>() {},
         null
     );
 
@@ -518,7 +531,7 @@ public class LookupCoordinatorManager
         configManager.set(
             LOOKUP_CONFIG_KEY,
             converted,
-            new AuditInfo("autoConversion", "autoConversion", "127.0.0.1")
+            new AuditInfo("autoConversion", "autoConversion", "autoConversion", "127.0.0.1")
         );
       }
     }
@@ -727,22 +740,21 @@ public class LookupCoordinatorManager
 
   static URL getLookupsURL(HostAndPortWithScheme druidNode) throws MalformedURLException
   {
-    return new URL(
-        druidNode.getScheme(),
-        druidNode.getHostText(),
-        druidNode.getPortOrDefault(-1),
-        LOOKUP_BASE_REQUEST_PATH
-    );
+    return lookupsURL(druidNode, LOOKUP_BASE_REQUEST_PATH);
   }
 
   static URL getLookupsUpdateURL(HostAndPortWithScheme druidNode) throws MalformedURLException
   {
-    return new URL(
-        druidNode.getScheme(),
-        druidNode.getHostText(),
-        druidNode.getPortOrDefault(-1),
-        LOOKUP_UPDATE_REQUEST_PATH
-    );
+    return lookupsURL(druidNode, LOOKUP_UPDATE_REQUEST_PATH);
+  }
+
+  private static URL lookupsURL(HostAndPortWithScheme druidNode, String path) throws MalformedURLException
+  {
+    final int port = druidNode.getPortOrDefault(-1);
+    final String hostAndPort = port < 0
+                               ? HostAndPort.fromHost(druidNode.getHostText()).toString()
+                               : HostAndPort.fromParts(druidNode.getHostText(), port).toString();
+    return URIs.toURL(druidNode.getScheme() + "://" + hostAndPort + path);
   }
 
   private static boolean httpStatusIsSuccess(int statusCode)
@@ -902,8 +914,8 @@ public class LookupCoordinatorManager
         @Override
         public ClientResponse<InputStream> handleResponse(HttpResponse response, TrafficCop trafficCop)
         {
-          returnCode.set(response.getStatus().getCode());
-          reasonString.set(response.getStatus().getReasonPhrase());
+          returnCode.set(response.status().code());
+          reasonString.set(response.status().reasonPhrase());
           return super.handleResponse(response, trafficCop);
         }
       };

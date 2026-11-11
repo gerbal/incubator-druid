@@ -19,63 +19,80 @@
 
 package org.apache.druid.server;
 
-import com.google.common.base.Supplier;
 import com.google.inject.Inject;
+import org.apache.druid.client.BrokerViewOfBrokerConfig;
 import org.apache.druid.guice.LazySingleton;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
-import org.apache.druid.query.DefaultQueryConfig;
 import org.apache.druid.query.GenericQueryMetricsFactory;
+import org.apache.druid.query.QueryConfigProvider;
+import org.apache.druid.query.QueryRunnerFactoryConglomerate;
 import org.apache.druid.query.QuerySegmentWalker;
-import org.apache.druid.query.QueryToolChestWarehouse;
+import org.apache.druid.query.policy.PolicyEnforcer;
+import org.apache.druid.server.broker.QueryConfigSnapshot;
 import org.apache.druid.server.log.RequestLogger;
 import org.apache.druid.server.security.AuthConfig;
 import org.apache.druid.server.security.AuthorizerMapper;
 
+import javax.annotation.Nullable;
+
 @LazySingleton
 public class QueryLifecycleFactory
 {
-  private final QueryToolChestWarehouse warehouse;
+  private final QueryRunnerFactoryConglomerate conglomerate;
   private final QuerySegmentWalker texasRanger;
   private final GenericQueryMetricsFactory queryMetricsFactory;
   private final ServiceEmitter emitter;
   private final RequestLogger requestLogger;
   private final AuthorizerMapper authorizerMapper;
-  private final DefaultQueryConfig defaultQueryConfig;
+  private final QueryConfigProvider queryConfigProvider;
   private final AuthConfig authConfig;
+  private final PolicyEnforcer policyEnforcer;
+  private final BrokerViewOfBrokerConfig brokerViewOfBrokerConfig;
 
   @Inject
   public QueryLifecycleFactory(
-      final QueryToolChestWarehouse warehouse,
+      final QueryRunnerFactoryConglomerate conglomerate,
       final QuerySegmentWalker texasRanger,
       final GenericQueryMetricsFactory queryMetricsFactory,
       final ServiceEmitter emitter,
       final RequestLogger requestLogger,
       final AuthConfig authConfig,
+      final PolicyEnforcer policyEnforcer,
       final AuthorizerMapper authorizerMapper,
-      final Supplier<DefaultQueryConfig> queryConfigSupplier
+      final QueryConfigProvider queryConfigProvider,
+      @Nullable final BrokerViewOfBrokerConfig brokerViewOfBrokerConfig
   )
   {
-    this.warehouse = warehouse;
+    this.conglomerate = conglomerate;
     this.texasRanger = texasRanger;
     this.queryMetricsFactory = queryMetricsFactory;
     this.emitter = emitter;
     this.requestLogger = requestLogger;
     this.authorizerMapper = authorizerMapper;
-    this.defaultQueryConfig = queryConfigSupplier.get();
+    this.queryConfigProvider = queryConfigProvider;
     this.authConfig = authConfig;
+    this.policyEnforcer = policyEnforcer;
+    this.brokerViewOfBrokerConfig = brokerViewOfBrokerConfig;
   }
 
   public QueryLifecycle factorize()
   {
+    // Read once per query so the whole lifecycle sees one config, even if it is swapped mid-query.
+    final QueryConfigSnapshot configSnapshot =
+        brokerViewOfBrokerConfig == null
+        ? new QueryConfigSnapshot(queryConfigProvider.getContext(), null)
+        : brokerViewOfBrokerConfig.snapshotForQuery();
+
     return new QueryLifecycle(
-        warehouse,
+        conglomerate,
         texasRanger,
         queryMetricsFactory,
         emitter,
         requestLogger,
         authorizerMapper,
-        defaultQueryConfig,
         authConfig,
+        policyEnforcer,
+        configSnapshot,
         System.currentTimeMillis(),
         System.nanoTime()
     );

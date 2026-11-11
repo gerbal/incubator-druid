@@ -34,6 +34,10 @@
     "dataSource",
     "type"
   ],
+  "query/segments/count": [
+    "dataSource",
+    "type"
+  ],
   "query/segment/time": [
     "dataSource",
     "type"
@@ -58,6 +62,7 @@
   "segment/loadQueue/failed": [],
   "segment/loadQueue/size": [],
   "segment/scan/pending": [],
+  "segment/scan/active": [],
   "segment/size": [
     "dataSource"
   ],

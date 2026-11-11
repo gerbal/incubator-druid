@@ -299,7 +299,7 @@ public abstract class ResponseContext
    *        EXTENSION_KEY_2
    *     });
    *   }
-   * }</pre>
+   * }}</pre>
    * Make sure all extension keys are added with the {@link #registerKey(Key)} or
    * {@link #registerKeys(Key[])} methods.
    * <p>
@@ -324,7 +324,7 @@ public abstract class ResponseContext
       @SuppressWarnings("unchecked")
       public Object mergeValues(Object oldValue, Object newValue)
       {
-        final List<Interval> result = new ArrayList<Interval>((List<Interval>) oldValue);
+        final List<Interval> result = new ArrayList<>((List<Interval>) oldValue);
         result.addAll((List<Interval>) newValue);
         return result;
       }
@@ -385,7 +385,7 @@ public abstract class ResponseContext
       @SuppressWarnings("unchecked")
       public Object mergeValues(Object oldValue, Object newValue)
       {
-        final List<SegmentDescriptor> result = new ArrayList<SegmentDescriptor>((List<SegmentDescriptor>) oldValue);
+        final List<SegmentDescriptor> result = new ArrayList<>((List<SegmentDescriptor>) oldValue);
         result.addAll((List<SegmentDescriptor>) newValue);
         return result;
       }
@@ -488,8 +488,8 @@ public abstract class ResponseContext
               TIMEOUT_AT,
               NUM_SCANNED_ROWS,
               CPU_CONSUMED_NANOS,
-              TRUNCATED,
-              }
+              TRUNCATED
+          }
       );
     }
 

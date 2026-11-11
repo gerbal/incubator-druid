@@ -20,9 +20,11 @@
 package org.apache.druid.query.aggregation.datasketches.theta;
 
 import com.google.common.collect.ImmutableList;
+import org.apache.druid.error.DruidException;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.query.Druids;
 import org.apache.druid.query.aggregation.AggregatorAndSize;
+import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
 import org.apache.druid.query.aggregation.datasketches.theta.oldapi.OldSketchBuildAggregatorFactory;
 import org.apache.druid.query.aggregation.datasketches.theta.oldapi.OldSketchMergeAggregatorFactory;
@@ -32,11 +34,16 @@ import org.apache.druid.query.timeseries.TimeseriesQuery;
 import org.apache.druid.query.timeseries.TimeseriesQueryQueryToolChest;
 import org.apache.druid.segment.ColumnSelectorFactory;
 import org.apache.druid.segment.ColumnValueSelector;
+import org.apache.druid.segment.TestColumnSelectorFactory;
+import org.apache.druid.segment.column.ColumnCapabilitiesImpl;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.RowSignature;
+import org.apache.druid.segment.vector.TestVectorColumnSelectorFactory;
+import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
 import org.easymock.EasyMock;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 public class SketchAggregatorFactoryTest
 {
@@ -46,23 +53,34 @@ public class SketchAggregatorFactoryTest
   private static final SketchMergeAggregatorFactory AGGREGATOR_32768 =
       new SketchMergeAggregatorFactory("x", "x", 32768, null, false, null);
 
+  private ColumnSelectorFactory metricFactory;
+  private VectorColumnSelectorFactory vectorFactory;
+
+  @BeforeEach
+  public void setup()
+  {
+    final ColumnCapabilitiesImpl columnCapabilities = ColumnCapabilitiesImpl.createDefault().setType(ColumnType.NESTED_DATA);
+    metricFactory = new TestColumnSelectorFactory().addCapabilities("x", columnCapabilities);
+    vectorFactory = new TestVectorColumnSelectorFactory().addCapabilities("x", columnCapabilities);
+  }
+
   @Test
   public void testGuessAggregatorHeapFootprint()
   {
-    Assert.assertEquals(288, AGGREGATOR_16384.guessAggregatorHeapFootprint(1));
-    Assert.assertEquals(1056, AGGREGATOR_16384.guessAggregatorHeapFootprint(100));
-    Assert.assertEquals(262176, AGGREGATOR_16384.guessAggregatorHeapFootprint(1_000_000_000_000L));
+    Assertions.assertEquals(288, AGGREGATOR_16384.guessAggregatorHeapFootprint(1));
+    Assertions.assertEquals(1056, AGGREGATOR_16384.guessAggregatorHeapFootprint(100));
+    Assertions.assertEquals(262176, AGGREGATOR_16384.guessAggregatorHeapFootprint(1_000_000_000_000L));
 
-    Assert.assertEquals(288, AGGREGATOR_32768.guessAggregatorHeapFootprint(1));
-    Assert.assertEquals(1056, AGGREGATOR_32768.guessAggregatorHeapFootprint(100));
-    Assert.assertEquals(524320, AGGREGATOR_32768.guessAggregatorHeapFootprint(1_000_000_000_000L));
+    Assertions.assertEquals(288, AGGREGATOR_32768.guessAggregatorHeapFootprint(1));
+    Assertions.assertEquals(1056, AGGREGATOR_32768.guessAggregatorHeapFootprint(100));
+    Assertions.assertEquals(524320, AGGREGATOR_32768.guessAggregatorHeapFootprint(1_000_000_000_000L));
   }
 
   @Test
   public void testMaxIntermediateSize()
   {
-    Assert.assertEquals(262176, AGGREGATOR_16384.getMaxIntermediateSize());
-    Assert.assertEquals(524320, AGGREGATOR_32768.getMaxIntermediateSize());
+    Assertions.assertEquals(262176, AGGREGATOR_16384.getMaxIntermediateSize());
+    Assertions.assertEquals(524320, AGGREGATOR_32768.getMaxIntermediateSize());
   }
 
   @Test
@@ -71,13 +89,14 @@ public class SketchAggregatorFactoryTest
     ColumnSelectorFactory colSelectorFactory = EasyMock.mock(ColumnSelectorFactory.class);
     EasyMock.expect(colSelectorFactory.makeColumnValueSelector(EasyMock.anyString()))
             .andReturn(EasyMock.createMock(ColumnValueSelector.class)).anyTimes();
+    EasyMock.expect(colSelectorFactory.getColumnCapabilities("x")).andReturn(null).anyTimes();
     EasyMock.replay(colSelectorFactory);
 
     AggregatorAndSize aggregatorAndSize = AGGREGATOR_16384.factorizeWithSize(colSelectorFactory);
-    Assert.assertEquals(48, aggregatorAndSize.getInitialSizeBytes());
+    Assertions.assertEquals(48, aggregatorAndSize.getInitialSizeBytes());
 
     aggregatorAndSize = AGGREGATOR_32768.factorizeWithSize(colSelectorFactory);
-    Assert.assertEquals(48, aggregatorAndSize.getInitialSizeBytes());
+    Assertions.assertEquals(48, aggregatorAndSize.getInitialSizeBytes());
   }
 
   @Test
@@ -133,7 +152,7 @@ public class SketchAggregatorFactoryTest
               )
               .build();
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         RowSignature.builder()
                     .addTimeColumn()
                     .add("count", ColumnType.LONG)
@@ -164,7 +183,49 @@ public class SketchAggregatorFactoryTest
   @Test
   public void testWithName()
   {
-    Assert.assertEquals(AGGREGATOR_16384, AGGREGATOR_16384.withName("x"));
-    Assert.assertEquals("newTest", AGGREGATOR_16384.withName("newTest").getName());
+    Assertions.assertEquals(AGGREGATOR_16384, AGGREGATOR_16384.withName("x"));
+    Assertions.assertEquals("newTest", AGGREGATOR_16384.withName("newTest").getName());
+  }
+
+  @Test
+  public void testFactorizeOnUnsupportedComplexColumn()
+  {
+    Throwable exception = Assertions.assertThrows(DruidException.class, () -> AGGREGATOR_16384.factorize(metricFactory));
+    Assertions.assertEquals("Unsupported input [x] of type [COMPLEX<json>] for aggregator [COMPLEX<thetaSketchBuild>].", exception.getMessage());
+  }
+
+  @Test
+  public void testFactorizeWithSizeOnUnsupportedComplexColumn()
+  {
+    Throwable exception = Assertions.assertThrows(DruidException.class, () -> AGGREGATOR_16384.factorizeWithSize(metricFactory));
+    Assertions.assertEquals("Unsupported input [x] of type [COMPLEX<json>] for aggregator [COMPLEX<thetaSketchBuild>].", exception.getMessage());
+  }
+
+  @Test
+  public void testFactorizeBufferedOnUnsupportedComplexColumn()
+  {
+    Throwable exception = Assertions.assertThrows(DruidException.class, () -> AGGREGATOR_16384.factorizeBuffered(metricFactory));
+    Assertions.assertEquals("Unsupported input [x] of type [COMPLEX<json>] for aggregator [COMPLEX<thetaSketchBuild>].", exception.getMessage());
+  }
+
+  @Test
+  public void testFactorizeVectorOnUnsupportedComplexColumn()
+  {
+    Throwable exception = Assertions.assertThrows(DruidException.class, () -> AGGREGATOR_16384.factorizeVector(vectorFactory));
+    Assertions.assertEquals("Unsupported input [x] of type [COMPLEX<json>] for aggregator [COMPLEX<thetaSketchBuild>].", exception.getMessage());
+  }
+
+  @Test
+  public void testCanSubstitute()
+  {
+    AggregatorFactory sketch1 = new SketchMergeAggregatorFactory("sketch", "x", 16, true, false, 2);
+    AggregatorFactory sketch2 = new SketchMergeAggregatorFactory("other", "x", null, false, false, null);
+    AggregatorFactory sketch3 = new SketchMergeAggregatorFactory("sketch", "x", null, false, false, 3);
+    AggregatorFactory sketch4 = new SketchMergeAggregatorFactory("sketch", "y", null, false, false, null);
+
+    Assertions.assertNotNull(sketch1.substituteCombiningFactory(sketch2));
+    Assertions.assertNotNull(sketch1.substituteCombiningFactory(sketch3));
+    Assertions.assertNull(sketch1.substituteCombiningFactory(sketch4));
+    Assertions.assertNull(sketch2.substituteCombiningFactory(sketch1));
   }
 }

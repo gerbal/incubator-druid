@@ -24,8 +24,6 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
-import com.google.common.primitives.Doubles;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.HumanReadableBytes;
 import org.apache.druid.java.util.common.Intervals;
@@ -35,10 +33,11 @@ import org.apache.druid.java.util.common.granularity.Granularity;
 import org.apache.druid.java.util.common.granularity.PeriodGranularity;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.metrics.StubServiceEmitter;
+import org.apache.druid.math.expr.ExpressionProcessing;
 import org.apache.druid.query.Druids;
 import org.apache.druid.query.FinalizeResultsQueryRunner;
 import org.apache.druid.query.MetricsEmittingQueryRunner;
-import org.apache.druid.query.QueryContexts;
+import org.apache.druid.query.QueryContext;
 import org.apache.druid.query.QueryPlus;
 import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QueryRunnerTestHelper;
@@ -52,12 +51,14 @@ import org.apache.druid.query.aggregation.DoubleSumAggregatorFactory;
 import org.apache.druid.query.aggregation.ExpressionLambdaAggregatorFactory;
 import org.apache.druid.query.aggregation.FilteredAggregatorFactory;
 import org.apache.druid.query.aggregation.FloatSumAggregatorFactory;
+import org.apache.druid.query.aggregation.LongMaxAggregatorFactory;
 import org.apache.druid.query.aggregation.LongSumAggregatorFactory;
 import org.apache.druid.query.aggregation.cardinality.CardinalityAggregatorFactory;
-import org.apache.druid.query.aggregation.first.DoubleFirstAggregatorFactory;
+import org.apache.druid.query.aggregation.firstlast.first.DoubleFirstAggregatorFactory;
+import org.apache.druid.query.aggregation.firstlast.last.DoubleLastAggregatorFactory;
 import org.apache.druid.query.aggregation.hyperloglog.HyperUniquesAggregatorFactory;
-import org.apache.druid.query.aggregation.last.DoubleLastAggregatorFactory;
 import org.apache.druid.query.aggregation.post.FieldAccessPostAggregator;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.dimension.DefaultDimensionSpec;
 import org.apache.druid.query.expression.TestExprMacroTable;
 import org.apache.druid.query.extraction.MapLookupExtractor;
@@ -80,12 +81,14 @@ import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
 import org.joda.time.Interval;
 import org.joda.time.Period;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
+
+import javax.annotation.Nullable;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -98,31 +101,32 @@ import java.util.stream.StreamSupport;
 
 /**
  */
-@RunWith(Parameterized.class)
+@ParameterizedClass
+@MethodSource("constructorFeeder")
 public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
 {
   private static final String TIMESTAMP_RESULT_FIELD_NAME = "d0";
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
 
-  @Parameterized.Parameters(name = "{0}:descending={1},vectorize={2}")
   public static Iterable<Object[]> constructorFeeder()
   {
     final Iterable<Object[]> baseConstructors = QueryRunnerTestHelper.cartesian(
         // runners
-        QueryRunnerTestHelper.makeQueryRunners(
+        QueryRunnerTestHelper.makeQueryRunnersToMerge(
             new TimeseriesQueryRunnerFactory(
                 new TimeseriesQueryQueryToolChest(),
                 new TimeseriesQueryEngine(),
                 QueryRunnerTestHelper.NOOP_QUERYWATCHER
-            )
+            ),
+            false
         ),
         // descending?
         Arrays.asList(false, true),
         // vectorize?
         Arrays.asList(false, true),
         // double vs. float
-        Arrays.asList(QueryRunnerTestHelper.COMMON_DOUBLE_AGGREGATORS, QueryRunnerTestHelper.COMMON_FLOAT_AGGREGATORS)
+        Arrays.asList(QueryRunnerTestHelper.COMMON_DOUBLE_AGGREGATORS, QueryRunnerTestHelper.COMMON_FLOAT_AGGREGATORS),
+        // useVectorApi? (SIMD aggregators)
+        Arrays.asList(false, true)
     );
 
     // Add vectorization tests for any indexes that support it.
@@ -130,17 +134,20 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
         .stream(baseConstructors.spliterator(), false)
         .filter(
             constructor -> {
-              boolean canVectorize =
-                  QueryRunnerTestHelper.isTestRunnerVectorizable((QueryRunner) constructor[0])
-                  && !(boolean) constructor[1] /* descending */;
+              boolean canVectorize = QueryRunnerTestHelper.isTestRunnerVectorizable((QueryRunner) constructor[0]);
               final boolean vectorize = (boolean) constructor[2]; /* vectorize */
+              final boolean useVectorApi = (boolean) constructor[4]; /* useVectorApi */
+              if (!vectorize && useVectorApi) {
+                // SIMD path is reachable only when vectorization is on; skip the redundant combo.
+                return false;
+              }
               return !vectorize || canVectorize;
             }
         )
         .collect(Collectors.toList());
   }
 
-  private <T> void assertExpectedResults(Iterable<Result<T>> expectedResults, Iterable<Result<T>> results)
+  protected <T> void assertExpectedResults(Iterable<Result<T>> expectedResults, Iterable<Result<T>> results)
   {
     if (descending) {
       expectedResults = TestHelper.revert(expectedResults);
@@ -148,30 +155,46 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
     TestHelper.assertExpectedResults(expectedResults, results);
   }
 
-  protected final QueryRunner runner;
+  protected final QueryRunner<Result<TimeseriesResultValue>> runner;
   protected final boolean descending;
   protected final boolean vectorize;
-  private final List<AggregatorFactory> aggregatorFactoryList;
+  protected final List<AggregatorFactory> aggregatorFactoryList;
+  protected final boolean useVectorApi;
 
   public TimeseriesQueryRunnerTest(
-      QueryRunner runner,
+      QueryRunner<Result<TimeseriesResultValue>> runner,
       boolean descending,
       boolean vectorize,
-      List<AggregatorFactory> aggregatorFactoryList
+      List<AggregatorFactory> aggregatorFactoryList,
+      boolean useVectorApi
   )
   {
     this.runner = runner;
     this.descending = descending;
     this.vectorize = vectorize;
     this.aggregatorFactoryList = aggregatorFactoryList;
+    this.useVectorApi = useVectorApi;
+  }
+
+  @BeforeEach
+  public void initializeExpressionProcessing()
+  {
+    if (useVectorApi) {
+      ExpressionProcessing.initializeForVectorApiTests();
+    } else {
+      ExpressionProcessing.initializeForTests();
+    }
+  }
+
+  @AfterEach
+  public void resetExpressionProcessing()
+  {
+    ExpressionProcessing.initializeForTests();
   }
 
   @Test
   public void testEmptyTimeseries()
   {
-    // Cannot vectorize due to "doubleFirst" aggregator.
-    cannotVectorize();
-
     TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
                                   .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
                                   .granularity(QueryRunnerTestHelper.ALL_GRAN)
@@ -189,8 +212,8 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
                                   .build();
     Map<String, Object> resultMap = new HashMap<>();
     resultMap.put("rows", 0L);
-    resultMap.put("index", NullHandling.defaultDoubleValue());
-    resultMap.put("first", NullHandling.defaultDoubleValue());
+    resultMap.put("index", null);
+    resultMap.put("first", null);
     List<Result<TimeseriesResultValue>> expectedResults = ImmutableList.of(
         new Result<>(
             DateTimes.of("2020-04-02"),
@@ -224,7 +247,7 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
 
     StubServiceEmitter stubServiceEmitter = new StubServiceEmitter("", "");
     MetricsEmittingQueryRunner<Result<TimeseriesResultValue>> metricsEmittingQueryRunner =
-        new MetricsEmittingQueryRunner<Result<TimeseriesResultValue>>(
+        new MetricsEmittingQueryRunner<>(
             stubServiceEmitter,
             new TimeseriesQueryQueryToolChest(),
             runner,
@@ -245,72 +268,51 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
     Result lastResult = null;
     for (Result<TimeseriesResultValue> result : results) {
       DateTime current = result.getTimestamp();
-      Assert.assertFalse(
-          StringUtils.format("Timestamp[%s] > expectedLast[%s]", current, expectedLast),
-          descending ? current.isBefore(expectedLast) : current.isAfter(expectedLast)
+      Assertions.assertFalse(
+          descending ? current.isBefore(expectedLast) : current.isAfter(expectedLast),
+          StringUtils.format("Timestamp[%s] > expectedLast[%s]", current, expectedLast)
       );
 
       final TimeseriesResultValue value = result.getValue();
 
-      Assert.assertEquals(
-          result.toString(),
+      Assertions.assertEquals(
           QueryRunnerTestHelper.SKIPPED_DAY.equals(current) ? 0L : 13L,
-          value.getLongMetric("rows").longValue()
+          value.getLongMetric("rows").longValue(),
+          result.toString()
       );
 
       if (!QueryRunnerTestHelper.SKIPPED_DAY.equals(current)) {
-        Assert.assertEquals(
-            result.toString(),
-            Doubles.tryParse(expectedIndex[count]).doubleValue(),
-            value.getDoubleMetric("index").doubleValue(),
-            value.getDoubleMetric("index").doubleValue() * 1e-6
+        Assertions.assertEquals(
+            Double.parseDouble(expectedIndex[count]),
+            value.getDoubleMetric("index"),
+            value.getDoubleMetric("index") * 1e-6,
+            result.toString()
         );
-        Assert.assertEquals(
-            result.toString(),
-            new Double(expectedIndex[count]) +
-            13L + 1L,
+        Assertions.assertEquals(
+            Double.parseDouble(expectedIndex[count]) + 13L + 1L,
             value.getDoubleMetric("addRowsIndexConstant"),
-            value.getDoubleMetric("addRowsIndexConstant") * 1e-6
+            value.getDoubleMetric("addRowsIndexConstant") * 1e-6,
+            result.toString()
         );
-        Assert.assertEquals(
-            value.getDoubleMetric("uniques"),
+        Assertions.assertEquals(
             9.0d,
+            value.getDoubleMetric("uniques"),
             0.02
         );
       } else {
-        if (NullHandling.replaceWithDefault()) {
-          Assert.assertEquals(
-              result.toString(),
-              0.0D,
-              value.getDoubleMetric("index").doubleValue(),
-              value.getDoubleMetric("index").doubleValue() * 1e-6
-          );
-          Assert.assertEquals(
-              result.toString(),
-              new Double(expectedIndex[count]) + 1L,
-              value.getDoubleMetric("addRowsIndexConstant"),
-              value.getDoubleMetric("addRowsIndexConstant") * 1e-6
-          );
-          Assert.assertEquals(
-              0.0D,
-              value.getDoubleMetric("uniques"),
-              0.02
-          );
-        } else {
-          Assert.assertNull(
-              result.toString(),
-              value.getDoubleMetric("index")
-          );
-          Assert.assertNull(
-              result.toString(),
-              value.getDoubleMetric("addRowsIndexConstant")
-          );
-          Assert.assertEquals(
-              value.getDoubleMetric("uniques"),
-              0.0d,
-              0.02
-          );
-        }
+        Assertions.assertNull(
+            value.getDoubleMetric("index"),
+            result.toString()
+        );
+        Assertions.assertNull(
+            value.getDoubleMetric("addRowsIndexConstant"),
+            result.toString()
+        );
+        Assertions.assertEquals(
+            0.0d,
+            value.getDoubleMetric("uniques"),
+            0.02
+        );
       }
 
       lastResult = result;
@@ -318,7 +320,10 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
     }
 
     stubServiceEmitter.verifyEmitted("query/wait/time", ImmutableMap.of("vectorized", vectorize), 1);
-    Assert.assertEquals(lastResult.toString(), expectedLast, lastResult.getTimestamp());
+    if (lastResult == null) {
+      throw new AssertionError("Expected at least one timeseries result");
+    }
+    Assertions.assertEquals(expectedLast, lastResult.getTimestamp(), lastResult.toString());
   }
 
   @Test
@@ -342,15 +347,111 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
     Result lastResult = null;
     for (Result<TimeseriesResultValue> result : results) {
       DateTime current = result.getTimestamp();
-      Assert.assertFalse(
-          StringUtils.format("Timestamp[%s] > expectedLast[%s]", current, expectedLast),
-          descending ? current.isBefore(expectedLast) : current.isAfter(expectedLast)
+      Assertions.assertFalse(
+          descending ? current.isBefore(expectedLast) : current.isAfter(expectedLast),
+          StringUtils.format("Timestamp[%s] > expectedLast[%s]", current, expectedLast)
       );
-      Assert.assertEquals(ImmutableMap.of(), result.getValue().getBaseObject());
+      Assertions.assertEquals(ImmutableMap.of(), result.getValue().getBaseObject());
       lastResult = result;
     }
 
-    Assert.assertEquals(lastResult.toString(), expectedLast, lastResult.getTimestamp());
+    if (lastResult == null) {
+      throw new AssertionError("Expected at least one timeseries result");
+    }
+    Assertions.assertEquals(expectedLast, lastResult.getTimestamp(), lastResult.toString());
+  }
+
+  @Test
+  public void testTimeseriesProjections()
+  {
+
+    AggregatorFactory maxQuality = new LongMaxAggregatorFactory("maxQuality", "qualityLong");
+    Druids.TimeseriesQueryBuilder queryBuilder = Druids.newTimeseriesQueryBuilder()
+                                                              .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
+                                                              .granularity(Granularities.DAY)
+                                                              .intervals("2011-01-20/2011-01-22")
+                                                              .aggregators(List.of(maxQuality));
+    // construct a query to ignore projection
+    Map<String, Object> contextNoProjection = makeContext();
+    contextNoProjection.put(QueryContextParameters.NO_PROJECTIONS.getName(), "true");
+    TimeseriesQuery queryNoProjection = queryBuilder.context(contextNoProjection).build();
+    // construct a query to use projection
+    Map<String, Object> contextWithProjection = makeContext();
+    contextWithProjection.put(QueryContextParameters.USE_PROJECTION.getName(), "daily_market_maxQuality");
+    TimeseriesQuery queryWithProjection = queryBuilder.context(contextWithProjection).build();
+
+
+    List<Result<TimeseriesResultValue>> resultNoProjection = runner.run(QueryPlus.wrap(queryNoProjection)).toList();
+    List<Result<TimeseriesResultValue>> resultWithProjection = runner.run(QueryPlus.wrap(queryWithProjection)).toList();
+
+    List<Result<TimeseriesResultValue>> expectedResults = List.of(
+        new Result<>(DateTimes.of("2011-01-20"), createTimeseriesResultValue("maxQuality", 1800L)),
+        new Result<>(DateTimes.of("2011-01-21"), createTimeseriesResultValue("maxQuality", null))
+    );
+    Assertions.assertEquals(expectedResults, resultNoProjection);
+    Assertions.assertEquals(expectedResults, resultWithProjection);
+  }
+
+  @Test
+  public void testTimeseriesProjectionsCounts()
+  {
+
+    AggregatorFactory countAgg = new CountAggregatorFactory("count");
+    Druids.TimeseriesQueryBuilder queryBuilder = Druids.newTimeseriesQueryBuilder()
+                                                              .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
+                                                              .granularity(Granularities.DAY)
+                                                              .intervals("2011-01-20/2011-01-22")
+                                                              .aggregators(List.of(countAgg));
+    // construct a query to ignore projection
+    Map<String, Object> contextNoProjection = makeContext();
+    contextNoProjection.put(QueryContextParameters.NO_PROJECTIONS.getName(), "true");
+    TimeseriesQuery queryNoProjection = queryBuilder.context(contextNoProjection).build();
+    // construct a query to use projection
+    Map<String, Object> contextWithProjection = makeContext();
+    contextWithProjection.put(QueryContextParameters.USE_PROJECTION.getName(), "daily_countAndQualityCardinalityAndMaxLongNullable");
+    TimeseriesQuery queryWithProjection = queryBuilder.context(contextWithProjection).build();
+
+
+    List<Result<TimeseriesResultValue>> resultNoProjection = runner.run(QueryPlus.wrap(queryNoProjection)).toList();
+    List<Result<TimeseriesResultValue>> resultWithProjection = runner.run(QueryPlus.wrap(queryWithProjection)).toList();
+
+    List<Result<TimeseriesResultValue>> expectedResults = List.of(
+        new Result<>(DateTimes.of("2011-01-20"), createTimeseriesResultValue("count", 13L)),
+        new Result<>(DateTimes.of("2011-01-21"), createTimeseriesResultValue("count", 0L))
+    );
+    Assertions.assertEquals(expectedResults, resultNoProjection);
+    Assertions.assertEquals(expectedResults, resultWithProjection);
+  }
+
+  @Test
+  public void testTimeseriesNullableLongMax()
+  {
+
+    AggregatorFactory longNullableMax = new LongMaxAggregatorFactory("longNullableMax", "longNumericNull");
+    Druids.TimeseriesQueryBuilder queryBuilder = Druids.newTimeseriesQueryBuilder()
+                                                              .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
+                                                              .granularity(Granularities.DAY)
+                                                              .intervals("2011-01-20/2011-01-22")
+                                                              .aggregators(List.of(longNullableMax));
+    // construct a query to ignore projection
+    Map<String, Object> contextNoProjection = makeContext();
+    contextNoProjection.put(QueryContextParameters.NO_PROJECTIONS.getName(), "true");
+    TimeseriesQuery queryNoProjection = queryBuilder.context(contextNoProjection).build();
+    // construct a query to use projection
+    Map<String, Object> contextWithProjection = makeContext();
+    contextWithProjection.put(QueryContextParameters.USE_PROJECTION.getName(), "daily_countAndQualityCardinalityAndMaxLongNullable");
+    TimeseriesQuery queryWithProjection = queryBuilder.context(contextWithProjection).build();
+
+
+    List<Result<TimeseriesResultValue>> resultNoProjection = runner.run(QueryPlus.wrap(queryNoProjection)).toList();
+    List<Result<TimeseriesResultValue>> resultWithProjection = runner.run(QueryPlus.wrap(queryWithProjection)).toList();
+
+    List<Result<TimeseriesResultValue>> expectedResults = List.of(
+        new Result<>(DateTimes.of("2011-01-20"), createTimeseriesResultValue("longNullableMax", 80L)),
+        new Result<>(DateTimes.of("2011-01-21"), createTimeseriesResultValue("longNullableMax", null))
+    );
+    Assertions.assertEquals(expectedResults, resultNoProjection);
+    Assertions.assertEquals(expectedResults, resultWithProjection);
   }
 
   @Test
@@ -376,16 +477,16 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
     Iterable<Result<TimeseriesResultValue>> results = runner.run(QueryPlus.wrap(query)).toList();
     Result<TimeseriesResultValue> result = results.iterator().next();
 
-    Assert.assertEquals(expectedEarliest, result.getTimestamp());
-    Assert.assertFalse(
-        StringUtils.format("Timestamp[%s] > expectedLast[%s]", result.getTimestamp(), expectedLast),
-        result.getTimestamp().isAfter(expectedLast)
+    Assertions.assertEquals(expectedEarliest, result.getTimestamp());
+    Assertions.assertFalse(
+        result.getTimestamp().isAfter(expectedLast),
+        StringUtils.format("Timestamp[%s] > expectedLast[%s]", result.getTimestamp(), expectedLast)
     );
 
     final TimeseriesResultValue value = result.getValue();
 
-    Assert.assertEquals(result.toString(), 1870.061029, value.getDoubleMetric("maxIndex"), 1870.061029 * 1e-6);
-    Assert.assertEquals(result.toString(), 59.021022, value.getDoubleMetric("minIndex"), 59.021022 * 1e-6);
+    Assertions.assertEquals(1870.061029, value.getDoubleMetric("maxIndex"), 1870.061029 * 1e-6, result.toString());
+    Assertions.assertEquals(59.021022, value.getDoubleMetric("minIndex"), 59.021022 * 1e-6, result.toString());
   }
 
   @Test
@@ -412,18 +513,18 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
 
     Iterable<Result<TimeseriesResultValue>> results = runner.run(QueryPlus.wrap(query)).toList();
     Result<TimeseriesResultValue> result = results.iterator().next();
-    Assert.assertEquals(expectedEarliest, result.getTimestamp());
-    Assert.assertFalse(
-        StringUtils.format("Timestamp[%s] > expectedLast[%s]", result.getTimestamp(), expectedLast),
-        result.getTimestamp().isAfter(expectedLast)
+    Assertions.assertEquals(expectedEarliest, result.getTimestamp());
+    Assertions.assertFalse(
+        result.getTimestamp().isAfter(expectedLast),
+        StringUtils.format("Timestamp[%s] > expectedLast[%s]", result.getTimestamp(), expectedLast)
     );
 
-    Assert.assertEquals(59L, (long) result.getValue().getLongMetric(QueryRunnerTestHelper.LONG_MIN_INDEX_METRIC));
-    Assert.assertEquals(1870, (long) result.getValue().getLongMetric(QueryRunnerTestHelper.LONG_MAX_INDEX_METRIC));
-    Assert.assertEquals(59.021022D, result.getValue().getDoubleMetric(QueryRunnerTestHelper.DOUBLE_MIN_INDEX_METRIC), 0);
-    Assert.assertEquals(1870.061029D, result.getValue().getDoubleMetric(QueryRunnerTestHelper.DOUBLE_MAX_INDEX_METRIC), 0);
-    Assert.assertEquals(59.021023F, result.getValue().getFloatMetric(QueryRunnerTestHelper.FLOAT_MIN_INDEX_METRIC), 0);
-    Assert.assertEquals(1870.061F, result.getValue().getFloatMetric(QueryRunnerTestHelper.FLOAT_MAX_INDEX_METRIC), 0);
+    Assertions.assertEquals(59L, (long) result.getValue().getLongMetric(QueryRunnerTestHelper.LONG_MIN_INDEX_METRIC));
+    Assertions.assertEquals(1870, (long) result.getValue().getLongMetric(QueryRunnerTestHelper.LONG_MAX_INDEX_METRIC));
+    Assertions.assertEquals(59.021022D, result.getValue().getDoubleMetric(QueryRunnerTestHelper.DOUBLE_MIN_INDEX_METRIC), 0);
+    Assertions.assertEquals(1870.061029D, result.getValue().getDoubleMetric(QueryRunnerTestHelper.DOUBLE_MAX_INDEX_METRIC), 0);
+    Assertions.assertEquals(59.021023F, result.getValue().getFloatMetric(QueryRunnerTestHelper.FLOAT_MIN_INDEX_METRIC), 0);
+    Assertions.assertEquals(1870.061F, result.getValue().getFloatMetric(QueryRunnerTestHelper.FLOAT_MAX_INDEX_METRIC), 0);
   }
 
   @Test
@@ -445,7 +546,7 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
                                   .context(makeContext())
                                   .build();
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         new SelectorDimFilter(QueryRunnerTestHelper.MARKET_DIMENSION, "upfront", null),
         query.getDimensionsFilter()
     );
@@ -458,25 +559,25 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
 
     for (Result<TimeseriesResultValue> result : results) {
       DateTime current = result.getTimestamp();
-      Assert.assertFalse(
-          StringUtils.format("Timestamp[%s] > expectedLast[%s]", current, expectedLast),
-          descending ? current.isBefore(expectedLast) : current.isAfter(expectedLast)
+      Assertions.assertFalse(
+          descending ? current.isBefore(expectedLast) : current.isAfter(expectedLast),
+          StringUtils.format("Timestamp[%s] > expectedLast[%s]", current, expectedLast)
       );
 
       final TimeseriesResultValue value = result.getValue();
 
-      Assert.assertEquals(
-          result.toString(),
+      Assertions.assertEquals(
           QueryRunnerTestHelper.SKIPPED_DAY.equals(result.getTimestamp()) ? 0L : 2L,
-          value.getLongMetric("rows").longValue()
+          value.getLongMetric("rows").longValue(),
+          result.toString()
       );
-      Assert.assertEquals(
-          result.toString(),
+      Assertions.assertEquals(
           QueryRunnerTestHelper.SKIPPED_DAY.equals(result.getTimestamp()) ? 0.0d : 2.0d,
           value.getDoubleMetric(
               "uniques"
           ),
-          0.01
+          0.01,
+          result.toString()
       );
     }
   }
@@ -546,7 +647,7 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
                                   )
                                   .postAggregators(QueryRunnerTestHelper.ADD_ROWS_INDEX_CONSTANT)
                                   .descending(descending)
-                                  .context(ImmutableMap.of(TimeseriesQuery.CTX_GRAND_TOTAL, true))
+                                  .context(QueryContext.ofMap(QueryContextParameters.GRAND_TOTAL, true))
                                   .build();
 
     List<Result<TimeseriesResultValue>> expectedResults = new ArrayList<>();
@@ -643,7 +744,7 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
                                   )
                                   .postAggregators(QueryRunnerTestHelper.ADD_ROWS_INDEX_CONSTANT)
                                   .descending(descending)
-                                  .context(ImmutableMap.of(TimeseriesQuery.SKIP_EMPTY_BUCKETS, false))
+                                  .context(QueryContext.ofMap(QueryContextParameters.SKIP_EMPTY_BUCKETS, false))
                                   .build();
     List<Result<TimeseriesResultValue>> expectedResults = new ArrayList<>();
 
@@ -655,21 +756,21 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
                     "rows",
                     0L,
                     "index",
-                    NullHandling.defaultLongValue(),
+                    null,
                     QueryRunnerTestHelper.ADD_ROWS_INDEX_CONSTANT_METRIC,
-                    NullHandling.sqlCompatible() ? null : 1.0,
+                    null,
                     QueryRunnerTestHelper.LONG_MIN_INDEX_METRIC,
-                    NullHandling.sqlCompatible() ? null : Long.MAX_VALUE,
+                    null,
                     QueryRunnerTestHelper.LONG_MAX_INDEX_METRIC,
-                    NullHandling.sqlCompatible() ? null : Long.MIN_VALUE,
+                    null,
                     QueryRunnerTestHelper.DOUBLE_MIN_INDEX_METRIC,
-                    NullHandling.sqlCompatible() ? null : Double.POSITIVE_INFINITY,
+                    null,
                     QueryRunnerTestHelper.DOUBLE_MAX_INDEX_METRIC,
-                    NullHandling.sqlCompatible() ? null : Double.NEGATIVE_INFINITY,
+                    null,
                     QueryRunnerTestHelper.FLOAT_MIN_INDEX_METRIC,
-                    NullHandling.sqlCompatible() ? null : Float.POSITIVE_INFINITY,
+                    null,
                     QueryRunnerTestHelper.FLOAT_MAX_INDEX_METRIC,
-                    NullHandling.sqlCompatible() ? null : Float.NEGATIVE_INFINITY
+                    null
                 )
             )
         )
@@ -930,9 +1031,9 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
     final Iterable<Interval> iterable = Granularities.HOUR.getIterable(
         new Interval(DateTimes.of("2011-04-14T01"), DateTimes.of("2011-04-15"))
     );
-    Map noRowsResult = new HashMap<>();
+    Map<String, Object> noRowsResult = new HashMap<>();
     noRowsResult.put("rows", 0L);
-    noRowsResult.put("idx", NullHandling.defaultLongValue());
+    noRowsResult.put("idx", null);
     for (Interval interval : iterable) {
       lotsOfZeroes.add(
           new Result<>(
@@ -1423,8 +1524,8 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
             new TimeseriesResultValue(
                 ImmutableMap.of(
                     "rows", 1L,
-                    "index", new Float(135.885094).doubleValue(),
-                    "addRowsIndexConstant", new Float(137.885094).doubleValue(),
+                    "index", 135.885094F,
+                    "addRowsIndexConstant", 137.885094F,
                     "uniques", QueryRunnerTestHelper.UNIQUES_1
                 )
             )
@@ -1434,8 +1535,8 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
             new TimeseriesResultValue(
                 ImmutableMap.of(
                     "rows", 1L,
-                    "index", new Float(147.425935).doubleValue(),
-                    "addRowsIndexConstant", new Float(149.425935).doubleValue(),
+                    "index", 147.425935F,
+                    "addRowsIndexConstant", 149.425935F,
                     "uniques", QueryRunnerTestHelper.UNIQUES_1
                 )
             )
@@ -1470,8 +1571,8 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
             new TimeseriesResultValue(
                 ImmutableMap.of(
                     "rows", 1L,
-                    "index", new Float(118.570340).doubleValue(),
-                    "addRowsIndexConstant", new Float(120.570340).doubleValue(),
+                    "index", 118.570340F,
+                    "addRowsIndexConstant", 120.570340F,
                     "uniques", QueryRunnerTestHelper.UNIQUES_1
                 )
             )
@@ -1481,8 +1582,8 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
             new TimeseriesResultValue(
                 ImmutableMap.of(
                     "rows", 1L,
-                    "index", new Float(112.987027).doubleValue(),
-                    "addRowsIndexConstant", new Float(114.987027).doubleValue(),
+                    "index", 112.987027F,
+                    "addRowsIndexConstant", 114.987027F,
                     "uniques", QueryRunnerTestHelper.UNIQUES_1
                 )
             )
@@ -1668,8 +1769,8 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
 
     Map<String, Object> resultMap = new HashMap<>();
     resultMap.put("rows", 0L);
-    resultMap.put("index", NullHandling.defaultDoubleValue());
-    resultMap.put("addRowsIndexConstant", NullHandling.replaceWithDefault() ? 1.0 : null);
+    resultMap.put("index", null);
+    resultMap.put("addRowsIndexConstant", null);
     resultMap.put("uniques", 0.0);
 
     List<Result<TimeseriesResultValue>> expectedResults = Arrays.asList(
@@ -1702,7 +1803,7 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
                                   .aggregators(aggregatorFactoryList)
                                   .postAggregators(QueryRunnerTestHelper.ADD_ROWS_INDEX_CONSTANT)
                                   .descending(descending)
-                                  .context(makeContext(ImmutableMap.of(TimeseriesQuery.SKIP_EMPTY_BUCKETS, "true")))
+                                  .context(makeContext(ImmutableMap.of(QueryContextParameters.SKIP_EMPTY_BUCKETS.getName(), "true")))
                                   .build();
 
     List<Result<TimeseriesResultValue>> expectedResults = Collections.emptyList();
@@ -1770,27 +1871,18 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
                                   .context(makeContext())
                                   .build();
 
+
     List<Result<TimeseriesResultValue>> expectedResults = Arrays.asList(
         new Result<>(
             DateTimes.of("2011-04-01"),
             new TimeseriesResultValue(
-                ImmutableMap.of(
-                    "rows", 13L,
-                    "index", 6626.151596069336,
-                    "addRowsIndexConstant", 6640.151596069336,
-                    "uniques", QueryRunnerTestHelper.UNIQUES_9
-                )
+                TestHelper.makeMap("rows", 0L, "index", null, "uniques", 0.0, "addRowsIndexConstant", null)
             )
         ),
         new Result<>(
             DateTimes.of("2011-04-02"),
             new TimeseriesResultValue(
-                ImmutableMap.of(
-                    "rows", 13L,
-                    "index", 5833.2095947265625,
-                    "addRowsIndexConstant", 5847.2095947265625,
-                    "uniques", QueryRunnerTestHelper.UNIQUES_9
-                )
+                TestHelper.makeMap("rows", 0L, "index", null, "uniques", 0.0, "addRowsIndexConstant", null)
             )
         )
     );
@@ -1815,8 +1907,8 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
                                   .build();
     Map<String, Object> resultMap = new HashMap<>();
     resultMap.put("rows", 0L);
-    resultMap.put("index", NullHandling.defaultDoubleValue());
-    resultMap.put("addRowsIndexConstant", NullHandling.replaceWithDefault() ? 1.0 : null);
+    resultMap.put("index", null);
+    resultMap.put("addRowsIndexConstant", null);
     resultMap.put("uniques", 0.0);
 
     List<Result<TimeseriesResultValue>> expectedResults = Arrays.asList(
@@ -1857,8 +1949,8 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
                                   .build();
     Map<String, Object> resultMap = new HashMap<>();
     resultMap.put("rows", 0L);
-    resultMap.put("index", NullHandling.defaultDoubleValue());
-    resultMap.put("addRowsIndexConstant", NullHandling.replaceWithDefault() ? 1.0 : null);
+    resultMap.put("index", null);
+    resultMap.put("addRowsIndexConstant", null);
     resultMap.put("uniques", 0.0);
 
     List<Result<TimeseriesResultValue>> expectedResults = Arrays.asList(
@@ -1884,7 +1976,6 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
   public void testTimeseriesWithMultiValueFilteringJavascriptAggregator()
   {
     // Cannot vectorize due to JavaScript aggregators.
-    cannotVectorize();
 
     TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
                                   .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
@@ -1914,6 +2005,14 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
         )
     );
 
+    if (vectorize) {
+      final RuntimeException exception = Assertions.assertThrows(
+          RuntimeException.class,
+          () -> runner.run(QueryPlus.wrap(query)).toList()
+      );
+      Assertions.assertTrue(exception.getMessage().contains("Cannot vectorize!"));
+      return;
+    }
     Iterable<Result<TimeseriesResultValue>> actualResults = runner.run(QueryPlus.wrap(query)).toList();
     assertExpectedResults(expectedResults, actualResults);
   }
@@ -1922,7 +2021,6 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
   public void testTimeseriesWithMultiValueFilteringJavascriptAggregatorAndAlsoRegularFilters()
   {
     // Cannot vectorize due to JavaScript aggregators.
-    cannotVectorize();
 
     TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
                                   .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
@@ -1953,6 +2051,14 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
         )
     );
 
+    if (vectorize) {
+      final RuntimeException exception = Assertions.assertThrows(
+          RuntimeException.class,
+          () -> runner.run(QueryPlus.wrap(query)).toList()
+      );
+      Assertions.assertTrue(exception.getMessage().contains("Cannot vectorize!"));
+      return;
+    }
     Iterable<Result<TimeseriesResultValue>> actualResults = runner.run(QueryPlus.wrap(query)).toList();
     assertExpectedResults(expectedResults, actualResults);
   }
@@ -1960,9 +2066,6 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
   @Test
   public void testTimeseriesWithFirstLastAggregator()
   {
-    // Cannot vectorize due to "doubleFirst", "doubleLast" aggregators.
-    cannotVectorize();
-
     TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
                                   .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
                                   .granularity(QueryRunnerTestHelper.MONTH_GRAN)
@@ -1985,8 +2088,8 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
             DateTimes.of("2011-01-01"),
             new TimeseriesResultValue(
                 ImmutableMap.of(
-                    "first", new Float(100.000000).doubleValue(),
-                    "last", new Float(943.497198).doubleValue()
+                    "first", 100.000000F,
+                    "last", 943.497198F
                 )
             )
         ),
@@ -1994,8 +2097,8 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
             DateTimes.of("2011-02-01"),
             new TimeseriesResultValue(
                 ImmutableMap.of(
-                    "first", new Float(132.123776).doubleValue(),
-                    "last", new Float(1101.918270).doubleValue()
+                    "first", 132.123776F,
+                    "last", 1101.918270F
                 )
             )
         ),
@@ -2003,8 +2106,8 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
             DateTimes.of("2011-03-01"),
             new TimeseriesResultValue(
                 ImmutableMap.of(
-                    "first", new Float(153.059937).doubleValue(),
-                    "last", new Float(1063.201156).doubleValue()
+                    "first", 153.059937F,
+                    "last", 1063.201156F
                 )
             )
         ),
@@ -2012,8 +2115,8 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
             DateTimes.of("2011-04-01"),
             new TimeseriesResultValue(
                 ImmutableMap.of(
-                    "first", new Float(135.885094).doubleValue(),
-                    "last", new Float(780.271977).doubleValue()
+                    "first", 135.885094F,
+                    "last", 780.271977F
                 )
             )
         )
@@ -2024,8 +2127,8 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
             DateTimes.of("2011-04-01"),
             new TimeseriesResultValue(
                 ImmutableMap.of(
-                    "first", new Float(1234.247546).doubleValue(),
-                    "last", new Float(106.793700).doubleValue()
+                    "first", 1234.247546F,
+                    "last", 106.793700F
                 )
             )
         ),
@@ -2033,8 +2136,8 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
             DateTimes.of("2011-03-01"),
             new TimeseriesResultValue(
                 ImmutableMap.of(
-                    "first", new Float(1004.940887).doubleValue(),
-                    "last", new Float(151.752485).doubleValue()
+                    "first", 1004.940887F,
+                    "last", 151.752485F
                 )
             )
         ),
@@ -2042,8 +2145,8 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
             DateTimes.of("2011-02-01"),
             new TimeseriesResultValue(
                 ImmutableMap.of(
-                    "first", new Float(913.561076).doubleValue(),
-                    "last", new Float(122.258195).doubleValue()
+                    "first", 913.561076F,
+                    "last", 122.258195F
                 )
             )
         ),
@@ -2051,8 +2154,8 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
             DateTimes.of("2011-01-01"),
             new TimeseriesResultValue(
                 ImmutableMap.of(
-                    "first", new Float(800.000000).doubleValue(),
-                    "last", new Float(133.740047).doubleValue()
+                    "first", 800.000000F,
+                    "last", 133.740047F
                 )
             )
         )
@@ -2255,8 +2358,6 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
   @Test
   public void testTimeSeriesWithFilteredAggAndExpressionFilteredAgg()
   {
-    // can't vectorize if expression
-    cannotVectorize();
     TimeseriesQuery query = Druids
         .newTimeseriesQueryBuilder()
         .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
@@ -2508,7 +2609,6 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
   public void testTimeseriesWithTimeColumn()
   {
     // Cannot vectorize due to JavaScript aggregators.
-    cannotVectorize();
 
     TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
                                   .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
@@ -2539,6 +2639,14 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
         )
     );
 
+    if (vectorize) {
+      final RuntimeException exception = Assertions.assertThrows(
+          RuntimeException.class,
+          () -> runner.run(QueryPlus.wrap(query)).toList()
+      );
+      Assertions.assertTrue(exception.getMessage().contains("Cannot vectorize!"));
+      return;
+    }
     Iterable<Result<TimeseriesResultValue>> actualResults = runner.run(QueryPlus.wrap(query)).toList();
 
     assertExpectedResults(expectedResults, actualResults);
@@ -2642,34 +2750,34 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
                                   .descending(descending)
                                   .context(
                                       makeContext(
-                                          ImmutableMap.of(
-                                              TimeseriesQuery.CTX_TIMESTAMP_RESULT_FIELD, TIMESTAMP_RESULT_FIELD_NAME,
-                                              TimeseriesQuery.SKIP_EMPTY_BUCKETS, true
-                                          )
+                                          QueryContext.builder()
+                                                      .put(QueryContextParameters.TIMESTAMP_RESULT_FIELD, TIMESTAMP_RESULT_FIELD_NAME)
+                                                      .put(QueryContextParameters.SKIP_EMPTY_BUCKETS, true)
+                                                      .toMap()
                                       )
                                   )
                                   .build();
 
-    Assert.assertEquals(TIMESTAMP_RESULT_FIELD_NAME, query.getTimestampResultField());
+    Assertions.assertEquals(TIMESTAMP_RESULT_FIELD_NAME, query.getTimestampResultField());
 
     QueryToolChest<Result<TimeseriesResultValue>, TimeseriesQuery> toolChest = new TimeseriesQueryQueryToolChest();
 
     RowSignature rowSignature = toolChest.resultArraySignature(query);
-    Assert.assertNotNull(rowSignature);
+    Assertions.assertNotNull(rowSignature);
     List<String> columnNames = rowSignature.getColumnNames();
-    Assert.assertNotNull(columnNames);
-    Assert.assertEquals(6, columnNames.size());
-    Assert.assertEquals("__time", columnNames.get(0));
-    Assert.assertEquals(TIMESTAMP_RESULT_FIELD_NAME, columnNames.get(1));
-    Assert.assertEquals("rows", columnNames.get(2));
-    Assert.assertEquals("index", columnNames.get(3));
-    Assert.assertEquals("uniques", columnNames.get(4));
-    Assert.assertEquals("addRowsIndexConstant", columnNames.get(5));
+    Assertions.assertNotNull(columnNames);
+    Assertions.assertEquals(6, columnNames.size());
+    Assertions.assertEquals("__time", columnNames.get(0));
+    Assertions.assertEquals(TIMESTAMP_RESULT_FIELD_NAME, columnNames.get(1));
+    Assertions.assertEquals("rows", columnNames.get(2));
+    Assertions.assertEquals("index", columnNames.get(3));
+    Assertions.assertEquals("uniques", columnNames.get(4));
+    Assertions.assertEquals("addRowsIndexConstant", columnNames.get(5));
 
     Sequence<Result<TimeseriesResultValue>> results = runner.run(QueryPlus.wrap(query));
     Sequence<Object[]> resultsAsArrays = toolChest.resultsAsArrays(query, results);
 
-    Assert.assertNotNull(resultsAsArrays);
+    Assertions.assertNotNull(resultsAsArrays);
 
     final String[] expectedIndex = descending ?
                                    QueryRunnerTestHelper.EXPECTED_FULL_ON_INDEX_VALUES_DESC :
@@ -2686,74 +2794,59 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
     Object[] lastResult = null;
     for (Object[] result : resultsAsArrays.toList()) {
       Long current = (Long) result[0];
-      Assert.assertFalse(
-          StringUtils.format("Timestamp[%s] > expectedLast[%s]", current, expectedLast),
-          descending ? current < expectedLast : current > expectedLast
+      Assertions.assertFalse(
+          descending ? current < expectedLast : current > expectedLast,
+          StringUtils.format("Timestamp[%s] > expectedLast[%s]", current, expectedLast)
       );
 
-      Assert.assertEquals(
+      Assertions.assertEquals(
           (Long) result[1],
           current,
           0
       );
 
-      Assert.assertEquals(
+      Assertions.assertEquals(
           QueryRunnerTestHelper.SKIPPED_DAY.getMillis() == current ? (Long) 0L : (Long) 13L,
           result[2]
       );
 
       if (QueryRunnerTestHelper.SKIPPED_DAY.getMillis() != current) {
-        Assert.assertEquals(
-            Doubles.tryParse(expectedIndexToUse[count]).doubleValue(),
+        Assertions.assertEquals(
+            Double.parseDouble(expectedIndexToUse[count]),
             (Double) result[3],
             (Double) result[3] * 1e-6
         );
-        Assert.assertEquals(
-            (Double) result[4],
+        Assertions.assertEquals(
             9.0d,
+            (Double) result[4],
             0.02
         );
-        Assert.assertEquals(
-            new Double(expectedIndexToUse[count]) + 13L + 1L,
+        Assertions.assertEquals(
+            Double.parseDouble(expectedIndexToUse[count]) + 13L + 1L,
             (Double) result[5],
             (Double) result[5] * 1e-6
         );
       } else {
-        if (NullHandling.replaceWithDefault()) {
-          Assert.assertEquals(
-              0.0D,
-              (Double) result[3],
-              (Double) result[3] * 1e-6
-          );
-          Assert.assertEquals(
-              0.0D,
-              (Double) result[4],
-              0.02
-          );
-          Assert.assertEquals(
-              new Double(expectedIndexToUse[count]) + 1L,
-              (Double) result[5],
-              (Double) result[5] * 1e-6
-          );
-        } else {
-          Assert.assertNull(
-              result[3]
-          );
-          Assert.assertEquals(
-              (Double) result[4],
-              0.0,
-              0.02
-          );
-          Assert.assertNull(
-              result[5]
-          );
-        }
+        Assertions.assertNull(
+            result[3]
+        );
+        Assertions.assertEquals(
+            0.0,
+            (Double) result[4],
+            0.02
+        );
+        Assertions.assertNull(
+            result[5]
+        );
       }
 
       lastResult = result;
       ++count;
     }
-    Assert.assertEquals(expectedLast, lastResult[0]);
+    if (lastResult == null) {
+      throw new AssertionError("Expected at least one timeseries result");
+    }
+    Assertions.assertEquals(expectedLast, lastResult[0]);
   }
 
   @Test
@@ -2773,15 +2866,15 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
                                   .descending(descending)
                                   .context(
                                       makeContext(
-                                          ImmutableMap.of(
-                                              TimeseriesQuery.CTX_TIMESTAMP_RESULT_FIELD, TIMESTAMP_RESULT_FIELD_NAME,
-                                              TimeseriesQuery.SKIP_EMPTY_BUCKETS, true
-                                          )
+                                          QueryContext.builder()
+                                                      .put(QueryContextParameters.TIMESTAMP_RESULT_FIELD, TIMESTAMP_RESULT_FIELD_NAME)
+                                                      .put(QueryContextParameters.SKIP_EMPTY_BUCKETS, true)
+                                                      .toMap()
                                       )
                                   )
                                   .build();
 
-    Assert.assertEquals(TIMESTAMP_RESULT_FIELD_NAME, query.getTimestampResultField());
+    Assertions.assertEquals(TIMESTAMP_RESULT_FIELD_NAME, query.getTimestampResultField());
 
     Iterable<Result<TimeseriesResultValue>> results = runner.run(QueryPlus.wrap(query)).toList();
 
@@ -2800,85 +2893,68 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
     Result lastResult = null;
     for (Result<TimeseriesResultValue> result : results) {
       DateTime current = result.getTimestamp();
-      Assert.assertFalse(
-          StringUtils.format("Timestamp[%s] > expectedLast[%s]", current, expectedLast),
-          descending ? current.isBefore(expectedLast) : current.isAfter(expectedLast)
+      Assertions.assertFalse(
+          descending ? current.isBefore(expectedLast) : current.isAfter(expectedLast),
+          StringUtils.format("Timestamp[%s] > expectedLast[%s]", current, expectedLast)
       );
 
       final TimeseriesResultValue value = result.getValue();
 
-      Assert.assertEquals(
+      Assertions.assertEquals(
           value.getLongMetric(TIMESTAMP_RESULT_FIELD_NAME),
           current.getMillis(),
           0
       );
 
-      Assert.assertEquals(
-          result.toString(),
+      Assertions.assertEquals(
           QueryRunnerTestHelper.SKIPPED_DAY.equals(current) ? 0L : 13L,
-          value.getLongMetric("rows").longValue()
+          value.getLongMetric("rows").longValue(),
+          result.toString()
       );
 
       if (!QueryRunnerTestHelper.SKIPPED_DAY.equals(current)) {
-        Assert.assertEquals(
-            result.toString(),
-            Doubles.tryParse(expectedIndexToUse[count]).doubleValue(),
-            value.getDoubleMetric("index").doubleValue(),
-            value.getDoubleMetric("index").doubleValue() * 1e-6
+        Assertions.assertEquals(
+            Double.parseDouble(expectedIndexToUse[count]),
+            value.getDoubleMetric("index"),
+            value.getDoubleMetric("index") * 1e-6,
+            result.toString()
         );
-        Assert.assertEquals(
-            result.toString(),
-            new Double(expectedIndexToUse[count]) +
+        Assertions.assertEquals(
+            Double.parseDouble(expectedIndexToUse[count]) +
             13L + 1L,
             value.getDoubleMetric("addRowsIndexConstant"),
-            value.getDoubleMetric("addRowsIndexConstant") * 1e-6
+            value.getDoubleMetric("addRowsIndexConstant") * 1e-6,
+            result.toString()
         );
-        Assert.assertEquals(
-            value.getDoubleMetric("uniques"),
+        Assertions.assertEquals(
             9.0d,
+            value.getDoubleMetric("uniques"),
             0.02
         );
       } else {
-        if (NullHandling.replaceWithDefault()) {
-          Assert.assertEquals(
-              result.toString(),
-              0.0D,
-              value.getDoubleMetric("index").doubleValue(),
-              value.getDoubleMetric("index").doubleValue() * 1e-6
-          );
-          Assert.assertEquals(
-              result.toString(),
-              new Double(expectedIndexToUse[count]) + 1L,
-              value.getDoubleMetric("addRowsIndexConstant"),
-              value.getDoubleMetric("addRowsIndexConstant") * 1e-6
-          );
-          Assert.assertEquals(
-              0.0D,
-              value.getDoubleMetric("uniques"),
-              0.02
-          );
-        } else {
-          Assert.assertNull(
-              result.toString(),
-              value.getDoubleMetric("index")
-          );
-          Assert.assertNull(
-              result.toString(),
-              value.getDoubleMetric("addRowsIndexConstant")
-          );
-          Assert.assertEquals(
-              value.getDoubleMetric("uniques"),
-              0.0d,
-              0.02
-          );
-        }
+        Assertions.assertNull(
+            value.getDoubleMetric("index"),
+            result.toString()
+        );
+        Assertions.assertNull(
+            value.getDoubleMetric("addRowsIndexConstant"),
+            result.toString()
+        );
+        Assertions.assertEquals(
+            0.0d,
+            value.getDoubleMetric("uniques"),
+            0.02
+        );
       }
 
       lastResult = result;
       ++count;
     }
 
-    Assert.assertEquals(lastResult.toString(), expectedLast, lastResult.getTimestamp());
+    if (lastResult == null) {
+      throw new AssertionError("Expected at least one timeseries result");
+    }
+    Assertions.assertEquals(expectedLast, lastResult.getTimestamp(), lastResult.toString());
   }
 
   @Test
@@ -2965,17 +3041,8 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
                                   .context(makeContext())
                                   .build();
 
-    // Must create a toolChest so we can run mergeResults.
-    QueryToolChest<Result<TimeseriesResultValue>, TimeseriesQuery> toolChest = new TimeseriesQueryQueryToolChest();
-
-    // Must wrapped in a results finalizer to stop the runner's builtin finalizer from being called.
-    final FinalizeResultsQueryRunner finalRunner = new FinalizeResultsQueryRunner(
-        toolChest.mergeResults(runner),
-        toolChest
-    );
-
-    final List list = finalRunner.run(QueryPlus.wrap(query)).toList();
-    Assert.assertEquals(10, list.size());
+    final List list = runner.run(QueryPlus.wrap(query)).toList();
+    Assertions.assertEquals(10, list.size());
   }
 
   @Test
@@ -2992,7 +3059,7 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
                                   .descending(descending)
                                   .context(
                                       makeContext(
-                                          ImmutableMap.of(TimeseriesQuery.CTX_TIMESTAMP_RESULT_FIELD, "myTimestamp")
+                                          QueryContext.ofMap(QueryContextParameters.TIMESTAMP_RESULT_FIELD, "myTimestamp")
                                       )
                                   )
                                   .build();
@@ -3029,7 +3096,6 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
   public void testTimeseriesWithExpressionAggregator()
   {
     // expression agg cannot vectorize
-    cannotVectorize();
     TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
                                   .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
                                   .granularity(QueryRunnerTestHelper.DAY_GRAN)
@@ -3131,6 +3197,14 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
         )
     );
 
+    if (vectorize) {
+      final RuntimeException exception = Assertions.assertThrows(
+          RuntimeException.class,
+          () -> runner.run(QueryPlus.wrap(query)).toList()
+      );
+      Assertions.assertTrue(exception.getMessage().contains("Cannot vectorize!"));
+      return;
+    }
     Iterable<Result<TimeseriesResultValue>> results = runner.run(QueryPlus.wrap(query)).toList();
     assertExpectedResults(expectedResults, results);
   }
@@ -3139,11 +3213,6 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
   public void testTimeseriesWithExpressionAggregatorTooBig()
   {
     // expression agg cannot vectorize
-    cannotVectorize();
-    if (!vectorize) {
-      // size bytes when it overshoots varies slightly between algorithms
-      expectedException.expectMessage("Exceeded memory usage when aggregating type [ARRAY<STRING>]");
-    }
     TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
                                   .dataSource(QueryRunnerTestHelper.DATA_SOURCE)
                                   .granularity(Granularities.DAY)
@@ -3172,7 +3241,23 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
                                   .context(makeContext())
                                   .build();
 
-    runner.run(QueryPlus.wrap(query)).toList();
+    if (vectorize) {
+      final RuntimeException exception = Assertions.assertThrows(
+          RuntimeException.class,
+          () -> runner.run(QueryPlus.wrap(query)).toList()
+      );
+      Assertions.assertTrue(exception.getMessage().contains("Cannot vectorize!"));
+      return;
+    }
+    // Size bytes when it overshoots varies slightly between algorithms.
+    final Throwable exception = Assertions.assertThrows(
+        Throwable.class,
+        () -> runner.run(QueryPlus.wrap(query)).toList()
+    );
+    Assertions.assertTrue(
+        exception.getMessage() != null
+        && exception.getMessage().contains("Exceeded memory usage when aggregating type [ARRAY<STRING>]")
+    );
   }
 
   @Test
@@ -3241,7 +3326,7 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
                     "rows",
                     26L,
                     "cardinality",
-                    NullHandling.replaceWithDefault() ? 1.0002442201269182 : 0.0d,
+                    0.0d,
                     "hyperUnique",
                     9.019833517963864d
                 )
@@ -3261,18 +3346,17 @@ public class TimeseriesQueryRunnerTest extends InitializedNullHandlingTest
   protected Map<String, Object> makeContext(final Map<String, Object> myContext)
   {
     final Map<String, Object> context = new HashMap<>();
-    context.put(QueryContexts.VECTORIZE_KEY, vectorize ? "force" : "false");
-    context.put(QueryContexts.VECTORIZE_VIRTUAL_COLUMNS_KEY, vectorize ? "force" : "false");
-    context.put(QueryContexts.VECTOR_SIZE_KEY, 16); // Small vector size to ensure we use more than one.
+    context.put(QueryContextParameters.VECTORIZE.getName(), vectorize ? "force" : "false");
+    context.put(QueryContextParameters.VECTORIZE_VIRTUAL_COLUMNS.getName(), vectorize ? "force" : "false");
+    context.put(QueryContextParameters.VECTOR_SIZE.getName(), 16); // Small vector size to ensure we use more than one.
     context.putAll(myContext);
     return context;
   }
 
-  protected void cannotVectorize()
+  private static TimeseriesResultValue createTimeseriesResultValue(String key, @Nullable Object val)
   {
-    if (vectorize) {
-      expectedException.expect(RuntimeException.class);
-      expectedException.expectMessage("Cannot vectorize!");
-    }
+    Map<String, Object> map = new HashMap<>();
+    map.put(key, val);
+    return new TimeseriesResultValue(map);
   }
 }

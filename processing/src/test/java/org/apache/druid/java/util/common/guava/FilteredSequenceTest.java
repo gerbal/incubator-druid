@@ -23,7 +23,7 @@ import com.google.common.base.Predicate;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import org.apache.druid.java.util.common.StringUtils;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -35,7 +35,7 @@ public class FilteredSequenceTest
   @Test
   public void testSanity() throws Exception
   {
-    Predicate<Integer> pred = new Predicate<Integer>()
+    Predicate<Integer> pred = new Predicate<>()
     {
       @Override
       public boolean apply(Integer input)

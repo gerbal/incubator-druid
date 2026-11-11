@@ -21,7 +21,7 @@ package org.apache.druid.query.expressions;
 
 import org.apache.druid.math.expr.Expr;
 import org.apache.druid.math.expr.ExprEval;
-import org.apache.druid.math.expr.ExprMacroTable.BaseScalarUnivariateMacroFunctionExpr;
+import org.apache.druid.math.expr.ExprMacroTable;
 import org.apache.druid.math.expr.ExprMacroTable.ExprMacro;
 import org.apache.druid.math.expr.ExpressionType;
 
@@ -52,11 +52,11 @@ public class SleepExprMacro implements ExprMacro
 
     Expr arg = args.get(0);
 
-    class SleepExpr extends BaseScalarUnivariateMacroFunctionExpr
+    class SleepExpr extends ExprMacroTable.BaseScalarMacroFunctionExpr
     {
-      public SleepExpr(Expr arg)
+      public SleepExpr(List<Expr> args)
       {
-        super(NAME, arg);
+        super(SleepExprMacro.this, args);
       }
 
       @Override
@@ -70,18 +70,12 @@ public class SleepExprMacro implements ExprMacro
               Thread.sleep((long) (seconds * 1000));
             }
           }
-          return ExprEval.of(null);
+          return ExprEval.ofMissing();
         }
         catch (InterruptedException e) {
           Thread.currentThread().interrupt();
           throw processingFailed(e, "interrupted");
         }
-      }
-
-      @Override
-      public Expr visit(Shuttle shuttle)
-      {
-        return shuttle.visit(apply(shuttle.visitAll(args)));
       }
 
       /**
@@ -101,6 +95,6 @@ public class SleepExprMacro implements ExprMacro
         return null;
       }
     }
-    return new SleepExpr(arg);
+    return new SleepExpr(args);
   }
 }

@@ -38,7 +38,7 @@ import java.nio.ByteBuffer;
  * Unlike {@link Aggregator}, BufferAggregators are never used by multiple threads at once. Implementations are not
  * required to be thread safe.
  *
- * @see VectorAggregator, the vectorized version
+ * @see VectorAggregator the vectorized version
  */
 @ExtensionPoint
 public interface BufferAggregator extends HotLoopCallee
@@ -158,7 +158,11 @@ public interface BufferAggregator extends HotLoopCallee
   }
 
   /**
-   * Release any resources used by the aggregator
+   * Release any resources used by the aggregator. The aggregator may be reused after this call, by calling
+   * {@link #init(ByteBuffer, int)} followed by other methods as normal.
+   *
+   * This call would be more properly named "reset", but we use the name "close" to improve compatibility with
+   * existing aggregator implementations in extensions.
    */
   void close();
 

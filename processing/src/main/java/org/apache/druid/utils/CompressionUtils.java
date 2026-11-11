@@ -19,17 +19,24 @@
 
 package org.apache.druid.utils;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
 import com.google.common.base.Predicate;
 import com.google.common.base.Strings;
 import com.google.common.base.Throwables;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.io.ByteSink;
 import com.google.common.io.ByteSource;
 import com.google.common.io.ByteStreams;
 import com.google.common.io.Files;
+import net.jpountz.lz4.LZ4BlockInputStream;
+import net.jpountz.lz4.LZ4BlockOutputStream;
+import net.jpountz.lz4.LZ4Factory;
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream;
 import org.apache.commons.compress.compressors.snappy.FramedSnappyCompressorInputStream;
 import org.apache.commons.compress.compressors.xz.XZCompressorInputStream;
 import org.apache.commons.compress.compressors.zstandard.ZstdCompressorInputStream;
+import org.apache.commons.compress.utils.FileNameUtils;
+import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.guice.annotations.PublicApi;
 import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.common.IAE;
@@ -40,9 +47,13 @@ import org.apache.druid.java.util.common.StreamUtils;
 import org.apache.druid.java.util.common.io.NativeIO;
 import org.apache.druid.java.util.common.logger.Logger;
 
+import javax.annotation.Nullable;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -53,6 +64,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.StandardOpenOption;
 import java.util.Arrays;
 import java.util.Enumeration;
+import java.util.Locale;
+import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
@@ -64,14 +77,128 @@ import java.util.zip.ZipOutputStream;
 @PublicApi
 public class CompressionUtils
 {
+
+  public enum Format
+  {
+    BZ2(".bz2", "bz2"),
+    GZ(".gz", "gz"),
+    LZ4(".lz4", "lz4") {
+      @Override
+      public long compressDirectory(File directory, OutputStream out) throws IOException
+      {
+        return lz4CompressDirectory(directory, out);
+      }
+
+      @Override
+      public FileUtils.FileCopyResult decompressDirectory(InputStream in, File outDir) throws IOException
+      {
+        return lz4DecompressDirectory(in, outDir);
+      }
+    },
+    SNAPPY(".sz", "sz"),
+    XZ(".xz", "xz"),
+    ZIP(".zip", "zip") {
+      @Override
+      public long compressDirectory(File directory, OutputStream out) throws IOException
+      {
+        return zip(directory, out);
+      }
+
+      @Override
+      public FileUtils.FileCopyResult decompressDirectory(InputStream in, File outDir) throws IOException
+      {
+        return unzip(in, outDir);
+      }
+    },
+    ZSTD(".zst", "zst");
+
+    private static final Map<String, Format> EXTENSION_TO_COMPRESSION_FORMAT;
+
+    static {
+      ImmutableMap.Builder<String, Format> builder = ImmutableMap.builder();
+      builder.put(BZ2.getExtension(), BZ2);
+      builder.put(GZ.getExtension(), GZ);
+      builder.put(LZ4.getExtension(), LZ4);
+      builder.put(SNAPPY.getExtension(), SNAPPY);
+      builder.put(XZ.getExtension(), XZ);
+      builder.put(ZIP.getExtension(), ZIP);
+      builder.put(ZSTD.getExtension(), ZSTD);
+      EXTENSION_TO_COMPRESSION_FORMAT = builder.build();
+    }
+
+    private final String suffix;
+    private final String extension;
+
+    Format(String suffix, String extension)
+    {
+      this.suffix = suffix;
+      this.extension = extension;
+    }
+
+    public String getSuffix()
+    {
+      return suffix;
+    }
+
+    public String getExtension()
+    {
+      return extension;
+    }
+
+    @Nullable
+    @JsonCreator
+    public static Format fromString(@Nullable String name)
+    {
+      if (Strings.isNullOrEmpty(name)) {
+        return null;
+      }
+      return valueOf(name.toUpperCase(Locale.ROOT));
+    }
+
+    @Nullable
+    public static Format fromFileName(@Nullable String fileName)
+    {
+      String extension = FileNameUtils.getExtension(fileName);
+      if (null == extension) {
+        return null;
+      }
+      return EXTENSION_TO_COMPRESSION_FORMAT.get(extension);
+    }
+
+    /**
+     * Compresses a directory to the output stream. Default implementation throws UnsupportedOperationException.
+     * Override this method for formats that support directory compression.
+     *
+     * @param directory The directory to compress
+     * @param out The output stream to write compressed data to
+     * @return The number of bytes (uncompressed) read from the input directory
+     * @throws IOException if an I/O error occurs
+     * @throws UnsupportedOperationException if the format doesn't support directory compression
+     */
+    public long compressDirectory(File directory, OutputStream out) throws IOException
+    {
+      throw new UnsupportedOperationException("Directory compression not supported for " + this.name());
+    }
+
+    /**
+     * Decompresses a directory from the input stream. Default implementation throws UnsupportedOperationException.
+     * Override this method for formats that support directory decompression.
+     *
+     * @param in The input stream containing compressed data
+     * @param outDir The output directory to extract files to
+     * @return A FileCopyResult containing information about extracted files
+     * @throws IOException if an I/O error occurs
+     * @throws UnsupportedOperationException if the format doesn't support directory decompression
+     */
+    public FileUtils.FileCopyResult decompressDirectory(InputStream in, File outDir) throws IOException
+    {
+      throw new UnsupportedOperationException("Directory decompression not supported for " + this.name());
+    }
+  }
+
+  public static final int COMPRESSED_TEXT_WEIGHT_FACTOR = 4;
   private static final Logger log = new Logger(CompressionUtils.class);
   private static final int DEFAULT_RETRY_COUNT = 3;
-  private static final String BZ2_SUFFIX = ".bz2";
-  private static final String GZ_SUFFIX = ".gz";
-  private static final String XZ_SUFFIX = ".xz";
-  private static final String ZIP_SUFFIX = ".zip";
-  private static final String SNAPPY_SUFFIX = ".sz";
-  private static final String ZSTD_SUFFIX = ".zst";
   private static final int GZIP_BUFFER_SIZE = 8192; // Default is 512
 
   /**
@@ -161,6 +288,106 @@ public class CompressionUtils
   }
 
   /**
+   * Compresses directory contents using LZ4 block compression with a simple archive format.
+   * Format: [file_count:4 bytes][file1_name_length:4][file1_name:bytes][file1_size:8][file1_data:bytes]...
+   *
+   * @param directory The directory whose contents should be compressed
+   * @param out The output stream to write compressed data to
+   * @return The number of bytes (uncompressed) read from the input directory
+   */
+  public static long lz4CompressDirectory(File directory, OutputStream out) throws IOException
+  {
+    if (!directory.isDirectory()) {
+      throw new IOE("directory[%s] is not a directory", directory);
+    }
+
+    // Use fast compressor for better performance (lower CPU, faster compression)
+    final LZ4BlockOutputStream lz4Out = new LZ4BlockOutputStream(
+        out,
+        64 * 1024, // Block size
+        LZ4Factory.fastestInstance().fastCompressor()
+    );
+    // Use DataOutputStream for structured writing
+    final DataOutputStream dataOut = new DataOutputStream(lz4Out);
+    final File[] files = directory.listFiles();
+
+    if (files == null) {
+      throw new IOE("Cannot list files in directory[%s]", directory);
+    }
+
+    // Sort for consistency
+    final File[] sortedFiles = Arrays.stream(files).sorted().toArray(File[]::new);
+
+    dataOut.writeInt(sortedFiles.length);
+
+    long totalSize = 0;
+
+    for (File file : sortedFiles) {
+      if (file.isDirectory()) {
+        continue; // Skip subdirectories like ZIP does
+      }
+
+      log.debug("Compressing file[%s] with size[%,d]. Total size so far[%,d]", file, file.length(), totalSize);
+
+      final String fileName = file.getName();
+      final byte[] fileNameBytes = fileName.getBytes(StandardCharsets.UTF_8);
+      dataOut.writeInt(fileNameBytes.length);
+      dataOut.write(fileNameBytes);
+
+      final long fileSize = file.length();
+      if (fileSize > Integer.MAX_VALUE) {
+        throw new IOE("file[%s] too large [%,d]", file, fileSize);
+      }
+
+      dataOut.writeLong(fileSize);
+      totalSize += fileSize;
+
+      // Copy file content to dataOut
+      try (FileInputStream fileIn = new FileInputStream(file)) {
+        ByteStreams.copy(fileIn, dataOut);
+      }
+    }
+
+    dataOut.flush();
+    lz4Out.finish();
+    return totalSize;
+  }
+
+  /**
+   * Decompresses LZ4-compressed directory archive
+   */
+  public static FileUtils.FileCopyResult lz4DecompressDirectory(InputStream in, File outDir) throws IOException
+  {
+    if (!(outDir.exists() && outDir.isDirectory())) {
+      throw new ISE("outDir[%s] must exist and be a directory", outDir);
+    }
+
+    final LZ4BlockInputStream lz4In = new LZ4BlockInputStream(in);
+    final DataInputStream dataIn = new DataInputStream(lz4In);
+
+    final int fileCount = dataIn.readInt();
+    final FileUtils.FileCopyResult result = new FileUtils.FileCopyResult();
+
+    for (int i = 0; i < fileCount; i++) {
+      final int fileNameLength = dataIn.readInt();
+      final byte[] fileNameBytes = new byte[fileNameLength];
+      dataIn.readFully(fileNameBytes);
+      final String fileName = new String(fileNameBytes, StandardCharsets.UTF_8);
+
+      final long fileSize = dataIn.readLong();
+
+      // Write to file
+      final File outFile = new File(outDir, fileName);
+      validateZipOutputFile("", outFile, outDir);
+
+      NativeIO.chunkedCopy(ByteStreams.limit(dataIn, fileSize), outFile);
+      result.addFile(outFile);
+    }
+
+    return result;
+  }
+
+  /**
    * Unzip the byteSource to the output directory. If cacheLocally is true, the byteSource is cached to local disk before unzipping.
    * This may cause more predictable behavior than trying to unzip a large file directly off a network stream, for example.
    * * @param byteSource The ByteSource which supplies the zip data
@@ -198,7 +425,7 @@ public class CompressionUtils
         throw Throwables.propagate(e);
       }
     } else {
-      final File tmpFile = File.createTempFile("compressionUtilZipCache", ZIP_SUFFIX);
+      final File tmpFile = File.createTempFile("compressionUtilZipCache", Format.ZIP.getSuffix());
       try {
         FileUtils.retryCopy(
             byteSource,
@@ -527,7 +754,7 @@ public class CompressionUtils
     if (Strings.isNullOrEmpty(fName)) {
       return false;
     }
-    return fName.endsWith(ZIP_SUFFIX); // Technically a file named `.zip` would be fine
+    return fName.endsWith(Format.ZIP.getSuffix()); // Technically a file named `.zip` would be fine
   }
 
   /**
@@ -542,7 +769,7 @@ public class CompressionUtils
     if (Strings.isNullOrEmpty(fName)) {
       return false;
     }
-    return fName.endsWith(GZ_SUFFIX) && fName.length() > GZ_SUFFIX.length();
+    return fName.endsWith(Format.GZ.getSuffix()) && fName.length() > Format.GZ.getSuffix().length();
   }
 
   /**
@@ -568,17 +795,19 @@ public class CompressionUtils
    */
   public static InputStream decompress(final InputStream in, final String fileName) throws IOException
   {
-    if (fileName.endsWith(GZ_SUFFIX)) {
+    if (fileName.endsWith(Format.GZ.getSuffix())) {
       return gzipInputStream(in);
-    } else if (fileName.endsWith(BZ2_SUFFIX)) {
+    } else if (fileName.endsWith(Format.LZ4.getSuffix())) {
+      return new LZ4BlockInputStream(in);
+    } else if (fileName.endsWith(Format.BZ2.getSuffix())) {
       return new BZip2CompressorInputStream(in, true);
-    } else if (fileName.endsWith(XZ_SUFFIX)) {
+    } else if (fileName.endsWith(Format.XZ.getSuffix())) {
       return new XZCompressorInputStream(in, true);
-    } else if (fileName.endsWith(SNAPPY_SUFFIX)) {
+    } else if (fileName.endsWith(Format.SNAPPY.getSuffix())) {
       return new FramedSnappyCompressorInputStream(in);
-    } else if (fileName.endsWith(ZSTD_SUFFIX)) {
+    } else if (fileName.endsWith(Format.ZSTD.getSuffix())) {
       return new ZstdCompressorInputStream(in);
-    } else if (fileName.endsWith(ZIP_SUFFIX)) {
+    } else if (fileName.endsWith(Format.ZIP.getSuffix())) {
       // This reads the first file in the archive.
       final ZipInputStream zipIn = new ZipInputStream(in, StandardCharsets.UTF_8);
       try {
@@ -602,6 +831,21 @@ public class CompressionUtils
       }
     } else {
       return in;
+    }
+  }
+
+  /**
+   * Returns the estimated compression factor for a given format on plain text. This is used by certain implementations
+   * of {@link InputFormat#getWeightedSize(String, long)}.
+   */
+  public static int estimatedCompressionFactor(@Nullable final Format format)
+  {
+    // The check for GZ specifically was originally added in https://github.com/apache/druid/pull/14307, and later
+    // moved here. It may make sense to expand this to other (all?) compression formats.
+    if (format == Format.GZ) {
+      return COMPRESSED_TEXT_WEIGHT_FACTOR;
+    } else {
+      return 1;
     }
   }
 }

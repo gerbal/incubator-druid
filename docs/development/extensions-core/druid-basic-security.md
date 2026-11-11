@@ -23,21 +23,21 @@ title: "Basic Security"
   -->
 
 
-The Basic Security extension for Apache Druid adds:
+The Basic Security extension for Apache&circledR; Druid adds:
 
 - an Authenticator which supports [HTTP Basic authentication](https://en.wikipedia.org/wiki/Basic_access_authentication) using the Druid metadata store or LDAP as its credentials store.
 - an Escalator which determines the authentication scheme for internal Druid processes.
 - an Authorizer which implements basic role-based access control for Druid metadata store or LDAP users and groups.
 
-To load the extension, [include](../../development/extensions.md#loading-extensions) `druid-basic-security` in the `druid.extensions.loadList` in your `common.runtime.properties`. For example:
+To load the extension, [include](../../configuration/extensions.md#loading-extensions) `druid-basic-security` in the `druid.extensions.loadList` in your `common.runtime.properties`. For example:
 ```
 druid.extensions.loadList=["postgresql-metadata-storage", "druid-hdfs-storage", "druid-basic-security"]
 ```
 
 To enable basic auth, configure the basic Authenticator, Escalator, and Authorizer in `common.runtime.properties`.
-See [Security overview](../../operations/security-overview.html#enable-an-authenticator) for an example configuration for HTTP basic authentication.
+See [Security overview](../../operations/security-overview.md#enable-an-authenticator) for an example configuration for HTTP basic authentication.
 
-Visit [Authentication and Authorization](../../design/auth.md) for more information on the implemented extension interfaces and for an example configuration.
+Visit [Authentication and Authorization](../../operations/auth.md) for more information on the implemented extension interfaces and for an example configuration.
 
 ## Configuration
 
@@ -105,7 +105,7 @@ druid.auth.authenticator.MyBasicMetadataAuthenticator.initialInternalClientPassw
 # Uses the metadata store for storing users, you can use authentication API to create new users and grant permissions
 druid.auth.authenticator.MyBasicMetadataAuthenticator.credentialsValidator.type=metadata
 
-# If true and the request credential doesn't exists in this credentials store, the request will proceed to next Authenticator in the chain.
+# If true and the request credential doesn't exist in this credentials store, the request proceeds to the next Authenticator in the chain.
 druid.auth.authenticator.MyBasicMetadataAuthenticator.skipOnFailure=false
 druid.auth.authenticator.MyBasicMetadataAuthenticator.authorizerName=MyBasicMetadataAuthorizer
 ```
@@ -165,13 +165,7 @@ Authorizer that requests should be directed to.<br />
 
 ##### Credential iterations and API performance
 
-As noted above, `credentialIterations` determines the number of iterations used to hash a password. A higher number increases security, but costs more in terms of CPU utilization. 
-
-This cost affects API performance, including query times. The default setting of 10000 is intentionally high to prevent attackers from using brute force to guess passwords.
-
-You can decrease the number of iterations to speed up API response times, but it may expose your system to dictionary attacks. Therefore, only reduce the number of iterations if your environment fits one of the following conditions:
-- **All** passwords are long and random which make them as safe as a randomly-generated token.
-- You have secured network access to Druid so that no attacker can execute a dictionary attack against it.
+As noted above, the value of `credentialIterations` determines the number of iterations used to hash a password. A higher number of iterations increases security. The default value of 10,000 is intentionally high to prevent attackers from using brute force to guess passwords. We recommend that you don't lower this value. Druid caches the hash of up to 1000 passwords used in the last hour to ensure that having a large number of iterations does not meaningfully impact query performance. 
 
 If Druid uses the default credentials validator (i.e., `credentialsValidator.type=metadata`), changing the `credentialIterations` value affects the number of hashing iterations only for users created after the change or for users who subsequently update their passwords via the `/druid-ext/basic-security/authentication/db/basic/users/{userName}/credentials` endpoint. If Druid uses the `ldap` validator, the change applies to any user at next log in (as well as to new users or users who update their passwords).
 
@@ -266,6 +260,18 @@ The max duration in seconds for valid credentials that can reside in cache regar
 The valid credentials cache size. The cache uses a LRU policy.<br />
 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;**Required**: No<br />
 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;**Default**: 100
+
+**`druid.auth.authenticator.MyBasicLDAPAuthenticator.credentialsValidator.groupBaseDn`**
+
+The base DN for searching LDAP groups. When set together with `groupSearch`, Druid performs a reverse group lookup to populate the `memberOf` attribute during authentication. This is needed when the LDAP server does not return `memberOf` in user search results. If not set, Druid relies on the `memberOf` attribute being returned directly by the user search.<br />
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp;**Required**: No<br />
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp;**Default**: null
+
+**`druid.auth.authenticator.MyBasicLDAPAuthenticator.credentialsValidator.groupSearch`**
+
+The LDAP search filter for finding groups that contain a user. The filter must contain a literal `%s` placeholder, which is replaced with the user's full DN. Note that `%%s` does not count, as it is a placeholder escaped for `String.format`. For example, `(uniqueMember=%s)` for `groupOfUniqueNames` or `(member=%s)` for `groupOfNames`. A filter without the placeholder is rejected at startup because it would match all groups under `groupBaseDn` for every user.<br />
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp;**Required**: No<br />
+&nbsp; &nbsp; &nbsp; &nbsp; &nbsp;**Default**: null
 
 **`druid.auth.authenticator.MyBasicLDAPAuthenticator.skipOnFailure`**
 
@@ -408,6 +414,51 @@ Array of LDAP group filters used to filter out the allowed set of groups returne
 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;**Required**: No<br />
 &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;**Default**: null
 
+#### ReadOnly Authorizer
+
+The ReadOnly authorizer allows READ on **all** resources of every type and denies all other actions (WRITE, DELETE, etc.).
+Please take extra care to consider if you actually intend to grant READ this broadly before using this authorizer. A few of the more sensitive resources that this authorizer grants READ access to include:
+
+- [`CONFIG`](../../operations/security-user-auth.md#config) and [`STATE`](../../operations/security-user-auth.md#state) resources, which expose cluster configuration and state that is generally not intended for low-trust users.
+- The [`EXTERNAL`](../../operations/security-user-auth.md#external) resource, which lets users run SQL queries with the `EXTERN` function and input source table functions. These queries can read any data the Druid services can reach, such as files on the local filesystem of Druid servers, HTTP endpoints, and cloud object storage.
+
+Example configuration:
+
+```
+druid.auth.authenticatorChain=["basic","anonymous"]
+
+# Basic authenticator for internal user
+druid.auth.authenticator.basic.type=basic
+druid.auth.authenticator.basic.initialAdminPassword=password
+druid.auth.authenticator.basic.initialInternalClientPassword=password
+druid.auth.authenticator.basic.credentialsValidator.type=metadata
+druid.auth.authenticator.basic.authorizerName=BasicAuthorizer
+
+# Anonymous authenticator for external users
+druid.auth.authenticator.anonymous.type=anonymous
+druid.auth.authenticator.anonymous.identity=defaultUser
+druid.auth.authenticator.anonymous.authorizerName=ReadOnlyAuthorizer
+
+# Escalator with Basic auth for internal communications
+druid.escalator.type=basic
+druid.escalator.internalClientUsername=druid_system
+druid.escalator.internalClientPassword=password
+druid.escalator.authorizerName=BasicAuthorizer
+
+# Both authorizers
+druid.auth.authorizers=["BasicAuthorizer","ReadOnlyAuthorizer"]
+
+# BasicAuthorizer configuration
+druid.auth.authorizer.BasicAuthorizer.type=basic
+
+# ReadOnlyAuthorizer configuration
+druid.auth.authorizer.ReadOnlyAuthorizer.type=readOnly
+```
+
+With this configuration:
+- Internal Druid communications use Basic authentication → AllowAll authorizer → full access
+- External users with no authentication → Anonymous authenticator → ReadOnly authorizer → read-only access
+
 #### Properties for LDAPS
 
 Use the following properties to configure Druid authentication with LDAP over TLS (LDAPS). See [Configure LDAP authentication](../../operations/auth-ldap.md) for more information.
@@ -468,23 +519,23 @@ To use these APIs, a user needs read/write permissions for the CONFIG resource t
 
 Root path: `/druid-ext/basic-security/authentication`
 
-Each API endpoint includes {authenticatorName}, specifying which Authenticator instance is being configured.
+Each API endpoint includes \{authenticatorName}, specifying which Authenticator instance is being configured.
 
 ##### User/Credential Management
 `GET(/druid-ext/basic-security/authentication/db/{authenticatorName}/users)`<br />
 Return a list of all user names.
 
 `GET(/druid-ext/basic-security/authentication/db/{authenticatorName}/users/{userName})`<br />
-Return the name and credentials information of the user with name {userName}
+Return the name and credentials information of the user with name \{userName}
 
 `POST(/druid-ext/basic-security/authentication/db/{authenticatorName}/users/{userName})`<br />
-Create a new user with name {userName}
+Create a new user with name \{userName}
 
 `DELETE(/druid-ext/basic-security/authentication/db/{authenticatorName}/users/{userName})`<br />
-Delete the user with name {userName}
+Delete the user with name \{userName}
 
 `POST(/druid-ext/basic-security/authentication/db/{authenticatorName}/users/{userName}/credentials)`<br />
-Assign a password used for HTTP basic authentication for {userName}
+Assign a password used for HTTP basic authentication for \{userName}
 Content: JSON password request object
 
 Example request body:
@@ -503,14 +554,14 @@ Return the current load status of the local caches of the authentication Druid m
 
 Root path: `/druid-ext/basic-security/authorization`<br />
 
-Each API endpoint includes {authorizerName}, specifying which Authorizer instance is being configured.
+Each API endpoint includes \{authorizerName}, specifying which Authorizer instance is being configured.
 
 ##### User Creation/Deletion
 `GET(/druid-ext/basic-security/authorization/db/{authorizerName}/users)`<br />
 Return a list of all user names.
 
 `GET(/druid-ext/basic-security/authorization/db/{authorizerName}/users/{userName})`<br />
-Return the name and role information of the user with name {userName}
+Return the name and role information of the user with name \{userName}
 
 Example output:
 
@@ -597,20 +648,20 @@ The `resourceNamePattern` is a compiled version of the resource name regex. It i
 ```
 
 `POST(/druid-ext/basic-security/authorization/db/{authorizerName}/users/{userName})`<br />
-Create a new user with name {userName}
+Create a new user with name \{userName}
 
 `DELETE(/druid-ext/basic-security/authorization/db/{authorizerName}/users/{userName})`<br />
-Delete the user with name {userName}
+Delete the user with name \{userName}
 
 ##### Group mapping Creation/Deletion
 `GET(/druid-ext/basic-security/authorization/db/{authorizerName}/groupMappings)`<br />
 Return a list of all group mappings.
 
 `GET(/druid-ext/basic-security/authorization/db/{authorizerName}/groupMappings/{groupMappingName})`<br />
-Return the group mapping and role information of the group mapping with name {groupMappingName}
+Return the group mapping and role information of the group mapping with name \{groupMappingName}
 
 `POST(/druid-ext/basic-security/authorization/db/{authorizerName}/groupMappings/{groupMappingName})`<br />
-Create a new group mapping with name {groupMappingName}
+Create a new group mapping with name \{groupMappingName}
 Content: JSON group mapping object
 Example request body:
 
@@ -625,14 +676,14 @@ Example request body:
 ```
 
 `DELETE(/druid-ext/basic-security/authorization/db/{authorizerName}/groupMappings/{groupMappingName})`<br />
-Delete the group mapping with name {groupMappingName}
+Delete the group mapping with name \{groupMappingName}
 
 #### Role Creation/Deletion
 `GET(/druid-ext/basic-security/authorization/db/{authorizerName}/roles)`<br />
 Return a list of all role names.
 
 `GET(/druid-ext/basic-security/authorization/db/{authorizerName}/roles/{roleName})`<br />
-Return name and permissions for the role named {roleName}.
+Return name and permissions for the role named \{roleName}.
 
 Example output:
 
@@ -686,30 +737,30 @@ Example output:
 
 
 `POST(/druid-ext/basic-security/authorization/db/{authorizerName}/roles/{roleName})`<br />
-Create a new role with name {roleName}.
+Create a new role with name \{roleName}.
 Content: username string
 
 `DELETE(/druid-ext/basic-security/authorization/db/{authorizerName}/roles/{roleName})`<br />
-Delete the role with name {roleName}.
+Delete the role with name \{roleName}.
 
 
 #### Role Assignment
 `POST(/druid-ext/basic-security/authorization/db/{authorizerName}/users/{userName}/roles/{roleName})`<br />
-Assign role {roleName} to user {userName}.
+Assign role \{roleName} to user \{userName}.
 
 `DELETE(/druid-ext/basic-security/authorization/db/{authorizerName}/users/{userName}/roles/{roleName})`<br />
-Unassign role {roleName} from user {userName}
+Unassign role \{roleName} from user \{userName}
 
 `POST(/druid-ext/basic-security/authorization/db/{authorizerName}/groupMappings/{groupMappingName}/roles/{roleName})`<br />
-Assign role {roleName} to group mapping {groupMappingName}.
+Assign role \{roleName} to group mapping \{groupMappingName}.
 
 `DELETE(/druid-ext/basic-security/authorization/db/{authorizerName}/groupMappings/{groupMappingName}/roles/{roleName})`<br />
-Unassign role {roleName} from group mapping {groupMappingName}
+Unassign role \{roleName} from group mapping \{groupMappingName}
 
 
 #### Permissions
 `POST(/druid-ext/basic-security/authorization/db/{authorizerName}/roles/{roleName}/permissions)`<br />
-Set the permissions of {roleName}. This replaces the previous set of permissions on the role.
+Set the permissions of \{roleName}. This replaces the previous set of permissions on the role.
 
 Content: List of JSON Resource-Action objects, e.g.:
 

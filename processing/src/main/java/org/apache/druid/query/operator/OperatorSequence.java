@@ -52,7 +52,7 @@ public class OperatorSequence implements Sequence<RowsAndColumns>
   {
     final MyReceiver<OutType> receiver = new MyReceiver<>(
         initValue,
-        new YieldingAccumulator<OutType, RowsAndColumns>()
+        new YieldingAccumulator<>()
         {
           @Override
           public OutType accumulate(OutType accumulated, RowsAndColumns in)
@@ -78,7 +78,7 @@ public class OperatorSequence implements Sequence<RowsAndColumns>
       // We finished processing, and the accumulator did not yield, so we return a done yielder with our value
       return Yielders.done(receiver.getRetVal(), null);
     } else {
-      return new Yielder<OutType>()
+      return new Yielder<>()
       {
         private Closeable continuation = finalContinuation;
 
@@ -91,6 +91,7 @@ public class OperatorSequence implements Sequence<RowsAndColumns>
         @Override
         public Yielder<OutType> next(OutType initValue)
         {
+          accumulator.reset();
           if (continuation == null) {
             // This means that we completed processing on the previous run.  In this case, we are all done
             return Yielders.done(null, null);

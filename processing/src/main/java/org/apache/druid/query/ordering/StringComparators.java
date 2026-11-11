@@ -22,6 +22,8 @@ package org.apache.druid.query.ordering;
 import com.google.common.collect.Ordering;
 import com.google.common.primitives.Ints;
 import org.apache.druid.common.guava.GuavaUtils;
+import org.apache.druid.error.DruidException;
+import org.apache.druid.java.util.common.StringUtils;
 import org.apache.maven.artifact.versioning.DefaultArtifactVersion;
 
 import java.math.BigDecimal;
@@ -34,25 +36,28 @@ public class StringComparators
   public static final String NUMERIC_NAME = "numeric";
   public static final String STRLEN_NAME = "strlen";
   public static final String VERSION_NAME = "version";
+  public static final String NATURAL_NAME = "natural";
 
   public static final StringComparator LEXICOGRAPHIC = new LexicographicComparator();
   public static final StringComparator ALPHANUMERIC = new AlphanumericComparator();
   public static final StringComparator NUMERIC = new NumericComparator();
   public static final StringComparator STRLEN = new StrlenComparator();
   public static final StringComparator VERSION = new VersionComparator();
+  public static final StringComparator NATURAL = new NaturalComparator();
 
   public static final int LEXICOGRAPHIC_CACHE_ID = 0x01;
   public static final int ALPHANUMERIC_CACHE_ID = 0x02;
   public static final int NUMERIC_CACHE_ID = 0x03;
   public static final int STRLEN_CACHE_ID = 0x04;
   public static final int VERSION_CACHE_ID = 0x05;
+  public static final int NATURAL_CACHE_ID = 0x06;
 
   /**
    * Comparison using the natural comparator of {@link String}.
    *
    * Note that this is not equivalent to comparing UTF-8 byte arrays; see javadocs for
-   * {@link org.apache.druid.java.util.common.StringUtils#compareUnicode(String, String)} and
-   * {@link org.apache.druid.java.util.common.StringUtils#compareUtf8UsingJavaStringOrdering(byte[], byte[])}.
+   * {@link StringUtils#compareUnicode(String, String)} and
+   * {@link StringUtils#compareUtf8UsingJavaStringOrdering(byte[], byte[])}.
    */
   public static class LexicographicComparator extends StringComparator
   {
@@ -63,7 +68,8 @@ public class StringComparators
     {
       // Avoid comparisons for equal references
       // Assuming we mostly compare different strings, checking s.equals(s2) will only make the comparison slower.
-      //noinspection StringEquality
+      // Identity is only a fast path; ORDERING performs the content comparison for distinct strings.
+      // codeql[java/reference-equality-on-strings]
       if (s == s2) {
         return 0;
       }
@@ -306,7 +312,8 @@ public class StringComparators
     public int compare(String s, String s2)
     {
       // Optimization
-      //noinspection StringEquality
+      // Identity is only a fast path; ORDERING performs the content comparison for distinct strings.
+      // codeql[java/reference-equality-on-strings]
       if (s == s2) {
         return 0;
       }
@@ -368,7 +375,8 @@ public class StringComparators
     {
       // return if o1 and o2 are the same object
       // Assuming we mostly compare different strings, checking o1.equals(o2) will only make the comparison slower.
-      //noinspection StringEquality
+      // Identity is only a fast path; numeric and lexical comparison handles distinct strings.
+      // codeql[java/reference-equality-on-strings]
       if (o1 == o2) {
         return 0;
       }
@@ -445,7 +453,8 @@ public class StringComparators
     @Override
     public int compare(String o1, String o2)
     {
-      //noinspection StringEquality
+      // Identity is only a fast path; version comparison handles distinct strings.
+      // codeql[java/reference-equality-on-strings]
       if (o1 == o2) {
         return 0;
       }
@@ -490,6 +499,53 @@ public class StringComparators
     public byte[] getCacheKey()
     {
       return new byte[]{(byte) VERSION_CACHE_ID};
+    }
+  }
+
+  /**
+   * NaturalComparator refers to the natural ordering of the type that it refers.
+   *
+   * For example, if the type is Long, the natural ordering would be numeric
+   * if the type is an array, the natural ordering would be lexicographic comparison of the natural ordering of the
+   * elements in the arrays.
+   *
+   * It is a sigil value for the dimension that we can handle in the execution layer, and don't need the comparator for.
+   * It is also a placeholder for dimensions that we don't have a comparator for (like arrays), but is a required for
+   * planning
+   */
+  public static class NaturalComparator extends StringComparator
+  {
+    @Override
+    public int compare(String o1, String o2)
+    {
+      throw DruidException.defensive("compare() should not be called for the NaturalComparator");
+    }
+
+    @Override
+    public String toString()
+    {
+      return StringComparators.NATURAL_NAME;
+    }
+
+    @Override
+    public boolean equals(Object o)
+    {
+      if (this == o) {
+        return true;
+      }
+      return o != null && getClass() == o.getClass();
+    }
+
+    @Override
+    public int hashCode()
+    {
+      return 0;
+    }
+
+    @Override
+    public byte[] getCacheKey()
+    {
+      return new byte[]{(byte) NATURAL_CACHE_ID};
     }
   }
 }

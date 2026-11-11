@@ -16,23 +16,22 @@
  * limitations under the License.
  */
 
+import { render } from '@testing-library/react';
 import { SqlQuery } from 'druid-query-toolkit';
-import React from 'react';
 
 import type { ColumnMetadata } from '../../../utils';
-import { shallow } from '../../../utils/shallow-renderer';
 
 import { ColumnTree } from './column-tree';
 
 describe('ColumnTree', () => {
   it('matches snapshot', () => {
-    const comp = shallow(
+    const { container } = render(
       <ColumnTree
         getParsedQuery={() => {
           return SqlQuery.parse(`SELECT channel, count(*) as cnt FROM wikipedia GROUP BY 1`);
         }}
         defaultSchema="druid"
-        defaultTable="wikipedia"
+        defaultTables={['wikipedia']}
         columnMetadataLoading={false}
         columnMetadata={
           [
@@ -66,6 +65,6 @@ describe('ColumnTree', () => {
       />,
     );
 
-    expect(comp).toMatchSnapshot();
+    expect(container.firstChild).toMatchSnapshot();
   });
 });

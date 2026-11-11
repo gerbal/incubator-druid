@@ -26,19 +26,19 @@ import { ExecutionStagesPane } from '../execution-stages-pane/execution-stages-p
 
 export interface ExecutionStagesPaneLoaderProps {
   id: string;
-  goToIngestion(taskId: string): void;
+  goToTask(taskId: string): void;
 }
 
 export const ExecutionStagesPaneLoader = React.memo(function ExecutionStagesPaneLoader(
   props: ExecutionStagesPaneLoaderProps,
 ) {
-  const { id, goToIngestion } = props;
+  const { id, goToTask } = props;
 
   const [executionState, queryManager] = useQueryManager<string, Execution>({
-    processQuery: (id: string) => {
-      return getTaskExecution(id);
-    },
     initQuery: id,
+    processQuery: (id, signal) => {
+      return getTaskExecution(id, undefined, signal);
+    },
   });
 
   useInterval(() => {
@@ -51,7 +51,7 @@ export const ExecutionStagesPaneLoader = React.memo(function ExecutionStagesPane
 
   const execution = executionState.getSomeData();
   if (execution) {
-    return <ExecutionStagesPane execution={execution} goToIngestion={goToIngestion} />;
+    return <ExecutionStagesPane execution={execution} goToTask={goToTask} />;
   } else if (executionState.isLoading()) {
     return <Loader className="execution-stages-pane" />;
   } else if (executionState.isError()) {

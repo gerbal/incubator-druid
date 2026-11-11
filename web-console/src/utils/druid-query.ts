@@ -22,14 +22,36 @@ import { C } from 'druid-query-toolkit';
 
 import { Api } from '../singletons';
 
-import { assemble } from './general';
-import type { RowColumn } from './query-cursor';
+import type { LineColumn } from './general';
+import { assemble, lookupBy } from './general';
 
 const CANCELED_MESSAGE = 'Query canceled by user.';
 
-export interface DruidErrorResponse {
+// https://github.com/apache/druid/blob/master/processing/src/main/java/org/apache/druid/error/DruidException.java#L292
+export type ErrorResponsePersona = 'USER' | 'ADMIN' | 'OPERATOR' | 'DEVELOPER';
+
+// https://github.com/apache/druid/blob/master/processing/src/main/java/org/apache/druid/error/DruidException.java#L321
+export type ErrorResponseCategory =
+  | 'DEFENSIVE'
+  | 'INVALID_INPUT'
+  | 'UNAUTHORIZED'
+  | 'FORBIDDEN'
+  | 'CAPACITY_EXCEEDED'
+  | 'CANCELED'
+  | 'RUNTIME_FAILURE'
+  | 'TIMEOUT'
+  | 'UNSUPPORTED'
+  | 'UNCATEGORIZED';
+
+export interface ErrorResponse {
+  persona: ErrorResponsePersona;
+  category: ErrorResponseCategory;
+  errorCode?: string;
+  errorMessage: string; // a message for the intended audience
+  context?: Record<string, any>; // a map of extra context values that might be helpful
+
+  // Deprecated as per https://github.com/apache/druid/blob/master/processing/src/main/java/org/apache/druid/error/ErrorResponse.java
   error?: string;
-  errorMessage?: string;
   errorClass?: string;
   host?: string;
 }
@@ -51,17 +73,20 @@ export function parseHtmlError(htmlStr: string): string | undefined {
     .replace(/&gt;/g, '>');
 }
 
-function getDruidErrorObject(e: any): DruidErrorResponse | string {
+function errorResponseFromWhatever(e: any): ErrorResponse | string {
   if (e.response) {
     // This is a direct axios response error
-    return e.response.data || {};
+    let data = e.response.data || {};
+    // MSQ errors nest their error objects inside the error key. Yo dawg, I heard you like errors...
+    if (typeof data.error?.error === 'string') data = data.error;
+    return data;
   } else {
     return e; // Assume the error was passed in directly
   }
 }
 
 export function getDruidErrorMessage(e: any): string {
-  const data = getDruidErrorObject(e);
+  const data = errorResponseFromWhatever(e);
   switch (typeof data) {
     case 'object':
       return (
@@ -84,30 +109,28 @@ export function getDruidErrorMessage(e: any): string {
 }
 
 export class DruidError extends Error {
-  static parsePosition(errorMessage: string): RowColumn | undefined {
-    const range = /from line (\d+), column (\d+) to line (\d+), column (\d+)/i.exec(
-      String(errorMessage),
-    );
-    if (range) {
-      return {
-        match: range[0],
-        row: Number(range[1]) - 1,
-        column: Number(range[2]) - 1,
-        endRow: Number(range[3]) - 1,
-        endColumn: Number(range[4]), // No -1 because we need to include the last char
-      };
-    }
+  static extractStartLineColumn(
+    context: Record<string, any> | undefined,
+    offsetLines = 0,
+  ): LineColumn | undefined {
+    if (context?.sourceType !== 'sql' || !context.line || !context.column) return;
 
-    const single = /at line (\d+), column (\d+)/i.exec(String(errorMessage));
-    if (single) {
-      return {
-        match: single[0],
-        row: Number(single[1]) - 1,
-        column: Number(single[2]) - 1,
-      };
-    }
+    return {
+      line: Number(context.line) + offsetLines,
+      column: Number(context.column),
+    };
+  }
 
-    return;
+  static extractEndLineColumn(
+    context: Record<string, any> | undefined,
+    offsetLines = 0,
+  ): LineColumn | undefined {
+    if (context?.sourceType !== 'sql' || !context.endLine || !context.endColumn) return;
+
+    return {
+      line: Number(context.endLine) + offsetLines,
+      column: Number(context.endColumn),
+    };
   }
 
   static positionToIndex(str: string, line: number, column: number): number {
@@ -120,8 +143,9 @@ export class DruidError extends Error {
   static getSuggestion(errorMessage: string): QuerySuggestion | undefined {
     // == is used instead of =
     // ex: SELECT * FROM wikipedia WHERE channel == '#en.wikipedia'
-    // ex: Encountered "= =" at line 3, column 15. Was expecting one of
-    const matchEquals = /Encountered "= =" at line (\d+), column (\d+)./.exec(errorMessage);
+    // er: Received an unexpected token [= =] (line [1], column [39]), acceptable options:
+    const matchEquals =
+      /Received an unexpected token \[= =] \(line \[(\d+)], column \[(\d+)]\),/.exec(errorMessage);
     if (matchEquals) {
       const line = Number(matchEquals[1]);
       const column = Number(matchEquals[2]);
@@ -137,6 +161,7 @@ export class DruidError extends Error {
 
     // Mangled quotes from copy/paste
     // ex: SELECT * FROM wikipedia WHERE channel = ‘#en.wikipedia‛
+    // er: Lexical error at line 1, column 41.  Encountered: "\u2018"
     const matchLexical =
       /Lexical error at line (\d+), column (\d+).\s+Encountered: "\\u201\w"/.exec(errorMessage);
     if (matchLexical) {
@@ -154,15 +179,15 @@ export class DruidError extends Error {
 
     // Incorrect quoting on table column
     // ex: SELECT * FROM wikipedia WHERE channel = "#en.wikipedia"
-    // ex: org.apache.calcite.runtime.CalciteContextException: From line 3, column 17 to line 3, column 31: Column '#ar.wikipedia' not found in any table
+    // er: Column '#en.wikipedia' not found in any table (line [1], column [41])
     const matchQuotes =
-      /org.apache.calcite.runtime.CalciteContextException: From line (\d+), column (\d+) to line \d+, column \d+: Column '([^']+)' not found in any table/.exec(
+      /Column '([^']+)' not found in any table \(line \[(\d+)], column \[(\d+)]\)/.exec(
         errorMessage,
       );
     if (matchQuotes) {
-      const line = Number(matchQuotes[1]);
-      const column = Number(matchQuotes[2]);
-      const literalString = matchQuotes[3];
+      const literalString = matchQuotes[1];
+      const line = Number(matchQuotes[2]);
+      const column = Number(matchQuotes[3]);
       return {
         label: `Replace "${literalString}" with '${literalString}'`,
         fn: str => {
@@ -177,7 +202,10 @@ export class DruidError extends Error {
 
     // Single quotes on AS alias
     // ex: SELECT channel AS 'c' FROM wikipedia
-    const matchSingleQuotesAlias = /Encountered "AS \\'([\w-]+)\\'" at/i.exec(errorMessage);
+    // er: Received an unexpected token [AS \'c\'] (line [1], column [16]), acceptable options:
+    const matchSingleQuotesAlias = /Received an unexpected token \[AS \\'([\w-]+)\\']/i.exec(
+      errorMessage,
+    );
     if (matchSingleQuotesAlias) {
       const alias = matchSingleQuotesAlias[1];
       return {
@@ -190,13 +218,16 @@ export class DruidError extends Error {
       };
     }
 
-    // , before FROM, GROUP, ORDER, or LIMIT
+    // Comma (,) before FROM, GROUP, ORDER, or LIMIT
     // ex: SELECT channel, FROM wikipedia
-    const matchComma = /Encountered ", (FROM|GROUP|ORDER|LIMIT)" at/i.exec(errorMessage);
+    // er: Received an unexpected token [, FROM] (line [1], column [15]), acceptable options:
+    const matchComma = /Received an unexpected token \[, (FROM|GROUP|ORDER|LIMIT)]/i.exec(
+      errorMessage,
+    );
     if (matchComma) {
       const keyword = matchComma[1];
       return {
-        label: `Remove , before ${keyword}`,
+        label: `Remove comma (,) before ${keyword}`,
         fn: str => {
           const newQuery = str.replace(new RegExp(`,(\\s+${keyword})`, 'gim'), '$1');
           if (newQuery === str) return;
@@ -205,19 +236,23 @@ export class DruidError extends Error {
       };
     }
 
-    // ; at the end. https://bit.ly/1n1yfkJ
-    // ex: SELECT 1;
-    // ex: Encountered ";" at line 6, column 16.
-    const matchSemicolon = /Encountered ";" at line (\d+), column (\d+)./i.exec(errorMessage);
+    // Missing (;) after SET statement
+    // ex: SET sqlTimeZone = 'America/Los_Angeles' SELECT * FROM "kttm_simple"
+    // ex: Received an unexpected token [SELECT] (line [1], column [41]), acceptable options: [<EOF>, <QUOTED_STRING>, ";", "UESCAPE"]
+    const matchSemicolon =
+      /Received an unexpected token \[(?:SET|SELECT)] \(line \[(\d+)], column \[(\d+)]\), acceptable options: \[[^;]*";"/i.exec(
+        errorMessage,
+      );
     if (matchSemicolon) {
       const line = Number(matchSemicolon[1]);
       const column = Number(matchSemicolon[2]);
       return {
-        label: `Remove trailing ;`,
+        label: `Add semicolon (;) after SET statement`,
         fn: str => {
           const index = DruidError.positionToIndex(str, line, column);
-          if (str[index] !== ';') return;
-          return str.slice(0, index) + str.slice(index + 1);
+          const prefix = str.slice(0, index).trimEnd();
+          if (prefix.endsWith(';')) return;
+          return prefix + ';' + str.slice(prefix.length);
         },
       };
     }
@@ -226,49 +261,53 @@ export class DruidError extends Error {
   }
 
   public canceled?: boolean;
-  public error?: string;
+  public persona?: ErrorResponsePersona;
+  public category?: ErrorResponseCategory;
+  public context?: Record<string, any>;
   public errorMessage?: string;
   public errorMessageWithoutExpectation?: string;
   public expectation?: string;
-  public position?: RowColumn;
+  public startLineColumn?: LineColumn;
+  public endLineColumn?: LineColumn;
+  public suggestion?: QuerySuggestion;
+  public queryDuration?: number;
+
+  // Deprecated
+  public error?: string;
   public errorClass?: string;
   public host?: string;
-  public suggestion?: QuerySuggestion;
 
-  constructor(e: any, removeLines?: number) {
+  constructor(e: any, offsetLines = 0) {
     super(axios.isCancel(e) ? CANCELED_MESSAGE : getDruidErrorMessage(e));
     if (axios.isCancel(e)) {
       this.canceled = true;
     } else {
-      const data = getDruidErrorObject(e);
+      const data = errorResponseFromWhatever(e);
 
-      let druidErrorResponse: DruidErrorResponse;
+      let druidErrorResponse: ErrorResponse;
       switch (typeof data) {
         case 'object':
           druidErrorResponse = data;
           break;
 
-        case 'string':
+        default:
           druidErrorResponse = {
             errorClass: 'HTML error',
-          };
-          break;
-
-        default:
-          druidErrorResponse = {};
+          } as any; // ToDo
           break;
       }
       Object.assign(this, druidErrorResponse);
 
       if (this.errorMessage) {
-        if (removeLines) {
+        if (offsetLines) {
           this.errorMessage = this.errorMessage.replace(
-            /line (\d+),/g,
-            (_, c) => `line ${Number(c) - removeLines},`,
+            /line \[(\d+)],/g,
+            (_, c) => `line [${Number(c) + offsetLines}],`,
           );
         }
 
-        this.position = DruidError.parsePosition(this.errorMessage);
+        this.startLineColumn = DruidError.extractStartLineColumn(this.context, offsetLines);
+        this.endLineColumn = DruidError.extractEndLineColumn(this.context, offsetLines);
         this.suggestion = DruidError.getSuggestion(this.errorMessage);
 
         const expectationIndex = this.errorMessage.indexOf('Was expecting one of');
@@ -283,33 +322,87 @@ export class DruidError extends Error {
   }
 }
 
-export async function queryDruidRune(runeQuery: Record<string, any>): Promise<any> {
+// Broker service to use for console system queries
+let consoleSystemQueryBrokerService: string | undefined;
+
+export function setConsoleSystemQueryBrokerService(brokerService: string | undefined): void {
+  consoleSystemQueryBrokerService = brokerService;
+}
+
+export async function queryDruidRune(
+  runeQuery: Record<string, any>,
+  signal?: AbortSignal,
+): Promise<any> {
   let runeResultResp: AxiosResponse;
   try {
-    runeResultResp = await Api.instance.post('/druid/v2', runeQuery);
+    runeResultResp = await Api.instance.post('/druid/v2', runeQuery, { signal });
   } catch (e) {
     throw new Error(getDruidErrorMessage(e));
   }
   return runeResultResp.data;
 }
 
-export async function queryDruidSql<T = any>(sqlQueryPayload: Record<string, any>): Promise<T[]> {
+export async function queryDruidSql<T = any>(
+  sqlQueryPayload: Record<string, any>,
+  signal?: AbortSignal,
+): Promise<T[]> {
   let sqlResultResp: AxiosResponse;
   try {
-    sqlResultResp = await Api.instance.post('/druid/v2/sql', sqlQueryPayload);
+    // Inject brokerService into context if configured for system queries
+    const payload = consoleSystemQueryBrokerService
+      ? {
+          ...sqlQueryPayload,
+          context: {
+            ...sqlQueryPayload.context,
+            brokerService: consoleSystemQueryBrokerService,
+          },
+        }
+      : sqlQueryPayload;
+
+    sqlResultResp = await Api.instance.post('/druid/v2/sql', payload, { signal });
   } catch (e) {
     throw new Error(getDruidErrorMessage(e));
   }
   return sqlResultResp.data;
 }
 
+export async function getApiArray<T = any>(url: string, signal?: AbortSignal): Promise<T[]> {
+  const result = (await Api.instance.get(url, { signal })).data;
+  if (!Array.isArray(result)) throw new Error('unexpected result');
+  return result;
+}
+
+export async function getApiArrayFromKey<T = any>(
+  url: string,
+  key: string,
+  signal?: AbortSignal,
+): Promise<T[]> {
+  const result = (await Api.instance.get(url, { signal })).data?.[key];
+  if (!Array.isArray(result)) throw new Error('unexpected result');
+  return result;
+}
+
 export interface QueryExplanation {
   query: any;
   signature: { name: string; type: string }[];
+  columnMappings: {
+    queryColumn: string;
+    outputColumn: string;
+  }[];
 }
 
-export function formatSignature(queryExplanation: QueryExplanation): string {
-  return queryExplanation.signature
-    .map(({ name, type }) => `${C.optionalQuotes(name)}::${type}`)
+export function formatColumnMappingsAndSignature(queryExplanation: QueryExplanation): string {
+  const columnNameToType = lookupBy(
+    queryExplanation.signature,
+    c => c.name,
+    c => c.type,
+  );
+  return queryExplanation.columnMappings
+    .map(({ queryColumn, outputColumn }) => {
+      const type = columnNameToType[queryColumn];
+      return `${C.optionalQuotes(queryColumn)}${type ? `::${type}` : ''}→${C.optionalQuotes(
+        outputColumn,
+      )}`;
+    })
     .join(', ');
 }

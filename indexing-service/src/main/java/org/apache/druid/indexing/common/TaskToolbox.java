@@ -32,6 +32,7 @@ import org.apache.druid.client.coordinator.CoordinatorClient;
 import org.apache.druid.discovery.DataNodeService;
 import org.apache.druid.discovery.DruidNodeAnnouncer;
 import org.apache.druid.discovery.LookupNodeService;
+import org.apache.druid.indexer.report.TaskReportFileWriter;
 import org.apache.druid.indexing.common.actions.SegmentTransactionalInsertAction;
 import org.apache.druid.indexing.common.actions.TaskActionClient;
 import org.apache.druid.indexing.common.config.TaskConfig;
@@ -42,11 +43,13 @@ import org.apache.druid.java.util.common.FileUtils;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.java.util.metrics.Monitor;
 import org.apache.druid.java.util.metrics.MonitorScheduler;
+import org.apache.druid.query.DruidProcessingConfig;
 import org.apache.druid.query.QueryProcessingPool;
 import org.apache.druid.query.QueryRunnerFactoryConglomerate;
+import org.apache.druid.query.policy.PolicyEnforcer;
 import org.apache.druid.rpc.indexing.OverlordClient;
 import org.apache.druid.segment.IndexIO;
-import org.apache.druid.segment.IndexMergerV9;
+import org.apache.druid.segment.IndexMerger;
 import org.apache.druid.segment.handoff.SegmentHandoffNotifierFactory;
 import org.apache.druid.segment.incremental.RowIngestionMetersFactory;
 import org.apache.druid.segment.join.JoinableFactory;
@@ -55,16 +58,16 @@ import org.apache.druid.segment.loading.DataSegmentKiller;
 import org.apache.druid.segment.loading.DataSegmentMover;
 import org.apache.druid.segment.loading.DataSegmentPusher;
 import org.apache.druid.segment.loading.SegmentCacheManager;
+import org.apache.druid.segment.loading.SegmentLoaderConfig;
+import org.apache.druid.segment.metadata.CentralizedDatasourceSchemaConfig;
+import org.apache.druid.segment.realtime.ChatHandlerProvider;
 import org.apache.druid.segment.realtime.appenderator.AppenderatorsManager;
 import org.apache.druid.segment.realtime.appenderator.UnifiedIndexerAppenderatorsManager;
-import org.apache.druid.segment.realtime.firehose.ChatHandlerProvider;
 import org.apache.druid.server.DruidNode;
 import org.apache.druid.server.coordination.DataSegmentAnnouncer;
-import org.apache.druid.server.coordination.DataSegmentServerAnnouncer;
 import org.apache.druid.server.security.AuthorizerMapper;
 import org.apache.druid.tasklogs.TaskLogPusher;
 import org.apache.druid.timeline.DataSegment;
-import org.apache.druid.utils.JvmUtils;
 import org.apache.druid.utils.RuntimeInfo;
 import org.joda.time.Interval;
 
@@ -78,6 +81,7 @@ import java.util.Collection;
  */
 public class TaskToolbox
 {
+  private final SegmentLoaderConfig segmentLoaderConfig;
   private final TaskConfig config;
   private final DruidNode taskExecutorNode;
   private final TaskActionClient taskActionClient;
@@ -87,14 +91,18 @@ public class TaskToolbox
   private final DataSegmentArchiver dataSegmentArchiver;
   private final DataSegmentMover dataSegmentMover;
   private final DataSegmentAnnouncer segmentAnnouncer;
-  private final DataSegmentServerAnnouncer serverAnnouncer;
   private final SegmentHandoffNotifierFactory handoffNotifierFactory;
   /**
    * Using Provider, not {@link QueryRunnerFactoryConglomerate} directly, to not require {@link
-   * org.apache.druid.indexing.overlord.TaskRunner} implementations that create TaskToolboxes to inject query stuff eagerly,
-   * because it may be unavailable, e. g. for batch tasks running in Spark or Hadoop.
+   * org.apache.druid.indexing.overlord.TaskRunner} implementations that create TaskToolboxes to inject query stuff
+   * eagerly, because it may be unavailable in extension task types
    */
   private final Provider<QueryRunnerFactoryConglomerate> queryRunnerFactoryConglomerateProvider;
+  /**
+   * Using Provider, not {@link DruidProcessingConfig} directly, because it may not be available for task
+   * types that do not run queries.
+   */
+  private final Provider<DruidProcessingConfig> processingConfigProvider;
   @Nullable
   private final Provider<MonitorScheduler> monitorSchedulerProvider;
   private final QueryProcessingPool queryProcessingPool;
@@ -106,7 +114,8 @@ public class TaskToolbox
   private final Cache cache;
   private final CacheConfig cacheConfig;
   private final CachePopulatorStats cachePopulatorStats;
-  private final IndexMergerV9 indexMergerV9;
+  private final PolicyEnforcer policyEnforcer;
+  private final IndexMerger indexMerger;
   private final TaskReportFileWriter taskReportFileWriter;
 
   private final DruidNodeAnnouncer druidNodeAnnouncer;
@@ -128,10 +137,11 @@ public class TaskToolbox
 
   private final TaskLogPusher taskLogPusher;
   private final String attemptId;
-  private final TaskStorageDirTracker dirTracker;
-
+  private final CentralizedDatasourceSchemaConfig centralizedDatasourceSchemaConfig;
+  private final RuntimeInfo runtimeInfo;
 
   public TaskToolbox(
+      SegmentLoaderConfig segmentLoaderConfig,
       TaskConfig config,
       DruidNode taskExecutorNode,
       TaskActionClient taskActionClient,
@@ -141,9 +151,9 @@ public class TaskToolbox
       DataSegmentMover dataSegmentMover,
       DataSegmentArchiver dataSegmentArchiver,
       DataSegmentAnnouncer segmentAnnouncer,
-      DataSegmentServerAnnouncer serverAnnouncer,
       SegmentHandoffNotifierFactory handoffNotifierFactory,
       Provider<QueryRunnerFactoryConglomerate> queryRunnerFactoryConglomerateProvider,
+      Provider<DruidProcessingConfig> processingConfigProvider,
       QueryProcessingPool queryProcessingPool,
       JoinableFactory joinableFactory,
       @Nullable Provider<MonitorScheduler> monitorSchedulerProvider,
@@ -154,7 +164,8 @@ public class TaskToolbox
       Cache cache,
       CacheConfig cacheConfig,
       CachePopulatorStats cachePopulatorStats,
-      IndexMergerV9 indexMergerV9,
+      PolicyEnforcer policyEnforcer,
+      IndexMerger indexMerger,
       DruidNodeAnnouncer druidNodeAnnouncer,
       DruidNode druidNode,
       LookupNodeService lookupNodeService,
@@ -171,9 +182,11 @@ public class TaskToolbox
       ShuffleClient shuffleClient,
       TaskLogPusher taskLogPusher,
       String attemptId,
-      TaskStorageDirTracker dirTracker
+      CentralizedDatasourceSchemaConfig centralizedDatasourceSchemaConfig,
+      RuntimeInfo runtimeInfo
   )
   {
+    this.segmentLoaderConfig = segmentLoaderConfig;
     this.config = config;
     this.taskExecutorNode = taskExecutorNode;
     this.taskActionClient = taskActionClient;
@@ -183,9 +196,9 @@ public class TaskToolbox
     this.dataSegmentMover = dataSegmentMover;
     this.dataSegmentArchiver = dataSegmentArchiver;
     this.segmentAnnouncer = segmentAnnouncer;
-    this.serverAnnouncer = serverAnnouncer;
     this.handoffNotifierFactory = handoffNotifierFactory;
     this.queryRunnerFactoryConglomerateProvider = queryRunnerFactoryConglomerateProvider;
+    this.processingConfigProvider = processingConfigProvider;
     this.queryProcessingPool = queryProcessingPool;
     this.joinableFactory = joinableFactory;
     this.monitorSchedulerProvider = monitorSchedulerProvider;
@@ -196,7 +209,8 @@ public class TaskToolbox
     this.cache = cache;
     this.cacheConfig = cacheConfig;
     this.cachePopulatorStats = cachePopulatorStats;
-    this.indexMergerV9 = Preconditions.checkNotNull(indexMergerV9, "Null IndexMergerV9");
+    this.policyEnforcer = policyEnforcer;
+    this.indexMerger = Preconditions.checkNotNull(indexMerger, "Null IndexMerger");
     this.druidNodeAnnouncer = druidNodeAnnouncer;
     this.druidNode = druidNode;
     this.lookupNodeService = lookupNodeService;
@@ -214,7 +228,13 @@ public class TaskToolbox
     this.shuffleClient = shuffleClient;
     this.taskLogPusher = taskLogPusher;
     this.attemptId = attemptId;
-    this.dirTracker = dirTracker;
+    this.centralizedDatasourceSchemaConfig = centralizedDatasourceSchemaConfig;
+    this.runtimeInfo = runtimeInfo;
+  }
+
+  public SegmentLoaderConfig getSegmentLoaderConfig()
+  {
+    return segmentLoaderConfig;
   }
 
   public TaskConfig getConfig()
@@ -235,6 +255,11 @@ public class TaskToolbox
   public ServiceEmitter getEmitter()
   {
     return emitter;
+  }
+
+  public PolicyEnforcer getPolicyEnforcer()
+  {
+    return policyEnforcer;
   }
 
   public DataSegmentPusher getSegmentPusher()
@@ -262,11 +287,6 @@ public class TaskToolbox
     return segmentAnnouncer;
   }
 
-  public DataSegmentServerAnnouncer getDataSegmentServerAnnouncer()
-  {
-    return serverAnnouncer;
-  }
-
   public SegmentHandoffNotifierFactory getSegmentHandoffNotifierFactory()
   {
     return handoffNotifierFactory;
@@ -275,6 +295,11 @@ public class TaskToolbox
   public QueryRunnerFactoryConglomerate getQueryRunnerFactoryConglomerate()
   {
     return queryRunnerFactoryConglomerateProvider.get();
+  }
+
+  public DruidProcessingConfig getProcessingConfig()
+  {
+    return processingConfigProvider.get();
   }
 
   public QueryProcessingPool getQueryProcessingPool()
@@ -324,6 +349,9 @@ public class TaskToolbox
     return jsonMapper;
   }
 
+  /**
+   * Returns a {@link SegmentCacheManager} in virtual storage mode.
+   */
   public SegmentCacheManager getSegmentCacheManager()
   {
     return segmentCacheManager;
@@ -339,7 +367,12 @@ public class TaskToolbox
     for (final Collection<DataSegment> segmentCollection : segmentMultimap.asMap().values()) {
       getTaskActionClient().submit(
           SegmentTransactionalInsertAction.appendAction(
-              ImmutableSet.copyOf(segmentCollection), null, null
+              ImmutableSet.copyOf(segmentCollection),
+              null,
+              null,
+              null,
+              null,
+              null
           )
       );
     }
@@ -365,9 +398,9 @@ public class TaskToolbox
     return cachePopulatorStats;
   }
 
-  public IndexMergerV9 getIndexMergerV9()
+  public IndexMerger getIndexMerger()
   {
-    return indexMergerV9;
+    return indexMerger;
   }
 
   public File getIndexingTmpDir()
@@ -472,11 +505,6 @@ public class TaskToolbox
     return attemptId;
   }
 
-  public TaskStorageDirTracker getDirTracker()
-  {
-    return dirTracker;
-  }
-
   /**
    * Get {@link RuntimeInfo} adjusted for this particular task. When running in a task JVM launched by a MiddleManager,
    * this is the same as the baseline {@link RuntimeInfo}. When running in an Indexer, it is adjusted based on
@@ -484,7 +512,12 @@ public class TaskToolbox
    */
   public RuntimeInfo getAdjustedRuntimeInfo()
   {
-    return createAdjustedRuntimeInfo(JvmUtils.getRuntimeInfo(), appenderatorsManager);
+    return createAdjustedRuntimeInfo(runtimeInfo, appenderatorsManager);
+  }
+
+  public CentralizedDatasourceSchemaConfig getCentralizedTableSchemaConfig()
+  {
+    return centralizedDatasourceSchemaConfig;
   }
 
   /**
@@ -513,6 +546,7 @@ public class TaskToolbox
 
   public static class Builder
   {
+    private SegmentLoaderConfig segmentLoaderConfig;
     private TaskConfig config;
     private DruidNode taskExecutorNode;
     private TaskActionClient taskActionClient;
@@ -522,9 +556,9 @@ public class TaskToolbox
     private DataSegmentMover dataSegmentMover;
     private DataSegmentArchiver dataSegmentArchiver;
     private DataSegmentAnnouncer segmentAnnouncer;
-    private DataSegmentServerAnnouncer serverAnnouncer;
     private SegmentHandoffNotifierFactory handoffNotifierFactory;
     private Provider<QueryRunnerFactoryConglomerate> queryRunnerFactoryConglomerateProvider;
+    private Provider<DruidProcessingConfig> processingConfigProvider;
     private QueryProcessingPool queryProcessingPool;
     private JoinableFactory joinableFactory;
     private Provider<MonitorScheduler> monitorSchedulerProvider;
@@ -535,7 +569,8 @@ public class TaskToolbox
     private Cache cache;
     private CacheConfig cacheConfig;
     private CachePopulatorStats cachePopulatorStats;
-    private IndexMergerV9 indexMergerV9;
+    private PolicyEnforcer policyEnforcer;
+    private IndexMerger indexMerger;
     private DruidNodeAnnouncer druidNodeAnnouncer;
     private DruidNode druidNode;
     private LookupNodeService lookupNodeService;
@@ -552,7 +587,8 @@ public class TaskToolbox
     private ShuffleClient shuffleClient;
     private TaskLogPusher taskLogPusher;
     private String attemptId;
-    private TaskStorageDirTracker dirTracker;
+    private CentralizedDatasourceSchemaConfig centralizedDatasourceSchemaConfig;
+    private RuntimeInfo runtimeInfo;
 
     public Builder()
     {
@@ -560,6 +596,7 @@ public class TaskToolbox
 
     public Builder(TaskToolbox other)
     {
+      this.segmentLoaderConfig = other.segmentLoaderConfig;
       this.config = other.config;
       this.taskExecutorNode = other.taskExecutorNode;
       this.taskActionClient = other.taskActionClient;
@@ -569,9 +606,9 @@ public class TaskToolbox
       this.dataSegmentMover = other.dataSegmentMover;
       this.dataSegmentArchiver = other.dataSegmentArchiver;
       this.segmentAnnouncer = other.segmentAnnouncer;
-      this.serverAnnouncer = other.serverAnnouncer;
       this.handoffNotifierFactory = other.handoffNotifierFactory;
       this.queryRunnerFactoryConglomerateProvider = other.queryRunnerFactoryConglomerateProvider;
+      this.processingConfigProvider = other.processingConfigProvider;
       this.queryProcessingPool = other.queryProcessingPool;
       this.joinableFactory = other.joinableFactory;
       this.monitorSchedulerProvider = other.monitorSchedulerProvider;
@@ -582,7 +619,8 @@ public class TaskToolbox
       this.cache = other.cache;
       this.cacheConfig = other.cacheConfig;
       this.cachePopulatorStats = other.cachePopulatorStats;
-      this.indexMergerV9 = other.indexMergerV9;
+      this.policyEnforcer = other.policyEnforcer;
+      this.indexMerger = other.indexMerger;
       this.druidNodeAnnouncer = other.druidNodeAnnouncer;
       this.druidNode = other.druidNode;
       this.lookupNodeService = other.lookupNodeService;
@@ -597,7 +635,14 @@ public class TaskToolbox
       this.intermediaryDataManager = other.intermediaryDataManager;
       this.supervisorTaskClientProvider = other.supervisorTaskClientProvider;
       this.shuffleClient = other.shuffleClient;
-      this.dirTracker = other.getDirTracker();
+      this.centralizedDatasourceSchemaConfig = other.centralizedDatasourceSchemaConfig;
+      this.runtimeInfo = other.runtimeInfo;
+    }
+
+    public Builder config(final SegmentLoaderConfig segmentLoaderConfig)
+    {
+      this.segmentLoaderConfig = segmentLoaderConfig;
+      return this;
     }
 
     public Builder config(final TaskConfig config)
@@ -621,6 +666,12 @@ public class TaskToolbox
     public Builder emitter(final ServiceEmitter emitter)
     {
       this.emitter = emitter;
+      return this;
+    }
+
+    public Builder policyEnforcer(final PolicyEnforcer policyEnforcer)
+    {
+      this.policyEnforcer = policyEnforcer;
       return this;
     }
 
@@ -654,12 +705,6 @@ public class TaskToolbox
       return this;
     }
 
-    public Builder serverAnnouncer(final DataSegmentServerAnnouncer serverAnnouncer)
-    {
-      this.serverAnnouncer = serverAnnouncer;
-      return this;
-    }
-
     public Builder handoffNotifierFactory(final SegmentHandoffNotifierFactory handoffNotifierFactory)
     {
       this.handoffNotifierFactory = handoffNotifierFactory;
@@ -669,6 +714,12 @@ public class TaskToolbox
     public Builder queryRunnerFactoryConglomerateProvider(final Provider<QueryRunnerFactoryConglomerate> queryRunnerFactoryConglomerateProvider)
     {
       this.queryRunnerFactoryConglomerateProvider = queryRunnerFactoryConglomerateProvider;
+      return this;
+    }
+
+    public Builder processingConfigProvider(final Provider<DruidProcessingConfig> processingConfigProvider)
+    {
+      this.processingConfigProvider = processingConfigProvider;
       return this;
     }
 
@@ -732,9 +783,9 @@ public class TaskToolbox
       return this;
     }
 
-    public Builder indexMergerV9(final IndexMergerV9 indexMergerV9)
+    public Builder indexMerger(final IndexMerger indexMerger)
     {
-      this.indexMergerV9 = indexMergerV9;
+      this.indexMerger = indexMerger;
       return this;
     }
 
@@ -834,15 +885,22 @@ public class TaskToolbox
       return this;
     }
 
-    public Builder dirTracker(final TaskStorageDirTracker dirTracker)
+    public Builder centralizedTableSchemaConfig(final CentralizedDatasourceSchemaConfig centralizedDatasourceSchemaConfig)
     {
-      this.dirTracker = dirTracker;
+      this.centralizedDatasourceSchemaConfig = centralizedDatasourceSchemaConfig;
+      return this;
+    }
+
+    public Builder runtimeInfo(final RuntimeInfo runtimeInfo)
+    {
+      this.runtimeInfo = runtimeInfo;
       return this;
     }
 
     public TaskToolbox build()
     {
       return new TaskToolbox(
+          segmentLoaderConfig,
           config,
           taskExecutorNode,
           taskActionClient,
@@ -852,9 +910,9 @@ public class TaskToolbox
           dataSegmentMover,
           dataSegmentArchiver,
           segmentAnnouncer,
-          serverAnnouncer,
           handoffNotifierFactory,
           queryRunnerFactoryConglomerateProvider,
+          processingConfigProvider,
           queryProcessingPool,
           joinableFactory,
           monitorSchedulerProvider,
@@ -865,7 +923,8 @@ public class TaskToolbox
           cache,
           cacheConfig,
           cachePopulatorStats,
-          indexMergerV9,
+          policyEnforcer,
+          indexMerger,
           druidNodeAnnouncer,
           druidNode,
           lookupNodeService,
@@ -882,7 +941,8 @@ public class TaskToolbox
           shuffleClient,
           taskLogPusher,
           attemptId,
-          dirTracker
+          centralizedDatasourceSchemaConfig,
+          runtimeInfo
       );
     }
   }

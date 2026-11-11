@@ -27,7 +27,6 @@ import com.google.common.base.Function;
 import com.google.common.base.Functions;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Ordering;
 import com.google.common.primitives.Longs;
@@ -43,12 +42,16 @@ import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.common.guava.Sequences;
 import org.apache.druid.query.BaseQuery;
 import org.apache.druid.query.DataSource;
+import org.apache.druid.query.DimensionComparisonUtils;
+import org.apache.druid.query.PerSegmentQueryOptimizationContext;
 import org.apache.druid.query.Queries;
 import org.apache.druid.query.Query;
+import org.apache.druid.query.QueryContexts;
 import org.apache.druid.query.QueryDataSource;
 import org.apache.druid.query.TableDataSource;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.PostAggregator;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.dimension.DefaultDimensionSpec;
 import org.apache.druid.query.dimension.DimensionSpec;
 import org.apache.druid.query.filter.DimFilter;
@@ -67,23 +70,18 @@ import org.apache.druid.segment.VirtualColumns;
 import org.apache.druid.segment.column.ColumnHolder;
 import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.column.RowSignature;
-import org.apache.druid.segment.data.ComparableList;
-import org.apache.druid.segment.data.ComparableStringArray;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
 
 import javax.annotation.Nullable;
-
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.UUID;
 import java.util.stream.Collectors;
 
 /**
@@ -91,11 +89,34 @@ import java.util.stream.Collectors;
  */
 public class GroupByQuery extends BaseQuery<ResultRow>
 {
+  /**
+   * @deprecated Use {@link QueryContextParameters#SORT_BY_DIMS_FIRST} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
   public static final String CTX_KEY_SORT_BY_DIMS_FIRST = "sortByDimsFirst";
+  /**
+   * @deprecated Use {@link QueryContextParameters#TIMESTAMP_RESULT_FIELD} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
   public static final String CTX_TIMESTAMP_RESULT_FIELD = "timestampResultField";
+  /**
+   * @deprecated Use {@link QueryContextParameters#TIMESTAMP_RESULT_FIELD_GRANULARITY} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
   public static final String CTX_TIMESTAMP_RESULT_FIELD_GRANULARITY = "timestampResultFieldGranularity";
+  /**
+   * @deprecated Use {@link QueryContextParameters#TIMESTAMP_RESULT_FIELD_IN_ORIGINAL_DIMENSIONS} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
   public static final String CTX_TIMESTAMP_RESULT_FIELD_INDEX = "timestampResultFieldInOriginalDimensions";
-  private static final String CTX_KEY_FUDGE_TIMESTAMP = "fudgeTimestamp";
+  /**
+   * Context key for whether this query has any "dropped" dimensions. This is set true for queries like
+   * "GROUP BY 'constant'", and enables {@link GroupingEngine#summaryRowPreconditions(GroupByQuery)} to correctly
+   * determine whether to include a summary row.
+   * @deprecated Use {@link QueryContextParameters#HAS_DROPPED_DIMENSIONS} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
+  public static final String CTX_HAS_DROPPED_DIMENSIONS = "hasDroppedDimensions";
 
   private static final Comparator<ResultRow> NON_GRANULAR_TIME_COMP =
       (ResultRow lhs, ResultRow rhs) -> Longs.compare(lhs.getLong(0), rhs.getLong(0));
@@ -112,6 +133,8 @@ public class GroupByQuery extends BaseQuery<ResultRow>
   @Nullable
   private final DimFilter dimFilter;
   private final List<DimensionSpec> dimensions;
+  private final List<String> groupingColumns;
+
   private final List<AggregatorFactory> aggregatorSpecs;
   private final List<PostAggregator> postAggregatorSpecs;
   @Nullable
@@ -204,13 +227,15 @@ public class GroupByQuery extends BaseQuery<ResultRow>
       final Map<String, Object> context
   )
   {
-    super(dataSource, querySegmentSpec, false, context, granularity);
+    super(dataSource, querySegmentSpec, context, granularity);
 
     this.virtualColumns = VirtualColumns.nullToEmpty(virtualColumns);
     this.dimFilter = dimFilter;
     this.dimensions = dimensions == null ? ImmutableList.of() : dimensions;
+    this.groupingColumns = new ArrayList<>();
     for (DimensionSpec spec : this.dimensions) {
       Preconditions.checkArgument(spec != null, "dimensions has null DimensionSpec");
+      groupingColumns.add(spec.getDimension());
     }
 
     this.aggregatorSpecs = aggregatorSpecs == null ? ImmutableList.of() : aggregatorSpecs;
@@ -330,11 +355,7 @@ public class GroupByQuery extends BaseQuery<ResultRow>
     return subtotalsSpec;
   }
 
-  /**
-   * Equivalent to {@code getResultRowSignature(Finalization.UNKNOWN)}.
-   *
-   * @see ResultRow for documentation about the order that fields will be in
-   */
+  @Override
   public RowSignature getResultRowSignature()
   {
     return resultRowSignature;
@@ -350,6 +371,7 @@ public class GroupByQuery extends BaseQuery<ResultRow>
    *
    * @see ResultRow for documentation about the order that fields will be in
    */
+  @Override
   public RowSignature getResultRowSignature(final RowSignature.Finalization finalization)
   {
     if (finalization == RowSignature.Finalization.UNKNOWN) {
@@ -382,7 +404,7 @@ public class GroupByQuery extends BaseQuery<ResultRow>
    *
    * This method will return a nonnull timestamp in the following two cases:
    *
-   * 1) CTX_KEY_FUDGE_TIMESTAMP is set (in which case this timestamp will be returned).
+   * 1) {@link QueryContextParameters#FUDGE_TIMESTAMP} is set (in which case this timestamp will be returned).
    * 2) Granularity is "ALL".
    *
    * If this method returns null, then {@link #getResultRowHasTimestamp()} will return true. The reverse is also true:
@@ -450,7 +472,7 @@ public class GroupByQuery extends BaseQuery<ResultRow>
   @JsonIgnore
   public boolean getContextSortByDimsFirst()
   {
-    return context().getBoolean(CTX_KEY_SORT_BY_DIMS_FIRST, false);
+    return context().getOrDefault(QueryContextParameters.SORT_BY_DIMS_FIRST);
   }
 
   @JsonIgnore
@@ -465,7 +487,17 @@ public class GroupByQuery extends BaseQuery<ResultRow>
   @JsonIgnore
   public boolean getApplyLimitPushDownFromContext()
   {
-    return context().getBoolean(GroupByQueryConfig.CTX_KEY_APPLY_LIMIT_PUSH_DOWN, true);
+    return context().getOrDefault(QueryContextParameters.APPLY_LIMIT_PUSH_DOWN);
+  }
+
+  /**
+   * Whether this query has any "dropped" dimensions. This is set true for queries like "GROUP BY 'constant'", and
+   * enables {@link GroupingEngine#summaryRowPreconditions(GroupByQuery)} to correctly determine whether to include a
+   * summary row. See {@link QueryContextParameters#HAS_DROPPED_DIMENSIONS}.
+   */
+  public boolean hasDroppedDimensions()
+  {
+    return context().getOrDefault(QueryContextParameters.HAS_DROPPED_DIMENSIONS);
   }
 
   @Override
@@ -487,7 +519,7 @@ public class GroupByQuery extends BaseQuery<ResultRow>
 
   private boolean validateAndGetForceLimitPushDown()
   {
-    final boolean forcePushDown = context().getBoolean(GroupByQueryConfig.CTX_KEY_FORCE_LIMIT_PUSH_DOWN, false);
+    final boolean forcePushDown = context().getOrDefault(QueryContextParameters.FORCE_LIMIT_PUSH_DOWN, false);
     if (forcePushDown) {
       if (!(limitSpec instanceof DefaultLimitSpec)) {
         throw new IAE("When forcing limit push down, a limit spec must be provided.");
@@ -563,15 +595,20 @@ public class GroupByQuery extends BaseQuery<ResultRow>
     return false;
   }
 
-  /**
-   * When limit push down is applied, the partial results would be sorted by the ordering specified by the
-   * limit/order spec (unlike non-push down case where the results always use the default natural ascending order),
-   * so when merging these partial result streams, the merge needs to use the same ordering to get correct results.
-   */
-  private Ordering<ResultRow> getRowOrderingForPushDown(
-      final boolean granular,
-      final DefaultLimitSpec limitSpec
-  )
+  public Ordering<ResultRow> getRowOrdering(final boolean granular)
+  {
+    return getOrderingAndDimensions(granular).getRowOrdering();
+  }
+
+  public List<String> getDimensionNamesInOrder()
+  {
+    return getOrderingAndDimensions(false).getDimensions()
+                                          .stream()
+                                          .map(DimensionSpec::getOutputName)
+                                          .collect(Collectors.toList());
+  }
+
+  public OrderingAndDimensions getOrderingAndDimensions(final boolean granular)
   {
     final boolean sortByDimsFirst = getContextSortByDimsFirst();
 
@@ -580,18 +617,30 @@ public class GroupByQuery extends BaseQuery<ResultRow>
     final List<Boolean> needsReverseList = new ArrayList<>();
     final List<ColumnType> dimensionTypes = new ArrayList<>();
     final List<StringComparator> comparators = new ArrayList<>();
+    final List<DimensionSpec> dimensionsInOrder = new ArrayList<>();
 
-    for (OrderByColumnSpec orderSpec : limitSpec.getColumns()) {
-      boolean needsReverse = orderSpec.getDirection() != OrderByColumnSpec.Direction.ASCENDING;
-      int dimIndex = OrderByColumnSpec.getDimIndexForOrderBy(orderSpec, dimensions);
-      if (dimIndex >= 0) {
-        DimensionSpec dim = dimensions.get(dimIndex);
-        orderedFieldNumbers.add(resultRowSignature.indexOf(dim.getOutputName()));
-        dimsInOrderBy.add(dimIndex);
-        needsReverseList.add(needsReverse);
-        final ColumnType type = dimensions.get(dimIndex).getOutputType();
-        dimensionTypes.add(type);
-        comparators.add(orderSpec.getDimensionComparator());
+    /*
+     * When limit push down is applied, the partial results would be sorted by the ordering specified by the
+     * limit/order spec (unlike non-push down case where the results always use the default natural ascending order),
+     * so when merging these partial result streams, the merge needs to use the same ordering to get correct results.
+     */
+    if (isApplyLimitPushDown()) {
+      DefaultLimitSpec limitSpec1 = (DefaultLimitSpec) limitSpec;
+      if (!DefaultLimitSpec.sortingOrderHasNonGroupingFields(limitSpec1, dimensions)) {
+        for (OrderByColumnSpec orderSpec : ((DefaultLimitSpec) limitSpec).getColumns()) {
+          boolean needsReverse = orderSpec.getDirection() != OrderByColumnSpec.Direction.ASCENDING;
+          int dimIndex = OrderByColumnSpec.getDimIndexForOrderBy(orderSpec, dimensions);
+          if (dimIndex >= 0) {
+            DimensionSpec dim = dimensions.get(dimIndex);
+            orderedFieldNumbers.add(resultRowSignature.indexOf(dim.getOutputName()));
+            dimsInOrderBy.add(dimIndex);
+            needsReverseList.add(needsReverse);
+            final ColumnType type = dimensions.get(dimIndex).getOutputType();
+            dimensionTypes.add(type);
+            comparators.add(orderSpec.getDimensionComparator());
+            dimensionsInOrder.add(dim);
+          }
+        }
       }
     }
 
@@ -601,19 +650,17 @@ public class GroupByQuery extends BaseQuery<ResultRow>
         needsReverseList.add(false);
         final ColumnType type = dimensions.get(i).getOutputType();
         dimensionTypes.add(type);
-        if (type.isNumeric()) {
-          comparators.add(StringComparators.NUMERIC);
-        } else {
-          comparators.add(StringComparators.LEXICOGRAPHIC);
-        }
+        comparators.add(StringComparators.NATURAL);
+        dimensionsInOrder.add(dimensions.get(i));
       }
     }
 
     final Comparator<ResultRow> timeComparator = getTimeComparator(granular);
+    Ordering<ResultRow> ordering;
 
     if (timeComparator == null) {
-      return Ordering.from(
-          (lhs, rhs) -> compareDimsForLimitPushDown(
+      ordering = Ordering.from(
+          (lhs, rhs) -> compareDims(
               orderedFieldNumbers,
               needsReverseList,
               dimensionTypes,
@@ -623,9 +670,9 @@ public class GroupByQuery extends BaseQuery<ResultRow>
           )
       );
     } else if (sortByDimsFirst) {
-      return Ordering.from(
+      ordering = Ordering.from(
           (lhs, rhs) -> {
-            final int cmp = compareDimsForLimitPushDown(
+            final int cmp = compareDims(
                 orderedFieldNumbers,
                 needsReverseList,
                 dimensionTypes,
@@ -641,7 +688,7 @@ public class GroupByQuery extends BaseQuery<ResultRow>
           }
       );
     } else {
-      return Ordering.from(
+      ordering = Ordering.from(
           (lhs, rhs) -> {
             final int timeCompare = timeComparator.compare(lhs, rhs);
 
@@ -649,7 +696,7 @@ public class GroupByQuery extends BaseQuery<ResultRow>
               return timeCompare;
             }
 
-            return compareDimsForLimitPushDown(
+            return compareDims(
                 orderedFieldNumbers,
                 needsReverseList,
                 dimensionTypes,
@@ -660,45 +707,8 @@ public class GroupByQuery extends BaseQuery<ResultRow>
           }
       );
     }
-  }
 
-  public Ordering<ResultRow> getRowOrdering(final boolean granular)
-  {
-    if (isApplyLimitPushDown()) {
-      if (!DefaultLimitSpec.sortingOrderHasNonGroupingFields((DefaultLimitSpec) limitSpec, dimensions)) {
-        return getRowOrderingForPushDown(granular, (DefaultLimitSpec) limitSpec);
-      }
-    }
-
-    final boolean sortByDimsFirst = getContextSortByDimsFirst();
-    final Comparator<ResultRow> timeComparator = getTimeComparator(granular);
-
-    if (timeComparator == null) {
-      return Ordering.from((lhs, rhs) -> compareDims(dimensions, lhs, rhs));
-    } else if (sortByDimsFirst) {
-      return Ordering.from(
-          (lhs, rhs) -> {
-            final int cmp = compareDims(dimensions, lhs, rhs);
-            if (cmp != 0) {
-              return cmp;
-            }
-
-            return timeComparator.compare(lhs, rhs);
-          }
-      );
-    } else {
-      return Ordering.from(
-          (lhs, rhs) -> {
-            final int timeCompare = timeComparator.compare(lhs, rhs);
-
-            if (timeCompare != 0) {
-              return timeCompare;
-            }
-
-            return compareDims(dimensions, lhs, rhs);
-          }
-      );
-    }
+    return new OrderingAndDimensions(ordering, dimensionsInOrder);
   }
 
   @Nullable
@@ -723,32 +733,13 @@ public class GroupByQuery extends BaseQuery<ResultRow>
     }
   }
 
-  private int compareDims(List<DimensionSpec> dimensions, ResultRow lhs, ResultRow rhs)
-  {
-    final int dimensionStart = getResultRowDimensionStart();
-
-    for (int i = 0; i < dimensions.size(); i++) {
-      DimensionSpec dimension = dimensions.get(i);
-      final int dimCompare = DimensionHandlerUtils.compareObjectsAsType(
-          lhs.get(dimensionStart + i),
-          rhs.get(dimensionStart + i),
-          dimension.getOutputType()
-      );
-      if (dimCompare != 0) {
-        return dimCompare;
-      }
-    }
-
-    return 0;
-  }
-
   /**
    * Computes the timestamp that will be returned by {@link #getUniversalTimestamp()}.
    */
   @Nullable
   private DateTime computeUniversalTimestamp()
   {
-    final String timestampStringFromContext = context().getString(CTX_KEY_FUDGE_TIMESTAMP, "");
+    final String timestampStringFromContext = context().getOrDefault(QueryContextParameters.FUDGE_TIMESTAMP, "");
     final Granularity granularity = getGranularity();
 
     if (!timestampStringFromContext.isEmpty()) {
@@ -766,7 +757,13 @@ public class GroupByQuery extends BaseQuery<ResultRow>
     }
   }
 
-  private static int compareDimsForLimitPushDown(
+  /**
+   * Compares the dimensions.
+   *
+   * Due to legacy reason, the provided StringComparator for the arrays isn't applied and must be changed once we
+   * get rid of the StringComparators for array types
+   */
+  private static int compareDims(
       final IntList fields,
       final List<Boolean> needsReverseList,
       final List<ColumnType> dimensionTypes,
@@ -785,20 +782,22 @@ public class GroupByQuery extends BaseQuery<ResultRow>
       final Object rhsObj = rhs.get(fieldNumber);
 
       if (dimensionType.isNumeric()) {
-        if (comparator.equals(StringComparators.NUMERIC)) {
+        if (DimensionComparisonUtils.isNaturalComparator(dimensionType.getType(), comparator)) {
           dimCompare = DimensionHandlerUtils.compareObjectsAsType(lhsObj, rhsObj, dimensionType);
         } else {
           dimCompare = comparator.compare(String.valueOf(lhsObj), String.valueOf(rhsObj));
         }
       } else if (dimensionType.equals(ColumnType.STRING_ARRAY)) {
-        final ComparableStringArray lhsArr = DimensionHandlerUtils.convertToComparableStringArray(lhsObj);
-        final ComparableStringArray rhsArr = DimensionHandlerUtils.convertToComparableStringArray(rhsObj);
-        dimCompare = Comparators.<Comparable>naturalNullsFirst().compare(lhsArr, rhsArr);
+        final Object[] lhsArr = DimensionHandlerUtils.coerceToStringArray(lhsObj);
+        final Object[] rhsArr = DimensionHandlerUtils.coerceToStringArray(rhsObj);
+        dimCompare = ColumnType.STRING_ARRAY.getNullableStrategy().compare(lhsArr, rhsArr);
       } else if (dimensionType.equals(ColumnType.LONG_ARRAY)
                  || dimensionType.equals(ColumnType.DOUBLE_ARRAY)) {
-        final ComparableList lhsArr = DimensionHandlerUtils.convertToList(lhsObj, dimensionType.getElementType().getType());
-        final ComparableList rhsArr = DimensionHandlerUtils.convertToList(rhsObj, dimensionType.getElementType().getType());
-        dimCompare = Comparators.<Comparable>naturalNullsFirst().compare(lhsArr, rhsArr);
+        final Object[] lhsArr = DimensionHandlerUtils.convertToArray(lhsObj, dimensionType.getElementType());
+        final Object[] rhsArr = DimensionHandlerUtils.convertToArray(rhsObj, dimensionType.getElementType());
+        dimCompare = dimensionType.getNullableStrategy().compare(lhsArr, rhsArr);
+      } else if (DimensionComparisonUtils.isNaturalComparator(dimensionType.getType(), comparator)) {
+        dimCompare = DimensionHandlerUtils.compareObjectsAsType(lhsObj, rhsObj, dimensionType);
       } else {
         dimCompare = comparator.compare((String) lhsObj, (String) rhsObj);
       }
@@ -831,10 +830,15 @@ public class GroupByQuery extends BaseQuery<ResultRow>
     return Queries.computeRequiredColumns(
         virtualColumns,
         dimFilter,
-        dimensions,
-        aggregatorSpecs,
-        Collections.emptyList()
+        groupingColumns,
+        aggregatorSpecs
     );
+  }
+
+  @JsonIgnore
+  public List<String> getGroupingColumns()
+  {
+    return groupingColumns;
   }
 
   @Override
@@ -890,6 +894,19 @@ public class GroupByQuery extends BaseQuery<ResultRow>
     return new Builder(this).setPostAggregatorSpecs(postAggregatorSpecs).build();
   }
 
+  @Override
+  public Query<ResultRow> optimizeForSegment(PerSegmentQueryOptimizationContext optimizationContext)
+  {
+    if (!context().isOptimizeAggregators()) {
+      return this;
+    }
+    final List<AggregatorFactory> optimizedAggs = new ArrayList<>(aggregatorSpecs.size());
+    for (AggregatorFactory aggregatorFactory : aggregatorSpecs) {
+      optimizedAggs.add(aggregatorFactory.optimizeForSegment(optimizationContext));
+    }
+    return withAggregatorSpecs(optimizedAggs);
+  }
+
   private static void verifyOutputNames(
       List<DimensionSpec> dimensions,
       List<AggregatorFactory> aggregators,
@@ -920,6 +937,28 @@ public class GroupByQuery extends BaseQuery<ResultRow>
           "'%s' cannot be used as an output name for dimensions, aggregators, or post-aggregators.",
           ColumnHolder.TIME_COLUMN_NAME
       );
+    }
+  }
+
+  public static class OrderingAndDimensions
+  {
+    Ordering<ResultRow> rowOrdering;
+    List<DimensionSpec> dimensions;
+
+    public OrderingAndDimensions(Ordering<ResultRow> rowOrdering, List<DimensionSpec> dimensions)
+    {
+      this.rowOrdering = rowOrdering;
+      this.dimensions = dimensions;
+    }
+
+    public Ordering<ResultRow> getRowOrdering()
+    {
+      return rowOrdering;
+    }
+
+    public List<DimensionSpec> getDimensions()
+    {
+      return dimensions;
     }
   }
 
@@ -1046,7 +1085,7 @@ public class GroupByQuery extends BaseQuery<ResultRow>
 
     public Builder setVirtualColumns(VirtualColumn... virtualColumns)
     {
-      this.virtualColumns = VirtualColumns.create(Arrays.asList(virtualColumns));
+      this.virtualColumns = VirtualColumns.create(virtualColumns);
       return this;
     }
 
@@ -1078,6 +1117,14 @@ public class GroupByQuery extends BaseQuery<ResultRow>
     {
       ensureExplicitLimitSpecNotSet();
       this.orderByColumnSpecs.add(columnSpec);
+      this.postProcessingFn = null;
+      return this;
+    }
+
+    public Builder setOrderByColumns(List<OrderByColumnSpec> columnSpec)
+    {
+      ensureExplicitLimitSpecNotSet();
+      this.orderByColumnSpecs = new ArrayList<>(columnSpec);
       this.postProcessingFn = null;
       return this;
     }
@@ -1190,20 +1237,22 @@ public class GroupByQuery extends BaseQuery<ResultRow>
       return this;
     }
 
+    public Builder setPostAggregatorSpecs(PostAggregator... postAggregatorSpecs)
+    {
+      this.postAggregatorSpecs = Lists.newArrayList(postAggregatorSpecs);
+      this.postProcessingFn = null;
+      return this;
+    }
+
     public Builder setContext(Map<String, Object> context)
     {
       this.context = context;
       return this;
     }
 
-    public Builder randomQueryId()
-    {
-      return queryId(UUID.randomUUID().toString());
-    }
-
     public Builder queryId(String queryId)
     {
-      context = BaseQuery.computeOverriddenContext(context, ImmutableMap.of(BaseQuery.QUERY_ID, queryId));
+      context = QueryContexts.override(context, QueryContextParameters.QUERY_ID, queryId);
       return this;
     }
 
@@ -1312,5 +1361,15 @@ public class GroupByQuery extends BaseQuery<ResultRow>
         postAggregatorSpecs,
         subtotalsSpec
     );
+  }
+
+  @Override
+  public boolean mayCollapseQueryDataSource()
+  {
+    if (getDataSource() instanceof QueryDataSource) {
+      QueryDataSource queryDataSource = (QueryDataSource) getDataSource();
+      return queryDataSource.getQuery() instanceof GroupByQuery;
+    }
+    return false;
   }
 }

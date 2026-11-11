@@ -19,6 +19,8 @@
 
 package org.apache.druid.indexing.overlord.supervisor;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Function;
@@ -30,18 +32,33 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.inject.Inject;
 import com.sun.jersey.spi.container.ResourceFilters;
+import org.apache.commons.lang3.NotImplementedException;
+import org.apache.druid.audit.AuditEntry;
+import org.apache.druid.audit.AuditManager;
+import org.apache.druid.error.DruidException;
+import org.apache.druid.indexing.overlord.DataSourceMetadata;
 import org.apache.druid.indexing.overlord.TaskMaster;
 import org.apache.druid.indexing.overlord.http.security.SupervisorResourceFilter;
+import org.apache.druid.indexing.seekablestream.supervisor.autoscaler.CostBasedAutoScalerConfig;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.common.UOE;
 import org.apache.druid.segment.incremental.ParseExceptionReport;
-import org.apache.druid.server.security.Access;
+import org.apache.druid.server.security.Action;
+import org.apache.druid.server.security.AuthConfig;
+import org.apache.druid.server.security.AuthorizationResult;
 import org.apache.druid.server.security.AuthorizationUtils;
 import org.apache.druid.server.security.AuthorizerMapper;
 import org.apache.druid.server.security.ForbiddenException;
+import org.apache.druid.server.security.Resource;
 import org.apache.druid.server.security.ResourceAction;
+import org.apache.druid.server.security.ResourceType;
+import org.apache.druid.utils.CollectionUtils;
 
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import javax.servlet.http.HttpServletRequest;
 import javax.ws.rs.Consumes;
+import javax.ws.rs.DefaultValue;
 import javax.ws.rs.GET;
 import javax.ws.rs.POST;
 import javax.ws.rs.Path;
@@ -83,41 +100,119 @@ public class SupervisorResource
   private final TaskMaster taskMaster;
   private final AuthorizerMapper authorizerMapper;
   private final ObjectMapper objectMapper;
+  private final AuditManager auditManager;
+  private final AuthConfig authConfig;
 
   @Inject
-  public SupervisorResource(TaskMaster taskMaster, AuthorizerMapper authorizerMapper, ObjectMapper objectMapper)
+  public SupervisorResource(
+      TaskMaster taskMaster,
+      AuthorizerMapper authorizerMapper,
+      ObjectMapper objectMapper,
+      AuthConfig authConfig,
+      AuditManager auditManager
+  )
   {
     this.taskMaster = taskMaster;
     this.authorizerMapper = authorizerMapper;
     this.objectMapper = objectMapper;
+    this.authConfig = authConfig;
+    this.auditManager = auditManager;
   }
 
   @POST
   @Consumes(MediaType.APPLICATION_JSON)
   @Produces(MediaType.APPLICATION_JSON)
-  public Response specPost(final SupervisorSpec spec, @Context final HttpServletRequest req)
+  public Response specPost(
+      final SupervisorSpec spec,
+      @QueryParam("skipRestartIfUnmodified") @DefaultValue("true") Boolean skipRestartIfUnmodified,
+      @Context final HttpServletRequest req
+  )
   {
     return asLeaderWithSupervisorManager(
         manager -> {
           Preconditions.checkArgument(
-              spec.getDataSources() != null && spec.getDataSources().size() > 0,
+              !CollectionUtils.isNullOrEmpty(spec.getDataSources()),
               "No dataSources found to perform authorization checks"
           );
+          final Set<ResourceAction> resourceActions;
+          try {
+            resourceActions = getNeededResourceActionsForTask(spec);
+          }
+          catch (UOE e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                           .entity(
+                               ImmutableMap.of(
+                                   "error",
+                                   e.getMessage()
+                               )
+                           )
+                           .build();
+          }
 
-          Access authResult = AuthorizationUtils.authorizeAllResourceActions(
+          AuthorizationResult authResult = AuthorizationUtils.authorizeAllResourceActions(
               req,
-              Iterables.transform(spec.getDataSources(), AuthorizationUtils.DATASOURCE_WRITE_RA_GENERATOR),
+              resourceActions,
               authorizerMapper
           );
 
-          if (!authResult.isAllowed()) {
-            throw new ForbiddenException(authResult.toString());
+          if (!authResult.allowAccessWithNoRestriction()) {
+            throw new ForbiddenException(authResult.getErrorMessage());
+          }
+          try {
+            spec.validateSpec();
+          }
+          catch (DruidException e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                           .entity(ImmutableMap.of("error", e.getMessage()))
+                           .build();
           }
 
-          manager.createOrUpdateAndStartSupervisor(spec);
-          return Response.ok(ImmutableMap.of("id", spec.getId())).build();
+          final SupervisorSpecUpdateResult updateResult =
+              manager.createOrUpdateAndStartSupervisor(spec, Boolean.TRUE.equals(skipRestartIfUnmodified));
+
+          if (updateResult.isModified() || updateResult.isRestarted()) {
+            auditSupervisorUpdate(spec, req);
+          }
+
+          return Response.ok(
+              Map.of(
+                  "id", spec.getId(),
+                  "modified", updateResult.isModified(),
+                  "restarted", updateResult.isRestarted()
+              )
+          ).build();
         }
     );
+  }
+
+  /**
+   * Audits supervisor spec submissions that changed or restarted the supervisor.
+   */
+  private void auditSupervisorUpdate(final SupervisorSpec spec, final HttpServletRequest req)
+  {
+    final String auditPayload
+        = StringUtils.format("Update supervisor[%s] for datasource[%s]", spec.getId(), spec.getDataSources());
+    auditManager.doAudit(
+        AuditEntry.builder()
+                  .key(spec.getId())
+                  .type("supervisor")
+                  .auditInfo(AuthorizationUtils.buildAuditInfo(req))
+                  .request(AuthorizationUtils.buildRequestInfo("overlord", req))
+                  .payload(auditPayload)
+                  .build()
+    );
+  }
+
+  private Set<ResourceAction> getNeededResourceActionsForTask(final SupervisorSpec spec)
+  {
+    final Set<ResourceAction> resourceActions =
+        spec.getDataSources().stream()
+            .map(dataSource -> new ResourceAction(new Resource(dataSource, ResourceType.DATASOURCE), Action.WRITE))
+            .collect(Collectors.toSet());
+    if (authConfig.isEnableInputSourceSecurity()) {
+      resourceActions.addAll(spec.getInputSourceResources());
+    }
+    return resourceActions;
   }
 
   @GET
@@ -134,7 +229,8 @@ public class SupervisorResource
           Set<String> authorizedSupervisorIds = filterAuthorizedSupervisorIds(
               req,
               manager,
-              manager.getSupervisorIds()
+              manager.getSupervisorIds(),
+              AuthorizationUtils.DATASOURCE_READ_RA_GENERATOR
           );
           final boolean includeFull = full != null;
           final boolean includeState = state != null && state;
@@ -153,29 +249,28 @@ public class SupervisorResource
                               .withDetailedState(theState.get().toString())
                               .withHealthy(theState.get().isHealthy());
                   }
-                  if (includeFull) {
-                    Optional<SupervisorSpec> theSpec = manager.getSupervisorSpec(x);
-                    if (theSpec.isPresent()) {
-                      theBuilder.withSpec(manager.getSupervisorSpec(x).get());
+                  Optional<SupervisorSpec> theSpec = manager.getSupervisorSpec(x);
+                  if (theSpec.isPresent()) {
+                    final SupervisorSpec spec = theSpec.get();
+                    theBuilder.withDataSource(spec.getDataSources().stream().findFirst().orElse(null));
+                    if (includeFull) {
+                      theBuilder.withSpec(spec);
                     }
-                  }
-                  if (includeSystem) {
-                    Optional<SupervisorSpec> theSpec = manager.getSupervisorSpec(x);
-                    if (theSpec.isPresent()) {
+                    if (includeSystem) {
                       try {
                         // serializing SupervisorSpec here, so that callers of `druid/indexer/v1/supervisor?system`
                         // which are outside the overlord process can deserialize the response and get a json
                         // payload of SupervisorSpec object when they don't have guice bindings for all the fields
                         // for example, broker does not have bindings for all fields of `KafkaSupervisorSpec` or
                         // `KinesisSupervisorSpec`
-                        theBuilder.withSpecString(objectMapper.writeValueAsString(manager.getSupervisorSpec(x).get()));
+                        theBuilder.withSpecString(objectMapper.writeValueAsString(spec));
                       }
                       catch (JsonProcessingException e) {
                         throw new RuntimeException(e);
                       }
-                      theBuilder.withType(manager.getSupervisorSpec(x).get().getType())
-                                .withSource(manager.getSupervisorSpec(x).get().getSource())
-                                .withSuspended(manager.getSupervisorSpec(x).get().isSuspended());
+                      theBuilder.withType(spec.getType())
+                                .withSource(spec.getSource())
+                                .withSuspended(spec.isSuspended());
                     }
                   }
                   return theBuilder.build();
@@ -337,6 +432,54 @@ public class SupervisorResource
     return terminate(id);
   }
 
+  /**
+   * This method will immediately try to handoff the list of task group ids for the given supervisor.
+   * This is a best effort API and makes no guarantees of execution, e.g. if a non-existent task group id
+   * is passed to it, the API call will still suceced.
+   */
+  @POST
+  @Path("/{id}/taskGroups/handoff")
+  @Consumes(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON)
+  @ResourceFilters(SupervisorResourceFilter.class)
+  public Response handoffTaskGroups(
+      @PathParam("id") final String id,
+      @Nonnull final HandoffTaskGroupsRequest handoffTaskGroupsRequest
+  )
+  {
+    List<Integer> taskGroupIds = handoffTaskGroupsRequest.getTaskGroupIds();
+    if (CollectionUtils.isNullOrEmpty(taskGroupIds)) {
+      return Response.status(Response.Status.BAD_REQUEST)
+                     .entity(ImmutableMap.of("error", "List of task groups to handoff can't be empty"))
+                     .build();
+
+    }
+    return asLeaderWithSupervisorManager(
+        manager -> {
+          try {
+            if (manager.handoffTaskGroupsEarly(id, taskGroupIds)) {
+              return Response.status(Response.Status.ACCEPTED).build();
+            } else {
+              return Response.status(Response.Status.NOT_FOUND)
+                             .entity(ImmutableMap.of("error", StringUtils.format("Supervisor was not found [%s]", id)))
+                             .build();
+            }
+          }
+          catch (NotImplementedException e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                           .entity(ImmutableMap.of(
+                               "error",
+                               StringUtils.format(
+                                   "Supervisor [%s] does not support early handoff",
+                                   id
+                               )
+                           ))
+                           .build();
+          }
+        }
+    );
+  }
+
   @POST
   @Path("/{id}/terminate")
   @Produces(MediaType.APPLICATION_JSON)
@@ -382,7 +525,8 @@ public class SupervisorResource
           Set<String> authorizedSupervisorIds = filterAuthorizedSupervisorIds(
               req,
               manager,
-              manager.getSupervisorIds()
+              manager.getSupervisorIds(),
+              AuthorizationUtils.DATASOURCE_WRITE_RA_GENERATOR
           );
 
           for (final String supervisorId : authorizedSupervisorIds) {
@@ -391,6 +535,31 @@ public class SupervisorResource
 
           return Response.ok(ImmutableMap.of("status", "success")).build();
         }
+    );
+  }
+
+  @POST
+  @Path("/{id}/autoscaler/simulate")
+  @Consumes(MediaType.APPLICATION_JSON)
+  @Produces(MediaType.APPLICATION_JSON)
+  @ResourceFilters(SupervisorResourceFilter.class)
+  public Response simulateAutoscaling(
+      @PathParam("id") String supervisorId,
+      CostBasedAutoScalerConfig autoScalerConfig,
+      @QueryParam("maxProcessingRatePerTask") int maxProcessingRatePerTask,
+      @QueryParam("currentTaskCount") Integer currentTaskCount,
+      @Context HttpServletRequest request
+  )
+  {
+    return asLeaderWithSupervisorManager(
+        manager -> Response.ok(
+            manager.simulateAutoscaling(
+                supervisorId,
+                autoScalerConfig,
+                maxProcessingRatePerTask,
+                currentTaskCount
+            )
+        ).build()
     );
   }
 
@@ -416,12 +585,38 @@ public class SupervisorResource
   @Produces(MediaType.APPLICATION_JSON)
   public Response specGetHistory(
       @Context final HttpServletRequest req,
-      @PathParam("id") final String id
+      @PathParam("id") final String id,
+      @QueryParam("count") final Integer count
   )
   {
+    if (count != null && count <= 0) {
+      return Response.status(Response.Status.BAD_REQUEST)
+                     .entity(ImmutableMap.of("error",
+                                             StringUtils.format(
+                                                 "Count must be greater than zero if set (count was %d)",
+                                                 count
+                                             )
+                     ))
+                     .build();
+    }
+
     return asLeaderWithSupervisorManager(
         manager -> {
-          List<VersionedSupervisorSpec> historyForId = manager.getSupervisorHistoryForId(id);
+          List<VersionedSupervisorSpec> historyForId;
+          try {
+            historyForId = manager.getSupervisorHistoryForId(id, count);
+          }
+          catch (IllegalArgumentException e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                           .entity(
+                               ImmutableMap.of(
+                                   "error",
+                                   e.getMessage()
+                               )
+                           )
+                           .build();
+          }
+
           if (!historyForId.isEmpty()) {
             final List<VersionedSupervisorSpec> authorizedHistoryForId =
                 Lists.newArrayList(
@@ -432,7 +627,7 @@ public class SupervisorResource
                         authorizerMapper
                     )
                 );
-            if (authorizedHistoryForId.size() > 0) {
+            if (!authorizedHistoryForId.isEmpty()) {
               return Response.ok(authorizedHistoryForId).build();
             }
           }
@@ -456,13 +651,78 @@ public class SupervisorResource
   @ResourceFilters(SupervisorResourceFilter.class)
   public Response reset(@PathParam("id") final String id)
   {
+    return handleResetRequest(id, null);
+  }
+
+  @POST
+  @Path("/{id}/resetOffsets")
+  @Produces(MediaType.APPLICATION_JSON)
+  @Consumes(MediaType.APPLICATION_JSON)
+  @ResourceFilters(SupervisorResourceFilter.class)
+  public Response resetOffsets(
+      @PathParam("id") final String id,
+      final DataSourceMetadata resetDataSourceMetadata
+  )
+  {
+    return handleResetRequest(id, resetDataSourceMetadata);
+  }
+
+  private Response handleResetRequest(
+      final String id,
+      @Nullable final DataSourceMetadata resetDataSourceMetadata
+  )
+  {
     return asLeaderWithSupervisorManager(
         manager -> {
-          if (manager.resetSupervisor(id, null)) {
+          if (manager.resetSupervisor(id, resetDataSourceMetadata)) {
             return Response.ok(ImmutableMap.of("id", id)).build();
           } else {
             return Response.status(Response.Status.NOT_FOUND)
                            .entity(ImmutableMap.of("error", StringUtils.format("[%s] does not exist", id)))
+                           .build();
+          }
+        }
+    );
+  }
+
+  @POST
+  @Path("/{id}/resetToLatestAndBackfill")
+  @Produces(MediaType.APPLICATION_JSON)
+  @ResourceFilters(SupervisorResourceFilter.class)
+  public Response resetToLatestAndBackfill(
+      @PathParam("id") final String id,
+      @QueryParam("backfillTaskCount") @Nullable final Integer backfillTaskCount
+  )
+  {
+    return handleResetToLatestAndBackfill(id, backfillTaskCount);
+  }
+
+  private Response handleResetToLatestAndBackfill(final String id, @Nullable final Integer backfillTaskCount)
+  {
+    if (backfillTaskCount != null && backfillTaskCount < 1) {
+      return Response.status(Response.Status.BAD_REQUEST)
+                     .entity(ImmutableMap.of("error", "backfillTaskCount must be a positive integer"))
+                     .build();
+    }
+    return asLeaderWithSupervisorManager(
+        manager -> {
+          if (!manager.getSupervisorIds().contains(id)) {
+            return Response.status(Response.Status.NOT_FOUND)
+                           .entity(ImmutableMap.of("error", StringUtils.format("[%s] does not exist", id)))
+                           .build();
+          }
+          try {
+            Map<String, Object> result = manager.resetToLatestAndBackfill(id, backfillTaskCount);
+            return Response.ok(result).build();
+          }
+          catch (IllegalArgumentException e) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                           .entity(ImmutableMap.of("error", e.getMessage()))
+                           .build();
+          }
+          catch (Exception e) {
+            return Response.serverError()
+                           .entity(ImmutableMap.of("error", e.getMessage()))
                            .build();
           }
         }
@@ -483,7 +743,8 @@ public class SupervisorResource
   private Set<String> filterAuthorizedSupervisorIds(
       final HttpServletRequest req,
       SupervisorManager manager,
-      Collection<String> supervisorIds
+      Collection<String> supervisorIds,
+      Function<String, ResourceAction> authorizationFn
   )
   {
     Function<String, Iterable<ResourceAction>> raGenerator = supervisorId -> {
@@ -491,7 +752,7 @@ public class SupervisorResource
       if (supervisorSpecOptional.isPresent()) {
         return Iterables.transform(
             supervisorSpecOptional.get().getDataSources(),
-            AuthorizationUtils.DATASOURCE_WRITE_RA_GENERATOR
+            authorizationFn
         );
       } else {
         return null;
@@ -541,7 +802,8 @@ public class SupervisorResource
           Set<String> authorizedSupervisorIds = filterAuthorizedSupervisorIds(
               req,
               manager,
-              manager.getSupervisorIds()
+              manager.getSupervisorIds(),
+              AuthorizationUtils.DATASOURCE_WRITE_RA_GENERATOR
           );
 
           for (final String supervisorId : authorizedSupervisorIds) {
@@ -551,5 +813,23 @@ public class SupervisorResource
           return Response.ok(ImmutableMap.of("status", "success")).build();
         }
     );
+  }
+
+  public static class HandoffTaskGroupsRequest
+  {
+
+    private final List<Integer> taskGroupIds;
+
+    @JsonCreator
+    public HandoffTaskGroupsRequest(@JsonProperty("taskGroupIds") List<Integer> taskGroupIds)
+    {
+      this.taskGroupIds = taskGroupIds;
+    }
+
+    @JsonProperty
+    public List<Integer> getTaskGroupIds()
+    {
+      return taskGroupIds;
+    }
   }
 }

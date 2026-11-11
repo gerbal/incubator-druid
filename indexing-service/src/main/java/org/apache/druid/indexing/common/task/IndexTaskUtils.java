@@ -20,94 +20,24 @@
 package org.apache.druid.indexing.common.task;
 
 import org.apache.druid.indexer.TaskStatus;
+import org.apache.druid.indexing.common.actions.TaskActionToolbox;
+import org.apache.druid.indexing.overlord.SegmentPublishResult;
+import org.apache.druid.indexing.seekablestream.SeekableStreamIndexTask;
 import org.apache.druid.java.util.common.DateTimes;
-import org.apache.druid.java.util.common.parsers.ParseException;
+import org.apache.druid.java.util.emitter.service.SegmentMetadataEvent;
+import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.java.util.emitter.service.ServiceMetricEvent;
+import org.apache.druid.metadata.PendingSegmentRecord;
 import org.apache.druid.query.DruidMetrics;
-import org.apache.druid.segment.incremental.ParseExceptionReport;
-import org.apache.druid.server.security.Access;
-import org.apache.druid.server.security.Action;
-import org.apache.druid.server.security.AuthorizationUtils;
-import org.apache.druid.server.security.AuthorizerMapper;
-import org.apache.druid.server.security.ForbiddenException;
-import org.apache.druid.server.security.Resource;
-import org.apache.druid.server.security.ResourceAction;
-import org.apache.druid.server.security.ResourceType;
-import org.apache.druid.utils.CircularBuffer;
-import org.joda.time.DateTime;
+import org.apache.druid.segment.realtime.appenderator.SegmentIdWithShardSpec;
+import org.apache.druid.timeline.DataSegment;
 
-import javax.annotation.Nullable;
-import javax.servlet.http.HttpServletRequest;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Collection;
 import java.util.Map;
+import java.util.Objects;
 
 public class IndexTaskUtils
 {
-  @Nullable
-  public static List<String> getMessagesFromSavedParseExceptions(
-      CircularBuffer<ParseException> savedParseExceptions,
-      boolean includeTimeOfException
-  )
-  {
-    if (savedParseExceptions == null) {
-      return null;
-    }
-
-    List<String> events = new ArrayList<>();
-    for (int i = 0; i < savedParseExceptions.size(); i++) {
-      if (includeTimeOfException) {
-        DateTime timeOfException = DateTimes.utc(savedParseExceptions.getLatest(i).getTimeOfExceptionMillis());
-        events.add(timeOfException + ", " + savedParseExceptions.getLatest(i).getMessage());
-      } else {
-        events.add(savedParseExceptions.getLatest(i).getMessage());
-      }
-    }
-
-    return events;
-  }
-
-  @Nullable
-  public static List<ParseExceptionReport> getReportListFromSavedParseExceptions(
-      CircularBuffer<ParseExceptionReport> savedParseExceptionReports
-  )
-  {
-    if (savedParseExceptionReports == null) {
-      return null;
-    }
-    List<ParseExceptionReport> reports = new ArrayList<>();
-    for (int i = 0; i < savedParseExceptionReports.size(); i++) {
-      reports.add(savedParseExceptionReports.getLatest(i));
-    }
-
-    return reports;
-  }
-
-  /**
-   * Authorizes action to be performed on a task's datasource
-   *
-   * @return authorization result
-   */
-  public static Access datasourceAuthorizationCheck(
-      final HttpServletRequest req,
-      Action action,
-      String datasource,
-      AuthorizerMapper authorizerMapper
-  )
-  {
-    ResourceAction resourceAction = new ResourceAction(
-        new Resource(datasource, ResourceType.DATASOURCE),
-        action
-    );
-
-    Access access = AuthorizationUtils.authorizeResourceAction(req, resourceAction, authorizerMapper);
-    if (!access.isAllowed()) {
-      throw new ForbiddenException(access.toString());
-    }
-
-    return access;
-  }
-
   public static void setTaskDimensions(final ServiceMetricEvent.Builder metricBuilder, final Task task)
   {
     metricBuilder.setDimension(DruidMetrics.TASK_ID, task.getId());
@@ -117,6 +47,7 @@ public class IndexTaskUtils
         DruidMetrics.TAGS,
         task.<Map<String, Object>>getContextValue(DruidMetrics.TAGS)
     );
+    metricBuilder.setDimensionIfNotNull(DruidMetrics.GROUP_ID, task.getGroupId());
   }
 
   public static void setTaskDimensions(final ServiceMetricEvent.Builder metricBuilder, final AbstractTask task)
@@ -129,6 +60,7 @@ public class IndexTaskUtils
         DruidMetrics.TAGS,
         task.<Map<String, Object>>getContextValue(DruidMetrics.TAGS)
     );
+    metricBuilder.setDimensionIfNotNull(DruidMetrics.GROUP_ID, task.getGroupId());
   }
 
   public static void setTaskStatusDimensions(
@@ -138,5 +70,103 @@ public class IndexTaskUtils
   {
     metricBuilder.setDimension(DruidMetrics.TASK_ID, taskStatus.getId());
     metricBuilder.setDimension(DruidMetrics.TASK_STATUS, taskStatus.getStatusCode().toString());
+
+    final String errorMsg = taskStatus.getErrorMsg();
+    if (errorMsg != null && !errorMsg.isEmpty()) {
+      final String statusDescription = errorMsg.length() > 100 ? errorMsg.substring(0, 100) : errorMsg;
+      metricBuilder.setDimension(DruidMetrics.DESCRIPTION, statusDescription);
+    }
+  }
+
+  public static void setSegmentDimensions(
+      ServiceMetricEvent.Builder metricBuilder,
+      DataSegment segment
+  )
+  {
+    final String partitionType = segment.getShardSpec() == null ? null : segment.getShardSpec().getType();
+    metricBuilder.setDimension(DruidMetrics.PARTITIONING_TYPE, partitionType);
+    metricBuilder.setDimension(DruidMetrics.INTERVAL, segment.getInterval().toString());
+  }
+
+  public static void emitSegmentPublishMetrics(
+      SegmentPublishResult publishResult,
+      Task task,
+      TaskActionToolbox toolbox
+  )
+  {
+    final ServiceMetricEvent.Builder metricBuilder = new ServiceMetricEvent.Builder();
+    IndexTaskUtils.setTaskDimensions(metricBuilder, task);
+
+    if (publishResult.isSuccess()) {
+      toolbox.getEmitter().emit(metricBuilder.setMetric("segment/txn/success", 1));
+      for (DataSegment segment : publishResult.getSegments()) {
+        IndexTaskUtils.setSegmentDimensions(metricBuilder, segment);
+        toolbox.getEmitter().emit(metricBuilder.setMetric("segment/added/bytes", segment.getSize()));
+        toolbox.getEmitter().emit(SegmentMetadataEvent.create(segment, DateTimes.nowUtc()));
+      }
+    } else {
+      toolbox.getEmitter().emit(metricBuilder.setMetric("segment/txn/failure", 1));
+    }
+  }
+
+  /**
+   * Emits the metric {@code segment/allocated/count}.
+   */
+  public static void emitSegmentAllocateMetric(SegmentIdWithShardSpec allocatedId, Task task, ServiceEmitter emitter)
+  {
+    final ServiceMetricEvent.Builder metricBuilder = new ServiceMetricEvent.Builder();
+    IndexTaskUtils.setTaskDimensions(metricBuilder, task);
+    if (task instanceof SeekableStreamIndexTask<?, ?, ?>) {
+      metricBuilder.setDimension(
+          DruidMetrics.SUPERVISOR_ID,
+          ((SeekableStreamIndexTask<?, ?, ?>) task).getSupervisorId()
+      );
+    }
+    metricBuilder.setDimension(DruidMetrics.ID, allocatedId.toString());
+    emitter.emit(metricBuilder.setMetric("segment/allocated/count", 1));
+  }
+
+  /**
+   * Gets total row count of the given segments. Legacy segments do not have the
+   * row count populated in the metadata and thus do not contribute to the row
+   * count.
+   */
+  public static long getTotalRowCount(Collection<DataSegment> segments)
+  {
+    return segments
+        .stream()
+        .map(DataSegment::getTotalRows)
+        .filter(Objects::nonNull)
+        .mapToLong(Integer::longValue)
+        .sum();
+  }
+
+  /**
+   * Counts published segments whose row count exceeds {@code maxRowsPerSegment * oversizedRatio}.
+   * Segments without {@link DataSegment#getTotalRows()} populated are ignored.
+   */
+  public static long getOversizedSegments(Collection<DataSegment> segments, int maxRowsPerSegment, double oversizedRatio)
+  {
+    return segments.stream()
+        .map(DataSegment::getTotalRows)
+        .filter(Objects::nonNull)
+        .filter(rowCount -> rowCount > maxRowsPerSegment * oversizedRatio)
+        .count();
+  }
+
+  /**
+   * Adds the upgraded pending segment's {@code interval} and {@code version} to a metric builder so that every
+   * segment-upgrade metric can be sliced by the specific segment being re-announced. Mirrors
+   * {@code IndexTaskUtils.setSegmentDimensions}, which serves the same purpose for {@code DataSegment}s.
+   */
+  public static ServiceMetricEvent.Builder setPendingSegmentDimensions(
+      ServiceMetricEvent.Builder metricBuilder,
+      PendingSegmentRecord pendingSegmentRecord
+  )
+  {
+    final SegmentIdWithShardSpec id = pendingSegmentRecord.getId();
+    return metricBuilder
+        .setDimension(DruidMetrics.INTERVAL, id.getInterval().toString())
+        .setDimension(DruidMetrics.VERSION, id.getVersion());
   }
 }

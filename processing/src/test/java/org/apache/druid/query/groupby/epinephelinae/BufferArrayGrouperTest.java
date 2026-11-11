@@ -22,7 +22,6 @@ package org.apache.druid.query.groupby.epinephelinae;
 import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.data.input.MapBasedRow;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.query.aggregation.AggregatorAdapters;
@@ -30,21 +29,14 @@ import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
 import org.apache.druid.query.aggregation.LongSumAggregatorFactory;
 import org.apache.druid.query.groupby.epinephelinae.Grouper.Entry;
-import org.junit.Assert;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
 import java.util.List;
 
 public class BufferArrayGrouperTest
 {
-  @BeforeClass
-  public static void setUpStatic()
-  {
-    NullHandling.initializeForTests();
-  }
-
   @Test
   public void testAggregate()
   {
@@ -103,18 +95,13 @@ public class BufferArrayGrouperTest
 
     final long[] requiredSizes;
 
-    if (NullHandling.sqlCompatible()) {
-      // We need additional space to store nulls.
-      requiredSizes = new long[]{19, 101, 19595788279L, -1};
-    } else {
-      requiredSizes = new long[]{17, 90, 17448304632L, -1};
-    }
+    requiredSizes = new long[]{19, 101, 19595788279L, -1};
 
     for (int i = 0; i < cardinalityArray.length; i++) {
-      Assert.assertEquals(
-          StringUtils.format("cardinality[%d]", cardinalityArray[i]),
+      Assertions.assertEquals(
           requiredSizes[i],
-          BufferArrayGrouper.requiredBufferCapacity(cardinalityArray[i], aggregatorFactories)
+          BufferArrayGrouper.requiredBufferCapacity(cardinalityArray[i], aggregatorFactories),
+          StringUtils.format("cardinality[%d]", cardinalityArray[i])
       );
     }
   }

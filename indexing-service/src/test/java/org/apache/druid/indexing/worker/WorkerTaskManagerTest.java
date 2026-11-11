@@ -20,16 +20,18 @@
 package org.apache.druid.indexing.worker;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import org.apache.druid.client.indexing.NoopOverlordClient;
-import org.apache.druid.discovery.DruidLeaderClient;
+import com.google.common.util.concurrent.Futures;
+import com.google.common.util.concurrent.ListenableFuture;
+import io.netty.handler.codec.http.DefaultHttpResponse;
+import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.handler.codec.http.HttpVersion;
+import org.apache.druid.client.coordinator.NoopCoordinatorClient;
 import org.apache.druid.indexer.TaskLocation;
 import org.apache.druid.indexer.TaskState;
 import org.apache.druid.indexer.TaskStatus;
 import org.apache.druid.indexing.common.SegmentCacheManagerFactory;
-import org.apache.druid.indexing.common.TaskStorageDirTracker;
 import org.apache.druid.indexing.common.TaskToolbox;
 import org.apache.druid.indexing.common.TaskToolboxFactory;
 import org.apache.druid.indexing.common.TestTasks;
@@ -37,38 +39,58 @@ import org.apache.druid.indexing.common.TestUtils;
 import org.apache.druid.indexing.common.actions.TaskActionClient;
 import org.apache.druid.indexing.common.actions.TaskActionClientFactory;
 import org.apache.druid.indexing.common.config.TaskConfig;
+import org.apache.druid.indexing.common.config.TaskConfigBuilder;
 import org.apache.druid.indexing.common.task.NoopTask;
 import org.apache.druid.indexing.common.task.NoopTestTaskReportFileWriter;
 import org.apache.druid.indexing.common.task.Task;
 import org.apache.druid.indexing.common.task.Tasks;
 import org.apache.druid.indexing.common.task.TestAppenderatorsManager;
 import org.apache.druid.indexing.overlord.TestTaskRunner;
+import org.apache.druid.indexing.worker.config.WorkerConfig;
 import org.apache.druid.java.util.common.FileUtils;
+import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.http.client.response.StringFullResponseHolder;
+import org.apache.druid.query.policy.NoopPolicyEnforcer;
+import org.apache.druid.rpc.HttpResponseException;
+import org.apache.druid.rpc.indexing.OverlordClient;
 import org.apache.druid.segment.IndexIO;
 import org.apache.druid.segment.IndexMergerV9Factory;
+import org.apache.druid.segment.TestIndex;
 import org.apache.druid.segment.handoff.SegmentHandoffNotifierFactory;
 import org.apache.druid.segment.join.NoopJoinableFactory;
-import org.apache.druid.segment.realtime.firehose.NoopChatHandlerProvider;
+import org.apache.druid.segment.metadata.CentralizedDatasourceSchemaConfig;
+import org.apache.druid.segment.realtime.ChatHandlerProvider;
 import org.apache.druid.server.coordination.ChangeRequestHistory;
 import org.apache.druid.server.coordination.ChangeRequestsSnapshot;
 import org.apache.druid.server.security.AuthTestUtils;
+import org.apache.druid.utils.JvmUtils;
 import org.easymock.EasyMock;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.Parameter;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.List;
+import java.util.Collections;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
 
 /**
+ *
  */
-@RunWith(Parameterized.class)
+@ParameterizedClass
+@MethodSource("getParameters")
 public class WorkerTaskManagerTest
 {
   private final TaskLocation location = TaskLocation.create("localhost", 1, 2);
@@ -77,78 +99,65 @@ public class WorkerTaskManagerTest
   private final IndexMergerV9Factory indexMergerV9Factory;
   private final IndexIO indexIO;
 
-  private final boolean restoreTasksOnRestart;
+  @TempDir
+  private File tempDir;
 
-  private final boolean useMultipleBaseTaskDirPaths;
+  @Parameter(0)
+  public boolean restoreTasksOnRestart;
 
   private WorkerTaskManager workerTaskManager;
+  private OverlordClient overlordClient;
 
-  public WorkerTaskManagerTest(boolean restoreTasksOnRestart, boolean useMultipleBaseTaskDirPaths)
+  public WorkerTaskManagerTest()
   {
     testUtils = new TestUtils();
     jsonMapper = testUtils.getTestObjectMapper();
     TestTasks.registerSubtypes(jsonMapper);
     indexMergerV9Factory = testUtils.getIndexMergerV9Factory();
     indexIO = testUtils.getTestIndexIO();
-    this.restoreTasksOnRestart = restoreTasksOnRestart;
-    this.useMultipleBaseTaskDirPaths = useMultipleBaseTaskDirPaths;
   }
 
-  @Parameterized.Parameters(name = "restoreTasksOnRestart = {0}, useMultipleBaseTaskDirPaths = {1}")
   public static Collection<Object[]> getParameters()
   {
-    Object[][] parameters = new Object[][]{
-        {false, false},
-        {true, false},
-        {false, true},
-        {true, true}
-    };
+    Object[][] parameters = new Object[][]{{false}, {true}};
 
     return Arrays.asList(parameters);
   }
 
   private WorkerTaskManager createWorkerTaskManager()
   {
-    List<String> baseTaskDirPaths = null;
-    if (useMultipleBaseTaskDirPaths) {
-      baseTaskDirPaths = ImmutableList.of(
-          FileUtils.createTempDir().toString(),
-          FileUtils.createTempDir().toString()
-      );
-    }
-    TaskConfig taskConfig = new TaskConfig(
-        FileUtils.createTempDir().toString(),
-        null,
-        null,
-        0,
-        null,
-        restoreTasksOnRestart,
-        null,
-        null,
-        null,
-        false,
-        false,
-        TaskConfig.BATCH_PROCESSING_MODE_DEFAULT.name(),
-        null,
-        false,
-        baseTaskDirPaths
-    );
-    TaskStorageDirTracker dirTracker = new TaskStorageDirTracker(taskConfig);
+    return createWorkerTaskManager(tempDir, new WorkerConfig());
+  }
+
+  private WorkerTaskManager createWorkerTaskManager(File baseDir)
+  {
+    return createWorkerTaskManager(baseDir, new WorkerConfig());
+  }
+
+  private WorkerTaskManager createWorkerTaskManager(File baseDir, WorkerConfig workerConfig)
+  {
+    TaskConfig taskConfig = new TaskConfigBuilder()
+        .setBaseDir(baseDir.toString())
+        .setRestoreTasksOnRestart(restoreTasksOnRestart)
+        .build();
+
     TaskActionClientFactory taskActionClientFactory = EasyMock.createNiceMock(TaskActionClientFactory.class);
     TaskActionClient taskActionClient = EasyMock.createNiceMock(TaskActionClient.class);
     EasyMock.expect(taskActionClientFactory.create(EasyMock.anyObject())).andReturn(taskActionClient).anyTimes();
     SegmentHandoffNotifierFactory notifierFactory = EasyMock.createNiceMock(SegmentHandoffNotifierFactory.class);
     EasyMock.replay(taskActionClientFactory, taskActionClient, notifierFactory);
+    overlordClient = EasyMock.createMock(OverlordClient.class);
 
     return new WorkerTaskManager(
         jsonMapper,
         new TestTaskRunner(
             new TaskToolboxFactory(
+                null,
                 taskConfig,
                 null,
                 taskActionClientFactory,
                 null,
-                null,
+                NoopPolicyEnforcer.instance(),
                 null,
                 null,
                 null,
@@ -157,9 +166,10 @@ public class WorkerTaskManagerTest
                 notifierFactory,
                 null,
                 null,
+                null,
                 NoopJoinableFactory.INSTANCE,
                 null,
-                new SegmentCacheManagerFactory(jsonMapper),
+                SegmentCacheManagerFactory.createWithOwnedPool(TestIndex.INDEX_IO, jsonMapper),
                 jsonMapper,
                 indexIO,
                 null,
@@ -170,104 +180,94 @@ public class WorkerTaskManagerTest
                 null,
                 null,
                 null,
+                null,
                 new NoopTestTaskReportFileWriter(),
                 null,
                 AuthTestUtils.TEST_AUTHORIZER_MAPPER,
-                new NoopChatHandlerProvider(),
+                new ChatHandlerProvider(),
                 testUtils.getRowIngestionMetersFactory(),
                 new TestAppenderatorsManager(),
-                new NoopOverlordClient(),
-                null,
+                overlordClient,
+                new NoopCoordinatorClient(),
                 null,
                 null,
                 null,
                 "1",
-                dirTracker
+                CentralizedDatasourceSchemaConfig.create(),
+                JvmUtils.getRuntimeInfo()
             ),
             taskConfig,
             location
         ),
-        EasyMock.createNiceMock(DruidLeaderClient.class),
-        dirTracker
-    )
-    {
-      @Override
-      protected void taskStarted(String taskId)
-      {
-      }
-
-      @Override
-      protected void taskAnnouncementChanged(TaskAnnouncement announcement)
-      {
-      }
-    };
+        taskConfig,
+        workerConfig,
+        overlordClient
+    );
   }
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
     workerTaskManager = createWorkerTaskManager();
   }
 
-  @After
+  @AfterEach
   public void tearDown() throws Exception
   {
     workerTaskManager.stop();
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testTaskRun() throws Exception
   {
+    EasyMock.expect(overlordClient.withRetryPolicy(EasyMock.anyObject())).andReturn(overlordClient).anyTimes();
+    EasyMock.replay(overlordClient);
     Task task1 = createNoopTask("task1-assigned-via-assign-dir");
     Task task2 = createNoopTask("task2-completed-already");
     Task task3 = createNoopTask("task3-assigned-explicitly");
 
-    for (File completedTaskDir : workerTaskManager.getCompletedTaskDirs()) {
-      FileUtils.mkdirp(completedTaskDir);
-    }
-    for (File assignedTaskDir : workerTaskManager.getAssignedTaskDirs()) {
-      FileUtils.mkdirp(assignedTaskDir);
-    }
+    FileUtils.mkdirp(workerTaskManager.getAssignedTaskDir());
+    FileUtils.mkdirp(workerTaskManager.getCompletedTaskDir());
 
     // create a task in assigned task directory, to simulate MM shutdown right after a task was assigned.
-    jsonMapper.writeValue(workerTaskManager.getAssignedTaskFile(task1.getId()), task1);
+    jsonMapper.writeValue(new File(workerTaskManager.getAssignedTaskDir(), task1.getId()), task1);
 
     // simulate an already completed task
     jsonMapper.writeValue(
-        workerTaskManager.getCompletedTaskFile(task2.getId()),
+        new File(workerTaskManager.getCompletedTaskDir(), task2.getId()),
         TaskAnnouncement.create(
             task2,
             TaskStatus.success(task2.getId()),
             location
         )
     );
-
     workerTaskManager.start();
 
-    Assert.assertTrue(workerTaskManager.getCompletedTasks().get(task2.getId()).getTaskStatus().isSuccess());
+    Assertions.assertTrue(workerTaskManager.getCompletedTasks().get(task2.getId()).getTaskStatus().isSuccess());
 
     while (!workerTaskManager.getCompletedTasks().containsKey(task1.getId())) {
       Thread.sleep(100);
     }
-    Assert.assertTrue(workerTaskManager.getCompletedTasks().get(task1.getId()).getTaskStatus().isSuccess());
-    Assert.assertTrue(workerTaskManager.getCompletedTaskFile(task1.getId()).exists());
-    Assert.assertFalse(workerTaskManager.getAssignedTaskFile(task1.getId()).exists());
+    Assertions.assertTrue(workerTaskManager.getCompletedTasks().get(task1.getId()).getTaskStatus().isSuccess());
+    Assertions.assertTrue(new File(workerTaskManager.getCompletedTaskDir(), task1.getId()).exists());
+    Assertions.assertFalse(new File(workerTaskManager.getAssignedTaskDir(), task1.getId()).exists());
 
     ChangeRequestsSnapshot<WorkerHistoryItem> baseHistory = workerTaskManager
         .getChangesSince(new ChangeRequestHistory.Counter(-1, 0))
         .get();
 
-    Assert.assertFalse(baseHistory.isResetCounter());
-    Assert.assertEquals(3, baseHistory.getRequests().size());
-    Assert.assertFalse(((WorkerHistoryItem.Metadata) baseHistory.getRequests().get(0)).isDisabled());
+    Assertions.assertFalse(baseHistory.isResetCounter());
+    Assertions.assertEquals(3, baseHistory.getRequests().size());
+    Assertions.assertFalse(((WorkerHistoryItem.Metadata) baseHistory.getRequests().get(0)).isDisabled());
 
     WorkerHistoryItem.TaskUpdate baseUpdate1 = (WorkerHistoryItem.TaskUpdate) baseHistory.getRequests().get(1);
     WorkerHistoryItem.TaskUpdate baseUpdate2 = (WorkerHistoryItem.TaskUpdate) baseHistory.getRequests().get(2);
 
-    Assert.assertTrue(baseUpdate1.getTaskAnnouncement().getTaskStatus().isSuccess());
-    Assert.assertTrue(baseUpdate2.getTaskAnnouncement().getTaskStatus().isSuccess());
+    Assertions.assertTrue(baseUpdate1.getTaskAnnouncement().getTaskStatus().isSuccess());
+    Assertions.assertTrue(baseUpdate2.getTaskAnnouncement().getTaskStatus().isSuccess());
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         ImmutableSet.of(task1.getId(), task2.getId()),
         ImmutableSet.of(
             baseUpdate1.getTaskAnnouncement().getTaskStatus().getId(),
@@ -282,40 +282,48 @@ public class WorkerTaskManagerTest
       Thread.sleep(100);
     }
 
-    Assert.assertTrue(workerTaskManager.getCompletedTasks().get(task3.getId()).getTaskStatus().isSuccess());
-    Assert.assertTrue(workerTaskManager.getCompletedTaskFile(task3.getId()).exists());
-    Assert.assertFalse(workerTaskManager.getAssignedTaskFile(task3.getId()).exists());
+    Assertions.assertTrue(workerTaskManager.getCompletedTasks().get(task3.getId()).getTaskStatus().isSuccess());
+    Assertions.assertTrue(new File(workerTaskManager.getCompletedTaskDir(), task3.getId()).exists());
+    Assertions.assertFalse(new File(workerTaskManager.getAssignedTaskDir(), task3.getId()).exists());
 
     ChangeRequestsSnapshot<WorkerHistoryItem> changes = workerTaskManager.getChangesSince(baseHistory.getCounter())
                                                                          .get();
-    Assert.assertFalse(changes.isResetCounter());
-    Assert.assertEquals(4, changes.getRequests().size());
+    Assertions.assertFalse(changes.isResetCounter());
+    Assertions.assertEquals(4, changes.getRequests().size());
 
     WorkerHistoryItem.TaskUpdate update1 = (WorkerHistoryItem.TaskUpdate) changes.getRequests().get(0);
-    Assert.assertEquals(task3.getId(), update1.getTaskAnnouncement().getTaskStatus().getId());
-    Assert.assertTrue(update1.getTaskAnnouncement().getTaskStatus().isRunnable());
-    Assert.assertNull(update1.getTaskAnnouncement().getTaskLocation().getHost());
+    Assertions.assertEquals(task3.getId(), update1.getTaskAnnouncement().getTaskStatus().getId());
+    Assertions.assertTrue(update1.getTaskAnnouncement().getTaskStatus().isRunnable());
+    Assertions.assertNull(update1.getTaskAnnouncement().getTaskLocation().getHost());
 
     WorkerHistoryItem.TaskUpdate update2 = (WorkerHistoryItem.TaskUpdate) changes.getRequests().get(1);
-    Assert.assertEquals(task3.getId(), update2.getTaskAnnouncement().getTaskStatus().getId());
-    Assert.assertTrue(update2.getTaskAnnouncement().getTaskStatus().isRunnable());
-    Assert.assertNull(update2.getTaskAnnouncement().getTaskLocation().getHost());
+    Assertions.assertEquals(task3.getId(), update2.getTaskAnnouncement().getTaskStatus().getId());
+    Assertions.assertTrue(update2.getTaskAnnouncement().getTaskStatus().isRunnable());
+    Assertions.assertNull(update2.getTaskAnnouncement().getTaskLocation().getHost());
 
     WorkerHistoryItem.TaskUpdate update3 = (WorkerHistoryItem.TaskUpdate) changes.getRequests().get(2);
-    Assert.assertEquals(task3.getId(), update3.getTaskAnnouncement().getTaskStatus().getId());
-    Assert.assertTrue(update3.getTaskAnnouncement().getTaskStatus().isRunnable());
-    Assert.assertNotNull(update3.getTaskAnnouncement().getTaskLocation().getHost());
+    Assertions.assertEquals(task3.getId(), update3.getTaskAnnouncement().getTaskStatus().getId());
+    Assertions.assertTrue(update3.getTaskAnnouncement().getTaskStatus().isRunnable());
+    Assertions.assertNotNull(update3.getTaskAnnouncement().getTaskLocation().getHost());
 
     WorkerHistoryItem.TaskUpdate update4 = (WorkerHistoryItem.TaskUpdate) changes.getRequests().get(3);
-    Assert.assertEquals(task3.getId(), update4.getTaskAnnouncement().getTaskStatus().getId());
-    Assert.assertTrue(update4.getTaskAnnouncement().getTaskStatus().isSuccess());
-    Assert.assertNotNull(update4.getTaskAnnouncement().getTaskLocation().getHost());
+    Assertions.assertEquals(task3.getId(), update4.getTaskAnnouncement().getTaskStatus().getId());
+    Assertions.assertTrue(update4.getTaskAnnouncement().getTaskStatus().isSuccess());
+    Assertions.assertNotNull(update4.getTaskAnnouncement().getTaskLocation().getHost());
   }
 
-  @Test(timeout = 30_000L)
+  @Test
+  public void testAssignTaskWithMaxLengthTaskId() throws Exception
+  {
+    workerTaskManager.start();
+    Assertions.assertDoesNotThrow(() -> workerTaskManager.assignTask(createNoopTask(StringUtils.repeat("x", 255))));
+  }
+
+  @Test
+  @Timeout(value = 30_000L, unit = TimeUnit.MILLISECONDS)
   public void testTaskStatusWhenTaskRunnerFutureThrowsException() throws Exception
   {
-    Task task = new NoopTask("id", null, null, 100, 0, null, null, ImmutableMap.of(Tasks.PRIORITY_KEY, 0))
+    Task task = new NoopTask("id", null, null, 100, 0, ImmutableMap.of(Tasks.PRIORITY_KEY, 0))
     {
       @Override
       public TaskStatus runTask(TaskToolbox toolbox)
@@ -329,20 +337,396 @@ public class WorkerTaskManagerTest
     Map<String, TaskAnnouncement> completeTasks;
     do {
       completeTasks = workerTaskManager.getCompletedTasks();
+      Thread.sleep(10);
     } while (completeTasks.isEmpty());
 
-    Assert.assertEquals(1, completeTasks.size());
+    Assertions.assertEquals(1, completeTasks.size());
     TaskAnnouncement announcement = completeTasks.get(task.getId());
-    Assert.assertNotNull(announcement);
-    Assert.assertEquals(TaskState.FAILED, announcement.getStatus());
-    Assert.assertEquals(
+    Assertions.assertNotNull(announcement);
+    Assertions.assertEquals(TaskState.FAILED, announcement.getStatus());
+    Assertions.assertEquals(
         "Failed to run task with an exception. See middleManager or indexer logs for more details.",
         announcement.getTaskStatus().getErrorMsg()
     );
   }
 
+  @Test
+  @Timeout(value = 30_000L, unit = TimeUnit.MILLISECONDS)
+  public void test_completedTasksCleanup_running() throws Exception
+  {
+    final Task task = setUpCompletedTasksCleanupTest();
+
+    EasyMock.expect(overlordClient.taskStatuses(Collections.singleton(task.getId())))
+            .andReturn(Futures.immediateFuture(ImmutableMap.of(task.getId(), TaskStatus.running(task.getId()))))
+            .once();
+    EasyMock.replay(overlordClient);
+
+    workerTaskManager.doCompletedTasksCleanup();
+    Assertions.assertEquals(1, workerTaskManager.getCompletedTasks().size());
+
+    EasyMock.verify(overlordClient);
+  }
+
+  @Test
+  @Timeout(value = 30_000L, unit = TimeUnit.MILLISECONDS)
+  public void test_completedTasksCleanup_noStatus() throws Exception
+  {
+    final Task task = setUpCompletedTasksCleanupTest();
+
+    EasyMock.expect(overlordClient.taskStatuses(Collections.singleton(task.getId())))
+            .andReturn(Futures.immediateFuture(Collections.emptyMap()))
+            .once();
+    EasyMock.replay(overlordClient);
+
+    // Missing status (empty map) means we clean up the task. The idea is that this means the Overlord has *never*
+    // heard of it, so we should forget about it.
+    workerTaskManager.doCompletedTasksCleanup();
+    Assertions.assertEquals(0, workerTaskManager.getCompletedTasks().size());
+
+    EasyMock.verify(overlordClient);
+  }
+
+  @Test
+  @Timeout(value = 30_000L, unit = TimeUnit.MILLISECONDS)
+  public void test_completedTasksCleanup_success() throws Exception
+  {
+    final Task task = setUpCompletedTasksCleanupTest();
+
+    EasyMock.expect(overlordClient.taskStatuses(Collections.singleton(task.getId())))
+            .andReturn(Futures.immediateFuture(ImmutableMap.of(task.getId(), TaskStatus.success(task.getId()))))
+            .once();
+    EasyMock.replay(overlordClient);
+
+    workerTaskManager.doCompletedTasksCleanup();
+    Assertions.assertEquals(0, workerTaskManager.getCompletedTasks().size());
+
+    EasyMock.verify(overlordClient);
+  }
+
+  @Test
+  @Timeout(value = 30_000L, unit = TimeUnit.MILLISECONDS)
+  public void test_completedTasksCleanup_404error() throws Exception
+  {
+    final Task task = setUpCompletedTasksCleanupTest();
+
+    EasyMock.expect(overlordClient.taskStatuses(Collections.singleton(task.getId())))
+            .andReturn(
+                Futures.immediateFailedFuture(
+                    new HttpResponseException(
+                        new StringFullResponseHolder(
+                            new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.NOT_FOUND),
+                            StandardCharsets.UTF_8
+                        )
+                    )
+                )
+            )
+            .once();
+    EasyMock.replay(overlordClient);
+
+    // Ending size zero, because 404 means we assume the Overlord does not have the taskStatuses API. In this case
+    // we remove all completed task statuses periodically regardless of Overlord confirmation.
+    workerTaskManager.doCompletedTasksCleanup();
+    Assertions.assertEquals(0, workerTaskManager.getCompletedTasks().size());
+
+    EasyMock.verify(overlordClient);
+  }
+
+  @Test
+  @Timeout(value = 30_000L, unit = TimeUnit.MILLISECONDS)
+  public void test_completedTasksCleanup_500error() throws Exception
+  {
+    final Task task = setUpCompletedTasksCleanupTest();
+
+    EasyMock.expect(overlordClient.taskStatuses(Collections.singleton(task.getId())))
+            .andReturn(
+                Futures.immediateFailedFuture(
+                    new HttpResponseException(
+                        new StringFullResponseHolder(
+                            new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.INTERNAL_SERVER_ERROR),
+                            StandardCharsets.UTF_8
+                        )
+                    )
+                )
+            )
+            .once();
+    EasyMock.replay(overlordClient);
+
+    // HTTP 500 is ignored and no cleanup happens.
+    workerTaskManager.doCompletedTasksCleanup();
+    Assertions.assertEquals(1, workerTaskManager.getCompletedTasks().size());
+
+    EasyMock.verify(overlordClient);
+  }
+
+  @Test
+  @Timeout(value = 30_000L, unit = TimeUnit.MILLISECONDS)
+  public void test_completedTasksCleanup_ioException() throws Exception
+  {
+    final Task task = setUpCompletedTasksCleanupTest();
+
+    EasyMock.expect(overlordClient.taskStatuses(Collections.singleton(task.getId())))
+            .andReturn(Futures.immediateFailedFuture(new IOException()))
+            .once();
+    EasyMock.replay(overlordClient);
+
+    // IOException is ignored and no cleanup happens.
+    workerTaskManager.doCompletedTasksCleanup();
+    Assertions.assertEquals(1, workerTaskManager.getCompletedTasks().size());
+
+    EasyMock.verify(overlordClient);
+  }
+
   private NoopTask createNoopTask(String id)
   {
-    return new NoopTask(id, null, null, 100, 0, null, null, ImmutableMap.of(Tasks.PRIORITY_KEY, 0));
+    return new NoopTask(id, null, null, 100, 0, ImmutableMap.of(Tasks.PRIORITY_KEY, 0));
+  }
+
+  private NoopTask createNoopTask(String id, String dataSource)
+  {
+    return new NoopTask(id, null, dataSource, 100, 0, ImmutableMap.of(Tasks.PRIORITY_KEY, 0));
+  }
+
+  private NoopTask createNoopFailingTask(String id, String dataSource)
+  {
+    return new NoopTask(id, null, dataSource, 100, 0, ImmutableMap.of(Tasks.PRIORITY_KEY, 0))
+    {
+      @Override
+      public TaskStatus runTask(TaskToolbox toolbox) throws Exception
+      {
+        Thread.sleep(getRunTime());
+        return TaskStatus.failure(getId(), "Failed to complete the task");
+      }
+    };
+  }
+
+  /**
+   * Start the {@link #workerTaskManager}, submit a {@link NoopTask}, wait for it to be complete. Common preamble
+   * for various tests of {@link WorkerTaskManager#doCompletedTasksCleanup()}.
+   */
+  private Task setUpCompletedTasksCleanupTest() throws Exception
+  {
+    EasyMock.expect(overlordClient.withRetryPolicy(EasyMock.anyObject())).andReturn(overlordClient).anyTimes();
+    EasyMock.replay(overlordClient);
+
+    final Task task = new NoopTask("id", null, null, 100, 0, ImmutableMap.of(Tasks.PRIORITY_KEY, 0));
+
+    // Scheduled scheduleCompletedTasksCleanup will not run, because initialDelay is 1 minute, which is longer than
+    // the 30-second timeout of this test case.
+    workerTaskManager.start();
+    workerTaskManager.assignTask(task);
+
+    Map<String, TaskAnnouncement> completeTasks;
+    do {
+      completeTasks = workerTaskManager.getCompletedTasks();
+      Thread.sleep(10);
+    } while (completeTasks.isEmpty());
+
+    Assertions.assertEquals(1, completeTasks.size());
+    TaskAnnouncement announcement = completeTasks.get(task.getId());
+    Assertions.assertNotNull(announcement);
+    Assertions.assertEquals(TaskState.SUCCESS, announcement.getStatus());
+
+    EasyMock.reset(overlordClient);
+    return task;
+  }
+
+  @Test
+  public void getWorkerTaskStatsTest() throws Exception
+  {
+    EasyMock.expect(overlordClient.withRetryPolicy(EasyMock.anyObject())).andReturn(overlordClient).anyTimes();
+    EasyMock.replay(overlordClient);
+
+    Task task1 = createNoopTask("task1", "wikipedia");
+    Task task2 = createNoopTask("task2", "wikipedia");
+    Task task3 = createNoopFailingTask("task3", "animals");
+
+    workerTaskManager.start();
+    // befor assigning tasks we should get no running tasks
+    Assertions.assertEquals(workerTaskManager.getWorkerRunningTasks().size(), 0L);
+
+    workerTaskManager.assignTask(task1);
+    workerTaskManager.assignTask(task2);
+    workerTaskManager.assignTask(task3);
+
+    Thread.sleep(25);
+    //should return all 3 tasks as running
+    Assertions.assertEquals(workerTaskManager.getWorkerRunningTasks(), ImmutableMap.of(
+        "wikipedia", 2L,
+        "animals", 1L
+    ));
+
+    Map<String, Long> runningTasks;
+    do {
+      runningTasks = workerTaskManager.getWorkerRunningTasks();
+      Thread.sleep(10);
+    } while (!runningTasks.isEmpty());
+
+    // When running tasks are empty all task should be reported as completed and
+    // one of the task for animals datasource should fail and other 2 tasks in
+    // the wikipedia datasource should succeed
+    Assertions.assertEquals(workerTaskManager.getWorkerCompletedTasks(), ImmutableMap.of(
+        "wikipedia", 2L,
+        "animals", 1L
+    ));
+    Assertions.assertEquals(workerTaskManager.getWorkerFailedTasks(), ImmutableMap.of(
+            "animals", 1L
+    ));
+    Assertions.assertEquals(workerTaskManager.getWorkerSuccessfulTasks(), ImmutableMap.of(
+            "wikipedia", 2L
+    ));
+    Assertions.assertEquals(workerTaskManager.getWorkerAssignedTasks().size(), 0L);
+  }
+
+  @Test
+  public void test_disabledState_persistsAcrossRestart() throws Exception
+  {
+    EasyMock.expect(overlordClient.withRetryPolicy(EasyMock.anyObject())).andReturn(overlordClient).anyTimes();
+    EasyMock.replay(overlordClient);
+
+    final File baseTaskDir = tempDir;
+
+    workerTaskManager = createWorkerTaskManager(baseTaskDir);
+    workerTaskManager.start();
+    Assertions.assertTrue(workerTaskManager.isWorkerEnabled());
+    workerTaskManager.workerDisabled();
+    Assertions.assertFalse(workerTaskManager.isWorkerEnabled());
+    Assertions.assertTrue(workerTaskManager.getStateFile().exists());
+    workerTaskManager.stop();
+
+    workerTaskManager = createWorkerTaskManager(baseTaskDir);
+    workerTaskManager.start();
+    Assertions.assertFalse(workerTaskManager.isWorkerEnabled());
+
+    final ChangeRequestsSnapshot<WorkerHistoryItem> history =
+        workerTaskManager.getChangesSince(new ChangeRequestHistory.Counter(-1, 0)).get();
+    Assertions.assertTrue(((WorkerHistoryItem.Metadata) history.getRequests().get(0)).isDisabled());
+  }
+
+  @Test
+  public void test_disabledState_reEnablePersistsAcrossRestart() throws Exception
+  {
+    EasyMock.expect(overlordClient.withRetryPolicy(EasyMock.anyObject())).andReturn(overlordClient).anyTimes();
+    EasyMock.replay(overlordClient);
+
+    final File baseTaskDir = tempDir;
+
+    workerTaskManager = createWorkerTaskManager(baseTaskDir);
+    workerTaskManager.start();
+    workerTaskManager.workerDisabled();
+    workerTaskManager.workerEnabled();
+    Assertions.assertTrue(workerTaskManager.isWorkerEnabled());
+    workerTaskManager.stop();
+
+    workerTaskManager = createWorkerTaskManager(baseTaskDir);
+    workerTaskManager.start();
+    Assertions.assertTrue(workerTaskManager.isWorkerEnabled());
+  }
+
+  @Test
+  public void test_disabledState_defaultsToEnabledWhenNoFile() throws Exception
+  {
+    EasyMock.expect(overlordClient.withRetryPolicy(EasyMock.anyObject())).andReturn(overlordClient).anyTimes();
+    EasyMock.replay(overlordClient);
+
+    workerTaskManager.start();
+    Assertions.assertTrue(workerTaskManager.isWorkerEnabled());
+  }
+
+  @Test
+  public void test_disabledState_malformedFileToleratedAndStartsEnabled() throws Exception
+  {
+    EasyMock.expect(overlordClient.withRetryPolicy(EasyMock.anyObject())).andReturn(overlordClient).anyTimes();
+    EasyMock.replay(overlordClient);
+
+    workerTaskManager = createWorkerTaskManager();
+    final File stateFile = workerTaskManager.getStateFile();
+    FileUtils.mkdirp(stateFile.getParentFile());
+    Files.write(stateFile.toPath(), "not valid json".getBytes(StandardCharsets.UTF_8));
+
+    workerTaskManager.start();
+    Assertions.assertTrue(workerTaskManager.isWorkerEnabled());
+  }
+
+  @Test
+  public void test_startAlwaysEnabled_ignoresAndDeletesPersistedDisabledState() throws Exception
+  {
+    EasyMock.expect(overlordClient.withRetryPolicy(EasyMock.anyObject())).andReturn(overlordClient).anyTimes();
+    EasyMock.replay(overlordClient);
+
+    final File baseTaskDir = tempDir;
+
+    workerTaskManager = createWorkerTaskManager(baseTaskDir);
+    workerTaskManager.start();
+    workerTaskManager.workerDisabled();
+    Assertions.assertFalse(workerTaskManager.isWorkerEnabled());
+    Assertions.assertTrue(workerTaskManager.getStateFile().exists());
+    workerTaskManager.stop();
+
+    final WorkerConfig workerConfig = new WorkerConfig().cloneBuilder()
+        .setStartAlwaysEnabled(true)
+        .build();
+    workerTaskManager = createWorkerTaskManager(baseTaskDir, workerConfig);
+    workerTaskManager.start();
+    Assertions.assertTrue(workerTaskManager.isWorkerEnabled());
+    Assertions.assertFalse(workerTaskManager.getStateFile().exists());
+  }
+
+  @Test
+  public void test_startAlwaysEnabled_doesNotCreateStateFileWhenAbsent() throws Exception
+  {
+    EasyMock.expect(overlordClient.withRetryPolicy(EasyMock.anyObject())).andReturn(overlordClient).anyTimes();
+    EasyMock.replay(overlordClient);
+
+    final WorkerConfig workerConfig = new WorkerConfig().cloneBuilder()
+        .setStartAlwaysEnabled(true)
+        .build();
+    workerTaskManager = createWorkerTaskManager(tempDir, workerConfig);
+    workerTaskManager.start();
+    Assertions.assertTrue(workerTaskManager.isWorkerEnabled());
+    Assertions.assertFalse(workerTaskManager.getStateFile().exists());
+  }
+
+  @Test
+  public void test_startAlwaysEnabled_runtimeDisableStillPersistsToStateFile() throws Exception
+  {
+    EasyMock.expect(overlordClient.withRetryPolicy(EasyMock.anyObject())).andReturn(overlordClient).anyTimes();
+    EasyMock.replay(overlordClient);
+
+    final WorkerConfig workerConfig = new WorkerConfig().cloneBuilder()
+        .setStartAlwaysEnabled(true)
+        .build();
+    workerTaskManager = createWorkerTaskManager(tempDir, workerConfig);
+    workerTaskManager.start();
+    workerTaskManager.workerDisabled();
+    Assertions.assertFalse(workerTaskManager.isWorkerEnabled());
+    Assertions.assertTrue(workerTaskManager.getStateFile().exists());
+  }
+
+  @Test
+  public void test_stopChangeHistory_failsWaitingAndLaterRequests() throws Exception
+  {
+    EasyMock.expect(overlordClient.withRetryPolicy(EasyMock.anyObject())).andReturn(overlordClient).anyTimes();
+    EasyMock.replay(overlordClient);
+
+    workerTaskManager.start();
+
+    final ChangeRequestHistory.Counter counter =
+        workerTaskManager.getChangesSince(new ChangeRequestHistory.Counter(-1, 0)).get().getCounter();
+
+    final ListenableFuture<ChangeRequestsSnapshot<WorkerHistoryItem>> waitingFuture =
+        workerTaskManager.getChangesSince(counter);
+    Assertions.assertFalse(waitingFuture.isDone());
+
+    workerTaskManager.stopChangeHistory();
+
+    Assertions.assertTrue(waitingFuture.isDone());
+    final ExecutionException e1 = Assertions.assertThrows(ExecutionException.class, waitingFuture::get);
+    Assertions.assertInstanceOf(IllegalStateException.class, e1.getCause());
+
+    final ListenableFuture<ChangeRequestsSnapshot<WorkerHistoryItem>> laterFuture =
+        workerTaskManager.getChangesSince(counter);
+    Assertions.assertTrue(laterFuture.isDone());
+    final ExecutionException e2 = Assertions.assertThrows(ExecutionException.class, laterFuture::get);
+    Assertions.assertInstanceOf(IllegalStateException.class, e2.getCause());
   }
 }

@@ -62,11 +62,11 @@ public class IPv4AddressStringifyExprMacro implements ExprMacroTable.ExprMacro
 
     Expr arg = args.get(0);
 
-    class IPv4AddressStringifyExpr extends ExprMacroTable.BaseScalarUnivariateMacroFunctionExpr
+    class IPv4AddressStringifyExpr extends ExprMacroTable.BaseScalarMacroFunctionExpr
     {
-      private IPv4AddressStringifyExpr(Expr arg)
+      private IPv4AddressStringifyExpr(List<Expr> args)
       {
-        super(FN_NAME, arg);
+        super(IPv4AddressStringifyExprMacro.this, args);
       }
 
       @Nonnull
@@ -80,14 +80,8 @@ public class IPv4AddressStringifyExprMacro implements ExprMacroTable.ExprMacro
           case LONG:
             return evalAsLong(eval);
           default:
-            return ExprEval.of(null);
+            return ExprEval.ofString(null);
         }
-      }
-
-      @Override
-      public Expr visit(Shuttle shuttle)
-      {
-        return shuttle.visit(apply(shuttle.visitAll(args)));
       }
 
       @Nullable
@@ -98,7 +92,7 @@ public class IPv4AddressStringifyExprMacro implements ExprMacroTable.ExprMacro
       }
     }
 
-    return new IPv4AddressStringifyExpr(arg);
+    return new IPv4AddressStringifyExpr(args);
   }
 
   private static ExprEval evalAsString(ExprEval eval)
@@ -106,19 +100,19 @@ public class IPv4AddressStringifyExprMacro implements ExprMacroTable.ExprMacro
     if (IPv4AddressExprUtils.isValidIPv4Address(eval.asString())) {
       return eval;
     }
-    return ExprEval.of(null);
+    return ExprEval.ofString(null);
   }
 
   private static ExprEval evalAsLong(ExprEval eval)
   {
     if (eval.isNumericNull()) {
-      return ExprEval.of(null);
+      return ExprEval.ofString(null);
     }
 
     IPv4Address address = IPv4AddressExprUtils.parse(eval.asLong());
     if (address == null) {
-      return ExprEval.of(null);
+      return ExprEval.ofString(null);
     }
-    return ExprEval.of(IPv4AddressExprUtils.toString(address));
+    return ExprEval.ofString(IPv4AddressExprUtils.toString(address));
   }
 }

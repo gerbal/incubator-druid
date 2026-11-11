@@ -112,4 +112,5 @@ public interface RowsAndColumns
    */
   @Nullable
   <T> T as(Class<T> clazz);
+
 }

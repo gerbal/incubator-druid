@@ -25,6 +25,7 @@ import com.google.inject.Injector;
 import com.google.inject.Key;
 import com.google.inject.Module;
 import org.apache.druid.discovery.NodeRole;
+import org.apache.druid.guice.annotations.ExcludeScope;
 import org.apache.druid.guice.annotations.Json;
 import org.apache.druid.guice.annotations.LoadScope;
 import org.apache.druid.guice.annotations.Smile;
@@ -33,11 +34,9 @@ import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.logger.Logger;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 /**
  * Druid-enabled injector builder which supports {@link DruidModule}s, module classes
@@ -101,7 +100,7 @@ public class DruidInjectorBuilder
   /**
    * Add an arbitrary set of modules.
    */
-  public DruidInjectorBuilder add(Object...input)
+  public DruidInjectorBuilder add(Object... input)
   {
     for (Object o : input) {
       addInput(o);
@@ -109,7 +108,7 @@ public class DruidInjectorBuilder
     return this;
   }
 
-  public DruidInjectorBuilder addModules(Module...inputs)
+  public DruidInjectorBuilder addModules(Module... inputs)
   {
     for (Object o : inputs) {
       addInput(o);
@@ -117,7 +116,7 @@ public class DruidInjectorBuilder
     return this;
   }
 
-  public DruidInjectorBuilder addAll(List<? extends Object> inputs)
+  public DruidInjectorBuilder addAll(Iterable<? extends Object> inputs)
   {
     for (Object o : inputs) {
       addInput(o);
@@ -159,7 +158,7 @@ public class DruidInjectorBuilder
 
   public DruidInjectorBuilder addClass(Class<?> input)
   {
-    if (!acceptModule((Class<?>) input)) {
+    if (!acceptModule(input)) {
       return this;
     }
     if (DruidModule.class.isAssignableFrom(input)) {
@@ -195,15 +194,27 @@ public class DruidInjectorBuilder
     if (ignoreLoadScopes) {
       return true;
     }
+
+    // check exclusions first
+    ExcludeScope excludeScope = moduleClass.getAnnotation(ExcludeScope.class);
+    if (excludeScope != null) {
+      for (String exclusion : excludeScope.roles()) {
+        if (nodeRoles.contains(NodeRole.fromJsonName(exclusion))) {
+          return false;
+        }
+      }
+    }
     LoadScope loadScope = moduleClass.getAnnotation(LoadScope.class);
     if (loadScope == null) {
       // always load if annotation is not specified
       return true;
     }
-    Set<NodeRole> rolesPredicate = Arrays.stream(loadScope.roles())
-                                         .map(NodeRole::fromJsonName)
-                                         .collect(Collectors.toSet());
-    return rolesPredicate.stream().anyMatch(nodeRoles::contains);
+    for (String role : loadScope.roles()) {
+      if (nodeRoles.contains(NodeRole.fromJsonName(role))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private void registerJacksonModules(DruidModule module)

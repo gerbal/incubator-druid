@@ -23,27 +23,36 @@ import nl.jqno.equalsverifier.EqualsVerifier;
 import org.apache.druid.java.util.common.DateTimes;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 public class ClientKillUnusedSegmentsTaskQueryTest
 {
   private static final String DATA_SOURCE = "data_source";
   public static final DateTime START = DateTimes.nowUtc();
   private static final Interval INTERVAL = new Interval(START, START.plus(1));
-  private static final Boolean MARK_UNUSED = true;
+  private static final Integer BATCH_SIZE = 999;
+  private static final Integer LIMIT = 1000;
 
   ClientKillUnusedSegmentsTaskQuery clientKillUnusedSegmentsQuery;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
-    clientKillUnusedSegmentsQuery = new ClientKillUnusedSegmentsTaskQuery("killTaskId", DATA_SOURCE, INTERVAL, true);
+    clientKillUnusedSegmentsQuery = new ClientKillUnusedSegmentsTaskQuery(
+        "killTaskId",
+        DATA_SOURCE,
+        INTERVAL,
+        null,
+        BATCH_SIZE,
+        LIMIT,
+        null
+    );
   }
 
-  @After
+  @AfterEach
   public void tearDown()
   {
     clientKillUnusedSegmentsQuery = null;
@@ -52,25 +61,31 @@ public class ClientKillUnusedSegmentsTaskQueryTest
   @Test
   public void testGetType()
   {
-    Assert.assertEquals("kill", clientKillUnusedSegmentsQuery.getType());
+    Assertions.assertEquals("kill", clientKillUnusedSegmentsQuery.getType());
   }
 
   @Test
   public void testGetDataSource()
   {
-    Assert.assertEquals(DATA_SOURCE, clientKillUnusedSegmentsQuery.getDataSource());
+    Assertions.assertEquals(DATA_SOURCE, clientKillUnusedSegmentsQuery.getDataSource());
   }
 
   @Test
   public void testGetInterval()
   {
-    Assert.assertEquals(INTERVAL, clientKillUnusedSegmentsQuery.getInterval());
+    Assertions.assertEquals(INTERVAL, clientKillUnusedSegmentsQuery.getInterval());
   }
 
   @Test
-  public void testGetMarkUnused()
+  public void testGetBatchSize()
   {
-    Assert.assertEquals(MARK_UNUSED, clientKillUnusedSegmentsQuery.getMarkAsUnused());
+    Assertions.assertEquals(BATCH_SIZE, clientKillUnusedSegmentsQuery.getBatchSize());
+  }
+
+  @Test
+  public void testGetLimit()
+  {
+    Assertions.assertEquals(LIMIT, clientKillUnusedSegmentsQuery.getLimit());
   }
 
   @Test
@@ -78,7 +93,7 @@ public class ClientKillUnusedSegmentsTaskQueryTest
   {
     EqualsVerifier.forClass(ClientKillUnusedSegmentsTaskQuery.class)
                   .usingGetClass()
-                  .withNonnullFields("id", "dataSource", "interval")
+                  .withNonnullFields("id", "dataSource", "interval", "batchSize", "limit")
                   .verify();
   }
 }

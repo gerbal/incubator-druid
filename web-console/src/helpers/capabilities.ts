@@ -16,7 +16,11 @@
  * limitations under the License.
  */
 
+import type { DruidEngine, QueryContextParameterMetadata } from '../druid-models';
+// Imported from its module rather than the druid-models barrel, which imports helpers (a circular import)
+import { QUERY_CONTEXT_PARAMETERS_QUERY } from '../druid-models/query-context/query-context';
 import { Api } from '../singletons';
+import { filterMap } from '../utils';
 
 import { maybeGetClusterCapacity } from './index';
 
@@ -33,12 +37,45 @@ export type CapabilitiesModeExtended =
 
 export type QueryType = 'none' | 'nativeOnly' | 'nativeAndSql';
 
+const FUNCTION_SQL = `SELECT "ROUTINE_NAME", "SIGNATURES", "IS_AGGREGATOR" FROM "INFORMATION_SCHEMA"."ROUTINES" WHERE "SIGNATURES" IS NOT NULL`;
+
+type FunctionRow = [string, string, string];
+
+export interface FunctionsDefinition {
+  args: string[];
+  isAggregate: boolean;
+}
+
+export type AvailableFunctions = Map<string, FunctionsDefinition>;
+
+function functionRowsToMap(functionRows: FunctionRow[]): AvailableFunctions {
+  return new Map<string, FunctionsDefinition>(
+    filterMap(functionRows, ([ROUTINE_NAME, SIGNATURES, IS_AGGREGATOR]) => {
+      if (!SIGNATURES) return;
+      const args = filterMap(SIGNATURES.replace(/'/g, '').split('\n'), sig => {
+        if (!sig.startsWith(`${ROUTINE_NAME}(`) || !sig.endsWith(')')) return;
+        return sig.slice(ROUTINE_NAME.length + 1, sig.length - 1);
+      });
+      if (!args.length) return;
+      return [
+        ROUTINE_NAME.toUpperCase(),
+        {
+          args,
+          isAggregate: IS_AGGREGATOR === 'YES',
+        },
+      ];
+    }),
+  );
+}
+
 export interface CapabilitiesValue {
   queryType: QueryType;
-  multiStageQuery: boolean;
+  multiStageQueryTask: boolean;
+  multiStageQueryDart: boolean;
   coordinator: boolean;
   overlord: boolean;
-  clusterCapacity?: number;
+  maxTaskSlots?: number;
+  availableSqlFunctions?: AvailableFunctions;
 }
 
 export class Capabilities {
@@ -50,12 +87,6 @@ export class Capabilities {
   static OVERLORD: Capabilities;
   static NO_PROXY: Capabilities;
 
-  private readonly queryType: QueryType;
-  private readonly multiStageQuery: boolean;
-  private readonly coordinator: boolean;
-  private readonly overlord: boolean;
-  private readonly clusterCapacity?: number;
-
   static async detectQueryType(): Promise<QueryType | undefined> {
     // Check SQL endpoint
     try {
@@ -65,8 +96,8 @@ export class Capabilities {
         { timeout: Capabilities.STATUS_TIMEOUT },
       );
     } catch (e) {
-      const { response } = e;
-      if (response.status !== 405 && response.status !== 404) {
+      const status = e.response?.status;
+      if (status !== 405 && status !== 404) {
         return; // other failure
       }
       try {
@@ -87,7 +118,7 @@ export class Capabilities {
           { timeout: Capabilities.STATUS_TIMEOUT },
         );
       } catch (e) {
-        if (response.status !== 405 && response.status !== 404) {
+        if (status !== 405 && status !== 404) {
           return; // other failure
         }
 
@@ -102,11 +133,13 @@ export class Capabilities {
 
   static async detectManagementProxy(): Promise<boolean> {
     try {
-      await Api.instance.get(`/proxy/coordinator/status?capabilities`, {
+      await Api.instance.get(`/proxy/enabled?capabilities`, {
         timeout: Capabilities.STATUS_TIMEOUT,
       });
     } catch (e) {
-      return false;
+      const status = e.response?.status;
+      // If we detect error code 400 the management proxy is enabled but just does not know about the recently added /proxy/enabled route so treat this as a win.
+      return status === 400;
     }
 
     return true;
@@ -127,10 +160,22 @@ export class Capabilities {
     return true;
   }
 
-  static async detectMultiStageQuery(): Promise<boolean> {
+  static async detectMultiStageQueryTask(): Promise<boolean> {
     try {
       const resp = await Api.instance.get(`/druid/v2/sql/task/enabled?capabilities`);
       return Boolean(resp.data.enabled);
+    } catch {
+      return false;
+    }
+  }
+
+  static async detectMultiStageQueryDart(): Promise<boolean> {
+    try {
+      const resp = (await Api.instance.get(`/druid/v2/sql/engines?capabilities`)).data;
+      return (
+        Array.isArray(resp.engines) &&
+        resp.engines.some(({ name }: { name: string }) => name === 'msq-dart')
+      );
     } catch {
       return false;
     }
@@ -151,11 +196,15 @@ export class Capabilities {
       coordinator = overlord = await Capabilities.detectManagementProxy();
     }
 
-    const multiStageQuery = await Capabilities.detectMultiStageQuery();
+    const [multiStageQueryTask, multiStageQueryDart] = await Promise.all([
+      Capabilities.detectMultiStageQueryTask(),
+      Capabilities.detectMultiStageQueryDart(),
+    ]);
 
     return new Capabilities({
       queryType,
-      multiStageQuery,
+      multiStageQueryTask,
+      multiStageQueryDart,
       coordinator,
       overlord,
     });
@@ -169,26 +218,94 @@ export class Capabilities {
 
     return new Capabilities({
       ...capabilities.valueOf(),
-      clusterCapacity: capacity.totalTaskSlots,
+      maxTaskSlots: capacity.totalTaskSlots,
     });
   }
 
+  static async detectAvailableSqlFunctions(
+    capabilities: Capabilities,
+  ): Promise<AvailableFunctions | undefined> {
+    if (!capabilities.hasSql()) return;
+
+    try {
+      return functionRowsToMap(
+        (
+          await Api.instance.post<FunctionRow[]>(
+            '/druid/v2/sql?capabilities-functions',
+            {
+              query: FUNCTION_SQL,
+              resultFormat: 'array',
+              context: { engine: 'native', timeout: Capabilities.STATUS_TIMEOUT },
+            },
+            { timeout: Capabilities.STATUS_TIMEOUT },
+          )
+        ).data,
+      );
+    } catch (e) {
+      console.error(e);
+      return;
+    }
+  }
+
+  /**
+   * The query context parameters, for SET completions. Undefined when they can not be loaded (an
+   * older Druid or no access to sys tables), in which case the completions fall back to the well-known context keys.
+   */
+  static async detectQueryContextParameters(
+    capabilities: Capabilities,
+  ): Promise<QueryContextParameterMetadata[] | undefined> {
+    if (!capabilities.hasSql()) return;
+
+    try {
+      return (
+        await Api.instance.post<QueryContextParameterMetadata[]>(
+          '/druid/v2/sql?capabilities-query-context-parameters',
+          {
+            query: QUERY_CONTEXT_PARAMETERS_QUERY,
+            // Arrays such as query_languages come back as arrays rather than JSON strings
+            context: {
+              engine: 'native',
+              timeout: Capabilities.STATUS_TIMEOUT,
+              sqlStringifyArrays: false,
+            },
+          },
+          { timeout: Capabilities.STATUS_TIMEOUT },
+        )
+      ).data;
+    } catch {
+      return;
+    }
+  }
+
+  private readonly queryType: QueryType;
+  private readonly multiStageQueryTask: boolean;
+  private readonly multiStageQueryDart: boolean;
+  private readonly coordinator: boolean;
+  private readonly overlord: boolean;
+  private readonly maxTaskSlots?: number;
+
   constructor(value: CapabilitiesValue) {
     this.queryType = value.queryType;
-    this.multiStageQuery = value.multiStageQuery;
+    this.multiStageQueryTask = value.multiStageQueryTask;
+    this.multiStageQueryDart = value.multiStageQueryDart;
     this.coordinator = value.coordinator;
     this.overlord = value.overlord;
-    this.clusterCapacity = value.clusterCapacity;
+    this.maxTaskSlots = value.maxTaskSlots;
   }
 
   public valueOf(): CapabilitiesValue {
     return {
       queryType: this.queryType,
-      multiStageQuery: this.multiStageQuery,
+      multiStageQueryTask: this.multiStageQueryTask,
+      multiStageQueryDart: this.multiStageQueryDart,
       coordinator: this.coordinator,
       overlord: this.overlord,
-      clusterCapacity: this.clusterCapacity,
+      maxTaskSlots: this.maxTaskSlots,
     };
+  }
+
+  public clone(): Capabilities {
+    return new Capabilities(this.valueOf());
   }
 
   public getMode(): CapabilitiesMode {
@@ -241,8 +358,26 @@ export class Capabilities {
     return this.queryType === 'nativeAndSql';
   }
 
-  public hasMultiStageQuery(): boolean {
-    return this.multiStageQuery;
+  public hasMultiStageQueryTask(): boolean {
+    return this.multiStageQueryTask;
+  }
+
+  public hasMultiStageQueryDart(): boolean {
+    return this.multiStageQueryDart;
+  }
+
+  public getSupportedQueryEngines(): DruidEngine[] {
+    const queryEngines: DruidEngine[] = ['native'];
+    if (this.hasSql()) {
+      queryEngines.push('sql-native');
+    }
+    if (this.hasMultiStageQueryTask()) {
+      queryEngines.push('sql-msq-task');
+    }
+    if (this.hasMultiStageQueryDart()) {
+      queryEngines.push('sql-msq-dart');
+    }
+    return queryEngines;
   }
 
   public hasCoordinatorAccess(): boolean {
@@ -261,43 +396,49 @@ export class Capabilities {
     return this.hasSql() || this.hasOverlordAccess();
   }
 
-  public getClusterCapacity(): number | undefined {
-    return this.clusterCapacity;
+  public getMaxTaskSlots(): number | undefined {
+    return this.maxTaskSlots;
   }
 }
 Capabilities.FULL = new Capabilities({
   queryType: 'nativeAndSql',
-  multiStageQuery: true,
+  multiStageQueryTask: true,
+  multiStageQueryDart: true,
   coordinator: true,
   overlord: true,
 });
 Capabilities.NO_SQL = new Capabilities({
   queryType: 'nativeOnly',
-  multiStageQuery: false,
+  multiStageQueryTask: false,
+  multiStageQueryDart: false,
   coordinator: true,
   overlord: true,
 });
 Capabilities.COORDINATOR_OVERLORD = new Capabilities({
   queryType: 'none',
-  multiStageQuery: false,
+  multiStageQueryTask: false,
+  multiStageQueryDart: false,
   coordinator: true,
   overlord: true,
 });
 Capabilities.COORDINATOR = new Capabilities({
   queryType: 'none',
-  multiStageQuery: false,
+  multiStageQueryTask: false,
+  multiStageQueryDart: false,
   coordinator: true,
   overlord: false,
 });
 Capabilities.OVERLORD = new Capabilities({
   queryType: 'none',
-  multiStageQuery: false,
+  multiStageQueryTask: false,
+  multiStageQueryDart: false,
   coordinator: false,
   overlord: true,
 });
 Capabilities.NO_PROXY = new Capabilities({
   queryType: 'nativeAndSql',
-  multiStageQuery: true,
+  multiStageQueryTask: true,
+  multiStageQueryDart: false,
   coordinator: false,
   overlord: false,
 });

@@ -27,8 +27,8 @@ import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
 import org.apache.druid.query.aggregation.LongSumAggregatorFactory;
 import org.joda.time.DateTime;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.List;
@@ -48,7 +48,7 @@ public class TimeseriesBinaryFnTest
   @Test
   public void testMerge()
   {
-    Result<TimeseriesResultValue> result1 = new Result<TimeseriesResultValue>(
+    Result<TimeseriesResultValue> result1 = new Result<>(
         currTime,
         new TimeseriesResultValue(
             ImmutableMap.of(
@@ -57,7 +57,7 @@ public class TimeseriesBinaryFnTest
             )
         )
     );
-    Result<TimeseriesResultValue> result2 = new Result<TimeseriesResultValue>(
+    Result<TimeseriesResultValue> result2 = new Result<>(
         currTime,
         new TimeseriesResultValue(
             ImmutableMap.of(
@@ -67,7 +67,7 @@ public class TimeseriesBinaryFnTest
         )
     );
 
-    Result<TimeseriesResultValue> expected = new Result<TimeseriesResultValue>(
+    Result<TimeseriesResultValue> expected = new Result<>(
         currTime,
         new TimeseriesResultValue(
             ImmutableMap.of(
@@ -84,13 +84,13 @@ public class TimeseriesBinaryFnTest
         result1,
         result2
     );
-    Assert.assertEquals(expected, actual);
+    Assertions.assertEquals(expected, actual);
   }
 
   @Test
   public void testMergeDay()
   {
-    Result<TimeseriesResultValue> result1 = new Result<TimeseriesResultValue>(
+    Result<TimeseriesResultValue> result1 = new Result<>(
         currTime,
         new TimeseriesResultValue(
             ImmutableMap.of(
@@ -99,7 +99,7 @@ public class TimeseriesBinaryFnTest
             )
         )
     );
-    Result<TimeseriesResultValue> result2 = new Result<TimeseriesResultValue>(
+    Result<TimeseriesResultValue> result2 = new Result<>(
         currTime,
         new TimeseriesResultValue(
             ImmutableMap.of(
@@ -109,7 +109,7 @@ public class TimeseriesBinaryFnTest
         )
     );
 
-    Result<TimeseriesResultValue> expected = new Result<TimeseriesResultValue>(
+    Result<TimeseriesResultValue> expected = new Result<>(
         Granularities.DAY.bucketStart(currTime),
         new TimeseriesResultValue(
             ImmutableMap.of(
@@ -126,13 +126,13 @@ public class TimeseriesBinaryFnTest
         result1,
         result2
     );
-    Assert.assertEquals(expected, actual);
+    Assertions.assertEquals(expected, actual);
   }
 
   @Test
   public void testMergeOneNullResult()
   {
-    Result<TimeseriesResultValue> result1 = new Result<TimeseriesResultValue>(
+    Result<TimeseriesResultValue> result1 = new Result<>(
         currTime,
         new TimeseriesResultValue(
             ImmutableMap.of(
@@ -152,13 +152,13 @@ public class TimeseriesBinaryFnTest
         result1,
         result2
     );
-    Assert.assertEquals(expected, actual);
+    Assertions.assertEquals(expected, actual);
   }
 
   @Test
   public void testMergeShiftedTimestamp()
   {
-    Result<TimeseriesResultValue> result1 = new Result<TimeseriesResultValue>(
+    Result<TimeseriesResultValue> result1 = new Result<>(
         currTime,
         new TimeseriesResultValue(
             ImmutableMap.of(
@@ -167,7 +167,7 @@ public class TimeseriesBinaryFnTest
             )
         )
     );
-    Result<TimeseriesResultValue> result2 = new Result<TimeseriesResultValue>(
+    Result<TimeseriesResultValue> result2 = new Result<>(
         currTime.plusHours(2),
         new TimeseriesResultValue(
             ImmutableMap.of(
@@ -177,7 +177,7 @@ public class TimeseriesBinaryFnTest
         )
     );
 
-    Result<TimeseriesResultValue> expected = new Result<TimeseriesResultValue>(
+    Result<TimeseriesResultValue> expected = new Result<>(
         currTime,
         new TimeseriesResultValue(
             ImmutableMap.of(
@@ -194,6 +194,6 @@ public class TimeseriesBinaryFnTest
         result1,
         result2
     );
-    Assert.assertEquals(expected, actual);
+    Assertions.assertEquals(expected, actual);
   }
 }

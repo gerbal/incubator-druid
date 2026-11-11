@@ -185,6 +185,7 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
     hashTable.reset();
     keySerde.reset();
     offsetHeap.reset();
+    aggregators.reset();
     heapIndexUpdater.setHashTableBuffer(hashTable.getTableBuffer());
     hasIterated = false;
     offsetHeapIterableSize = 0;
@@ -248,7 +249,7 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
     final int size = offsetHeap.getHeapSize();
 
     @SuppressWarnings("MismatchedQueryAndUpdateOfCollection")
-    final List<Integer> wrappedOffsets = new AbstractList<Integer>()
+    final List<Integer> wrappedOffsets = new AbstractList<>()
     {
       @Override
       public Integer get(int index)
@@ -276,7 +277,7 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
     // Sort offsets in-place.
     Collections.sort(
         wrappedOffsets,
-        new Comparator<Integer>()
+        new Comparator<>()
         {
           @Override
           public int compare(Integer lhs, Integer rhs)
@@ -292,7 +293,7 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
         }
     );
 
-    return new CloseableIterator<Entry<KeyType>>()
+    return new CloseableIterator<>()
     {
       final ReusableEntry<KeyType> reusableEntry = ReusableEntry.create(keySerde, aggregators.size());
       int curr = 0;
@@ -331,7 +332,7 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
     if (!hasIterated) {
       hasIterated = true;
       offsetHeapIterableSize = initialHeapSize;
-      return new CloseableIterator<Entry<KeyType>>()
+      return new CloseableIterator<>()
       {
         final ReusableEntry<KeyType> reusableEntry = ReusableEntry.create(keySerde, aggregators.size());
         int curr = 0;
@@ -371,7 +372,7 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
       };
     } else {
       // subsequent iterations just walk the buffer backwards
-      return new CloseableIterator<Entry<KeyType>>()
+      return new CloseableIterator<>()
       {
         final ReusableEntry<KeyType> reusableEntry = ReusableEntry.create(keySerde, aggregators.size());
         int curr = offsetHeapIterableSize - 1;
@@ -419,7 +420,7 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
 
   private Comparator<Integer> makeHeapComparator()
   {
-    return new Comparator<Integer>()
+    return new Comparator<>()
     {
       final BufferComparator bufferComparator = keySerde.bufferComparatorWithAggregators(
           aggregators.factories().toArray(new AggregatorFactory[0]),
@@ -455,6 +456,18 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
     } else {
       return true;
     }
+  }
+
+  @Override
+  public long getMaxMergeBufferUsedBytes()
+  {
+    if (!initialized) {
+      return 0L;
+    }
+
+    long hashTableUsage = super.getMaxMergeBufferUsedBytes();
+    long offSetHeapUsage = offsetHeap.getMaxMergeBufferUsedBytes();
+    return hashTableUsage + offSetHeapUsage;
   }
 
   private class AlternatingByteBufferHashTable extends ByteBufferHashTable
@@ -508,10 +521,11 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
     public void reset()
     {
       size = 0;
+      updateMaxMergeBufferUsedBytes();
       growthCount = 0;
       // clear the used bits of the first buffer
       for (int i = 0; i < maxBuckets; i++) {
-        subHashTableBuffers[0].put(i * bucketSizeWithHash, (byte) 0);
+        subHashTableBuffers[0].putInt(i * bucketSizeWithHash, 0);
       }
       tableBuffer = subHashTableBuffers[0];
     }
@@ -524,7 +538,7 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
 
       // clear the used bits of the buffer we're swapping to
       for (int i = 0; i < maxBuckets; i++) {
-        newTableBuffer.put(i * bucketSizeWithHash, (byte) 0);
+        newTableBuffer.putInt(i * bucketSizeWithHash, 0);
       }
 
       // Get the offsets of the top N buckets from the heap and copy the buckets to new table
@@ -543,7 +557,7 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
           keyBuffer.position(entryBuffer.position() + HASH_SIZE);
 
           // Put the entry in the new hash table
-          final int keyHash = entryBuffer.getInt(entryBuffer.position()) & 0x7fffffff;
+          final int keyHash = entryBuffer.getInt(entryBuffer.position()) & Groupers.USED_FLAG_MASK;
           final int newBucket = findBucket(true, maxBuckets, newTableBuffer, keyBuffer, keyHash);
 
           if (newBucket < 0) {
@@ -569,8 +583,23 @@ public class LimitedBufferHashGrouper<KeyType> extends AbstractBufferHashGrouper
       }
 
       size = numCopied;
+      updateMaxMergeBufferUsedBytes();
       tableBuffer = newTableBuffer;
+      heapIndexUpdater.setHashTableBuffer(newTableBuffer);
       growthCount++;
+    }
+
+    /**
+     * The alternating table trims-and-swaps to keep the top-{@code limit} entries in memory and never spills via the
+     * fill path (see base {@link #recordsFillProximity()}), so suppress fill-proximity recording — such queries read
+     * 0.0. Its only spill signal is a rejection in {@link #findBucketWithAutoGrowth}, which does NOT fire on ordinary
+     * swaps: post-swap {@code size == numCopied <= limit}, and construction guarantees
+     * {@code regrowthThreshold >= limit + 1}, so the next insert always finds a bucket.
+     */
+    @Override
+    protected boolean recordsFillProximity()
+    {
+      return false;
     }
   }
 }

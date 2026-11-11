@@ -19,8 +19,8 @@
 
 package org.apache.druid.query.aggregation;
 
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.java.util.common.ISE;
+import org.apache.druid.segment.column.TypeStrategies;
 import org.apache.druid.segment.vector.VectorValueSelector;
 
 import javax.annotation.Nullable;
@@ -68,7 +68,7 @@ public class NullableNumericVectorAggregator implements VectorAggregator
   @Override
   public void init(ByteBuffer buf, int position)
   {
-    buf.put(position, NullHandling.IS_NULL_BYTE);
+    buf.put(position, TypeStrategies.IS_NULL_BYTE);
     delegate.init(buf, position + Byte.BYTES);
   }
 
@@ -76,7 +76,16 @@ public class NullableNumericVectorAggregator implements VectorAggregator
   public void aggregate(ByteBuffer buf, int position, int startRow, int endRow)
   {
     final boolean[] nullVector = selector.getNullVector();
-    if (nullVector != null) {
+    if (nullVector == null) {
+      doAggregate(buf, position, startRow, endRow);
+    } else if (delegate instanceof NullAwareVectorAggregator nullAware) {
+      // Delegate handles null inputs itself (typically via SIMD masking); set the null marker only if it
+      // reports at least one non-null row contributed.
+      if (nullAware.aggregate(buf, position + Byte.BYTES, startRow, endRow, nullVector)) {
+        buf.put(position, TypeStrategies.IS_NOT_NULL_BYTE);
+      }
+    } else {
+      // Fallback: filter non-null rows and route through the scatter-gather variant with a uniform position.
       // Deferred initialization, since vAggregationPositions and vAggregationRows are only needed if nulls
       // actually occur.
       if (vAggregationPositions == null) {
@@ -94,8 +103,6 @@ public class NullableNumericVectorAggregator implements VectorAggregator
       Arrays.fill(vAggregationPositions, 0, j, position);
 
       doAggregate(buf, j, vAggregationPositions, vAggregationRows, 0);
-    } else {
-      doAggregate(buf, position, startRow, endRow);
     }
   }
 
@@ -132,9 +139,9 @@ public class NullableNumericVectorAggregator implements VectorAggregator
   public Object get(ByteBuffer buf, int position)
   {
     switch (buf.get(position)) {
-      case NullHandling.IS_NULL_BYTE:
+      case TypeStrategies.IS_NULL_BYTE:
         return null;
-      case NullHandling.IS_NOT_NULL_BYTE:
+      case TypeStrategies.IS_NOT_NULL_BYTE:
         return delegate.get(buf, position + Byte.BYTES);
       default:
         // Corrupted byte?
@@ -156,14 +163,14 @@ public class NullableNumericVectorAggregator implements VectorAggregator
 
   private void doAggregate(ByteBuffer buf, int position, int start, int end)
   {
-    buf.put(position, NullHandling.IS_NOT_NULL_BYTE);
+    buf.put(position, TypeStrategies.IS_NOT_NULL_BYTE);
     delegate.aggregate(buf, position + Byte.BYTES, start, end);
   }
 
   private void doAggregate(ByteBuffer buf, int numRows, int[] positions, @Nullable int[] rows, int positionOffset)
   {
     for (int i = 0; i < numRows; i++) {
-      buf.put(positions[i] + positionOffset, NullHandling.IS_NOT_NULL_BYTE);
+      buf.put(positions[i] + positionOffset, TypeStrategies.IS_NOT_NULL_BYTE);
     }
 
     delegate.aggregate(buf, numRows, positions, rows, positionOffset + Byte.BYTES);

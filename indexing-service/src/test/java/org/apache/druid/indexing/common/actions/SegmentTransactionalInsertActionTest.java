@@ -22,6 +22,7 @@ package org.apache.druid.indexing.common.actions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import org.apache.druid.error.DruidException;
 import org.apache.druid.indexing.common.TaskLockType;
 import org.apache.druid.indexing.common.task.NoopTask;
 import org.apache.druid.indexing.common.task.Task;
@@ -30,65 +31,57 @@ import org.apache.druid.indexing.overlord.ObjectMetadata;
 import org.apache.druid.indexing.overlord.SegmentPublishResult;
 import org.apache.druid.indexing.overlord.Segments;
 import org.apache.druid.indexing.overlord.TimeChunkLockRequest;
+import org.apache.druid.indexing.overlord.supervisor.NoopSupervisorSpec;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 import org.apache.druid.timeline.partition.LinearShardSpec;
-import org.assertj.core.api.Assertions;
-import org.hamcrest.CoreMatchers;
 import org.joda.time.Interval;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+
+import java.util.List;
+
+import static org.assertj.core.api.Assertions.assertThat;
 
 public class SegmentTransactionalInsertActionTest
 {
-  @Rule
-  public ExpectedException thrown = ExpectedException.none();
-
-  @Rule
+  @RegisterExtension
   public TaskActionTestKit actionTestKit = new TaskActionTestKit();
 
   private static final String DATA_SOURCE = "none";
+  private static final String SUPERVISOR_ID = "supervisorId";
   private static final Interval INTERVAL = Intervals.of("2020/2020T01");
   private static final String PARTY_YEAR = "1999";
   private static final String THE_DISTANT_FUTURE = "3000";
 
-  private static final DataSegment SEGMENT1 = new DataSegment(
-      DATA_SOURCE,
-      INTERVAL,
-      PARTY_YEAR,
-      ImmutableMap.of(),
-      ImmutableList.of(),
-      ImmutableList.of(),
-      new LinearShardSpec(0),
-      9,
-      1024
-  );
+  private static final DataSegment SEGMENT1 = DataSegment.builder(SegmentId.of(DATA_SOURCE, INTERVAL, PARTY_YEAR, 0))
+                                                         .loadSpec(ImmutableMap.of())
+                                                         .dimensions(ImmutableList.of())
+                                                         .metrics(ImmutableList.of())
+                                                         .shardSpec(new LinearShardSpec(0))
+                                                         .binaryVersion(9)
+                                                         .size(1024)
+                                                         .build();
 
-  private static final DataSegment SEGMENT2 = new DataSegment(
-      DATA_SOURCE,
-      INTERVAL,
-      PARTY_YEAR,
-      ImmutableMap.of(),
-      ImmutableList.of(),
-      ImmutableList.of(),
-      new LinearShardSpec(1),
-      9,
-      1024
-  );
+  private static final DataSegment SEGMENT2 = DataSegment.builder(SegmentId.of(DATA_SOURCE, INTERVAL, PARTY_YEAR, 1))
+                                                         .loadSpec(ImmutableMap.of())
+                                                         .dimensions(ImmutableList.of())
+                                                         .metrics(ImmutableList.of())
+                                                         .shardSpec(new LinearShardSpec(1))
+                                                         .binaryVersion(9)
+                                                         .size(1024)
+                                                         .build();
 
-  private static final DataSegment SEGMENT3 = new DataSegment(
-      DATA_SOURCE,
-      INTERVAL,
-      THE_DISTANT_FUTURE,
-      ImmutableMap.of(),
-      ImmutableList.of(),
-      ImmutableList.of(),
-      new LinearShardSpec(1),
-      9,
-      1024
-  );
+  private static final DataSegment SEGMENT3 = DataSegment.builder(SegmentId.of(DATA_SOURCE, INTERVAL, THE_DISTANT_FUTURE, 1))
+                                                         .loadSpec(ImmutableMap.of())
+                                                         .dimensions(ImmutableList.of())
+                                                         .metrics(ImmutableList.of())
+                                                         .shardSpec(new LinearShardSpec(1))
+                                                         .binaryVersion(9)
+                                                         .size(1024)
+                                                         .build();
 
   private LockResult acquireTimeChunkLock(TaskLockType lockType, Task task, Interval interval, long timeoutMs)
       throws InterruptedException
@@ -97,7 +90,7 @@ public class SegmentTransactionalInsertActionTest
   }
 
   @Test
-  public void testTransactionalUpdateDataSourceMetadata() throws Exception
+  public void test_transactionalUpdateDataSourceMetadata_withDefaultSupervisorId() throws Exception
   {
     final Task task = NoopTask.create();
     actionTestKit.getTaskLockbox().add(task);
@@ -105,135 +98,133 @@ public class SegmentTransactionalInsertActionTest
 
     SegmentPublishResult result1 = SegmentTransactionalInsertAction.appendAction(
         ImmutableSet.of(SEGMENT1),
+        SUPERVISOR_ID,
+        DATA_SOURCE,
         new ObjectMetadata(null),
-        new ObjectMetadata(ImmutableList.of(1))
+        new ObjectMetadata(ImmutableList.of(1)),
+        null
     ).perform(
         task,
         actionTestKit.getTaskActionToolbox()
     );
-    Assert.assertEquals(SegmentPublishResult.ok(ImmutableSet.of(SEGMENT1)), result1);
+    Assertions.assertEquals(SegmentPublishResult.ok(ImmutableSet.of(SEGMENT1)), result1);
 
     SegmentPublishResult result2 = SegmentTransactionalInsertAction.appendAction(
         ImmutableSet.of(SEGMENT2),
+        SUPERVISOR_ID,
+        DATA_SOURCE,
         new ObjectMetadata(ImmutableList.of(1)),
-        new ObjectMetadata(ImmutableList.of(2))
+        new ObjectMetadata(ImmutableList.of(2)),
+        null
     ).perform(
         task,
         actionTestKit.getTaskActionToolbox()
     );
-    Assert.assertEquals(SegmentPublishResult.ok(ImmutableSet.of(SEGMENT2)), result2);
+    Assertions.assertEquals(SegmentPublishResult.ok(ImmutableSet.of(SEGMENT2)), result2);
 
-    Assertions.assertThat(
+    assertThat(
         actionTestKit.getMetadataStorageCoordinator()
                      .retrieveUsedSegmentsForInterval(DATA_SOURCE, INTERVAL, Segments.ONLY_VISIBLE)
     ).containsExactlyInAnyOrder(SEGMENT1, SEGMENT2);
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         new ObjectMetadata(ImmutableList.of(2)),
-        actionTestKit.getMetadataStorageCoordinator().retrieveDataSourceMetadata(DATA_SOURCE)
+        actionTestKit.getMetadataStorageCoordinator().retrieveDataSourceMetadata(SUPERVISOR_ID)
     );
   }
 
   @Test
-  public void testTransactionalDropSegments() throws Exception
+  public void test_transactionalUpdateDataSourceMetadata_withCustomSupervisorId() throws Exception
   {
     final Task task = NoopTask.create();
     actionTestKit.getTaskLockbox().add(task);
     acquireTimeChunkLock(TaskLockType.EXCLUSIVE, task, INTERVAL, 5000);
 
-    SegmentPublishResult result1 = SegmentTransactionalInsertAction.overwriteAction(
-        null,
-        null,
-        ImmutableSet.of(SEGMENT1)
-    ).perform(
-        task,
-        actionTestKit.getTaskActionToolbox()
-    );
-    Assert.assertEquals(SegmentPublishResult.ok(ImmutableSet.of(SEGMENT1)), result1);
-
-    SegmentPublishResult result2 = SegmentTransactionalInsertAction.overwriteAction(
-        null,
+    SegmentPublishResult result1 = SegmentTransactionalInsertAction.appendAction(
         ImmutableSet.of(SEGMENT1),
-        ImmutableSet.of(SEGMENT2)
+        SUPERVISOR_ID,
+        DATA_SOURCE,
+        new ObjectMetadata(null),
+        new ObjectMetadata(ImmutableList.of(1)),
+        null
     ).perform(
         task,
         actionTestKit.getTaskActionToolbox()
     );
-    Assert.assertEquals(SegmentPublishResult.ok(ImmutableSet.of(SEGMENT2)), result2);
+    Assertions.assertEquals(SegmentPublishResult.ok(ImmutableSet.of(SEGMENT1)), result1);
 
-    Assertions.assertThat(
+    SegmentPublishResult result2 = SegmentTransactionalInsertAction.appendAction(
+        ImmutableSet.of(SEGMENT2),
+        SUPERVISOR_ID,
+        DATA_SOURCE,
+        new ObjectMetadata(ImmutableList.of(1)),
+        new ObjectMetadata(ImmutableList.of(2)),
+        null
+    ).perform(
+        task,
+        actionTestKit.getTaskActionToolbox()
+    );
+    Assertions.assertEquals(SegmentPublishResult.ok(ImmutableSet.of(SEGMENT2)), result2);
+
+    assertThat(
         actionTestKit.getMetadataStorageCoordinator()
                      .retrieveUsedSegmentsForInterval(DATA_SOURCE, INTERVAL, Segments.ONLY_VISIBLE)
-    ).containsExactlyInAnyOrder(SEGMENT2);
+    ).containsExactlyInAnyOrder(SEGMENT1, SEGMENT2);
+
+    Assertions.assertEquals(
+        new ObjectMetadata(ImmutableList.of(2)),
+        actionTestKit.getMetadataStorageCoordinator().retrieveDataSourceMetadata(SUPERVISOR_ID)
+    );
   }
 
   @Test
-  public void testFailTransactionalUpdateDataSourceMetadata() throws Exception
+  public void test_fail_transactionalUpdateDataSourceMetadata() throws Exception
   {
     final Task task = NoopTask.create();
     actionTestKit.getTaskLockbox().add(task);
     acquireTimeChunkLock(TaskLockType.EXCLUSIVE, task, INTERVAL, 5000);
+
+    final NoopSupervisorSpec supervisorSpec = new NoopSupervisorSpec(SUPERVISOR_ID, List.of(DATA_SOURCE));
+    actionTestKit.getSupervisorManager().createOrUpdateAndStartSupervisor(supervisorSpec, false);
 
     SegmentPublishResult result = SegmentTransactionalInsertAction.appendAction(
         ImmutableSet.of(SEGMENT1),
+        SUPERVISOR_ID,
+        DATA_SOURCE,
         new ObjectMetadata(ImmutableList.of(1)),
-        new ObjectMetadata(ImmutableList.of(2))
+        new ObjectMetadata(ImmutableList.of(2)),
+        null
     ).perform(
         task,
         actionTestKit.getTaskActionToolbox()
     );
 
-    Assert.assertEquals(
-        SegmentPublishResult.fail(
-          "java.lang.RuntimeException: Inconsistent metadata state. " +
-          "This can happen if you update input topic in a spec without changing the supervisor name. " +
-          "Stored state: [null], Target state: [ObjectMetadata{theObject=[1]}]."
+    Assertions.assertTrue(result.isOffsetMismatch());
+    Assertions.assertEquals(
+        SegmentPublishResult.retryableOffsetMismatchFailure(
+            "The new start metadata state[ObjectMetadata{theObject=[1]}] is"
+            + " ahead of the last committed end state[null]. Try resetting the supervisor."
         ),
         result
     );
   }
 
   @Test
-  public void testFailTransactionalDropSegment() throws Exception
+  public void test_fail_badVersion() throws Exception
   {
     final Task task = NoopTask.create();
+    final SegmentTransactionalInsertAction action = SegmentTransactionalInsertAction
+        .overwriteAction(null, ImmutableSet.of(SEGMENT3), null);
     actionTestKit.getTaskLockbox().add(task);
     acquireTimeChunkLock(TaskLockType.EXCLUSIVE, task, INTERVAL, 5000);
 
-    SegmentPublishResult result = SegmentTransactionalInsertAction.overwriteAction(
-        null,
-        // SEGMENT1 does not exist, hence will fail to drop
-        ImmutableSet.of(SEGMENT1),
-        ImmutableSet.of(SEGMENT2)
-    ).perform(
-        task,
-        actionTestKit.getTaskActionToolbox()
+    final DruidException exception = Assertions.assertThrows(
+        DruidException.class,
+        () -> action.perform(task, actionTestKit.getTaskActionToolbox())
     );
-
-    Assert.assertEquals(
-        SegmentPublishResult.fail(
-            "org.apache.druid.metadata.RetryTransactionException: " +
-            "Failed to drop some segments. Only 0 could be dropped out of 1. Trying again"
-        ),
-        result
-    );
-  }
-
-  @Test
-  public void testFailBadVersion() throws Exception
-  {
-    final Task task = NoopTask.create();
-    final SegmentTransactionalInsertAction action = SegmentTransactionalInsertAction.overwriteAction(
-        null,
-        null,
-        ImmutableSet.of(SEGMENT3)
-    );
-    actionTestKit.getTaskLockbox().add(task);
-    acquireTimeChunkLock(TaskLockType.EXCLUSIVE, task, INTERVAL, 5000);
-
-    thrown.expect(IllegalStateException.class);
-    thrown.expectMessage(CoreMatchers.containsString("are not covered by locks"));
-    SegmentPublishResult result = action.perform(task, actionTestKit.getTaskActionToolbox());
-    Assert.assertEquals(SegmentPublishResult.ok(ImmutableSet.of(SEGMENT3)), result);
+    Assertions.assertEquals(DruidException.Persona.OPERATOR, exception.getTargetPersona());
+    Assertions.assertEquals(DruidException.Category.CONFLICT, exception.getCategory());
+    Assertions.assertEquals("general", exception.getErrorCode());
+    assertThat(exception.getMessage()).contains("are not covered by locks");
   }
 }

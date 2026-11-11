@@ -22,13 +22,13 @@ package org.apache.druid.segment.serde;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Suppliers;
-import org.apache.druid.java.util.common.io.smoosh.FileSmoosher;
 import org.apache.druid.query.extraction.ExtractionFn;
 import org.apache.druid.segment.DimensionSelector;
 import org.apache.druid.segment.column.DictionaryEncodedColumn;
 import org.apache.druid.segment.data.BitmapSerdeFactory;
 import org.apache.druid.segment.data.IndexedInts;
 import org.apache.druid.segment.data.ReadableOffset;
+import org.apache.druid.segment.file.SegmentFileBuilder;
 import org.apache.druid.segment.vector.MultiValueDimensionVectorSelector;
 import org.apache.druid.segment.vector.NilVectorSelector;
 import org.apache.druid.segment.vector.ReadableVectorOffset;
@@ -57,15 +57,13 @@ public class NullColumnPartSerde implements ColumnPartSerde
     }
 
     @Override
-    public void writeTo(WritableByteChannel channel, FileSmoosher smoosher)
+    public void writeTo(WritableByteChannel channel, SegmentFileBuilder fileBuilder)
     {
     }
   };
 
   private final int numRows;
   private final BitmapSerdeFactory bitmapSerdeFactory;
-
-  private final NullDictionaryEncodedColumn nullDictionaryEncodedColumn;
 
   @JsonCreator
   public NullColumnPartSerde(
@@ -75,7 +73,6 @@ public class NullColumnPartSerde implements ColumnPartSerde
   {
     this.numRows = numRows;
     this.bitmapSerdeFactory = bitmapSerdeFactory;
-    this.nullDictionaryEncodedColumn = new NullDictionaryEncodedColumn();
   }
 
   @JsonProperty
@@ -105,14 +102,13 @@ public class NullColumnPartSerde implements ColumnPartSerde
   @Override
   public Deserializer getDeserializer()
   {
-    return (buffer, builder, columnConfig) -> {
+    return (buffer, builder, columnConfig, parent) -> {
       builder.setHasMultipleValues(false)
              .setHasNulls(true)
-             .setFilterable(true)
              // this is a bit sneaky, we set supplier to null here to act like a null column instead of a column
              // without any indexes, which is the default state
              .setIndexSupplier(null, true, false)
-             .setDictionaryEncodedColumnSupplier(Suppliers.ofInstance(nullDictionaryEncodedColumn));
+             .setDictionaryEncodedColumnSupplier(Suppliers.ofInstance(new NullDictionaryEncodedColumn()));
     };
   }
 

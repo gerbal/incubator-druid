@@ -16,7 +16,6 @@
  * limitations under the License.
  */
 
-window.consoleConfig = {
-  exampleManifestsUrl: 'https://druid.apache.org/data/example-manifests-v2.tsv',
-  /* future configs may go here */
-};
+/* globals window */
+
+window.consoleConfig = {/* configs go here */};

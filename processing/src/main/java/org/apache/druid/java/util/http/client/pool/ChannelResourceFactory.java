@@ -20,70 +20,68 @@
 package org.apache.druid.java.util.http.client.pool;
 
 import com.google.common.base.Preconditions;
+import io.netty.bootstrap.Bootstrap;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelException;
+import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.ChannelPipeline;
+import io.netty.channel.ChannelPromise;
+import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.handler.codec.http.DefaultFullHttpRequest;
+import io.netty.handler.codec.http.FullHttpRequest;
+import io.netty.handler.codec.http.HttpClientCodec;
+import io.netty.handler.codec.http.HttpMethod;
+import io.netty.handler.codec.http.HttpObject;
+import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.handler.codec.http.HttpVersion;
+import io.netty.handler.codec.http.LastHttpContent;
+import io.netty.handler.ssl.SslHandler;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.common.URIs;
 import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.java.util.http.client.HttpClientProxyConfig;
 import org.apache.druid.java.util.http.client.Request;
-import org.jboss.netty.bootstrap.ClientBootstrap;
-import org.jboss.netty.channel.Channel;
-import org.jboss.netty.channel.ChannelException;
-import org.jboss.netty.channel.ChannelFuture;
-import org.jboss.netty.channel.ChannelFutureListener;
-import org.jboss.netty.channel.ChannelHandlerContext;
-import org.jboss.netty.channel.ChannelPipeline;
-import org.jboss.netty.channel.Channels;
-import org.jboss.netty.channel.ExceptionEvent;
-import org.jboss.netty.channel.MessageEvent;
-import org.jboss.netty.channel.SimpleChannelUpstreamHandler;
-import org.jboss.netty.handler.codec.http.DefaultHttpRequest;
-import org.jboss.netty.handler.codec.http.HttpClientCodec;
-import org.jboss.netty.handler.codec.http.HttpMethod;
-import org.jboss.netty.handler.codec.http.HttpResponse;
-import org.jboss.netty.handler.codec.http.HttpResponseStatus;
-import org.jboss.netty.handler.codec.http.HttpVersion;
-import org.jboss.netty.handler.ssl.SslHandler;
-import org.jboss.netty.util.Timer;
 
+import javax.annotation.Nullable;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLParameters;
 import java.net.InetSocketAddress;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 /**
+ *
  */
 public class ChannelResourceFactory implements ResourceFactory<String, ChannelFuture>
 {
   private static final Logger log = new Logger(ChannelResourceFactory.class);
 
   private static final long DEFAULT_SSL_HANDSHAKE_TIMEOUT_MILLIS = TimeUnit.SECONDS.toMillis(10);
-  private static final String DRUID_PROXY_HANDLER = "druid_proxyHandler";
+  private static final String PROXY_HANDLER_NAME = "druid-proxy";
+  private static final String ERROR_HANDLER_NAME = "druid-connection-error";
 
-  private final ClientBootstrap bootstrap;
+  private final Bootstrap bootstrap;
   private final SSLContext sslContext;
   private final HttpClientProxyConfig proxyConfig;
-  private final Timer timer;
   private final long sslHandshakeTimeout;
 
   public ChannelResourceFactory(
-      ClientBootstrap bootstrap,
+      Bootstrap bootstrap,
       SSLContext sslContext,
       HttpClientProxyConfig proxyConfig,
-      Timer timer,
       long sslHandshakeTimeout
   )
   {
     this.bootstrap = Preconditions.checkNotNull(bootstrap, "bootstrap");
     this.sslContext = sslContext;
     this.proxyConfig = proxyConfig;
-    this.timer = timer;
     this.sslHandshakeTimeout = sslHandshakeTimeout >= 0 ? sslHandshakeTimeout : DEFAULT_SSL_HANDSHAKE_TIMEOUT_MILLIS;
-
-    if (sslContext != null) {
-      Preconditions.checkNotNull(timer, "timer is required when sslContext is present");
-    }
   }
 
   @Override
@@ -92,7 +90,7 @@ public class ChannelResourceFactory implements ResourceFactory<String, ChannelFu
     log.debug("Generating: %s", hostname);
     URL url;
     try {
-      url = new URL(hostname);
+      url = URIs.toURL(hostname);
     }
     catch (MalformedURLException e) {
       throw new RuntimeException(e);
@@ -107,10 +105,15 @@ public class ChannelResourceFactory implements ResourceFactory<String, ChannelFu
       final ChannelFuture proxyFuture = bootstrap.connect(
           new InetSocketAddress(proxyConfig.getHost(), proxyConfig.getPort())
       );
-      connectFuture = Channels.future(proxyFuture.getChannel());
+      final ChannelPromise overallConnectPromise = proxyFuture.channel().newPromise();
+      connectFuture = overallConnectPromise;
 
       final String proxyUri = StringUtils.format("%s:%d", host, port);
-      DefaultHttpRequest connectRequest = new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.CONNECT, proxyUri);
+      final FullHttpRequest connectRequest = new DefaultFullHttpRequest(
+          HttpVersion.HTTP_1_1,
+          HttpMethod.CONNECT,
+          proxyUri
+      );
 
       if (proxyConfig.getUser() != null) {
         connectRequest.headers().add(
@@ -120,75 +123,90 @@ public class ChannelResourceFactory implements ResourceFactory<String, ChannelFu
         );
       }
 
-      proxyFuture.addListener(new ChannelFutureListener()
-      {
-        @Override
-        public void operationComplete(ChannelFuture f1)
-        {
-          if (f1.isSuccess()) {
-            final Channel channel = f1.getChannel();
-            channel.getPipeline().addLast(
-                DRUID_PROXY_HANDLER,
-                new SimpleChannelUpstreamHandler()
+      proxyFuture.addListener((ChannelFuture f1) -> {
+        if (f1.isSuccess()) {
+          final Channel channel = f1.channel();
+          channel.pipeline().addLast(
+              PROXY_HANDLER_NAME,
+              new SimpleChannelInboundHandler<HttpObject>()
+              {
+                private HttpResponseStatus responseStatus;
+
+                @Override
+                protected void channelRead0(ChannelHandlerContext ctx, HttpObject msg)
                 {
-                  @Override
-                  public void messageReceived(ChannelHandlerContext ctx, MessageEvent e)
-                  {
-                    Object msg = e.getMessage();
-
-                    final ChannelPipeline pipeline = ctx.getPipeline();
-                    pipeline.remove(DRUID_PROXY_HANDLER);
-
-                    if (msg instanceof HttpResponse) {
-                      HttpResponse httpResponse = (HttpResponse) msg;
-                      if (HttpResponseStatus.OK.equals(httpResponse.getStatus())) {
-                        // When the HttpClientCodec sees the CONNECT response complete, it goes into a "done"
-                        // mode which makes it just do nothing.  Swap it with a new instance that will cover
-                        // subsequent requests
-                        pipeline.replace("codec", "codec", new HttpClientCodec());
-                        connectFuture.setSuccess();
-                      } else {
-                        connectFuture.setFailure(
-                            new ChannelException(
-                                StringUtils.format(
-                                    "Got status[%s] from CONNECT request to proxy[%s]",
-                                    httpResponse.getStatus(),
-                                    proxyUri
-                                )
-                            )
-                        );
-                      }
-                    } else {
-                      connectFuture.setFailure(new ChannelException(StringUtils.format(
-                          "Got message of type[%s], don't know what to do.", msg.getClass()
-                      )));
-                    }
+                  if (msg instanceof HttpResponse) {
+                    responseStatus = ((HttpResponse) msg).status();
                   }
-                }
-            );
-            channel.write(connectRequest).addListener(
-                new ChannelFutureListener()
-                {
-                  @Override
-                  public void operationComplete(ChannelFuture f2)
-                  {
-                    if (!f2.isSuccess()) {
-                      connectFuture.setFailure(
+                  if (msg instanceof LastHttpContent) {
+                    final ChannelPipeline pipeline = ctx.pipeline();
+                    pipeline.remove(PROXY_HANDLER_NAME);
+
+                    if (HttpResponseStatus.OK.equals(responseStatus)) {
+                      // When the HttpClientCodec sees the CONNECT response complete, it goes into a "done"
+                      // mode which makes it just do nothing.  Swap it with a new instance that will cover
+                      // subsequent requests
+                      pipeline.replace("codec", "codec", new HttpClientCodec());
+                      overallConnectPromise.trySuccess();
+                    } else {
+                      overallConnectPromise.tryFailure(
                           new ChannelException(
-                              StringUtils.format("Problem with CONNECT request to proxy[%s]", proxyUri), f2.getCause()
+                              StringUtils.format(
+                                  "Got status[%s] from CONNECT request to proxy[%s]",
+                                  responseStatus,
+                                  proxyUri
+                              )
                           )
                       );
                     }
                   }
                 }
-            );
-          } else {
-            connectFuture.setFailure(
-                new ChannelException(
-                    StringUtils.format("Problem connecting to proxy[%s]", proxyUri), f1.getCause()
-                )
-            );
-          }
+              }
+          );
+          // Bound the wait for the CONNECT response. Bootstrap's CONNECT_TIMEOUT_MILLIS only covers the TCP
+          // handshake, and the per-request readTimeout in NettyHttpClient does not apply yet because this
+          // channel is not in the pool. A proxy that accepts TCP but never sends a CONNECT response would
+          // otherwise hang overallConnectPromise (and every future waiter on the pool) indefinitely.
+          final ScheduledFuture<?> connectTimeoutTask = channel.eventLoop().schedule(
+              () -> overallConnectPromise.tryFailure(
+                  new ChannelException(
+                      StringUtils.format(
+                          "Timed out after [%,dms] waiting for CONNECT response from proxy[%s]",
+                          sslHandshakeTimeout,
+                          proxyUri
+                      )
+                  )
+              ),
+              sslHandshakeTimeout,
+              TimeUnit.MILLISECONDS
+          );
+          // Any failure path leaves the socket connected to the proxy. NettyHttpClient's caller returns
+          // the failed ChannelFuture to the pool via giveBack(), which retains it — factory.close() only
+          // fires on a later take() for the same key, so an unretried key would leak an open socket until
+          // pool shutdown. Close the channel here on any failure. channel.close() is idempotent, so
+          // multiple failure signals converging is safe.
+          overallConnectPromise.addListener((ChannelFuture f) -> {
+            connectTimeoutTask.cancel(false);
+            if (!f.isSuccess()) {
+              channel.close();
+            }
+          });
+
+          channel.writeAndFlush(connectRequest).addListener((ChannelFuture f2) -> {
+            if (!f2.isSuccess()) {
+              overallConnectPromise.tryFailure(
+                  new ChannelException(
+                      StringUtils.format("Problem with CONNECT request to proxy[%s]", proxyUri), f2.cause()
+                  )
+              );
+            }
+          });
+        } else {
+          overallConnectPromise.tryFailure(
+              new ChannelException(
+                  StringUtils.format("Problem connecting to proxy[%s]", proxyUri), f1.cause()
+              )
+          );
         }
       });
     } else {
@@ -205,81 +223,46 @@ public class ChannelResourceFactory implements ResourceFactory<String, ChannelFu
       sslParameters.setEndpointIdentificationAlgorithm("HTTPS");
       sslEngine.setSSLParameters(sslParameters);
       sslEngine.setUseClientMode(true);
-      final SslHandler sslHandler = new SslHandler(
-          sslEngine,
-          SslHandler.getDefaultBufferPool(),
-          false,
-          timer,
-          sslHandshakeTimeout
+      final SslHandler sslHandler = new SslHandler(sslEngine);
+      sslHandler.setHandshakeTimeoutMillis(sslHandshakeTimeout);
+
+      final Channel sslChannel = connectFuture.channel();
+      final ChannelPromise handshakePromise = sslChannel.newPromise();
+      sslChannel.eventLoop().execute(
+          () -> sslChannel.pipeline().addLast(ERROR_HANDLER_NAME, new ConnectionErrorHandler(handshakePromise))
       );
-
-      // https://github.com/netty/netty/issues/160
-      sslHandler.setCloseOnSSLException(true);
-
-      final ChannelFuture handshakeFuture = Channels.future(connectFuture.getChannel());
-      connectFuture.getChannel().getPipeline().addLast(
-          "connectionErrorHandler", new SimpleChannelUpstreamHandler()
-          {
-            @Override
-            public void exceptionCaught(ChannelHandlerContext ctx, ExceptionEvent e)
-            {
-              final Channel channel = ctx.getChannel();
-              if (channel == null) {
-                // For the case where this pipeline is not attached yet.
-                handshakeFuture.setFailure(new ChannelException(
-                    StringUtils.format("Channel is null. The context name is [%s]", ctx.getName())
-                ));
-                return;
-              }
-              handshakeFuture.setFailure(e.getCause());
-              if (channel.isOpen()) {
-                channel.close();
-              }
+      connectFuture.addListener((ChannelFuture f) -> {
+        if (f.isSuccess()) {
+          final ChannelPipeline pipeline = f.channel().pipeline();
+          pipeline.addFirst("ssl", sslHandler);
+          sslHandler.handshakeFuture().addListener(f2 -> {
+            if (f2.isSuccess()) {
+              handshakePromise.trySuccess();
+            } else {
+              handshakePromise.tryFailure(
+                  new ChannelException(
+                      StringUtils.format("Failed to handshake with host[%s]", hostname),
+                      f2.cause()
+                  )
+              );
             }
-          }
-      );
-      connectFuture.addListener(
-          new ChannelFutureListener()
-          {
-            @Override
-            public void operationComplete(ChannelFuture f)
-            {
-              if (f.isSuccess()) {
-                final ChannelPipeline pipeline = f.getChannel().getPipeline();
-                pipeline.addFirst("ssl", sslHandler);
-                sslHandler.handshake().addListener(
-                    new ChannelFutureListener()
-                    {
-                      @Override
-                      public void operationComplete(ChannelFuture f2)
-                      {
-                        if (f2.isSuccess()) {
-                          handshakeFuture.setSuccess();
-                        } else {
-                          handshakeFuture.setFailure(
-                              new ChannelException(
-                                  StringUtils.format("Failed to handshake with host[%s]", hostname),
-                                  f2.getCause()
-                              )
-                          );
-                        }
-                      }
-                    }
-                );
-              } else {
-                handshakeFuture.setFailure(
-                    new ChannelException(
-                        StringUtils.format("Failed to connect to host[%s]", hostname),
-                        f.getCause()
-                    )
-                );
-              }
-            }
-          }
-      );
+          });
+        } else {
+          handshakePromise.tryFailure(
+              new ChannelException(
+                  StringUtils.format("Failed to connect to host[%s]", hostname),
+                  f.cause()
+              )
+          );
+        }
+      });
 
-      retVal = handshakeFuture;
+      retVal = handshakePromise;
     } else {
+      final Channel plainChannel = connectFuture.channel();
+      plainChannel.eventLoop().execute(
+          () -> plainChannel.pipeline().addLast(ERROR_HANDLER_NAME, new ConnectionErrorHandler(null))
+      );
       retVal = connectFuture;
     }
 
@@ -289,23 +272,77 @@ public class ChannelResourceFactory implements ResourceFactory<String, ChannelFu
   @Override
   public boolean isGood(ChannelFuture resource)
   {
-    Channel channel = resource.awaitUninterruptibly().getChannel();
+    Channel channel = resource.awaitUninterruptibly().channel();
 
     boolean isSuccess = resource.isSuccess();
-    boolean isConnected = channel.isConnected();
+    boolean isActive = channel.isActive();
     boolean isOpen = channel.isOpen();
 
     if (log.isTraceEnabled()) {
-      log.trace("isGood = isSucess[%s] && isConnected[%s] && isOpen[%s]", isSuccess, isConnected, isOpen);
+      log.trace("isGood = isSuccess[%s] && isActive[%s] && isOpen[%s]", isSuccess, isActive, isOpen);
     }
 
-    return isSuccess && isConnected && isOpen;
+    return isSuccess && isActive && isOpen;
   }
 
   @Override
   public void close(ChannelFuture resource)
   {
     log.trace("Closing");
-    resource.awaitUninterruptibly().getChannel().close();
+    resource.awaitUninterruptibly().channel().close();
+  }
+
+  /**
+   * Handler that captures errors that occur while connecting. Typically superseded by other handlers after
+   * a connection happens, in {@link org.apache.druid.java.util.http.client.NettyHttpClient}.
+   *
+   * It's important to have this for all channels, even if {@link #promise} is null, because otherwise exceptions
+   * that occur during connection land at {@link io.netty.handler.codec.http.HttpContentDecompressor} (the last
+   * handler from {@link org.apache.druid.java.util.http.client.netty.HttpClientChannelInitializer}) and are dropped on
+   * the floor along with a scary-looking warning.
+   */
+  private static class ConnectionErrorHandler extends ChannelInboundHandlerAdapter
+  {
+    @Nullable
+    private final ChannelPromise promise;
+
+    /**
+     * Constructor.
+     *
+     * @param promise promise to attach errors to
+     */
+    public ConnectionErrorHandler(@Nullable ChannelPromise promise)
+    {
+      this.promise = promise;
+    }
+
+    @Override
+    public void exceptionCaught(final ChannelHandlerContext ctx, final Throwable cause)
+    {
+      final Channel channel = ctx.channel();
+      if (channel == null) {
+        // For the case where this pipeline is not attached yet.
+        if (promise != null && !promise.isDone()) {
+          final ChannelException e2 =
+              new ChannelException(StringUtils.format("Channel is null. The context name is [%s]", ctx.name()));
+          e2.addSuppressed(cause);
+          promise.tryFailure(e2);
+        }
+        return;
+      }
+
+      if (promise != null) {
+        promise.tryFailure(cause);
+      }
+
+      // Close the channel if this is the last handler. Otherwise, we expect that NettyHttpClient would have added
+      // additional handlers to take care of the errors.
+      //noinspection ObjectEquality
+      if (channel.isOpen() && this == ctx.pipeline().last()) {
+        channel.close();
+      }
+
+      ctx.fireExceptionCaught(cause);
+    }
   }
 }

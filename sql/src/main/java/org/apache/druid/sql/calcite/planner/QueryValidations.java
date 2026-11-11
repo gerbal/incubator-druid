@@ -25,6 +25,8 @@ import org.apache.calcite.rel.core.Join;
 import org.apache.calcite.rel.logical.LogicalJoin;
 import org.apache.calcite.tools.ValidationException;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.query.JoinAlgorithm;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.sql.calcite.run.EngineFeature;
 
 /**
@@ -75,11 +77,12 @@ public class QueryValidations
       if (shuttle.found != null) {
         throw new ValidationException(
             StringUtils.format(
-                "%s join is not supported by engine [%s] with join algorithm [%s]. Try %s: %s.",
+                "%s JOIN is not supported by engine[%s] with %s[%s]. Try %s[%s].",
                 shuttle.found.getJoinType(),
                 plannerContext.getEngine().name(),
+                QueryContextParameters.SQL_JOIN_ALGORITHM,
                 plannerContext.getJoinAlgorithm(),
-                PlannerContext.CTX_SQL_JOIN_ALGORITHM,
+                QueryContextParameters.SQL_JOIN_ALGORITHM,
                 JoinAlgorithm.SORT_MERGE.toString()
             )
         );

@@ -25,14 +25,13 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.query.extraction.MapLookupExtractor;
-import org.junit.Assert;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.io.IOException;
 import java.util.Arrays;
@@ -41,10 +40,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-@RunWith(Parameterized.class)
+@ParameterizedClass
+
+@MethodSource("constructorFeeder")
 public class LookupExtractionFnTest
 {
-  @Parameterized.Parameters
   public static Iterable<Object[]> constructorFeeder()
   {
     return Iterables.transform(
@@ -66,7 +66,7 @@ public class LookupExtractionFnTest
 
   public LookupExtractionFnTest(boolean retainMissing, String replaceMissing, Optional<Boolean> injective)
   {
-    this.replaceMissing = NullHandling.emptyToNullIfNeeded(replaceMissing);
+    this.replaceMissing = replaceMissing;
     this.retainMissing = retainMissing;
     this.injective = injective.orElse(null);
   }
@@ -74,7 +74,7 @@ public class LookupExtractionFnTest
   @Test
   public void testEqualsAndHash()
   {
-    if (retainMissing && !NullHandling.isNullOrEquivalent(replaceMissing)) {
+    if (retainMissing && replaceMissing != null) {
       // skip
       return;
     }
@@ -102,16 +102,16 @@ public class LookupExtractionFnTest
         false
     );
 
-    Assert.assertEquals(lookupExtractionFn1, lookupExtractionFn2);
-    Assert.assertEquals(lookupExtractionFn1.hashCode(), lookupExtractionFn2.hashCode());
-    Assert.assertNotEquals(lookupExtractionFn1, lookupExtractionFn3);
-    Assert.assertNotEquals(lookupExtractionFn1.hashCode(), lookupExtractionFn3.hashCode());
+    Assertions.assertEquals(lookupExtractionFn1, lookupExtractionFn2);
+    Assertions.assertEquals(lookupExtractionFn1.hashCode(), lookupExtractionFn2.hashCode());
+    Assertions.assertNotEquals(lookupExtractionFn1, lookupExtractionFn3);
+    Assertions.assertNotEquals(lookupExtractionFn1.hashCode(), lookupExtractionFn3.hashCode());
   }
 
   @Test
   public void testSimpleSerDe() throws IOException
   {
-    if (retainMissing && !NullHandling.isNullOrEquivalent(replaceMissing)) {
+    if (retainMissing && replaceMissing != null) {
       // skip
       return;
     }
@@ -126,44 +126,48 @@ public class LookupExtractionFnTest
 
     final LookupExtractionFn lookupExtractionFn2 = OBJECT_MAPPER.readValue(str1, LookupExtractionFn.class);
 
-    Assert.assertEquals(retainMissing, lookupExtractionFn2.isRetainMissingValue());
-    Assert.assertEquals(replaceMissing, lookupExtractionFn2.getReplaceMissingValueWith());
+    Assertions.assertEquals(retainMissing, lookupExtractionFn2.isRetainMissingValue());
+    Assertions.assertEquals(replaceMissing, lookupExtractionFn2.getReplaceMissingValueWith());
 
     if (injective == null) {
-      Assert.assertEquals(lookupExtractionFn2.getLookup().isOneToOne(), lookupExtractionFn2.isInjective());
+      Assertions.assertEquals(lookupExtractionFn2.getLookup().isOneToOne(), lookupExtractionFn2.isInjective());
     } else {
-      Assert.assertEquals(injective, lookupExtractionFn2.isInjective());
+      Assertions.assertEquals(injective, lookupExtractionFn2.isInjective());
     }
 
-    Assert.assertArrayEquals(lookupExtractionFn.getCacheKey(), lookupExtractionFn2.getCacheKey());
+    Assertions.assertArrayEquals(lookupExtractionFn.getCacheKey(), lookupExtractionFn2.getCacheKey());
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         str1,
         OBJECT_MAPPER.writeValueAsString(lookupExtractionFn2)
     );
   }
 
-  @Test(expected = IllegalArgumentException.class)
+  @Test
   public void testIllegalArgs()
   {
-    if (retainMissing && !NullHandling.isNullOrEquivalent(replaceMissing)) {
-      @SuppressWarnings("unused") // expected exception
-      final LookupExtractionFn lookupExtractionFn = new LookupExtractionFn(
-          new MapLookupExtractor(ImmutableMap.of("foo", "bar"), false),
-          retainMissing,
-          NullHandling.emptyToNullIfNeeded(replaceMissing),
-          injective,
-          false
-      );
-    } else {
-      throw new IAE("Case not valid");
-    }
+    Assertions.assertThrows(
+        IllegalArgumentException.class,
+        () -> {
+          if (retainMissing && replaceMissing != null) {
+            new LookupExtractionFn(
+                new MapLookupExtractor(ImmutableMap.of("foo", "bar"), false),
+                retainMissing,
+                replaceMissing,
+                injective,
+                false
+            );
+          } else {
+            throw new IAE("Case not valid");
+          }
+        }
+    );
   }
 
   @Test
   public void testCacheKey()
   {
-    if (retainMissing && !NullHandling.isNullOrEquivalent(replaceMissing)) {
+    if (retainMissing && replaceMissing != null) {
       // skip
       return;
     }
@@ -178,8 +182,8 @@ public class LookupExtractionFnTest
         false
     );
 
-    if (NullHandling.isNullOrEquivalent(replaceMissing) || retainMissing) {
-      Assert.assertFalse(
+    if (replaceMissing == null || retainMissing) {
+      Assertions.assertFalse(
           Arrays.equals(
               lookupExtractionFn.getCacheKey(),
               new LookupExtractionFn(
@@ -191,7 +195,7 @@ public class LookupExtractionFnTest
               ).getCacheKey()
           )
       );
-      Assert.assertFalse(
+      Assertions.assertFalse(
           Arrays.equals(
               lookupExtractionFn.getCacheKey(),
               new LookupExtractionFn(
@@ -204,7 +208,7 @@ public class LookupExtractionFnTest
           )
       );
     }
-    Assert.assertFalse(
+    Assertions.assertFalse(
         Arrays.equals(
             lookupExtractionFn.getCacheKey(),
             new LookupExtractionFn(
@@ -216,7 +220,7 @@ public class LookupExtractionFnTest
             ).getCacheKey()
         )
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         Arrays.equals(
             lookupExtractionFn.getCacheKey(),
             new LookupExtractionFn(

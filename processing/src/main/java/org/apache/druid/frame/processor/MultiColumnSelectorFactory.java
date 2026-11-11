@@ -19,9 +19,9 @@
 
 package org.apache.druid.frame.processor;
 
-import com.google.common.base.Predicate;
 import org.apache.druid.frame.segment.row.FrameColumnSelectorFactory;
 import org.apache.druid.query.dimension.DimensionSpec;
+import org.apache.druid.query.filter.DruidPredicateFactory;
 import org.apache.druid.query.filter.ValueMatcher;
 import org.apache.druid.query.monomorphicprocessing.RuntimeShapeInspector;
 import org.apache.druid.segment.ColumnSelectorFactory;
@@ -65,7 +65,8 @@ public class MultiColumnSelectorFactory implements ColumnSelectorFactory
   }
 
   /**
-   * Create a copy that includes {@link FrameColumnSelectorFactory#ROW_SIGNATURE_COLUMN} and
+   * Create a copy that includes {@link FrameColumnSelectorFactory#FRAME_TYPE_COLUMN},
+   * {@link FrameColumnSelectorFactory#ROW_SIGNATURE_COLUMN}, and
    * {@link FrameColumnSelectorFactory#ROW_MEMORY_COLUMN} to potentially enable direct row memory copying. If these
    * columns don't actually exist in the underlying column selector factories, they'll be ignored, so it's OK to
    * use this method even if the columns may not exist.
@@ -76,6 +77,7 @@ public class MultiColumnSelectorFactory implements ColumnSelectorFactory
         factorySuppliers,
         RowSignature.builder()
                     .addAll(signature)
+                    .add(FrameColumnSelectorFactory.FRAME_TYPE_COLUMN, ColumnType.UNKNOWN_COMPLEX)
                     .add(FrameColumnSelectorFactory.ROW_SIGNATURE_COLUMN, ColumnType.UNKNOWN_COMPLEX)
                     .add(FrameColumnSelectorFactory.ROW_MEMORY_COLUMN, ColumnType.UNKNOWN_COMPLEX)
                     .build()
@@ -103,9 +105,9 @@ public class MultiColumnSelectorFactory implements ColumnSelectorFactory
       }
 
       @Override
-      public ValueMatcher makeValueMatcher(Predicate<String> predicate)
+      public ValueMatcher makeValueMatcher(DruidPredicateFactory predicateFactory)
       {
-        return DimensionSelectorUtils.makeValueMatcherGeneric(this, predicate);
+        return DimensionSelectorUtils.makeValueMatcherGeneric(this, predicateFactory);
       }
 
       @Nullable

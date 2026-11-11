@@ -20,25 +20,32 @@
 package org.apache.druid.query.aggregation.histogram;
 
 import com.google.common.collect.Lists;
-import org.apache.druid.common.config.NullHandling;
+import org.apache.druid.data.input.ColumnsFilter;
+import org.apache.druid.data.input.InputRowSchema;
 import org.apache.druid.data.input.MapBasedRow;
+import org.apache.druid.data.input.impl.DelimitedInputFormat;
+import org.apache.druid.data.input.impl.DimensionsSpec;
+import org.apache.druid.data.input.impl.TimestampSpec;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.query.aggregation.AggregationTestHelper;
+import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.groupby.GroupByQuery;
 import org.apache.druid.query.groupby.GroupByQueryConfig;
 import org.apache.druid.query.groupby.GroupByQueryRunnerTest;
 import org.apache.druid.query.groupby.ResultRow;
 import org.apache.druid.testing.InitializedNullHandlingTest;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
+import java.io.ByteArrayInputStream;
+import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -46,15 +53,14 @@ import java.util.List;
 /**
  *
  */
-@RunWith(Parameterized.class)
 public class FixedBucketsHistogramAggregationTest extends InitializedNullHandlingTest
 {
   private AggregationTestHelper helper;
 
-  @Rule
-  public final TemporaryFolder tempFolder = new TemporaryFolder();
+  @TempDir
+  public File tempFolder;
 
-  public FixedBucketsHistogramAggregationTest(final GroupByQueryConfig config)
+  public void initFixedBucketsHistogramAggregationTest(final GroupByQueryConfig config)
   {
     ApproximateHistogramDruidModule.registerSerde();
     helper = AggregationTestHelper.createGroupByQueryAggregationTestHelper(
@@ -64,7 +70,6 @@ public class FixedBucketsHistogramAggregationTest extends InitializedNullHandlin
     );
   }
 
-  @Parameterized.Parameters(name = "{0}")
   public static Collection<?> constructorFeeder()
   {
     final List<Object[]> constructors = new ArrayList<>();
@@ -74,92 +79,98 @@ public class FixedBucketsHistogramAggregationTest extends InitializedNullHandlin
     return constructors;
   }
 
-  @After
+  @AfterEach
   public void teardown() throws IOException
   {
     helper.close();
   }
 
-  @Test
-  public void testIngestWithNullsIgnoredAndQuery() throws Exception
+  @MethodSource("constructorFeeder")
+  @ParameterizedTest(name = "{0}")
+  public void testIngestWithNullsIgnoredAndQuery(final GroupByQueryConfig config) throws Exception
   {
-    MapBasedRow row = ingestAndQuery();
-    if (!NullHandling.replaceWithDefault()) {
-      Assert.assertEquals(92.782760, row.getMetric("index_min").floatValue(), 0.0001);
-      Assert.assertEquals(135.109191, row.getMetric("index_max").floatValue(), 0.0001);
-      Assert.assertEquals(135.9499969482422, row.getMetric("index_quantile").floatValue(), 0.0001);
-    } else {
-      Assert.assertEquals(0.0, row.getMetric("index_min"));
-      Assert.assertEquals(135.109191, row.getMetric("index_max").floatValue(), 0.0001);
-      Assert.assertEquals(135.8699951171875, row.getMetric("index_quantile").floatValue(), 0.0001);
-    }
+    initFixedBucketsHistogramAggregationTest(config);
+    MapBasedRow row = ingestAndQuery(this.getClass().getClassLoader().getResourceAsStream("sample.data.tsv"));
+    FixedBucketsHistogram histogram = (FixedBucketsHistogram) row.getRaw("index_fbh");
+    Assertions.assertEquals(5, histogram.getCount());
+    Assertions.assertEquals(92.782760, row.getMetric("index_min").floatValue(), 0.0001);
+    Assertions.assertEquals(135.109191, row.getMetric("index_max").floatValue(), 0.0001);
+    Assertions.assertEquals(135.9499969482422, row.getMetric("index_quantile").floatValue(), 0.0001);
   }
 
-  private MapBasedRow ingestAndQuery() throws Exception
+  /**
+   * When {@link org.apache.druid.segment.RowCombiningTimeAndDimsIterator#moveToNext} is merging indexes,
+   * if {@link org.apache.druid.segment.MergingRowIterator#hasTimeAndDimsChangedSinceMark} is false, then
+   * {@link org.apache.druid.query.aggregation.AggregateCombiner#reset} gets called. This is the only path
+   * that calls this method.
+   */
+  @MethodSource("constructorFeeder")
+  @ParameterizedTest(name = "{0}")
+  public void testAggregateCombinerReset(final GroupByQueryConfig config) throws Exception
   {
-    String ingestionAgg = FixedBucketsHistogramAggregator.TYPE_NAME;
+    initFixedBucketsHistogramAggregationTest(config);
+    String inputRows = "2011-04-15T00:00:00.000Z\tspot\thealth\tpreferred\ta\u0001preferred\t10\n"
+                       + "2011-04-15T00:00:00.000Z\tspot\thealth\tpreferred\ta\u0001preferred\t20\n"
+                       + "2011-04-15T00:00:00.000Z\tspot\thealth\tpreferred\ta\u0001preferred\t30\n"
+                       + "2011-04-15T00:00:00.000Z\tspot\thealth\tpreferred\ta\u0001preferred\t40\n"
+                       + "2011-04-15T00:00:00.000Z\tspot\thealth\tpreferred\ta\u0001preferred\t50\n"
+                       + "2011-04-15T00:00:00.000Z\tspot\thealth\tpreferred\ta\u0001preferred\t10\n"
+                       + "2011-04-15T00:00:00.000Z\tspot\thealth\tpreferred\ta\u0001preferred\t20\n"
+                       + "2011-04-15T00:00:00.000Z\tspot\thealth\tpreferred\ta\u0001preferred\t30\n"
+                       + "2011-04-15T00:00:00.000Z\tspot\thealth\tpreferred\ta\u0001preferred\t40\n"
+                       + "2011-04-15T00:00:00.000Z\tspot\thealth\tpreferred\ta\u0001preferred\t50\n";
+    MapBasedRow row = ingestAndQuery(new ByteArrayInputStream(inputRows.getBytes(StandardCharsets.UTF_8)));
+    FixedBucketsHistogram histogram = (FixedBucketsHistogram) row.getRaw("index_fbh");
+    Assertions.assertEquals(10, histogram.getCount());
+    Assertions.assertEquals(10, row.getMetric("index_min").floatValue(), 0.0001);
+    Assertions.assertEquals(50, row.getMetric("index_max").floatValue(), 0.0001);
+    // Current interpolation logic doesn't consider min/max: it assumes the values seen were evenly-distributed between 50 and 51.
+    Assertions.assertEquals(50.95, row.getMetric("index_quantile").floatValue(), 0.0001);
+  }
 
-    String metricSpec = "[{"
-                        + "\"type\": \"" + ingestionAgg + "\","
-                        + "\"name\": \"index_fbh\","
-                        + "\"numBuckets\": 200,"
-                        + "\"lowerLimit\": 0,"
-                        + "\"upperLimit\": 200,"
-                        + "\"outlierHandlingMode\": \"overflow\","
-                        + "\"fieldName\": \"index\""
-                        + "}]";
+  private MapBasedRow ingestAndQuery(InputStream inputDataStream) throws Exception
+  {
+    List<AggregatorFactory> metricSpec = List.of(
+        new FixedBucketsHistogramAggregatorFactory(
+            "index_fbh", "index", 200, 0, 200,
+            FixedBucketsHistogram.OutlierHandlingMode.OVERFLOW, null
+        )
+    );
 
-    String parseSpec = "{"
-                       + "\"type\" : \"string\","
-                       + "\"parseSpec\" : {"
-                       + "    \"format\" : \"tsv\","
-                       + "    \"timestampSpec\" : {"
-                       + "        \"column\" : \"timestamp\","
-                       + "        \"format\" : \"auto\""
-                       + "},"
-                       + "    \"dimensionsSpec\" : {"
-                       + "        \"dimensions\": [],"
-                       + "        \"dimensionExclusions\" : [],"
-                       + "        \"spatialDimensions\" : []"
-                       + "    },"
-                       + "    \"columns\": [\"timestamp\", \"market\", \"quality\", \"placement\", \"placementish\", \"index\"]"
-                       + "  }"
-                       + "}";
-
-    String query = "{"
-                   + "\"queryType\": \"groupBy\","
-                   + "\"dataSource\": \"test_datasource\","
-                   + "\"granularity\": \"ALL\","
-                   + "\"dimensions\": [],"
-                   + "\"aggregations\": ["
-                   + "  {"
-                   + "   \"type\": \"fixedBucketsHistogram\","
-                   + "   \"name\": \"index_fbh\","
-                   + "   \"fieldName\": \"index_fbh\","
-                   + "   \"numBuckets\": 200,"
-                   + "   \"lowerLimit\": 0,"
-                   + "   \"upperLimit\": 200,"
-                   + "   \"outlierHandlingMode\": \"overflow\""
-                   + "  }"
-                   + "],"
-                   + "\"postAggregations\": ["
-                   + "  { \"type\": \"min\", \"name\": \"index_min\", \"fieldName\": \"index_fbh\"},"
-                   + "  { \"type\": \"max\", \"name\": \"index_max\", \"fieldName\": \"index_fbh\"},"
-                   + "  { \"type\": \"quantile\", \"name\": \"index_quantile\", \"fieldName\": \"index_fbh\", \"probability\" : 0.99 }"
-                   + "],"
-                   + "\"intervals\": [ \"1970/2050\" ]"
-                   + "}";
+    GroupByQuery query = GroupByQuery.builder()
+                                     .setDataSource("test_datasource")
+                                     .setGranularity(Granularities.ALL)
+                                     .setInterval("1970/2050")
+                                     .setAggregatorSpecs(
+                                         new FixedBucketsHistogramAggregatorFactory(
+                                             "index_fbh", "index_fbh", 200, 0, 200,
+                                             FixedBucketsHistogram.OutlierHandlingMode.OVERFLOW, true
+                                         )
+                                     )
+                                     .setPostAggregatorSpecs(
+                                         new MinPostAggregator("index_min", "index_fbh"),
+                                         new MaxPostAggregator("index_max", "index_fbh"),
+                                         new QuantilePostAggregator("index_quantile", "index_fbh", 0.99f)
+                                     )
+                                     .build();
 
     Sequence<ResultRow> seq = helper.createIndexAndRunQueryOnSegment(
-        this.getClass().getClassLoader().getResourceAsStream("sample.data.tsv"),
-        parseSpec,
+        inputDataStream,
+        new InputRowSchema(
+            new TimestampSpec("timestamp", "auto", null),
+            new DimensionsSpec(DimensionsSpec.getDefaultSchemas(List.of())),
+            ColumnsFilter.all()
+        ),
+        DelimitedInputFormat.forColumns(
+            List.of("timestamp", "market", "quality", "placement", "placementish", "index")
+        ),
         metricSpec,
         0,
         Granularities.NONE,
-        50000,
+        5, // ensure we get more than one index, to test merging
         query
     );
 
-    return seq.toList().get(0).toMapBasedRow((GroupByQuery) helper.readQuery(query));
+    return seq.toList().get(0).toMapBasedRow(query);
   }
 }

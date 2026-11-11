@@ -29,13 +29,15 @@ import org.apache.druid.guice.GuiceInjectors;
 import org.apache.druid.guice.JsonConfigProvider;
 import org.apache.druid.guice.JsonConfigurator;
 import org.apache.druid.initialization.DruidModule;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.apache.druid.query.Query;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Properties;
+
 
 /**
  *
@@ -47,7 +49,7 @@ public class CacheConfigTest
   JsonConfigProvider<CacheConfig> configProvider;
   private static final String PROPERTY_PREFIX = "org.apache.druid.collections.test.cache";
 
-  @BeforeClass
+  @BeforeAll
   public static void populateStatics()
   {
     injector = GuiceInjectors.makeStartupInjectorWithModules(ImmutableList.<com.google.inject.Module>of(new CacheConfigTestModule()));
@@ -72,7 +74,7 @@ public class CacheConfigTest
 
   private Properties properties = new Properties();
 
-  @Before
+  @BeforeEach
   public void setupTest()
   {
     properties.clear();
@@ -88,13 +90,14 @@ public class CacheConfigTest
     properties.put(PROPERTY_PREFIX + ".unCacheable", "[\"a\",\"b\"]");
 
     configProvider.inject(properties, configurator);
-    CacheConfig config = configProvider.get().get();
+    CacheConfig config = configProvider.get();
 
     injector.injectMembers(config);
-    Assert.assertEquals(5, config.getNumBackgroundThreads());
-    Assert.assertEquals(true, config.isPopulateCache());
-    Assert.assertEquals(true, config.isUseCache());
+    Assertions.assertEquals(5, config.getNumBackgroundThreads());
+    Assertions.assertEquals(true, config.isPopulateCache());
+    Assertions.assertEquals(true, config.isUseCache());
   }
+
   @Test
   public void testInjection2()
   {
@@ -103,60 +106,83 @@ public class CacheConfigTest
     properties.put(PROPERTY_PREFIX + ".useCache", "false");
 
     configProvider.inject(properties, configurator);
-    CacheConfig config = configProvider.get().get();
+    CacheConfig config = configProvider.get();
 
-    Assert.assertEquals(99, config.getNumBackgroundThreads());
-    Assert.assertEquals(false, config.isPopulateCache());
-    Assert.assertEquals(false, config.isUseCache());
+    Assertions.assertEquals(99, config.getNumBackgroundThreads());
+    Assertions.assertEquals(false, config.isPopulateCache());
+    Assertions.assertEquals(false, config.isUseCache());
   }
 
-  @Test(expected = ProvisionException.class)
+  @Test
   public void testValidationError()
   {
-    properties.put(PROPERTY_PREFIX + ".numBackgroundThreads", "-1");
+    Assertions.assertThrows(ProvisionException.class, () -> {
+      properties.put(PROPERTY_PREFIX + ".numBackgroundThreads", "-1");
 
-    configProvider.inject(properties, configurator);
-    CacheConfig config = configProvider.get().get();
-    Assert.assertNotEquals(-1, config.getNumBackgroundThreads());
+      configProvider.inject(properties, configurator);
+      CacheConfig config = configProvider.get();
+      Assertions.assertNotEquals(-1, config.getNumBackgroundThreads());
+    });
   }
 
 
-  @Test(expected = ProvisionException.class)
+  @Test
   public void testValidationInsaneError()
   {
-    properties.put(PROPERTY_PREFIX + ".numBackgroundThreads", "BABBA YAGA");
-    configProvider.inject(properties, configurator);
-    CacheConfig config = configProvider.get().get();
-    throw new IllegalStateException("Should have already failed");
+    Assertions.assertThrows(ProvisionException.class, () -> {
+      properties.put(PROPERTY_PREFIX + ".numBackgroundThreads", "BABBA YAGA");
+      configProvider.inject(properties, configurator);
+      CacheConfig config = configProvider.get();
+      throw new IllegalStateException("Should have already failed");
+    });
   }
 
-  @Test(expected = ProvisionException.class)
+  @Test
   public void testTRUE()
   {
     properties.put(PROPERTY_PREFIX + ".populateCache", "TRUE");
     configProvider.inject(properties, configurator);
-    CacheConfig config = configProvider.get().get();
-    throw new IllegalStateException("Should have already failed");
+    CacheConfig config = configProvider.get();
+    Assertions.assertTrue(config.isPopulateCache());
   }
 
-  @Test(expected = ProvisionException.class)
-  public void testFALSE()
+  @Test
+  public void testUppercaseFalse()
   {
     properties.put(PROPERTY_PREFIX + ".populateCache", "FALSE");
     configProvider.inject(properties, configurator);
-    CacheConfig config = configProvider.get().get();
-    throw new IllegalStateException("Should have already failed");
+    CacheConfig config = configProvider.get();
+    Assertions.assertFalse(config.isPopulateCache());
   }
 
 
-  @Test(expected = ProvisionException.class)
-  public void testFaLse()
+  @Test
+  public void testMixedCaseFalseIsRejected()
   {
-    properties.put(PROPERTY_PREFIX + ".populateCache", "FaLse");
-    configProvider.inject(properties, configurator);
-    CacheConfig config = configProvider.get().get();
-    throw new IllegalStateException("Should have already failed");
+    Assertions.assertThrows(ProvisionException.class, () -> {
+      properties.put(PROPERTY_PREFIX + ".populateCache", "FaLse");
+      configProvider.inject(properties, configurator);
+      CacheConfig config = configProvider.get();
+      throw new IllegalStateException("Should have already failed");
+    });
   }
 
+  @Test
+  public void testDefaultUnCacheableList()
+  {
+    configProvider.inject(properties, configurator);
+    CacheConfig config = configProvider.get();
+    injector.injectMembers(config);
 
+    Assertions.assertFalse(config.isQueryCacheable(Query.SCAN));
+
+    properties.clear();
+    configProvider = JsonConfigProvider.of(PROPERTY_PREFIX, CacheConfig.class);
+
+    properties.put(PROPERTY_PREFIX + ".unCacheable", "[]");
+    configProvider.inject(properties, configurator);
+    CacheConfig config2 = configProvider.get();
+    injector.injectMembers(config2);
+    Assertions.assertTrue(config2.isQueryCacheable(Query.SCAN));
+  }
 }

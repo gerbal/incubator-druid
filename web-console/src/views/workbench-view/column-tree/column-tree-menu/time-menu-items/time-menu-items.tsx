@@ -18,8 +18,10 @@
 
 import { MenuDivider, MenuItem } from '@blueprintjs/core';
 import { IconNames } from '@blueprintjs/icons';
+import { day, hour, month, Timezone, year } from 'chronoshift';
 import type { SqlQuery } from 'druid-query-toolkit';
 import { C, F, SqlExpression } from 'druid-query-toolkit';
+import type { JSX } from 'react';
 import React from 'react';
 
 import { prettyPrintSql } from '../../../../../utils';
@@ -48,59 +50,7 @@ function fillWithColumn(b: SqlExpression, columnName: string): SqlExpression {
 
 function fillWithColumnStartEnd(columnName: string, start: Date, end: Date): SqlExpression {
   const column = C(columnName);
-  return BETWEEN.fillPlaceholders([start, column, column, end])!;
-}
-
-// ------------------------------------
-
-function floorHour(dt: Date): Date {
-  dt = new Date(dt.valueOf());
-  dt.setUTCMinutes(0, 0, 0);
-  return dt;
-}
-
-function nextHour(dt: Date): Date {
-  dt = new Date(dt.valueOf());
-  dt.setUTCHours(dt.getUTCHours() + 1);
-  return dt;
-}
-
-function floorDay(dt: Date): Date {
-  dt = new Date(dt.valueOf());
-  dt.setUTCHours(0, 0, 0, 0);
-  return dt;
-}
-
-function nextDay(dt: Date): Date {
-  dt = new Date(dt.valueOf());
-  dt.setUTCDate(dt.getUTCDate() + 1);
-  return dt;
-}
-
-function floorMonth(dt: Date): Date {
-  dt = new Date(dt.valueOf());
-  dt.setUTCHours(0, 0, 0, 0);
-  dt.setUTCDate(1);
-  return dt;
-}
-
-function nextMonth(dt: Date): Date {
-  dt = new Date(dt.valueOf());
-  dt.setUTCMonth(dt.getUTCMonth() + 1);
-  return dt;
-}
-
-function floorYear(dt: Date): Date {
-  dt = new Date(dt.valueOf());
-  dt.setUTCHours(0, 0, 0, 0);
-  dt.setUTCMonth(0, 1);
-  return dt;
-}
-
-function nextYear(dt: Date): Date {
-  dt = new Date(dt.valueOf());
-  dt.setUTCFullYear(dt.getUTCFullYear() + 1);
-  return dt;
+  return BETWEEN.fillPlaceholders([start, column, column, end]);
 }
 
 export interface TimeMenuItemsProps {
@@ -112,9 +62,10 @@ export interface TimeMenuItemsProps {
 }
 
 export const TimeMenuItems = React.memo(function TimeMenuItems(props: TimeMenuItemsProps) {
-  function renderFilterMenu(): JSX.Element | undefined {
-    const { columnName, parsedQuery, onQueryChange } = props;
+  const { columnName, parsedQuery, onQueryChange } = props;
+  const column = C(columnName);
 
+  function renderFilterMenu(): JSX.Element | undefined {
     function filterMenuItem(label: string, clause: SqlExpression) {
       return (
         <MenuItem
@@ -127,10 +78,10 @@ export const TimeMenuItems = React.memo(function TimeMenuItems(props: TimeMenuIt
     }
 
     const now = new Date();
-    const hourStart = floorHour(now);
-    const dayStart = floorDay(now);
-    const monthStart = floorMonth(now);
-    const yearStart = floorYear(now);
+    const hourStart = hour.floor(now, Timezone.UTC);
+    const dayStart = day.floor(now, Timezone.UTC);
+    const monthStart = month.floor(now, Timezone.UTC);
+    const yearStart = year.floor(now, Timezone.UTC);
     return (
       <MenuItem icon={IconNames.FILTER} text="Filter">
         {filterMenuItem(`Latest hour`, fillWithColumn(LATEST_HOUR, columnName))}
@@ -141,26 +92,25 @@ export const TimeMenuItems = React.memo(function TimeMenuItems(props: TimeMenuIt
         <MenuDivider />
         {filterMenuItem(
           `Current hour`,
-          fillWithColumnStartEnd(columnName, hourStart, nextHour(hourStart)),
+          fillWithColumnStartEnd(columnName, hourStart, hour.shift(hourStart, Timezone.UTC, 1)),
         )}
         {filterMenuItem(
           `Current day`,
-          fillWithColumnStartEnd(columnName, dayStart, nextDay(dayStart)),
+          fillWithColumnStartEnd(columnName, dayStart, day.shift(dayStart, Timezone.UTC, 1)),
         )}
         {filterMenuItem(
           `Current month`,
-          fillWithColumnStartEnd(columnName, monthStart, nextMonth(monthStart)),
+          fillWithColumnStartEnd(columnName, monthStart, month.shift(monthStart, Timezone.UTC, 1)),
         )}
         {filterMenuItem(
           `Current year`,
-          fillWithColumnStartEnd(columnName, yearStart, nextYear(yearStart)),
+          fillWithColumnStartEnd(columnName, yearStart, year.shift(yearStart, Timezone.UTC, 1)),
         )}
       </MenuItem>
     );
   }
 
   function renderRemoveFilter(): JSX.Element | undefined {
-    const { columnName, parsedQuery, onQueryChange } = props;
     if (!parsedQuery.getEffectiveWhereExpression().containsColumnName(columnName)) return;
 
     return (
@@ -175,7 +125,6 @@ export const TimeMenuItems = React.memo(function TimeMenuItems(props: TimeMenuIt
   }
 
   function renderRemoveGroupBy(): JSX.Element | undefined {
-    const { columnName, parsedQuery, onQueryChange } = props;
     const groupedSelectIndexes = parsedQuery.getGroupedSelectIndexesForColumn(columnName);
     if (!groupedSelectIndexes.length) return;
 
@@ -191,7 +140,6 @@ export const TimeMenuItems = React.memo(function TimeMenuItems(props: TimeMenuIt
   }
 
   function renderGroupByMenu(): JSX.Element | undefined {
-    const { columnName, parsedQuery, onQueryChange } = props;
     if (!parsedQuery.hasGroupBy()) return;
 
     function groupByMenuItem(ex: SqlExpression, alias: string) {
@@ -211,7 +159,6 @@ export const TimeMenuItems = React.memo(function TimeMenuItems(props: TimeMenuIt
       );
     }
 
-    const column = C(columnName);
     return (
       <MenuItem icon={IconNames.GROUP_OBJECTS} text="Group by">
         {groupByMenuItem(F.timeFloor(column, 'PT1H'), `${columnName}_by_hour`)}
@@ -228,7 +175,6 @@ export const TimeMenuItems = React.memo(function TimeMenuItems(props: TimeMenuIt
   }
 
   function renderAggregateMenu(): JSX.Element | undefined {
-    const { columnName, parsedQuery, onQueryChange } = props;
     if (!parsedQuery.hasGroupBy()) return;
 
     function aggregateMenuItem(ex: SqlExpression, alias: string) {
@@ -242,7 +188,6 @@ export const TimeMenuItems = React.memo(function TimeMenuItems(props: TimeMenuIt
       );
     }
 
-    const column = C(columnName);
     return (
       <MenuItem icon={IconNames.FUNCTION} text="Aggregate">
         {aggregateMenuItem(F.max(column), `max_${columnName}`)}

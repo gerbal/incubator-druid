@@ -1,0 +1,688 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`TieredReplicant matches snapshot when disabled 1`] = `
+<div
+  class="bp6-control-group tiered-replicant"
+  role="group"
+>
+  <button
+    class="bp6-button bp6-disabled bp6-minimal"
+    disabled=""
+    style="pointer-events: none;"
+    tabindex="-1"
+    type="button"
+  >
+    <span
+      class="bp6-button-text"
+    >
+      Tier:
+    </span>
+  </button>
+  <div
+    class="formatted-input suggestible-input"
+  >
+    <div
+      class="bp6-input-group bp6-disabled bp6-fill"
+    >
+      <input
+        aria-disabled="true"
+        class="bp6-input"
+        disabled=""
+        style="padding-right: 0px;"
+        type="text"
+        value="test1"
+      />
+      <span
+        class="bp6-input-action"
+      >
+        <span
+          class="bp6-popover-target"
+        >
+          <button
+            aria-expanded="false"
+            aria-haspopup="menu"
+            class="bp6-button bp6-minimal"
+            type="button"
+          >
+            <span
+              aria-hidden="true"
+              class="bp6-icon bp6-icon-caret-down"
+            >
+              <svg
+                data-icon="caret-down"
+              />
+            </span>
+          </button>
+        </span>
+      </span>
+    </div>
+  </div>
+  <button
+    class="bp6-button bp6-disabled bp6-minimal"
+    disabled=""
+    style="pointer-events: none;"
+    tabindex="-1"
+    type="button"
+  >
+    <span
+      class="bp6-button-text"
+    >
+      Replicants:
+    </span>
+  </button>
+  <div
+    class="bp6-control-group bp6-numeric-input"
+    role="group"
+  >
+    <div
+      class="bp6-input-group bp6-disabled"
+    >
+      <input
+        aria-disabled="true"
+        aria-valuemax="256"
+        aria-valuemin="0"
+        aria-valuenow="3"
+        autocomplete="off"
+        class="bp6-input"
+        disabled=""
+        id="numericInput-2"
+        max="256"
+        min="0"
+        role="spinbutton"
+        type="text"
+        value="3"
+      />
+    </div>
+    <div
+      class="bp6-button-group bp6-vertical bp6-fixed"
+    >
+      <button
+        aria-controls="numericInput-2"
+        aria-label="increment"
+        class="bp6-button bp6-disabled"
+        disabled=""
+        tabindex="-1"
+        type="button"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-chevron-up"
+        >
+          <svg
+            data-icon="chevron-up"
+          />
+        </span>
+      </button>
+      <button
+        aria-controls="numericInput-2"
+        aria-label="decrement"
+        class="bp6-button bp6-disabled"
+        disabled=""
+        tabindex="-1"
+        type="button"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-chevron-down"
+        >
+          <svg
+            data-icon="chevron-down"
+          />
+        </span>
+      </button>
+    </div>
+  </div>
+  <button
+    class="bp6-button"
+    type="button"
+  >
+    <span
+      aria-hidden="true"
+      class="bp6-icon bp6-icon-trash"
+    >
+      <svg
+        data-icon="trash"
+      />
+    </span>
+  </button>
+</div>
+`;
+
+exports[`TieredReplicant matches snapshot with existing tier 1`] = `
+<div
+  class="bp6-control-group tiered-replicant"
+  role="group"
+>
+  <button
+    class="bp6-button bp6-minimal"
+    style="pointer-events: none;"
+    type="button"
+  >
+    <span
+      class="bp6-button-text"
+    >
+      Tier:
+    </span>
+  </button>
+  <div
+    class="formatted-input suggestible-input"
+  >
+    <div
+      class="bp6-input-group bp6-fill"
+    >
+      <input
+        aria-disabled="false"
+        class="bp6-input"
+        style="padding-right: 0px;"
+        type="text"
+        value="test1"
+      />
+      <span
+        class="bp6-input-action"
+      >
+        <span
+          class="bp6-popover-target"
+        >
+          <button
+            aria-expanded="false"
+            aria-haspopup="menu"
+            class="bp6-button bp6-minimal"
+            type="button"
+          >
+            <span
+              aria-hidden="true"
+              class="bp6-icon bp6-icon-caret-down"
+            >
+              <svg
+                data-icon="caret-down"
+              />
+            </span>
+          </button>
+        </span>
+      </span>
+    </div>
+  </div>
+  <button
+    class="bp6-button bp6-minimal"
+    style="pointer-events: none;"
+    type="button"
+  >
+    <span
+      class="bp6-button-text"
+    >
+      Replicants:
+    </span>
+  </button>
+  <div
+    class="bp6-control-group bp6-numeric-input"
+    role="group"
+  >
+    <div
+      class="bp6-input-group"
+    >
+      <input
+        aria-disabled="false"
+        aria-valuemax="256"
+        aria-valuemin="0"
+        aria-valuenow="2"
+        autocomplete="off"
+        class="bp6-input"
+        id="numericInput-0"
+        max="256"
+        min="0"
+        role="spinbutton"
+        type="text"
+        value="2"
+      />
+    </div>
+    <div
+      class="bp6-button-group bp6-vertical bp6-fixed"
+    >
+      <button
+        aria-controls="numericInput-0"
+        aria-label="increment"
+        class="bp6-button"
+        type="button"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-chevron-up"
+        >
+          <svg
+            data-icon="chevron-up"
+          />
+        </span>
+      </button>
+      <button
+        aria-controls="numericInput-0"
+        aria-label="decrement"
+        class="bp6-button"
+        type="button"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-chevron-down"
+        >
+          <svg
+            data-icon="chevron-down"
+          />
+        </span>
+      </button>
+    </div>
+  </div>
+  <button
+    class="bp6-button"
+    type="button"
+  >
+    <span
+      aria-hidden="true"
+      class="bp6-icon bp6-icon-trash"
+    >
+      <svg
+        data-icon="trash"
+      />
+    </span>
+  </button>
+</div>
+`;
+
+exports[`TieredReplicant matches snapshot with multiple used tiers 1`] = `
+<div
+  class="bp6-control-group tiered-replicant"
+  role="group"
+>
+  <button
+    class="bp6-button bp6-minimal"
+    style="pointer-events: none;"
+    type="button"
+  >
+    <span
+      class="bp6-button-text"
+    >
+      Tier:
+    </span>
+  </button>
+  <div
+    class="formatted-input suggestible-input"
+  >
+    <div
+      class="bp6-input-group bp6-fill"
+    >
+      <input
+        aria-disabled="false"
+        class="bp6-input"
+        style="padding-right: 0px;"
+        type="text"
+        value="test3"
+      />
+      <span
+        class="bp6-input-action"
+      >
+        <span
+          class="bp6-popover-target"
+        >
+          <button
+            aria-expanded="false"
+            aria-haspopup="menu"
+            class="bp6-button bp6-minimal"
+            type="button"
+          >
+            <span
+              aria-hidden="true"
+              class="bp6-icon bp6-icon-caret-down"
+            >
+              <svg
+                data-icon="caret-down"
+              />
+            </span>
+          </button>
+        </span>
+      </span>
+    </div>
+  </div>
+  <button
+    class="bp6-button bp6-minimal"
+    style="pointer-events: none;"
+    type="button"
+  >
+    <span
+      class="bp6-button-text"
+    >
+      Replicants:
+    </span>
+  </button>
+  <div
+    class="bp6-control-group bp6-numeric-input"
+    role="group"
+  >
+    <div
+      class="bp6-input-group"
+    >
+      <input
+        aria-disabled="false"
+        aria-valuemax="256"
+        aria-valuemin="0"
+        aria-valuenow="5"
+        autocomplete="off"
+        class="bp6-input"
+        id="numericInput-4"
+        max="256"
+        min="0"
+        role="spinbutton"
+        type="text"
+        value="5"
+      />
+    </div>
+    <div
+      class="bp6-button-group bp6-vertical bp6-fixed"
+    >
+      <button
+        aria-controls="numericInput-4"
+        aria-label="increment"
+        class="bp6-button"
+        type="button"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-chevron-up"
+        >
+          <svg
+            data-icon="chevron-up"
+          />
+        </span>
+      </button>
+      <button
+        aria-controls="numericInput-4"
+        aria-label="decrement"
+        class="bp6-button"
+        type="button"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-chevron-down"
+        >
+          <svg
+            data-icon="chevron-down"
+          />
+        </span>
+      </button>
+    </div>
+  </div>
+  <button
+    class="bp6-button"
+    type="button"
+  >
+    <span
+      aria-hidden="true"
+      class="bp6-icon bp6-icon-trash"
+    >
+      <svg
+        data-icon="trash"
+      />
+    </span>
+  </button>
+</div>
+`;
+
+exports[`TieredReplicant matches snapshot with non-existing tier 1`] = `
+<div
+  class="bp6-control-group tiered-replicant"
+  role="group"
+>
+  <button
+    class="bp6-button bp6-minimal"
+    style="pointer-events: none;"
+    type="button"
+  >
+    <span
+      class="bp6-button-text"
+    >
+      Tier:
+    </span>
+  </button>
+  <div
+    class="formatted-input suggestible-input"
+  >
+    <div
+      class="bp6-input-group bp6-fill"
+    >
+      <input
+        aria-disabled="false"
+        class="bp6-input"
+        style="padding-right: 0px;"
+        type="text"
+        value="nonexist"
+      />
+      <span
+        class="bp6-input-action"
+      >
+        <span
+          class="bp6-popover-target"
+        >
+          <button
+            aria-expanded="false"
+            aria-haspopup="menu"
+            class="bp6-button bp6-minimal"
+            type="button"
+          >
+            <span
+              aria-hidden="true"
+              class="bp6-icon bp6-icon-caret-down"
+            >
+              <svg
+                data-icon="caret-down"
+              />
+            </span>
+          </button>
+        </span>
+      </span>
+    </div>
+  </div>
+  <button
+    class="bp6-button bp6-minimal"
+    style="pointer-events: none;"
+    type="button"
+  >
+    <span
+      class="bp6-button-text"
+    >
+      Replicants:
+    </span>
+  </button>
+  <div
+    class="bp6-control-group bp6-numeric-input"
+    role="group"
+  >
+    <div
+      class="bp6-input-group"
+    >
+      <input
+        aria-disabled="false"
+        aria-valuemax="256"
+        aria-valuemin="0"
+        aria-valuenow="1"
+        autocomplete="off"
+        class="bp6-input"
+        id="numericInput-1"
+        max="256"
+        min="0"
+        role="spinbutton"
+        type="text"
+        value="1"
+      />
+    </div>
+    <div
+      class="bp6-button-group bp6-vertical bp6-fixed"
+    >
+      <button
+        aria-controls="numericInput-1"
+        aria-label="increment"
+        class="bp6-button"
+        type="button"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-chevron-up"
+        >
+          <svg
+            data-icon="chevron-up"
+          />
+        </span>
+      </button>
+      <button
+        aria-controls="numericInput-1"
+        aria-label="decrement"
+        class="bp6-button"
+        type="button"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-chevron-down"
+        >
+          <svg
+            data-icon="chevron-down"
+          />
+        </span>
+      </button>
+    </div>
+  </div>
+  <button
+    class="bp6-button"
+    type="button"
+  >
+    <span
+      aria-hidden="true"
+      class="bp6-icon bp6-icon-trash"
+    >
+      <svg
+        data-icon="trash"
+      />
+    </span>
+  </button>
+</div>
+`;
+
+exports[`TieredReplicant matches snapshot without remove button 1`] = `
+<div
+  class="bp6-control-group tiered-replicant"
+  role="group"
+>
+  <button
+    class="bp6-button bp6-minimal"
+    style="pointer-events: none;"
+    type="button"
+  >
+    <span
+      class="bp6-button-text"
+    >
+      Tier:
+    </span>
+  </button>
+  <div
+    class="formatted-input suggestible-input"
+  >
+    <div
+      class="bp6-input-group bp6-fill"
+    >
+      <input
+        aria-disabled="false"
+        class="bp6-input"
+        style="padding-right: 0px;"
+        type="text"
+        value="test2"
+      />
+      <span
+        class="bp6-input-action"
+      >
+        <span
+          class="bp6-popover-target"
+        >
+          <button
+            aria-expanded="false"
+            aria-haspopup="menu"
+            class="bp6-button bp6-minimal"
+            type="button"
+          >
+            <span
+              aria-hidden="true"
+              class="bp6-icon bp6-icon-caret-down"
+            >
+              <svg
+                data-icon="caret-down"
+              />
+            </span>
+          </button>
+        </span>
+      </span>
+    </div>
+  </div>
+  <button
+    class="bp6-button bp6-minimal"
+    style="pointer-events: none;"
+    type="button"
+  >
+    <span
+      class="bp6-button-text"
+    >
+      Replicants:
+    </span>
+  </button>
+  <div
+    class="bp6-control-group bp6-numeric-input"
+    role="group"
+  >
+    <div
+      class="bp6-input-group"
+    >
+      <input
+        aria-disabled="false"
+        aria-valuemax="256"
+        aria-valuemin="0"
+        aria-valuenow="1"
+        autocomplete="off"
+        class="bp6-input"
+        id="numericInput-3"
+        max="256"
+        min="0"
+        role="spinbutton"
+        type="text"
+        value="1"
+      />
+    </div>
+    <div
+      class="bp6-button-group bp6-vertical bp6-fixed"
+    >
+      <button
+        aria-controls="numericInput-3"
+        aria-label="increment"
+        class="bp6-button"
+        type="button"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-chevron-up"
+        >
+          <svg
+            data-icon="chevron-up"
+          />
+        </span>
+      </button>
+      <button
+        aria-controls="numericInput-3"
+        aria-label="decrement"
+        class="bp6-button"
+        type="button"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-icon bp6-icon-chevron-down"
+        >
+          <svg
+            data-icon="chevron-down"
+          />
+        </span>
+      </button>
+    </div>
+  </div>
+</div>
+`;

@@ -19,12 +19,14 @@
 
 package org.apache.druid.java.util.common;
 
+import org.apache.druid.error.DruidExceptionMatcher;
 import org.apache.druid.java.util.common.guava.Comparators;
 import org.joda.time.Interval;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
+import java.util.List;
 
 public class IntervalsTest
 {
@@ -41,41 +43,118 @@ public class IntervalsTest
     Arrays.sort(sortedIntervals, Comparators.intervalsByStartThenEnd());
 
     // Search interval outside the bounds of the sorted intervals
-    Assert.assertNull(
+    Assertions.assertNull(
         Intervals.findOverlappingInterval(Intervals.of("2018/2019"), sortedIntervals)
     );
-    Assert.assertNull(
+    Assertions.assertNull(
         Intervals.findOverlappingInterval(Intervals.of("2023/2024"), sortedIntervals)
     );
 
     // Search interval within bounds, overlap exists
     // Fully overlapping interval
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Intervals.of("2021/2022"),
         Intervals.findOverlappingInterval(Intervals.of("2021/2022"), sortedIntervals)
     );
 
     // Partially overlapping interval
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Intervals.of("2022/2023"),
         Intervals.findOverlappingInterval(Intervals.of("2022-01-01/2022-01-02"), sortedIntervals)
     );
 
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Intervals.of("2021/2022"),
         Intervals.findOverlappingInterval(Intervals.of("2021-06-01/2021-07-01"), sortedIntervals)
     );
 
     // Overlap with multiple intervals, "smallest" one is returned
-    Assert.assertEquals(
+    Assertions.assertEquals(
         Intervals.of("2021/2022"),
         Intervals.findOverlappingInterval(Intervals.of("2021-03-01/2021-04-01"), sortedIntervals)
     );
 
     // Search interval within bounds, no overlap
-    Assert.assertNull(
+    Assertions.assertNull(
         Intervals.findOverlappingInterval(Intervals.of("2020-01-02/2020-03-03"), sortedIntervals)
     );
   }
 
+  @Test
+  public void testValidIntervalStrings()
+  {
+    final String[] intervalStringRepresentations = new String[]{
+        // Tests that use does not fallback to Intervals.of()
+        // Zulu with millis
+        "2022-01-01T00:00:00.000Z/2022-01-02T00:00:00.000Z",
+        "2021-03-14T12:34:56.789Z/2021-03-15T12:34:56.789Z",
+
+        // Offset with colon
+        "2022-01-01T00:00:00.000+05:30/2022-01-01T01:00:00.000+05:30",
+        "2022-01-01T07:00:00.000-07:00/2022-01-01T08:00:00.000-07:00",
+
+        // Basic offset without colon
+        "2022-01-01T00:00:00.000+0530/2022-01-01T01:00:00.000+0530",
+
+        // Tests that fallback to Intervals.of()
+        // Zulu without millis
+        "2022-01-01T00:00:00Z/2022-01-02T00:00:00Z",
+        // Date-only
+        "2022-01-01/2022-01-02",
+        // start/period
+        "2022-01-01T00:00:00.000Z/P1D",
+        "2022-01-01T12:00:00Z/PT6H",
+        "2022-01-01T00:00:00Z/P2DT3H4M5S",
+        // period/end
+        "P1D/2022-01-02T00:00:00.000Z",
+        "PT6H/2022-01-01T18:00:00Z",
+        "P2DT3H4M5S/2022-01-03T03:04:05Z"
+    };
+
+    for (String s : intervalStringRepresentations) {
+      Interval expected = Intervals.of(s);
+      Interval actual = Intervals.fromString(s);
+      Assertions.assertEquals(expected, actual, "Mismatch for: " + s);
+    }
+  }
+
+  @Test
+  public void testInvalidInterval()
+  {
+    DruidExceptionMatcher.invalidInput().assertThrowsAndMatches(
+        () -> Intervals.of("invalid string")
+    );
+  }
+
+  @Test
+  public void testComplementOf()
+  {
+    Assertions.assertEquals(
+        List.of(),
+        Intervals.complementOf(Intervals.ETERNITY)
+    );
+
+    testComplementOf("2020/P1Y");
+    testComplementOf("2001/2001-01");
+    testComplementOf("2001-01-02/2001-02");
+  }
+
+  private void testComplementOf(String interval)
+  {
+    final Interval testInterval = Intervals.of(interval);
+    final List<Interval> complement = List.of(
+        new Interval(DateTimes.MIN, testInterval.getStart()),
+        new Interval(testInterval.getEnd(), DateTimes.MAX)
+    );
+    Assertions.assertEquals(
+        complement,
+        Intervals.complementOf(testInterval)
+    );
+    Assertions.assertEquals(
+        Intervals.ONLY_ETERNITY,
+        JodaUtils.condenseIntervals(
+            List.of(complement.get(0), complement.get(1), testInterval)
+        )
+    );
+  }
 }

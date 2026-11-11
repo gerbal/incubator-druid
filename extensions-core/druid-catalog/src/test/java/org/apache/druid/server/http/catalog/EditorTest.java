@@ -19,10 +19,14 @@
 
 package org.apache.druid.server.http.catalog;
 
-import org.apache.curator.shaded.com.google.common.collect.ImmutableMap;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import org.apache.druid.catalog.CatalogException;
 import org.apache.druid.catalog.http.TableEditRequest;
+import org.apache.druid.catalog.http.TableEditRequest.AddProjection;
 import org.apache.druid.catalog.http.TableEditRequest.DropColumns;
+import org.apache.druid.catalog.http.TableEditRequest.DropProjection;
 import org.apache.druid.catalog.http.TableEditRequest.HideColumns;
 import org.apache.druid.catalog.http.TableEditRequest.MoveColumn;
 import org.apache.druid.catalog.http.TableEditRequest.UnhideColumns;
@@ -30,19 +34,28 @@ import org.apache.druid.catalog.http.TableEditRequest.UpdateColumns;
 import org.apache.druid.catalog.http.TableEditRequest.UpdateProperties;
 import org.apache.druid.catalog.http.TableEditor;
 import org.apache.druid.catalog.model.CatalogUtils;
+import org.apache.druid.catalog.model.ClusteredValueGroupsBaseTableMetadata;
 import org.apache.druid.catalog.model.ColumnSpec;
 import org.apache.druid.catalog.model.Columns;
+import org.apache.druid.catalog.model.DatasourceProjectionMetadata;
 import org.apache.druid.catalog.model.TableId;
 import org.apache.druid.catalog.model.TableMetadata;
+import org.apache.druid.catalog.model.table.ClusterKeySpec;
 import org.apache.druid.catalog.model.table.DatasourceDefn;
 import org.apache.druid.catalog.model.table.TableBuilder;
 import org.apache.druid.catalog.storage.CatalogStorage;
 import org.apache.druid.catalog.storage.CatalogTests;
-import org.apache.druid.metadata.TestDerbyConnector;
-import org.junit.After;
-import org.junit.Before;
-import org.junit.Rule;
-import org.junit.Test;
+import org.apache.druid.data.input.impl.AggregateProjectionSpec;
+import org.apache.druid.data.input.impl.LongDimensionSchema;
+import org.apache.druid.data.input.impl.StringDimensionSchema;
+import org.apache.druid.jackson.DefaultObjectMapper;
+import org.apache.druid.java.util.common.granularity.Granularities;
+import org.apache.druid.metadata.JUnit5TestDerbyConnector;
+import org.apache.druid.query.aggregation.LongSumAggregatorFactory;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -50,26 +63,28 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class EditorTest
 {
-  @Rule
-  public final TestDerbyConnector.DerbyConnectorRule derbyConnectorRule = new TestDerbyConnector.DerbyConnectorRule();
+  private static final ObjectMapper MAPPER = new DefaultObjectMapper();
+  @RegisterExtension
+  public static final JUnit5TestDerbyConnector DERBY_CONNECTOR_RULE = new JUnit5TestDerbyConnector();
 
   private CatalogTests.DbFixture dbFixture;
   private CatalogStorage catalog;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
-    dbFixture = new CatalogTests.DbFixture(derbyConnectorRule);
+    dbFixture = new CatalogTests.DbFixture(DERBY_CONNECTOR_RULE);
     catalog = dbFixture.storage;
   }
 
-  @After
+  @AfterEach
   public void tearDown()
   {
     CatalogTests.tearDown(dbFixture);
@@ -326,25 +341,21 @@ public class EditorTest
     // Can't test an empty property set: no table type allows empty
     // properties.
 
-    // Remove a required property
-    Map<String, Object> updates1 = new HashMap<>();
-    updates1.put(DatasourceDefn.SEGMENT_GRANULARITY_PROPERTY, null);
-    assertThrows(
-        CatalogException.class,
-        () -> new TableEditor(
-                  catalog,
-                  table.id(),
-                  new UpdateProperties(updates1)
-              )
-             .go()
+    Map<String, Object> updates = new HashMap<>();
+    updates.put(DatasourceDefn.SEGMENT_GRANULARITY_PROPERTY, null);
+    cmd = new UpdateProperties(updates);
+    Map<String, Object> expected = ImmutableMap.of();
+    assertEquals(
+        expected,
+        doEdit(tableName, cmd).spec().properties()
     );
 
     // Add and update properties
-    Map<String, Object> updates = new HashMap<>();
+    updates = new HashMap<>();
     updates.put(DatasourceDefn.SEGMENT_GRANULARITY_PROPERTY, "PT1H");
     updates.put("foo", "bar");
     cmd = new UpdateProperties(updates);
-    Map<String, Object> expected = ImmutableMap.of(
+    expected = ImmutableMap.of(
         DatasourceDefn.SEGMENT_GRANULARITY_PROPERTY, "PT1H",
         "foo", "bar"
     );
@@ -377,6 +388,37 @@ public class EditorTest
         expected,
         doEdit(tableName, cmd).spec().properties()
     );
+
+    // Add a DESC cluster key - should fail
+    Map<String, Object> updates1 = new HashMap<>();
+    updates1.put(DatasourceDefn.CLUSTER_KEYS_PROPERTY, ImmutableList.of(new ClusterKeySpec("clusterKeyA", true)));
+
+    assertThrows(
+        CatalogException.class,
+        () -> new TableEditor(
+            catalog,
+            table.id(),
+            new UpdateProperties(updates1)
+        ).go()
+    );
+
+    // Add a ASC cluster key - should succeed
+    updates = new HashMap<>();
+    updates.put(DatasourceDefn.CLUSTER_KEYS_PROPERTY, ImmutableList.of(new ClusterKeySpec("clusterKeyA", false)));
+    cmd = new UpdateProperties(updates);
+    expected = ImmutableMap.of(
+        DatasourceDefn.SEGMENT_GRANULARITY_PROPERTY, "PT1H",
+        DatasourceDefn.CLUSTER_KEYS_PROPERTY, ImmutableList.of(new ClusterKeySpec("clusterKeyA", false))
+    );
+    Map<String, Object> actual = doEdit(tableName, cmd).spec().properties();
+    actual.put(
+        DatasourceDefn.CLUSTER_KEYS_PROPERTY,
+        MAPPER.convertValue(actual.get(DatasourceDefn.CLUSTER_KEYS_PROPERTY), ClusterKeySpec.CLUSTER_KEY_LIST_TYPE_REF)
+    );
+    assertEquals(
+        expected,
+        actual
+    );
   }
 
   @Test
@@ -401,7 +443,7 @@ public class EditorTest
     // Add a column
     cmd = new UpdateColumns(
         Collections.singletonList(
-            new ColumnSpec("d", Columns.VARCHAR, null)
+            new ColumnSpec("d", Columns.STRING, null)
          )
     );
     TableMetadata revised = doEdit(tableName, cmd);
@@ -411,14 +453,14 @@ public class EditorTest
     );
     ColumnSpec colD = revised.spec().columns().get(3);
     assertEquals("d", colD.name());
-    assertEquals(Columns.VARCHAR, colD.sqlType());
+    assertEquals(Columns.STRING, colD.dataType());
 
     // Update a column
     cmd = new UpdateColumns(
         Collections.singletonList(
             new ColumnSpec(
                 "a",
-                Columns.BIGINT,
+                Columns.LONG,
                 ImmutableMap.of("foo", "bar")
             )
          )
@@ -430,13 +472,13 @@ public class EditorTest
     );
     ColumnSpec colA = revised.spec().columns().get(0);
     assertEquals("a", colA.name());
-    assertEquals(Columns.BIGINT, colA.sqlType());
+    assertEquals(Columns.LONG, colA.dataType());
     assertEquals(ImmutableMap.of("foo", "bar"), colA.properties());
 
     // Duplicates
     UpdateColumns cmd2 = new UpdateColumns(
         Arrays.asList(
-            new ColumnSpec("e", Columns.VARCHAR, null),
+            new ColumnSpec("e", Columns.STRING, null),
             new ColumnSpec("e", null, null)
          )
     );
@@ -445,7 +487,7 @@ public class EditorTest
     // Valid time column type
     cmd = new UpdateColumns(
         Collections.singletonList(
-            new ColumnSpec(Columns.TIME_COLUMN, Columns.TIMESTAMP, null)
+            new ColumnSpec(Columns.TIME_COLUMN, Columns.LONG, null)
          )
     );
     revised = doEdit(tableName, cmd);
@@ -453,5 +495,296 @@ public class EditorTest
         Arrays.asList("a", "b", "c", "d", "__time"),
         CatalogUtils.columnNames(revised.spec().columns())
     );
+  }
+
+  @Test
+  public void testAddAndDropProjection() throws CatalogException
+  {
+    final String tableName = "projections";
+    final TableMetadata table = TableBuilder.datasource(tableName, "P1D")
+        .timeColumn()
+        .column("dim", "VARCHAR")
+        .column("met", "BIGINT")
+        .build();
+    catalog.tables().create(table);
+
+    final DatasourceProjectionMetadata daily = new DatasourceProjectionMetadata(
+        AggregateProjectionSpec.builder("daily")
+                               .groupingColumns(new StringDimensionSchema("dim"))
+                               .aggregators(new LongSumAggregatorFactory("sum_met", "met"))
+                               .build()
+    );
+
+    assertTrue(new TableEditor(catalog, table.id(), new AddProjection(daily, false)).go() > 0);
+    assertEquals(List.of(daily), projectionsOf(tableName));
+
+    // Adding the same name again is an error, unless the caller said to leave it alone.
+    assertThrows(
+        CatalogException.class,
+        () -> new TableEditor(catalog, table.id(), new AddProjection(daily, false)).go()
+    );
+    assertEquals(0, new TableEditor(catalog, table.id(), new AddProjection(daily, true)).go());
+    assertEquals(List.of(daily), projectionsOf(tableName));
+
+    // Dropping a projection that is not there is likewise an error unless tolerated.
+    assertThrows(
+        CatalogException.class,
+        () -> new TableEditor(catalog, table.id(), new DropProjection("nope", false)).go()
+    );
+    assertEquals(0, new TableEditor(catalog, table.id(), new DropProjection("nope", true)).go());
+
+    assertTrue(new TableEditor(catalog, table.id(), new DropProjection("daily", false)).go() > 0);
+    assertNull(
+        catalog.tables().read(TableId.datasource(tableName))
+               .spec().properties().get(DatasourceDefn.PROJECTIONS_KEYS_PROPERTY)
+    );
+  }
+
+  /**
+   * {@code AddColumns} means add: a column that already exists is an error rather than a silent in-place update, which
+   * is what plain {@code UpdateColumns} would do.
+   */
+  @Test
+  public void testAddColumns() throws CatalogException
+  {
+    final String tableName = "addCols";
+    final TableMetadata table = TableBuilder.datasource(tableName, "P1D")
+        .timeColumn()
+        .column("dim", "VARCHAR")
+        .build();
+    catalog.tables().create(table);
+
+    final TableMetadata revised = doEdit(
+        tableName,
+        new TableEditRequest.AddColumns(Collections.singletonList(new ColumnSpec("met", "BIGINT", null)))
+    );
+    assertEquals(
+        Arrays.asList(Columns.TIME_COLUMN, "dim", "met"),
+        CatalogUtils.columnNames(revised.spec().columns())
+    );
+
+    final CatalogException e = assertThrows(
+        CatalogException.class,
+        () -> doEdit(
+            tableName,
+            new TableEditRequest.AddColumns(Collections.singletonList(new ColumnSpec("dim", "BIGINT", null)))
+        )
+    );
+    assertTrue(e.getMessage().contains("Column [dim] already exists"), e.getMessage());
+    // The rejected add did not change the existing column's type.
+    assertEquals("VARCHAR", columnType(tableName, "dim"));
+  }
+
+  /**
+   * {@code AlterColumns} means alter: a column that does not exist is an error rather than being appended, so a
+   * misspelled target cannot quietly create a column.
+   */
+  @Test
+  public void testAlterColumns() throws CatalogException
+  {
+    final String tableName = "alterCols";
+    final TableMetadata table = TableBuilder.datasource(tableName, "P1D")
+        .timeColumn()
+        .column("dim", "VARCHAR")
+        .build();
+    catalog.tables().create(table);
+
+    doEdit(
+        tableName,
+        new TableEditRequest.AlterColumns(Collections.singletonList(new ColumnSpec("dim", "BIGINT", null)))
+    );
+    assertEquals("BIGINT", columnType(tableName, "dim"));
+
+    final CatalogException e = assertThrows(
+        CatalogException.class,
+        () -> doEdit(
+            tableName,
+            new TableEditRequest.AlterColumns(Collections.singletonList(new ColumnSpec("typo", "BIGINT", null)))
+        )
+    );
+    assertTrue(e.getMessage().contains("Column [typo] does not exist"), e.getMessage());
+    // The misspelled target was not created.
+    assertEquals(
+        Arrays.asList(Columns.TIME_COLUMN, "dim"),
+        CatalogUtils.columnNames(catalog.tables().read(table.id()).spec().columns())
+    );
+  }
+
+  /**
+   * A property edit is validated against the parts of the spec it does not touch. Segment granularity and the declared
+   * projections are only meaningful together, so coarsening the segments under a projection has to be caught here
+   * rather than at ingest time.
+   */
+  @Test
+  public void testUpdatePropertiesValidatedAgainstProjections() throws CatalogException
+  {
+    final String tableName = "granularity";
+    final TableMetadata table = TableBuilder.datasource(tableName, "P1D")
+        .timeColumn()
+        .column("dim", "VARCHAR")
+        .column("met", "BIGINT")
+        .build();
+    catalog.tables().create(table);
+
+    final DatasourceProjectionMetadata daily = new DatasourceProjectionMetadata(
+        AggregateProjectionSpec.builder("daily")
+                               .virtualColumns(
+                                   Granularities.toVirtualColumn(
+                                       Granularities.DAY,
+                                       Granularities.GRANULARITY_VIRTUAL_COLUMN_NAME
+                                   )
+                               )
+                               .groupingColumns(
+                                   new LongDimensionSchema(Granularities.GRANULARITY_VIRTUAL_COLUMN_NAME),
+                                   new StringDimensionSchema("dim")
+                               )
+                               .aggregators(new LongSumAggregatorFactory("sum_met", "met"))
+                               .build()
+    );
+    // A day-granularity projection is fine in day-granularity segments.
+    assertTrue(new TableEditor(catalog, table.id(), new AddProjection(daily, false)).go() > 0);
+
+    assertThrows(
+        CatalogException.class,
+        () -> doEdit(
+            tableName,
+            new UpdateProperties(ImmutableMap.of(DatasourceDefn.SEGMENT_GRANULARITY_PROPERTY, "PT1H"))
+        )
+    );
+    // The rejected edit left the stored spec alone.
+    assertEquals(
+        "P1D",
+        catalog.tables().read(table.id()).spec().properties().get(DatasourceDefn.SEGMENT_GRANULARITY_PROPERTY)
+    );
+  }
+
+  /**
+   * The base table layout lives in a property rather than in the projections list, but it follows the same rules as
+   * {@code AddProjection} / {@code DropProjection}, decided inside the update transaction rather than by the caller.
+   */
+  @Test
+  public void testSetAndDropBaseTable() throws CatalogException
+  {
+    final String tableName = "baseTable";
+    final TableMetadata table = TableBuilder.datasource(tableName, "P1D")
+        .column("tenant", "VARCHAR")
+        .timeColumn()
+        .sealed(true)
+        .build();
+    catalog.tables().create(table);
+
+    final ClusteredValueGroupsBaseTableMetadata layout =
+        new ClusteredValueGroupsBaseTableMetadata(ImmutableList.of("tenant"), null, null);
+
+    assertTrue(new TableEditor(catalog, table.id(), new TableEditRequest.SetBaseTable(layout, false)).go() > 0);
+    assertEquals(
+        layout,
+        catalog.tableRegistry()
+               .resolve(catalog.tables().read(table.id()).spec())
+               .decodeProperty(DatasourceDefn.BASE_TABLE_PROPERTY)
+    );
+
+    // Defining a second layout is an error unless the caller said to leave the existing one alone.
+    final CatalogException e = assertThrows(
+        CatalogException.class,
+        () -> doEdit(tableName, new TableEditRequest.SetBaseTable(layout, false))
+    );
+    assertTrue(e.getMessage().contains("already has a base table layout"), e.getMessage());
+    assertEquals(0, new TableEditor(catalog, table.id(), new TableEditRequest.SetBaseTable(layout, true)).go());
+
+    assertTrue(new TableEditor(catalog, table.id(), new TableEditRequest.DropBaseTable(false)).go() > 0);
+    assertNull(
+        catalog.tables().read(table.id()).spec().properties().get(DatasourceDefn.BASE_TABLE_PROPERTY)
+    );
+
+    // Dropping one that is not there is likewise an error unless tolerated.
+    assertThrows(
+        CatalogException.class,
+        () -> doEdit(tableName, new TableEditRequest.DropBaseTable(false))
+    );
+    assertEquals(0, new TableEditor(catalog, table.id(), new TableEditRequest.DropBaseTable(true)).go());
+  }
+
+  /**
+   * A projection records the type of each column it groups by, so retyping such a column would leave a projection the
+   * table can no longer build. The whole-spec validation catches it before the edit is committed.
+   */
+  @Test
+  public void testAlterColumnsValidatedAgainstProjections() throws CatalogException
+  {
+    final String tableName = "retype";
+    final TableMetadata table = TableBuilder.datasource(tableName, "P1D")
+        .timeColumn()
+        .column("dim", "VARCHAR")
+        .column("met", "BIGINT")
+        .build();
+    catalog.tables().create(table);
+
+    final DatasourceProjectionMetadata byDim = new DatasourceProjectionMetadata(
+        AggregateProjectionSpec.builder("by_dim")
+                               .groupingColumns(new StringDimensionSchema("dim"))
+                               .aggregators(new LongSumAggregatorFactory("sum_met", "met"))
+                               .build()
+    );
+    assertTrue(new TableEditor(catalog, table.id(), new AddProjection(byDim, false)).go() > 0);
+
+    final CatalogException e = assertThrows(
+        CatalogException.class,
+        () -> doEdit(
+            tableName,
+            new TableEditRequest.AlterColumns(Collections.singletonList(new ColumnSpec("dim", "BIGINT", null)))
+        )
+    );
+    assertTrue(e.getMessage().contains("groups on column [dim]"), e.getMessage());
+    // The rejected edit left the column as it was.
+    assertEquals("VARCHAR", columnType(tableName, "dim"));
+  }
+
+  /**
+   * The mirror case: a column edit is validated against the properties it does not touch. A base table layout names
+   * the columns it clusters on, so dropping one leaves a layout that can no longer be derived.
+   */
+  @Test
+  public void testDropColumnsValidatedAgainstBaseTable() throws CatalogException
+  {
+    final String tableName = "clustered";
+    final TableMetadata table = TableBuilder.datasource(tableName, "P1D")
+        // Declared order is the segment order, so the clustering column leads.
+        .column("tenant", "VARCHAR")
+        .timeColumn()
+        .column("met", "BIGINT")
+        .sealed(true)
+        .baseTable(new ClusteredValueGroupsBaseTableMetadata(ImmutableList.of("tenant"), null, null))
+        .build();
+    catalog.tables().create(table);
+
+    assertThrows(
+        CatalogException.class,
+        () -> doEdit(tableName, new DropColumns(ImmutableList.of("tenant")))
+    );
+    assertEquals(
+        Arrays.asList("tenant", Columns.TIME_COLUMN, "met"),
+        CatalogUtils.columnNames(catalog.tables().read(table.id()).spec().columns())
+    );
+
+    // Dropping a column the layout does not name is still allowed.
+    assertTrue(new TableEditor(catalog, table.id(), new DropColumns(ImmutableList.of("met"))).go() > 0);
+  }
+
+
+  private String columnType(String tableName, String columnName) throws CatalogException
+  {
+    return catalog.tables().read(TableId.datasource(tableName)).spec().columns().stream()
+                  .filter(c -> columnName.equals(c.name()))
+                  .findFirst()
+                  .orElseThrow(() -> new AssertionError("No column [" + columnName + "]"))
+                  .dataType();
+  }
+
+  private List<DatasourceProjectionMetadata> projectionsOf(String tableName) throws CatalogException
+  {
+    return catalog.tableRegistry()
+                  .resolve(catalog.tables().read(TableId.datasource(tableName)).spec())
+                  .decodeProperty(DatasourceDefn.PROJECTIONS_KEYS_PROPERTY);
   }
 }

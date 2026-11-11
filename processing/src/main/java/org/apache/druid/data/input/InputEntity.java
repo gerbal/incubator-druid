@@ -63,15 +63,22 @@ public interface InputEntity
   URI getUri();
 
   /**
-   * Opens an {@link InputStream} on the input entity directly.
+   * Opens an {@link InputStream} on the input entity, decompressing the raw bytes if the entity is compressed.
    * This is the basic way to read the given entity.
-   *
-   * The behavior of this method is only defined fort the first call to open().
-   * The behavior of subsequent calls is undefined and may vary between implementations.
+   * This method may be called multiple times to re-read the data from the entity.
    *
    * @see #fetch
    */
-  InputStream open() throws IOException;
+  default InputStream open() throws IOException
+  {
+    // Implementations that decompress must override this method.
+    return openRaw();
+  }
+
+  /**
+   * Opens an {@link InputStream} on the raw bytes of the input entity, without any decompression.
+   */
+  InputStream openRaw() throws IOException;
 
   /**
    * Fetches the input entity into the local storage.

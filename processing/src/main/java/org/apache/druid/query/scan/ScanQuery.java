@@ -30,16 +30,26 @@ import com.google.common.collect.Ordering;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.Pair;
-import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.UOE;
 import org.apache.druid.query.BaseQuery;
 import org.apache.druid.query.DataSource;
 import org.apache.druid.query.Druids;
+import org.apache.druid.query.InlineDataSource;
+import org.apache.druid.query.Order;
+import org.apache.druid.query.OrderBy;
 import org.apache.druid.query.Queries;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.filter.DimFilter;
+import org.apache.druid.query.operator.OffsetLimit;
 import org.apache.druid.query.spec.QuerySegmentSpec;
+import org.apache.druid.segment.VirtualColumn;
 import org.apache.druid.segment.VirtualColumns;
+import org.apache.druid.segment.column.ColumnCapabilities;
 import org.apache.druid.segment.column.ColumnHolder;
+import org.apache.druid.segment.column.ColumnType;
+import org.apache.druid.segment.column.RowSignature;
+import org.apache.druid.segment.column.RowSignature.Builder;
+import org.apache.druid.segment.column.RowSignature.Finalization;
 
 import javax.annotation.Nullable;
 import java.util.Collections;
@@ -89,87 +99,12 @@ public class ScanQuery extends BaseQuery<ScanResultValue>
     }
   }
 
-  public static class OrderBy
-  {
-    private final String columnName;
-    private final Order order;
-
-    @JsonCreator
-    public OrderBy(
-        @JsonProperty("columnName") final String columnName,
-        @JsonProperty("order") final Order order
-    )
-    {
-      this.columnName = Preconditions.checkNotNull(columnName, "columnName");
-      this.order = Preconditions.checkNotNull(order, "order");
-
-      if (order == Order.NONE) {
-        throw new IAE("Order required for column [%s]", columnName);
-      }
-    }
-
-    @JsonProperty
-    public String getColumnName()
-    {
-      return columnName;
-    }
-
-    @JsonProperty
-    public Order getOrder()
-    {
-      return order;
-    }
-
-    @Override
-    public boolean equals(Object o)
-    {
-      if (this == o) {
-        return true;
-      }
-      if (o == null || getClass() != o.getClass()) {
-        return false;
-      }
-      OrderBy that = (OrderBy) o;
-      return Objects.equals(columnName, that.columnName) && order == that.order;
-    }
-
-    @Override
-    public int hashCode()
-    {
-      return Objects.hash(columnName, order);
-    }
-
-    @Override
-    public String toString()
-    {
-      return StringUtils.format("%s %s", columnName, order == Order.ASCENDING ? "ASC" : "DESC");
-    }
-  }
-
-  public enum Order
-  {
-    ASCENDING,
-    DESCENDING,
-    NONE;
-
-    @JsonValue
-    @Override
-    public String toString()
-    {
-      return StringUtils.toLowerCase(this.name());
-    }
-
-    @JsonCreator
-    public static Order fromString(String name)
-    {
-      return valueOf(StringUtils.toUpperCase(name));
-    }
-  }
-
   /**
    * This context flag corresponds to whether the query is running on the "outermost" process (i.e. the process
    * the query is sent to).
+   * @deprecated Use {@link QueryContextParameters#SCAN_OUTERMOST} instead.
    */
+  @Deprecated(since = "39.0.0", forRemoval = true)
   public static final String CTX_KEY_OUTERMOST = "scanOutermost";
   public static final int DEFAULT_BATCH_SIZE = 4096 * 5;
 
@@ -180,11 +115,11 @@ public class ScanQuery extends BaseQuery<ScanResultValue>
   private final long scanRowsLimit;
   private final DimFilter dimFilter;
   private final List<String> columns;
-  private final Boolean legacy;
   private final Order timeOrder;
   private final List<OrderBy> orderBys;
   private final Integer maxRowsQueuedForOrdering;
   private final Integer maxSegmentPartitionsOrderedInMemory;
+  private final List<ColumnType> columnTypes;
 
   @JsonCreator
   public ScanQuery(
@@ -199,11 +134,11 @@ public class ScanQuery extends BaseQuery<ScanResultValue>
       @JsonProperty("orderBy") List<OrderBy> orderBysFromUser,
       @JsonProperty("filter") DimFilter dimFilter,
       @JsonProperty("columns") List<String> columns,
-      @JsonProperty("legacy") Boolean legacy,
-      @JsonProperty("context") Map<String, Object> context
+      @JsonProperty("context") Map<String, Object> context,
+      @JsonProperty("columnTypes") List<ColumnType> columnTypes
   )
   {
-    super(dataSource, querySegmentSpec, false, context);
+    super(dataSource, querySegmentSpec, context);
     this.virtualColumns = VirtualColumns.nullToEmpty(virtualColumns);
     this.resultFormat = (resultFormat == null) ? ResultFormat.RESULT_FORMAT_LIST : resultFormat;
     this.batchSize = (batchSize == 0) ? DEFAULT_BATCH_SIZE : batchSize;
@@ -223,7 +158,18 @@ public class ScanQuery extends BaseQuery<ScanResultValue>
     );
     this.dimFilter = dimFilter;
     this.columns = columns;
-    this.legacy = legacy;
+    this.columnTypes = columnTypes;
+
+    if (columnTypes != null) {
+      Preconditions.checkNotNull(columns, "columns may not be null if columnTypes are specified");
+      if (columns.size() != columnTypes.size()) {
+        throw new IAE(
+            "Inconsistent number of columns[%d] and columnTypes[%d] specified!",
+            columns.size(),
+            columnTypes.size()
+        );
+      }
+    }
 
     final Pair<List<OrderBy>, Order> ordering = verifyAndReconcileOrdering(orderBysFromUser, orderFromUser);
     this.orderBys = Preconditions.checkNotNull(ordering.lhs);
@@ -263,24 +209,12 @@ public class ScanQuery extends BaseQuery<ScanResultValue>
 
   private Integer validateAndGetMaxRowsQueuedForOrdering()
   {
-    final Integer maxRowsQueuedForOrdering =
-        context().getInt(ScanQueryConfig.CTX_KEY_MAX_ROWS_QUEUED_FOR_ORDERING);
-    Preconditions.checkArgument(
-        maxRowsQueuedForOrdering == null || maxRowsQueuedForOrdering > 0,
-        "maxRowsQueuedForOrdering must be greater than 0"
-    );
-    return maxRowsQueuedForOrdering;
+    return context().get(QueryContextParameters.MAX_ROWS_QUEUED_FOR_ORDERING);
   }
 
   private Integer validateAndGetMaxSegmentPartitionsOrderedInMemory()
   {
-    final Integer maxSegmentPartitionsOrderedInMemory =
-        context().getInt(ScanQueryConfig.CTX_KEY_MAX_SEGMENT_PARTITIONS_FOR_ORDERING);
-    Preconditions.checkArgument(
-        maxSegmentPartitionsOrderedInMemory == null || maxSegmentPartitionsOrderedInMemory > 0,
-        "maxRowsQueuedForOrdering must be greater than 0"
-    );
-    return maxSegmentPartitionsOrderedInMemory;
+    return context().get(QueryContextParameters.MAX_SEGMENT_PARTITIONS_ORDERED_IN_MEMORY);
   }
 
   @JsonProperty
@@ -323,6 +257,11 @@ public class ScanQuery extends BaseQuery<ScanResultValue>
   public long getScanRowsLimit()
   {
     return scanRowsLimit;
+  }
+
+  public OffsetLimit getOffsetLimit()
+  {
+    return new OffsetLimit(scanRowsOffset, scanRowsLimit);
   }
 
   /**
@@ -412,19 +351,24 @@ public class ScanQuery extends BaseQuery<ScanResultValue>
     return columns;
   }
 
-  /**
-   * Compatibility mode with the legacy scan-query extension.
-   *
-   * True, false, and null have different meanings: true/false mean "legacy" and "not legacy"; null means use the
-   * default set by {@link ScanQueryConfig#isLegacy()}. The method {@link #withNonNullLegacy} is provided to help
-   * with this.
-   */
   @Nullable
   @JsonProperty
-  @JsonInclude(JsonInclude.Include.NON_NULL)
+  @JsonInclude(JsonInclude.Include.NON_EMPTY)
+  public List<ColumnType> getColumnTypes()
+  {
+    return columnTypes;
+  }
+
+  /**
+   * Prior to PR https://github.com/apache/druid/pull/16659 (Druid 31) data servers require
+   * the "legacy" parameter to be set to a non-null value. For compatibility with older data
+   * servers during rolling updates, we need to write out "false".
+   */
+  @Deprecated
+  @JsonProperty("legacy")
   public Boolean isLegacy()
   {
-    return legacy;
+    return false;
   }
 
   @Override
@@ -456,9 +400,8 @@ public class ScanQuery extends BaseQuery<ScanResultValue>
       return Queries.computeRequiredColumns(
           virtualColumns,
           dimFilter,
-          Collections.emptyList(),
-          Collections.emptyList(),
-          columns
+          columns,
+          Collections.emptyList()
       );
     }
   }
@@ -471,11 +414,6 @@ public class ScanQuery extends BaseQuery<ScanResultValue>
   public ScanQuery withLimit(final long newLimit)
   {
     return Druids.ScanQueryBuilder.copy(this).limit(newLimit).build();
-  }
-
-  public ScanQuery withNonNullLegacy(final ScanQueryConfig scanQueryConfig)
-  {
-    return Druids.ScanQueryBuilder.copy(this).legacy(legacy != null ? legacy : scanQueryConfig.isLegacy()).build();
   }
 
   @Override
@@ -512,12 +450,13 @@ public class ScanQuery extends BaseQuery<ScanResultValue>
     return batchSize == scanQuery.batchSize &&
            scanRowsOffset == scanQuery.scanRowsOffset &&
            scanRowsLimit == scanQuery.scanRowsLimit &&
-           Objects.equals(legacy, scanQuery.legacy) &&
            Objects.equals(virtualColumns, scanQuery.virtualColumns) &&
            Objects.equals(resultFormat, scanQuery.resultFormat) &&
            Objects.equals(dimFilter, scanQuery.dimFilter) &&
            Objects.equals(columns, scanQuery.columns) &&
-           Objects.equals(orderBys, scanQuery.orderBys);
+           Objects.equals(columnTypes, scanQuery.columnTypes) &&
+           Objects.equals(orderBys, scanQuery.orderBys) &&
+           Objects.equals(timeOrder, scanQuery.timeOrder);
   }
 
   @Override
@@ -532,8 +471,9 @@ public class ScanQuery extends BaseQuery<ScanResultValue>
         scanRowsLimit,
         dimFilter,
         columns,
+        columnTypes,
         orderBys,
-        legacy
+        timeOrder
     );
   }
 
@@ -550,8 +490,8 @@ public class ScanQuery extends BaseQuery<ScanResultValue>
            ", limit=" + scanRowsLimit +
            ", dimFilter=" + dimFilter +
            ", columns=" + columns +
+           ", columnTypes=" + columnTypes +
            (orderBys.isEmpty() ? "" : ", orderBy=" + orderBys) +
-           (legacy == null ? "" : ", legacy=" + legacy) +
            ", context=" + getContext() +
            '}';
   }
@@ -666,5 +606,69 @@ public class ScanQuery extends BaseQuery<ScanResultValue>
     {
       return obj instanceof Integer && (int) obj == DEFAULT_BATCH_SIZE;
     }
+  }
+
+  @Override
+  public RowSignature getResultRowSignature(Finalization finalization)
+  {
+    return getRowSignature();
+  }
+
+  /**
+   * Returns the RowSignature.
+   *
+   * If {@link ScanQuery#columnTypes} is not available it will do its best to fill in the types.
+   */
+  @Nullable
+  public RowSignature getRowSignature()
+  {
+    if (columns == null || columns.isEmpty()) {
+      // Note: if no specific list of columns is provided, then since we can't predict what columns will come back, we
+      // unfortunately can't do array-based results. In this case, there is a major difference between standard and
+      // array-based results: the standard results will detect and return _all_ columns, whereas the array-based results
+      // will include none of them.
+      return RowSignature.empty();
+    }
+    if (columnTypes != null) {
+      Builder builder = RowSignature.builder();
+      for (int i = 0; i < columnTypes.size(); i++) {
+        builder.add(columns.get(i), columnTypes.get(i));
+      }
+      return builder.build();
+    }
+    final RowSignature.Builder builder = RowSignature.builder();
+    DataSource dataSource = getDataSource();
+    for (String columnName : columns) {
+      final ColumnType columnType = guessColumnType(columnName, virtualColumns, dataSource);
+      builder.add(columnName, columnType);
+    }
+    return builder.build();
+  }
+
+  /**
+   * Tries to guess the {@link ColumnType} from the {@link VirtualColumns} and the {@link DataSource}.
+   *
+   * We know the columnType for virtual columns and in some cases the columntypes of the datasource as well.
+   */
+  @Nullable
+  private static ColumnType guessColumnType(String columnName, VirtualColumns virtualColumns, DataSource dataSource)
+  {
+    final VirtualColumn virtualColumn = virtualColumns.getVirtualColumn(columnName);
+    if (virtualColumn != null) {
+      final ColumnCapabilities capabilities = virtualColumn.capabilities(c -> null, columnName);
+      if (capabilities != null) {
+        return capabilities.toColumnType();
+      }
+    } else {
+      if (dataSource instanceof InlineDataSource) {
+        InlineDataSource inlineDataSource = (InlineDataSource) dataSource;
+        ColumnCapabilities caps = inlineDataSource.getRowSignature().getColumnCapabilities(columnName);
+        if (caps != null) {
+          return caps.toColumnType();
+        }
+      }
+    }
+    // Unknown type. In the future, it would be nice to have a way to fill these in.
+    return null;
   }
 }

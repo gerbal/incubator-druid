@@ -50,7 +50,8 @@ import org.apache.druid.query.Query;
 import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QuerySegmentWalker;
 import org.apache.druid.query.SegmentDescriptor;
-import org.apache.druid.query.planning.DataSourceAnalysis;
+import org.apache.druid.query.TableDataSource;
+import org.apache.druid.query.planning.ExecutionVertex;
 import org.apache.druid.server.DruidNode;
 import org.apache.druid.server.SetAndVerifyContextQueryRunner;
 import org.apache.druid.server.initialization.ServerConfig;
@@ -97,7 +98,7 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
     this.toolboxFactory = Preconditions.checkNotNull(toolboxFactory, "toolboxFactory");
     this.taskConfig = taskConfig;
     this.emitter = Preconditions.checkNotNull(emitter, "emitter");
-    this.location = TaskLocation.create(node.getHost(), node.getPlaintextPort(), node.getTlsPort());
+    this.location = TaskLocation.create(node.getHost(), node.getAdvertisedPlaintextPort(), node.getTlsPort());
     this.serverConfig = serverConfig;
   }
 
@@ -126,7 +127,7 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
     if (runningItem != null) {
       TaskRunnerUtils.notifyLocationChanged(
           ImmutableList.of(listenerPair),
-          runningItem.getTaskId(),
+          runningItem.getTask(),
           runningItem.getLocation()
       );
     }
@@ -185,6 +186,7 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
       // stopGracefully for resource cleaning
       log.info("Starting graceful shutdown of task[%s].", task.getId());
       task.stopGracefully(taskConfig);
+      task.waitForCleanupToFinish();
 
       if (taskConfig.isRestoreTasksOnRestart() && task.canRestore()) {
         try {
@@ -200,7 +202,7 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
               System.currentTimeMillis() - start
           );
 
-          TaskRunnerUtils.notifyStatusChanged(listeners, task.getId(), taskStatus);
+          TaskRunnerUtils.notifyStatusChanged(listeners, task, taskStatus);
         }
         catch (Exception e) {
           log.makeAlert(e, "Graceful task shutdown failed: %s", task.getDataSource())
@@ -216,7 +218,7 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
           // See https://github.com/apache/druid/issues/11445.
           TaskRunnerUtils.notifyStatusChanged(
               listeners,
-              task.getId(),
+              task,
               TaskStatus.failure(
                   task.getId(),
                   "Failed to stop gracefully with exception. See task logs for more details."
@@ -231,7 +233,7 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
         // See https://github.com/apache/druid/issues/11445.
         TaskRunnerUtils.notifyStatusChanged(
             listeners,
-            task.getId(),
+            task,
             TaskStatus.failure(task.getId(), "Canceled as task execution process stopped")
         );
       }
@@ -245,8 +247,8 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
           .setDimension("graceful", "true") // for backward compatibility
           .setDimension("error", String.valueOf(error));
 
-      emitter.emit(metricBuilder.build("task/interrupt/count", 1L));
-      emitter.emit(metricBuilder.build("task/interrupt/elapsed", elapsed));
+      emitter.emit(metricBuilder.setMetric("task/interrupt/count", 1L));
+      emitter.emit(metricBuilder.setMetric("task/interrupt/elapsed", elapsed));
     }
 
     // Ok, now interrupt everything.
@@ -387,11 +389,10 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
     QueryRunner<T> queryRunner = null;
 
     if (runningItem != null) {
-      final DataSourceAnalysis analysis = query.getDataSource().getAnalysis();
       final Task task = runningItem.getTask();
+      final TableDataSource queryTable = ExecutionVertex.of(query).getBaseTableDataSource();
 
-      if (analysis.getBaseTableDataSource().isPresent()
-          && task.getDataSource().equals(analysis.getBaseTableDataSource().get().getName())) {
+      if (task.getDataSource().equals(queryTable.getName())) {
         final QueryRunner<T> taskQueryRunner = task.getQueryRunner(query);
 
         if (taskQueryRunner != null) {
@@ -422,6 +423,7 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
       this.location = location;
     }
 
+    @Override
     public Task getTask()
     {
       return task;
@@ -470,10 +472,10 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
         log.info("Running task: %s", task.getId());
         TaskRunnerUtils.notifyLocationChanged(
             listeners,
-            task.getId(),
+            task,
             location
         );
-        TaskRunnerUtils.notifyStatusChanged(listeners, task.getId(), TaskStatus.running(task.getId()));
+        TaskRunnerUtils.notifyStatusChanged(listeners, task, TaskStatus.running(task.getId()));
         status = task.run(toolbox);
       }
       catch (InterruptedException e) {
@@ -498,7 +500,7 @@ public class SingleTaskBackgroundRunner implements TaskRunner, QuerySegmentWalke
       }
 
       status = status.withDuration(System.currentTimeMillis() - startTime);
-      TaskRunnerUtils.notifyStatusChanged(listeners, task.getId(), status);
+      TaskRunnerUtils.notifyStatusChanged(listeners, task, status);
       return status;
     }
   }

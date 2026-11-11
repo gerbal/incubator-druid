@@ -20,11 +20,10 @@
 package org.apache.druid.benchmark;
 
 import com.google.common.collect.ImmutableList;
-import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.granularity.Granularities;
-import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.common.io.Closer;
+import org.apache.druid.math.expr.ExpressionProcessing;
 import org.apache.druid.query.expression.TestExprMacroTable;
 import org.apache.druid.query.filter.AndDimFilter;
 import org.apache.druid.query.filter.DimFilter;
@@ -32,14 +31,16 @@ import org.apache.druid.query.filter.ExpressionDimFilter;
 import org.apache.druid.query.filter.SelectorDimFilter;
 import org.apache.druid.segment.ColumnValueSelector;
 import org.apache.druid.segment.Cursor;
+import org.apache.druid.segment.CursorBuildSpec;
+import org.apache.druid.segment.CursorHolder;
 import org.apache.druid.segment.QueryableIndex;
-import org.apache.druid.segment.QueryableIndexStorageAdapter;
-import org.apache.druid.segment.VirtualColumns;
+import org.apache.druid.segment.QueryableIndexCursorFactory;
 import org.apache.druid.segment.column.ValueType;
 import org.apache.druid.segment.generator.GeneratorColumnSchema;
 import org.apache.druid.segment.generator.GeneratorSchemaInfo;
 import org.apache.druid.segment.generator.SegmentGenerator;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 import org.apache.druid.timeline.partition.LinearShardSpec;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
@@ -57,7 +58,6 @@ import org.openjdk.jmh.annotations.Warmup;
 import org.openjdk.jmh.infra.Blackhole;
 
 import java.util.Arrays;
-import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 @State(Scope.Benchmark)
@@ -69,7 +69,7 @@ import java.util.concurrent.TimeUnit;
 public class ExpressionFilterBenchmark
 {
   static {
-    NullHandling.initializeForTests();
+    ExpressionProcessing.initializeForTests();
   }
 
   @Param({"1000000"})
@@ -112,10 +112,7 @@ public class ExpressionFilterBenchmark
         false
     );
 
-    final DataSegment dataSegment = DataSegment.builder()
-                                               .dataSource("foo")
-                                               .interval(schemaInfo.getDataInterval())
-                                               .version("1")
+    final DataSegment dataSegment = DataSegment.builder(SegmentId.of("foo", schemaInfo.getDataInterval(), "1", 0))
                                                .shardSpec(new LinearShardSpec(0))
                                                .size(0)
                                                .build();
@@ -144,52 +141,38 @@ public class ExpressionFilterBenchmark
   @Benchmark
   public void expressionFilter(Blackhole blackhole)
   {
-    final Sequence<Cursor> cursors = new QueryableIndexStorageAdapter(index).makeCursors(
-        expressionFilter.toFilter(),
-        index.getDataInterval(),
-        VirtualColumns.EMPTY,
-        Granularities.ALL,
-        false,
-        null
-    );
-    final List<?> results = cursors
-        .map(cursor -> {
-          final ColumnValueSelector selector = cursor.getColumnSelectorFactory().makeColumnValueSelector("x");
-          consumeString(cursor, selector, blackhole);
-          return null;
-        })
-        .toList();
+    final CursorBuildSpec buildSpec = CursorBuildSpec.builder()
+                                                     .setFilter(expressionFilter.toFilter())
+                                                     .build();
+    final QueryableIndexCursorFactory cursorFactory = new QueryableIndexCursorFactory(index);
 
-    blackhole.consume(results);
+    try (final CursorHolder cursorHolder = cursorFactory.makeCursorHolder(buildSpec)) {
+      final Cursor cursor = cursorHolder.asCursor();
+
+
+      final ColumnValueSelector selector = cursor.getColumnSelectorFactory().makeColumnValueSelector("x");
+      while (!cursor.isDone()) {
+        blackhole.consume(selector.getObject());
+        cursor.advance();
+      }
+    }
   }
 
   @Benchmark
   public void nativeFilter(Blackhole blackhole)
   {
-    final Sequence<Cursor> cursors = new QueryableIndexStorageAdapter(index).makeCursors(
-        nativeFilter.toFilter(),
-        index.getDataInterval(),
-        VirtualColumns.EMPTY,
-        Granularities.ALL,
-        false,
-        null
-    );
-    final List<?> results = cursors
-        .map(cursor -> {
-          final ColumnValueSelector selector = cursor.getColumnSelectorFactory().makeColumnValueSelector("x");
-          consumeString(cursor, selector, blackhole);
-          return null;
-        })
-        .toList();
+    final CursorBuildSpec buildSpec = CursorBuildSpec.builder()
+                                                     .setFilter(nativeFilter.toFilter())
+                                                     .build();
+    final QueryableIndexCursorFactory cursorFactory = new QueryableIndexCursorFactory(index);
 
-    blackhole.consume(results);
-  }
-
-  private void consumeString(final Cursor cursor, final ColumnValueSelector selector, final Blackhole blackhole)
-  {
-    while (!cursor.isDone()) {
-      blackhole.consume(selector.getLong());
-      cursor.advance();
+    try (final CursorHolder cursorHolder = cursorFactory.makeCursorHolder(buildSpec)) {
+      final Cursor cursor = cursorHolder.asCursor();
+      final ColumnValueSelector selector = cursor.getColumnSelectorFactory().makeColumnValueSelector("x");
+      while (!cursor.isDone()) {
+        blackhole.consume(selector.getObject());
+        cursor.advance();
+      }
     }
   }
 }

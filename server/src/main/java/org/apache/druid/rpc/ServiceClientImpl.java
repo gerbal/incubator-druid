@@ -27,6 +27,8 @@ import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
+import io.netty.handler.codec.http.HttpResponseStatus;
+import org.apache.druid.discovery.NodeRole;
 import org.apache.druid.java.util.common.Either;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.StringUtils;
@@ -37,11 +39,9 @@ import org.apache.druid.java.util.http.client.Request;
 import org.apache.druid.java.util.http.client.response.HttpResponseHandler;
 import org.apache.druid.java.util.http.client.response.ObjectOrErrorResponseHandler;
 import org.apache.druid.java.util.http.client.response.StringFullResponseHolder;
-import org.jboss.netty.handler.codec.http.HttpResponseStatus;
 
 import javax.annotation.Nullable;
 import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -80,6 +80,15 @@ public class ServiceClientImpl implements ServiceClient
     if (retryPolicy.maxAttempts() == 0) {
       throw new IAE("Invalid maxAttempts[%d] in retry policy", retryPolicy.maxAttempts());
     }
+  }
+
+  @VisibleForTesting
+  public static long computeBackoffMs(final ServiceRetryPolicy retryPolicy, final long attemptNumber)
+  {
+    return Math.max(
+        retryPolicy.minWaitMillis(),
+        Math.min(retryPolicy.maxWaitMillis(), (long) (Math.pow(2, attemptNumber) * retryPolicy.minWaitMillis()))
+    );
   }
 
   @Override
@@ -179,7 +188,7 @@ public class ServiceClientImpl implements ServiceClient
 
           Futures.addCallback(
               responseFuture,
-              new FutureCallback<Either<StringFullResponseHolder, FinalType>>()
+              new FutureCallback<>()
               {
                 @Override
                 public void onSuccess(@Nullable final Either<StringFullResponseHolder, FinalType> result)
@@ -207,6 +216,7 @@ public class ServiceClientImpl implements ServiceClient
                   }
                   catch (Throwable t) {
                     // It's a bug if this happens. The purpose of this line is to help us debug what went wrong.
+                    log.error(t, "Service[%s] handler exited unexpected", serviceName);
                     retVal.setException(new RpcException(t, "Service [%s] handler exited unexpectedly", serviceName));
                   }
                 }
@@ -220,7 +230,20 @@ public class ServiceClientImpl implements ServiceClient
                     if (shouldTry(nextAttemptNumber) && retryPolicy.retryThrowable(t)) {
                       final long backoffMs = computeBackoffMs(retryPolicy, attemptNumber);
 
-                      log.noStackTrace().info(t, buildErrorMessage(request, null, backoffMs, nextAttemptNumber));
+                      if (retryPolicy.retryLoggable()) {
+                        // log as INFO level if the retry is loggable
+                        log.noStackTrace().info(t, buildErrorMessage(request, null, backoffMs, nextAttemptNumber));
+                      } else if (log.isDebugEnabled()) {
+                        // log as DEBUG level if the debug log is enabled
+                        log.noStackTrace().debug(t, buildErrorMessage(request, null, backoffMs, nextAttemptNumber));
+                      } else {
+                        // If none of the above is valid, we log the error message every tenth time we retry. It seems like
+                        // a good balance between making the logs not too verbose when the retry is due to the same cause
+                        // and enriching logs with useful information, if we keep retrying due to the same reason
+                        if (nextAttemptNumber > 0 && nextAttemptNumber % 10 == 0) {
+                          log.noStackTrace().info(t, buildErrorMessage(request, null, backoffMs, nextAttemptNumber));
+                        }
+                      }
 
                       connectExec.schedule(
                           () -> tryRequest(requestBuilder, handler, retVal, nextAttemptNumber, ImmutableSet.of()),
@@ -272,7 +295,15 @@ public class ServiceClientImpl implements ServiceClient
                   // Retryable server response (or null errorHolder, which means null result, which can happen
                   // if the HttpClient encounters an exception in the midst of response processing).
                   final long backoffMs = computeBackoffMs(retryPolicy, attemptNumber);
-                  log.info(buildErrorMessage(request, errorHolder, backoffMs, nextAttemptNumber));
+                  if (retryPolicy.retryLoggable()) {
+                    log.noStackTrace().info(buildErrorMessage(request, errorHolder, backoffMs, nextAttemptNumber));
+                  } else if (log.isDebugEnabled()) {
+                    log.noStackTrace().debug(buildErrorMessage(request, errorHolder, backoffMs, nextAttemptNumber));
+                  } else {
+                    if (nextAttemptNumber > 0 && nextAttemptNumber % 10 == 0) {
+                      log.noStackTrace().info(buildErrorMessage(request, errorHolder, backoffMs, nextAttemptNumber));
+                    }
+                  }
                   connectExec.schedule(
                       () -> tryRequest(requestBuilder, handler, retVal, nextAttemptNumber, ImmutableSet.of()),
                       backoffMs,
@@ -341,9 +372,9 @@ public class ServiceClientImpl implements ServiceClient
                       final long backoffMs = computeBackoffMs(retryPolicy, attemptNumber);
 
                       log.info(
-                          "Service [%s] issued redirect to unknown URL [%s] on attempt #%d; retrying in %,d ms.",
+                          "Service [%s] %s on attempt #%d; retrying in %,d ms.",
                           serviceName,
-                          newUri,
+                          unknownRedirectTargetMessage(newUri),
                           nextAttemptNumber,
                           backoffMs
                       );
@@ -355,11 +386,7 @@ public class ServiceClientImpl implements ServiceClient
                       );
                     } else {
                       retVal.setException(
-                          new ServiceNotAvailableException(
-                              serviceName,
-                              "issued redirect to unknown URL [%s]",
-                              newUri
-                          )
+                          new ServiceNotAvailableException(serviceName, "%s", unknownRedirectTargetMessage(newUri))
                       );
                     }
                   }
@@ -376,7 +403,7 @@ public class ServiceClientImpl implements ServiceClient
   {
     Futures.addCallback(
         serviceLocator.locate(),
-        new FutureCallback<ServiceLocations>()
+        new FutureCallback<>()
         {
           @Override
           public void onSuccess(final ServiceLocations locations)
@@ -466,17 +493,25 @@ public class ServiceClientImpl implements ServiceClient
     return errorMessage.toString();
   }
 
-  @VisibleForTesting
-  static long computeBackoffMs(final ServiceRetryPolicy retryPolicy, final long attemptNumber)
+  /**
+   * Generates the message used by logs or errors that occur due to redirection to an unknown URL.
+   */
+  private String unknownRedirectTargetMessage(final String newUri)
   {
-    return Math.max(
-        retryPolicy.minWaitMillis(),
-        Math.min(retryPolicy.maxWaitMillis(), (long) (Math.pow(2, attemptNumber) * retryPolicy.minWaitMillis()))
+    // Standard service names used by ServiceClientModule. If we are a client for one of these services, we'll include
+    // some language about how this redirect can indicate a failover in progress.
+    final boolean isOverlordOrCoordinator =
+        NodeRole.OVERLORD.getJsonName().equals(serviceName) || NodeRole.COORDINATOR.getJsonName().equals(serviceName);
+
+    return StringUtils.format(
+        "issued redirect to unknown URL [%s]%s",
+        newUri,
+        isOverlordOrCoordinator ? " (can be leader failover in progress)" : ""
     );
   }
 
   /**
-   * Returns a {@link ServiceLocation} without a path component, based on a URI.
+   * Returns a {@link ServiceLocation} without a path component, based on a URI. Returns null on invalid URIs.
    */
   @Nullable
   @VisibleForTesting
@@ -487,24 +522,17 @@ public class ServiceClientImpl implements ServiceClient
     }
 
     try {
-      final URI uri = new URI(uriString);
-      final String host = uri.getHost();
+      final ServiceLocation location = ServiceLocation.fromUri(URI.create(uriString));
 
-      if (host == null) {
-        return null;
-      }
-
-      final String scheme = uri.getScheme();
-
-      if ("http".equals(scheme)) {
-        return new ServiceLocation(host, uri.getPort() < 0 ? 80 : uri.getPort(), -1, "");
-      } else if ("https".equals(scheme)) {
-        return new ServiceLocation(host, -1, uri.getPort() < 0 ? 443 : uri.getPort(), "");
-      } else {
-        return null;
-      }
+      // Strip path.
+      return new ServiceLocation(
+          location.getHost(),
+          location.getPlaintextPort(),
+          location.getTlsPort(),
+          ""
+      );
     }
-    catch (URISyntaxException e) {
+    catch (IllegalArgumentException e) {
       return null;
     }
   }
@@ -516,8 +544,8 @@ public class ServiceClientImpl implements ServiceClient
   static boolean serviceLocationMatches(final ServiceLocation left, final ServiceLocation right)
   {
     return left.getHost().equals(right.getHost())
-        && portMatches(left.getPlaintextPort(), right.getPlaintextPort())
-        && portMatches(left.getTlsPort(), right.getTlsPort());
+           && portMatches(left.getPlaintextPort(), right.getPlaintextPort())
+           && portMatches(left.getTlsPort(), right.getTlsPort());
   }
 
   static boolean portMatches(int left, int right)
@@ -528,9 +556,9 @@ public class ServiceClientImpl implements ServiceClient
   @VisibleForTesting
   static boolean isRedirect(final HttpResponseStatus responseStatus)
   {
-    final int code = responseStatus.getCode();
-    return code == HttpResponseStatus.TEMPORARY_REDIRECT.getCode()
-           || code == HttpResponseStatus.FOUND.getCode()
-           || code == HttpResponseStatus.MOVED_PERMANENTLY.getCode();
+    final int code = responseStatus.code();
+    return code == HttpResponseStatus.TEMPORARY_REDIRECT.code()
+           || code == HttpResponseStatus.FOUND.code()
+           || code == HttpResponseStatus.MOVED_PERMANENTLY.code();
   }
 }

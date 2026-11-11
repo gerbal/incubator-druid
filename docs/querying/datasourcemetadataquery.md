@@ -23,13 +23,15 @@ sidebar_label: "DatasourceMetadata"
   ~ under the License.
   -->
 
-> Apache Druid supports two query languages: [Druid SQL](sql.md) and [native queries](querying.md).
-> This document describes a query
-> type that is only available in the native language.
+:::info
+ Apache&circledR; Druid supports two query languages: [Druid SQL](sql.md) and [native queries](querying.md).
+ This document describes a query
+ type that is only available in the native language.
+:::
 
 Data Source Metadata queries return metadata information for a dataSource.  These queries return information about:
 
-* The timestamp of latest ingested event for the dataSource. This is the ingested event without any consideration of rollup.
+* `maxIngestedEventTime`: The timestamp of the latest ingested event for the dataSource. For realtime datasources, this may be later than `MAX(__time)` if `queryGranularity` is being used. For non-realtime datasources, this is equivalent to `MAX(__time)`.
 
 The grammar for these queries is:
 
@@ -44,9 +46,9 @@ There are 2 main parts to a Data Source Metadata query:
 
 |property|description|required?|
 |--------|-----------|---------|
-|queryType|This String should always be "dataSourceMetadata"; this is the first thing Apache Druid looks at to figure out how to interpret the query|yes|
+|queryType|This String should always be "dataSourceMetadata"; this is the first thing Apache&circledR; Druid looks at to figure out how to interpret the query|yes|
 |dataSource|A String or Object defining the data source to query, very similar to a table in a relational database. See [DataSource](../querying/datasource.md) for more information.|yes|
-|context|See [Context](../querying/query-context.md)|no|
+|context|See [Query context reference](../querying/query-context-reference.md)|no|
 
 The format of the result is:
 

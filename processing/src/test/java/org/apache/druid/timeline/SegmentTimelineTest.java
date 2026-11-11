@@ -20,16 +20,17 @@
 package org.apache.druid.timeline;
 
 import org.apache.druid.java.util.common.Intervals;
+import org.apache.druid.segment.TestDataSource;
 import org.apache.druid.timeline.partition.NumberedShardSpec;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Set;
 
 public class SegmentTimelineTest
 {
-
   @Test
   public void testIsOvershadowed()
   {
@@ -43,39 +44,56 @@ public class SegmentTimelineTest
         )
     );
 
-    Assert.assertFalse(
+    Assertions.assertFalse(
         timeline.isOvershadowed(createSegment("2022-01-01/2022-01-02", "v1", 1, 3))
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         timeline.isOvershadowed(createSegment("2022-01-01/2022-01-02", "v1", 2, 3))
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         timeline.isOvershadowed(createSegment("2022-01-01/2022-01-02", "v1", 1, 4))
     );
-    Assert.assertFalse(
+    Assertions.assertFalse(
         timeline.isOvershadowed(createSegment("2022-01-01T00:00:00/2022-01-01T06:00:00", "v1", 1, 4))
     );
 
-    Assert.assertTrue(
+    Assertions.assertTrue(
         timeline.isOvershadowed(createSegment("2022-01-02/2022-01-03", "v1", 2, 4))
     );
-    Assert.assertTrue(
+    Assertions.assertTrue(
         timeline.isOvershadowed(createSegment("2022-01-02/2022-01-03", "v1", 0, 1))
     );
   }
 
+  @Test
+  public void testAddRemoveSegment()
+  {
+    final DataSegment segment = createSegment("2022-01-01/P1D", "v1", 0, 1);
+
+    final SegmentTimeline timeline = SegmentTimeline.forSegments(Set.of());
+    timeline.add(segment);
+    Assertions.assertEquals(1, timeline.getNumObjects());
+
+    timeline.remove(segment);
+    Assertions.assertEquals(0, timeline.getNumObjects());
+    Assertions.assertTrue(timeline.isEmpty());
+  }
+
   private DataSegment createSegment(String interval, String version, int partitionNum, int totalNumPartitions)
   {
-    return new DataSegment(
-        "wiki",
-        Intervals.of(interval),
-        version,
-        Collections.emptyMap(),
-        Collections.emptyList(),
-        Collections.emptyList(),
-        new NumberedShardSpec(partitionNum, totalNumPartitions),
-        0x9,
-        1L
-    );
+    return DataSegment.builder(SegmentId.of(
+                          TestDataSource.WIKI,
+                          Intervals.of(interval),
+                          version,
+                          new NumberedShardSpec(partitionNum, totalNumPartitions)
+                      ))
+                      .loadSpec(Collections.emptyMap())
+                      .dimensions(Collections.emptyList())
+                      .metrics(Collections.emptyList())
+                      .shardSpec(new NumberedShardSpec(partitionNum, totalNumPartitions))
+                      .binaryVersion(0x9)
+                      .size(1L)
+                      .totalRows(1)
+                      .build();
   }
 }

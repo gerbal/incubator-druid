@@ -19,14 +19,12 @@
 
 package org.apache.druid.client;
 
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Ordering;
 import org.apache.druid.client.cache.CacheConfig;
 import org.apache.druid.client.cache.CachePopulator;
 import org.apache.druid.client.cache.MapCache;
 import org.apache.druid.client.selector.HighestPriorityTierSelectorStrategy;
-import org.apache.druid.client.selector.QueryableDruidServer;
 import org.apache.druid.client.selector.RandomServerSelectorStrategy;
 import org.apache.druid.client.selector.ServerSelector;
 import org.apache.druid.guice.http.DruidHttpClientConfig;
@@ -34,32 +32,39 @@ import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.common.guava.TestSequence;
 import org.apache.druid.query.BaseQuery;
+import org.apache.druid.query.BrokerParallelMergeConfig;
 import org.apache.druid.query.DataSource;
-import org.apache.druid.query.DruidProcessingConfig;
 import org.apache.druid.query.Query;
+import org.apache.druid.query.QueryContext;
+import org.apache.druid.query.QueryLogic;
 import org.apache.druid.query.QueryPlus;
 import org.apache.druid.query.QueryRunner;
+import org.apache.druid.query.QueryRunnerFactory;
+import org.apache.druid.query.QueryRunnerFactoryConglomerate;
 import org.apache.druid.query.QueryToolChest;
-import org.apache.druid.query.QueryToolChestWarehouse;
 import org.apache.druid.query.SegmentDescriptor;
 import org.apache.druid.query.TableDataSource;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.context.ResponseContext;
 import org.apache.druid.query.filter.DimFilter;
 import org.apache.druid.query.spec.MultipleIntervalSegmentSpec;
 import org.apache.druid.query.spec.MultipleSpecificSegmentSpec;
 import org.apache.druid.query.spec.QuerySegmentSpec;
 import org.apache.druid.segment.TestHelper;
-import org.apache.druid.segment.join.JoinableFactoryWrapperTest;
 import org.apache.druid.server.QueryScheduler;
 import org.apache.druid.server.coordination.ServerManagerTest;
 import org.apache.druid.server.coordination.ServerType;
+import org.apache.druid.server.coordination.TestCoordinatorClient;
 import org.apache.druid.server.metrics.NoopServiceEmitter;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.SegmentId;
 import org.apache.druid.timeline.VersionedIntervalTimeline;
 import org.apache.druid.timeline.partition.LinearShardSpec;
 import org.joda.time.Interval;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.Timeout.ThreadMode;
 import org.mockito.Mockito;
 
 import java.util.ArrayList;
@@ -68,6 +73,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.TimeUnit;
 
 import static org.mockito.ArgumentMatchers.any;
 
@@ -78,7 +84,8 @@ import static org.mockito.ArgumentMatchers.any;
 public class CachingClusteredClientPerfTest
 {
 
-  @Test(timeout = 10_000)
+  @Test
+  @Timeout(value = 10_000, unit = TimeUnit.MILLISECONDS, threadMode = ThreadMode.SEPARATE_THREAD)
   public void testGetQueryRunnerForSegments_singleIntervalLargeSegments()
   {
     final int segmentCount = 30_000;
@@ -86,11 +93,14 @@ public class CachingClusteredClientPerfTest
     final List<SegmentDescriptor> segmentDescriptors = new ArrayList<>(segmentCount);
     final List<DataSegment> dataSegments = new ArrayList<>(segmentCount);
     final VersionedIntervalTimeline<String, ServerSelector> timeline = new VersionedIntervalTimeline<>(Ordering.natural());
+    final BrokerViewOfCoordinatorConfig brokerViewOfCoordinatorConfig = new BrokerViewOfCoordinatorConfig(new TestCoordinatorClient());
+    brokerViewOfCoordinatorConfig.start();
     final DruidServer server = new DruidServer(
         "server",
         "localhost:9000",
         null,
         Long.MAX_VALUE,
+        null,
         ServerType.HISTORICAL,
         DruidServer.DEFAULT_TIER,
         DruidServer.DEFAULT_PRIORITY
@@ -105,7 +115,8 @@ public class CachingClusteredClientPerfTest
         Iterators.transform(dataSegments.iterator(), segment -> {
           ServerSelector ss = new ServerSelector(
               segment,
-              new HighestPriorityTierSelectorStrategy(new RandomServerSelectorStrategy())
+              new HighestPriorityTierSelectorStrategy(new RandomServerSelectorStrategy()),
+              brokerViewOfCoordinatorConfig
           );
           ss.addServerAndUpdateSegment(new QueryableDruidServer(
               server,
@@ -129,17 +140,16 @@ public class CachingClusteredClientPerfTest
     Mockito.doReturn(Optional.of(timeline)).when(serverView).getTimeline(any());
     Mockito.doReturn(new MockQueryRunner()).when(serverView).getQueryRunner(any());
     CachingClusteredClient cachingClusteredClient = new CachingClusteredClient(
-        new MockQueryToolChestWareHouse(),
+        new MockQueryRunnerFactoryConglomerate(),
         serverView,
         MapCache.create(1024),
         TestHelper.makeJsonMapper(),
         Mockito.mock(CachePopulator.class),
         new CacheConfig(),
         Mockito.mock(DruidHttpClientConfig.class),
-        Mockito.mock(DruidProcessingConfig.class),
+        Mockito.mock(BrokerParallelMergeConfig.class),
         ForkJoinPool.commonPool(),
         queryScheduler,
-        JoinableFactoryWrapperTest.NOOP_JOINABLE_FACTORY_WRAPPER,
         new NoopServiceEmitter()
     );
 
@@ -149,7 +159,7 @@ public class CachingClusteredClientPerfTest
         segmentDescriptors
     );
     Sequence<SegmentDescriptor> sequence = queryRunner.run(QueryPlus.wrap(fakeQuery));
-    Assert.assertEquals(segmentDescriptors, sequence.toList());
+    Assertions.assertEquals(segmentDescriptors, sequence.toList());
   }
 
   private Query<SegmentDescriptor> makeFakeQuery(Interval interval)
@@ -157,29 +167,36 @@ public class CachingClusteredClientPerfTest
     return new TestQuery(
         new TableDataSource("test"),
         new MultipleIntervalSegmentSpec(Collections.singletonList(interval)),
-        false,
-        ImmutableMap.of(BaseQuery.QUERY_ID, "testQuery")
+        QueryContext.ofMap(QueryContextParameters.QUERY_ID, "testQuery")
     );
   }
 
   private DataSegment makeDataSegment(String dataSource, Interval interval, String version, int partition)
   {
-    return DataSegment.builder()
-                      .dataSource(dataSource)
-                      .interval(interval)
-                      .version(version)
+    return DataSegment.builder(SegmentId.of(dataSource, interval, version, partition))
                       .shardSpec(new LinearShardSpec(partition))
                       .size(1)
                       .build();
   }
 
-  private static class MockQueryToolChestWareHouse implements QueryToolChestWarehouse
+  private static class MockQueryRunnerFactoryConglomerate implements QueryRunnerFactoryConglomerate
   {
-
     @Override
     public <T, QueryType extends Query<T>> QueryToolChest<T, QueryType> getToolChest(QueryType query)
     {
       return new ServerManagerTest.NoopQueryToolChest<>();
+    }
+
+    @Override
+    public <T, QueryType extends Query<T>> QueryRunnerFactory<T, QueryType> findFactory(QueryType query)
+    {
+      return null;
+    }
+
+    @Override
+    public <T, QueryType extends Query<T>> QueryLogic getQueryLogic(QueryType query)
+    {
+      return null;
     }
   }
 
@@ -193,7 +210,7 @@ public class CachingClusteredClientPerfTest
     )
     {
       TestQuery query = (TestQuery) queryPlus.getQuery();
-      return TestSequence.create(((MultipleSpecificSegmentSpec) query.getSpec()).getDescriptors());
+      return TestSequence.create(((MultipleSpecificSegmentSpec) query.getQuerySegmentSpec()).getDescriptors());
     }
   }
 
@@ -204,11 +221,10 @@ public class CachingClusteredClientPerfTest
     public TestQuery(
         DataSource dataSource,
         QuerySegmentSpec querySegmentSpec,
-        boolean descending,
         Map<String, Object> context
     )
     {
-      super(dataSource, querySegmentSpec, descending, context);
+      super(dataSource, querySegmentSpec, context);
     }
 
     @Override
@@ -248,7 +264,8 @@ public class CachingClusteredClientPerfTest
       return this;
     }
 
-    public QuerySegmentSpec getSpec()
+    @Override
+    public QuerySegmentSpec getQuerySegmentSpec()
     {
       return spec;
     }

@@ -22,10 +22,12 @@ package org.apache.druid.indexing.common.actions;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.google.common.util.concurrent.ListenableFuture;
 import org.apache.druid.indexing.common.task.Task;
 
-import java.util.concurrent.Future;
-
+/**
+ * An action performed on behalf of a Task by the Overlord.
+ */
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = TaskAction.TYPE_FIELD)
 @JsonSubTypes(value = {
     @JsonSubTypes.Type(name = "lockAcquire", value = TimeChunkLockAcquireAction.class),
@@ -34,11 +36,14 @@ import java.util.concurrent.Future;
     @JsonSubTypes.Type(name = "segmentLockAcquire", value = SegmentLockAcquireAction.class),
     @JsonSubTypes.Type(name = "lockList", value = LockListAction.class),
     @JsonSubTypes.Type(name = "lockRelease", value = LockReleaseAction.class),
-    @JsonSubTypes.Type(name = "segmentInsertion", value = SegmentInsertAction.class),
     @JsonSubTypes.Type(name = "segmentTransactionalInsert", value = SegmentTransactionalInsertAction.class),
-    // Type name doesn't correspond to the name of the class for backward compatibility.
+    @JsonSubTypes.Type(name = "segmentTransactionalAppend", value = SegmentTransactionalAppendAction.class),
+    @JsonSubTypes.Type(name = "segmentTransactionalReplace", value = SegmentTransactionalReplaceAction.class),
+    @JsonSubTypes.Type(name = "markSegmentsToUpgrade", value = MarkSegmentToUpgradeAction.class),
+    @JsonSubTypes.Type(name = "retrieveSegmentsById", value = RetrieveSegmentsByIdAction.class),
+    @JsonSubTypes.Type(name = "retrieveUpgradedFromSegmentIds", value = RetrieveUpgradedFromSegmentIdsAction.class),
+    @JsonSubTypes.Type(name = "retrieveUpgradedToSegmentIds", value = RetrieveUpgradedToSegmentIdsAction.class),
     @JsonSubTypes.Type(name = "segmentListUsed", value = RetrieveUsedSegmentsAction.class),
-    // Type name doesn't correspond to the name of the class for backward compatibility.
     @JsonSubTypes.Type(name = "segmentListUnused", value = RetrieveUnusedSegmentsAction.class),
     @JsonSubTypes.Type(name = "markSegmentsAsUnused", value = MarkSegmentsAsUnusedAction.class),
     @JsonSubTypes.Type(name = "segmentNuke", value = SegmentNukeAction.class),
@@ -58,14 +63,12 @@ public interface TaskAction<RetType>
 
   RetType perform(Task task, TaskActionToolbox toolbox);
 
-  boolean isAudited();
-
   default boolean canPerformAsync(Task task, TaskActionToolbox toolbox)
   {
     return false;
   }
 
-  default Future<RetType> performAsync(Task task, TaskActionToolbox toolbox)
+  default ListenableFuture<RetType> performAsync(Task task, TaskActionToolbox toolbox)
   {
     throw new UnsupportedOperationException();
   }

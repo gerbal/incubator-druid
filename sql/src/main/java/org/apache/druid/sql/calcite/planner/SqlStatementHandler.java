@@ -21,8 +21,8 @@ package org.apache.druid.sql.calcite.planner;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.calcite.schema.SchemaPlus;
-import org.apache.calcite.tools.ValidationException;
 import org.apache.druid.query.QueryContext;
+import org.apache.druid.query.explain.ExplainAttributes;
 import org.apache.druid.server.security.ResourceAction;
 import org.apache.druid.sql.calcite.run.SqlEngine;
 import org.joda.time.DateTimeZone;
@@ -36,11 +36,12 @@ import java.util.Set;
  */
 public interface SqlStatementHandler
 {
-  void validate() throws ValidationException;
+  void validate();
   Set<ResourceAction> resourceActions();
   void prepare();
   PrepareResult prepareResult();
-  PlannerResult plan() throws ValidationException;
+  PlannerResult plan();
+  ExplainAttributes explainAttributes();
 
   /**
    * Context available to statement handlers.
@@ -56,6 +57,11 @@ public interface SqlStatementHandler
     ObjectMapper jsonMapper();
     DateTimeZone timeZone();
     PlannerHook hook();
+
+    /**
+     * The factory that created the enclosing planner, for statements that need to plan a nested query of their own.
+     */
+    PlannerFactory plannerFactory();
   }
 
   abstract class BaseStatementHandler implements SqlStatementHandler

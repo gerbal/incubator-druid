@@ -23,6 +23,8 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import org.apache.druid.guice.annotations.ExtensionPoint;
 
+import java.util.concurrent.TimeUnit;
+
 /**
  * This class implements the logic of how units of query execution run concurrently. It is used in {@link QueryRunnerFactory#mergeRunners(QueryProcessingPool, Iterable)}.
  * In a most straightforward implementation, each unit will be submitted to an {@link PrioritizedExecutorService}. Extensions,
@@ -30,7 +32,7 @@ import org.apache.druid.guice.annotations.ExtensionPoint;
  * <p>
  * This interface extends {@link ListeningExecutorService} as well. It has a separate
  * method to submit query execution tasks so that implementations can differentiate those tasks from any regular async
- * tasks. One example is {@link org.apache.druid.query.groupby.strategy.GroupByStrategyV2#mergeRunners(QueryProcessingPool, Iterable)}
+ * tasks. One example is {@link org.apache.druid.query.groupby.GroupingEngine#mergeRunners(QueryProcessingPool, Iterable)}
  * where different kind of tasks are submitted to same processing pool.
  * <p>
  * Query execution task also includes a reference to {@link QueryRunner} so that any state required to decide the priority
@@ -48,4 +50,17 @@ public interface QueryProcessingPool extends ListeningExecutorService
    * @return - Future object for tracking the task completion.
    */
   <T, V> ListenableFuture<T> submitRunnerTask(PrioritizedQueryRunnerCallable<T, V> task);
+
+
+  /**
+   * Submits the query execution task for asynchronous execution, with a provided timeout.
+   *
+   * @param task    - Task to be submitted.
+   * @param <T>     - Task result type
+   * @param <V>     - Query runner sequence type
+   * @param timeout - Timeout value
+   * @param unit   - Timeout unit
+   * @return - Future object for tracking the task completion.
+   */
+  <T, V> ListenableFuture<T> submitRunnerTask(PrioritizedQueryRunnerCallable<T, V> task, long timeout, TimeUnit unit);
 }

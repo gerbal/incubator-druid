@@ -60,7 +60,7 @@ public class V3CompressedVSizeColumnarMultiIntsSupplierTest extends CompressedVS
   }
 
   @Override
-  public void teardown() throws IOException
+  public void teardownSimple() throws IOException
   {
     columnarMultiIntsSupplier = null;
     closer.close();
@@ -85,7 +85,8 @@ public class V3CompressedVSizeColumnarMultiIntsSupplierTest extends CompressedVS
     return wrapSupplier(
         V3CompressedVSizeColumnarMultiIntsSupplier.fromByteBuffer(
             buffer,
-            ByteOrder.nativeOrder()
+            ByteOrder.nativeOrder(),
+            null
         ),
         closer
     );

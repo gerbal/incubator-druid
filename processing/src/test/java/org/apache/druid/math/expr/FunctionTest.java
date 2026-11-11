@@ -19,70 +19,146 @@
 
 package org.apache.druid.math.expr;
 
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import org.apache.druid.common.config.NullHandling;
+import org.apache.druid.error.DruidException;
+import org.apache.druid.guice.BuiltInTypesModule;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.Pair;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.math.expr.Expr.ObjectBinding;
 import org.apache.druid.segment.column.TypeStrategies;
 import org.apache.druid.segment.column.TypeStrategiesTest;
 import org.apache.druid.segment.column.TypeStrategy;
+import org.apache.druid.segment.nested.StructuredData;
 import org.apache.druid.testing.InitializedNullHandlingTest;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.ExpectedException;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import javax.annotation.Nullable;
+
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 public class FunctionTest extends InitializedNullHandlingTest
 {
-  @Rule
-  public ExpectedException expectedException = ExpectedException.none();
+  private Expr.ObjectBinding bestEffortBindings;
+  private Expr.ObjectBinding typedBindings;
+  private Expr.ObjectBinding[] allBindings;
 
-  private Expr.ObjectBinding bindings;
 
-  @BeforeClass
+  @BeforeAll
   public static void setupClass()
   {
     TypeStrategies.registerComplex(
         TypeStrategiesTest.NULLABLE_TEST_PAIR_TYPE.getComplexTypeName(),
         new TypeStrategiesTest.NullableLongPairTypeStrategy()
     );
+    BuiltInTypesModule.registerHandlersAndSerde();
   }
 
-  @Before
+  @BeforeEach
   public void setup()
   {
-    ImmutableMap.Builder<String, Object> builder =
-        ImmutableMap.<String, Object>builder()
-                    .put("x", "foo")
-                    .put("y", 2)
-                    .put("z", 3.1)
-                    .put("d", 34.56D)
-                    .put("maxLong", Long.MAX_VALUE)
-                    .put("minLong", Long.MIN_VALUE)
-                    .put("f", 12.34F)
-                    .put("nan", Double.NaN)
-                    .put("inf", Double.POSITIVE_INFINITY)
-                    .put("-inf", Double.NEGATIVE_INFINITY)
-                    .put("o", 0)
-                    .put("od", 0D)
-                    .put("of", 0F)
-                    .put("a", new String[] {"foo", "bar", "baz", "foobar"})
-                    .put("b", new Long[] {1L, 2L, 3L, 4L, 5L})
-                    .put("c", new Double[] {3.1, 4.2, 5.3})
-                    .put("someComplex", new TypeStrategiesTest.NullableLongPair(1L, 2L))
-                    .put("str1", "v1")
-                    .put("str2", "v2");
-    bindings = InputBindings.forMap(builder.build());
+    ImmutableMap.Builder<String, ExpressionType> inputTypesBuilder = ImmutableMap.builder();
+    inputTypesBuilder.put("x", ExpressionType.STRING)
+                     .put("y", ExpressionType.LONG)
+                     .put("z", ExpressionType.DOUBLE)
+                     .put("d", ExpressionType.DOUBLE)
+                     .put("maxLong", ExpressionType.LONG)
+                     .put("minLong", ExpressionType.LONG)
+                     .put("f", ExpressionType.DOUBLE)
+                     .put("nan", ExpressionType.DOUBLE)
+                     .put("inf", ExpressionType.DOUBLE)
+                     .put("-inf", ExpressionType.DOUBLE)
+                     .put("o", ExpressionType.LONG)
+                     .put("od", ExpressionType.DOUBLE)
+                     .put("of", ExpressionType.DOUBLE)
+                     .put("a", ExpressionType.STRING_ARRAY)
+                     .put("b", ExpressionType.LONG_ARRAY)
+                     .put("c", ExpressionType.DOUBLE_ARRAY)
+                     .put("someComplex", ExpressionType.fromColumnType(TypeStrategiesTest.NULLABLE_TEST_PAIR_TYPE))
+                     .put("str1", ExpressionType.STRING)
+                     .put("str2", ExpressionType.STRING)
+                     .put("nestedArray", ExpressionType.NESTED_DATA)
+                     .put("emptyArray", ExpressionType.STRING_ARRAY);
+
+    final StructuredData nestedArray = StructuredData.wrap(
+        ImmutableList.of(
+            ImmutableMap.of("x", 2L, "y", 3.3),
+            ImmutableMap.of("x", 4L, "y", 6.6)
+        )
+    );
+    ImmutableMap.Builder<String, Object> builder = ImmutableMap.builder();
+    builder.put("x", "foo")
+           .put("y", 2)
+           .put("z", 3.1)
+           .put("d", 34.56D)
+           .put("maxLong", Long.MAX_VALUE)
+           .put("minLong", Long.MIN_VALUE)
+           .put("f", 12.34F)
+           .put("nan", Double.NaN)
+           .put("inf", Double.POSITIVE_INFINITY)
+           .put("-inf", Double.NEGATIVE_INFINITY)
+           .put("o", 0)
+           .put("od", 0D)
+           .put("of", 0F)
+           .put("a", new String[]{"foo", "bar", "baz", "foobar"})
+           .put("b", new Long[]{1L, 2L, 3L, 4L, 5L})
+           .put("c", new Double[]{3.1, 4.2, 5.3})
+           .put("someComplex", new TypeStrategiesTest.NullableLongPair(1L, 2L))
+           .put("str1", "v1")
+           .put("str2", "v2")
+           .put("nestedArray", nestedArray)
+           .put("emptyArray", new Object[]{});
+    bestEffortBindings = InputBindings.forMap(builder.build());
+    typedBindings = InputBindings.forMap(
+        builder.build(), InputBindings.inspectorFromTypeMap(inputTypesBuilder.build())
+    );
+    allBindings = new Expr.ObjectBinding[]{bestEffortBindings, typedBindings};
+  }
+
+  @Test
+  public void testUnknownErrorsAreWrappedAndReported()
+  {
+    final Expr expr = Parser.parse("abs(x)", ExprMacroTable.nil());
+
+    ObjectBinding bind = new ObjectBinding()
+    {
+
+      @Override
+      public ExpressionType getType(String name)
+      {
+        return ExpressionType.LONG_ARRAY;
+      }
+
+      @Override
+      public Object get(String name)
+      {
+        throw new RuntimeException("nested-exception");
+      }
+    };
+    DruidException e = Assertions.assertThrows(
+        DruidException.class,
+        () -> {
+          expr.eval(bind);
+        }
+    );
+
+    assertEquals("Function[abs] encountered unknown exception.", e.getMessage());
+    assertNotNull(e.getCause());
+    assertEquals("nested-exception", e.getCause().getMessage());
   }
 
   @Test
@@ -107,11 +183,7 @@ public class FunctionTest extends InitializedNullHandlingTest
   public void testConcat()
   {
     assertExpr("concat(x,' ',y)", "foo 2");
-    if (NullHandling.replaceWithDefault()) {
-      assertExpr("concat(x,' ',nonexistent,' ',y)", "foo  2");
-    } else {
-      assertArrayExpr("concat(x,' ',nonexistent,' ',y)", null);
-    }
+    assertArrayExpr("concat(x,' ',nonexistent,' ',y)", null);
 
     assertExpr("concat(z)", "3.1");
     assertArrayExpr("concat()", null);
@@ -186,17 +258,17 @@ public class FunctionTest extends InitializedNullHandlingTest
     assertExpr("lpad(x, 5, 'ab')", "abfoo");
     assertExpr("lpad(x, 4, 'ab')", "afoo");
     assertExpr("lpad(x, 2, 'ab')", "fo");
-    assertExpr("lpad(x, -1, 'ab')", NullHandling.replaceWithDefault() ? null : "");
+    assertExpr("lpad(x, -1, 'ab')", "");
     assertExpr("lpad(null, 5, 'ab')", null);
-    assertExpr("lpad(x, 2, '')", NullHandling.replaceWithDefault() ? null : "fo");
-    assertExpr("lpad(x, 6, '')", NullHandling.replaceWithDefault() ? null : "foo");
-    assertExpr("lpad('', 3, '*')", NullHandling.replaceWithDefault() ? null : "***");
+    assertExpr("lpad(x, 2, '')", "fo");
+    assertExpr("lpad(x, 6, '')", "foo");
+    assertExpr("lpad('', 3, '*')", "***");
     assertExpr("lpad(x, 2, null)", null);
     assertExpr("lpad(a, 4, '*')", "[foo");
     assertExpr("lpad(a, 2, '*')", "[f");
-    assertExpr("lpad(a, 2, '')", NullHandling.replaceWithDefault() ? null : "[f");
+    assertExpr("lpad(a, 2, '')", "[f");
     assertExpr("lpad(b, 4, '*')", "[1, ");
-    assertExpr("lpad(b, 2, '')", NullHandling.replaceWithDefault() ? null : "[1");
+    assertExpr("lpad(b, 2, '')", "[1");
     assertExpr("lpad(b, 2, null)", null);
     assertExpr("lpad(x, 5, x)", "fofoo");
     assertExpr("lpad(x, 5, y)", "22foo");
@@ -211,16 +283,16 @@ public class FunctionTest extends InitializedNullHandlingTest
     assertExpr("rpad(x, 5, 'ab')", "fooab");
     assertExpr("rpad(x, 4, 'ab')", "fooa");
     assertExpr("rpad(x, 2, 'ab')", "fo");
-    assertExpr("rpad(x, -1, 'ab')", NullHandling.replaceWithDefault() ? null : "");
+    assertExpr("rpad(x, -1, 'ab')", "");
     assertExpr("rpad(null, 5, 'ab')", null);
-    assertExpr("rpad(x, 2, '')", NullHandling.replaceWithDefault() ? null : "fo");
-    assertExpr("rpad(x, 6, '')", NullHandling.replaceWithDefault() ? null : "foo");
-    assertExpr("rpad('', 3, '*')", NullHandling.replaceWithDefault() ? null : "***");
+    assertExpr("rpad(x, 2, '')", "fo");
+    assertExpr("rpad(x, 6, '')", "foo");
+    assertExpr("rpad('', 3, '*')", "***");
     assertExpr("rpad(x, 2, null)", null);
     assertExpr("rpad(a, 2, '*')", "[f");
-    assertExpr("rpad(a, 2, '')", NullHandling.replaceWithDefault() ? null : "[f");
+    assertExpr("rpad(a, 2, '')", "[f");
     assertExpr("rpad(b, 4, '*')", "[1, ");
-    assertExpr("rpad(b, 2, '')", NullHandling.replaceWithDefault() ? null : "[1");
+    assertExpr("rpad(b, 2, '')", "[1");
     assertExpr("rpad(b, 2, null)", null);
     assertExpr("rpad(x, 5, x)", "foofo");
     assertExpr("rpad(x, 5, y)", "foo22");
@@ -233,9 +305,16 @@ public class FunctionTest extends InitializedNullHandlingTest
   public void testArrayConstructor()
   {
     assertArrayExpr("array(1, 2, 3, 4)", new Long[]{1L, 2L, 3L, 4L});
-    assertArrayExpr("array(1, 2, 3, 'bar')", new Long[]{1L, 2L, 3L, null});
+    assertArrayExpr("array(1, 2, 3, 'bar')", new String[]{"1", "2", "3", "bar"});
     assertArrayExpr("array(1.0)", new Double[]{1.0});
     assertArrayExpr("array('foo', 'bar')", new String[]{"foo", "bar"});
+    assertArrayExpr(
+        "array(a, b)",
+        new Object[]{
+            new Object[]{"foo", "bar", "baz", "foobar"},
+            new Object[]{"1", "2", "3", "4", "5"}
+        }
+    );
   }
 
   @Test
@@ -243,6 +322,8 @@ public class FunctionTest extends InitializedNullHandlingTest
   {
     assertExpr("array_length([1,2,3])", 3L);
     assertExpr("array_length(a)", 4L);
+    // nested types only work with typed bindings right now, and pretty limited support for stuff
+    assertExpr("array_length(nestedArray)", 2L, typedBindings, ExprMacroTable.nil());
   }
 
   @Test
@@ -250,7 +331,10 @@ public class FunctionTest extends InitializedNullHandlingTest
   {
     assertExpr("array_offset([1, 2, 3], 2)", 3L);
     assertArrayExpr("array_offset([1, 2, 3], 3)", null);
+    assertArrayExpr("array_offset([1, 2, 3], -1)", null);
     assertExpr("array_offset(a, 2)", "baz");
+    // nested types only work with typed bindings right now, and pretty limited support for stuff
+    assertExpr("array_offset(nestedArray, 1)", ImmutableMap.of("x", 4L, "y", 6.6), typedBindings, ExprMacroTable.nil());
   }
 
   @Test
@@ -258,14 +342,17 @@ public class FunctionTest extends InitializedNullHandlingTest
   {
     assertExpr("array_ordinal([1, 2, 3], 3)", 3L);
     assertArrayExpr("array_ordinal([1, 2, 3], 4)", null);
+    assertArrayExpr("array_ordinal([1, 2, 3], 0)", null);
     assertExpr("array_ordinal(a, 3)", "baz");
+    // nested types only work with typed bindings right now, and pretty limited support for stuff
+    assertExpr("array_ordinal(nestedArray, 2)", ImmutableMap.of("x", 4L, "y", 6.6), typedBindings, ExprMacroTable.nil());
   }
 
   @Test
   public void testArrayOffsetOf()
   {
     assertExpr("array_offset_of([1, 2, 3], 3)", 2L);
-    assertExpr("array_offset_of([1, 2, 3], 4)", NullHandling.replaceWithDefault() ? -1L : null);
+    assertExpr("array_offset_of([1, 2, 3], 4)", null);
     assertExpr("array_offset_of(a, 'baz')", 2L);
   }
 
@@ -273,8 +360,23 @@ public class FunctionTest extends InitializedNullHandlingTest
   public void testArrayOrdinalOf()
   {
     assertExpr("array_ordinal_of([1, 2, 3], 3)", 3L);
-    assertExpr("array_ordinal_of([1, 2, 3], 4)", NullHandling.replaceWithDefault() ? -1L : null);
+    assertExpr("array_ordinal_of([1, 2, 3], 4)", null);
     assertExpr("array_ordinal_of(a, 'baz')", 3L);
+  }
+
+  @Test
+  public void testScalarInArray()
+  {
+    assertExpr("scalar_in_array(2, [1, 2, 3])", 1L);
+    assertExpr("scalar_in_array(2.1, [1, 2, 3])", 0L);
+    assertExpr("scalar_in_array(2, [1.1, 2.1, 3.1])", 0L);
+    assertExpr("scalar_in_array(2, [1.1, 2.0, 3.1])", 1L);
+    assertExpr("scalar_in_array(4, [1, 2, 3])", 0L);
+    assertExpr("scalar_in_array(b, [3, 4])", 0L);
+    assertExpr("scalar_in_array(1, null)", null);
+    assertExpr("scalar_in_array(null, null)", null);
+    assertExpr("scalar_in_array(null, [1, null, 2])", 1L);
+    assertExpr("scalar_in_array(null, [1, 2])", null);
   }
 
   @Test
@@ -285,6 +387,112 @@ public class FunctionTest extends InitializedNullHandlingTest
     assertExpr("array_contains([1, 2, 3], [2, 3])", 1L);
     assertExpr("array_contains([1, 2, 3], [3, 4])", 0L);
     assertExpr("array_contains(b, [3, 4])", 1L);
+    assertExpr("array_contains(null, [3, 4])", null);
+    assertExpr("array_contains(null, null)", null);
+    assertExpr("array_contains([1, null, 2], null)", 1L);
+    assertExpr("array_contains([1, null, 2], [null])", 1L);
+    assertExpr("array_contains([1, 2], null)", 0L);
+    assertExpr("array_contains([1, 2, 3], [])", 1L);
+    assertExpr("array_contains([], [])", 1L);
+    assertExpr("array_contains([null], [])", 1L);
+    assertExpr("array_contains(['foo', 'bar'], [])", 1L);
+    assertExpr("array_contains(null, [])", null);
+  }
+
+  @Test
+  public void testMvContains()
+  {
+    // Tests where the first argument is a numeric array that does not contain null
+    assertExpr("mv_contains([1, 2, 3], 2)", 1L);
+    assertExpr("mv_contains([1, 2, 3], 4)", 0L);
+    assertExpr("mv_contains([1, 2, 3], [2, 3])", 1L);
+    assertExpr("mv_contains([1, 2, 3], [3, 4])", 0L);
+    assertExpr("mv_contains([1, 2], null)", 0L);
+    assertExpr("mv_contains(b, y)", 1L);
+    assertExpr("mv_contains(b, x)", 0L);
+
+    // Tests where the first argument is a string array that does not contain null
+    assertExpr("mv_contains(a, str1)", 0L);
+    assertExpr("mv_contains(a, x)", 1L);
+
+    // Tests where the first argument is a numeric array that does contain null
+    assertExpr("mv_contains([1, null, 2], 2)", 1L);
+    assertExpr("mv_contains([1, null, 2], 3)", 0L);
+    assertExpr("mv_contains([1, null, 2], [2, 3])", 0L);
+    assertExpr("mv_contains([1, null, 2], [1, 2])", 1L);
+    assertExpr("mv_contains([1, null, 2], [null])", 1L);
+    assertExpr("mv_contains([null, 1], null)", 1L);
+    assertExpr("mv_contains([null, 1], [null])", 1L);
+    assertExpr("mv_contains([1, null, 2], y)", 1L);
+    assertExpr("mv_contains([null, 1], o)", 0L);
+
+    // Tests where the first argument is a string array that does contain null
+    assertExpr("mv_contains(['foo', null, 'bar'], 'foo')", 1L);
+    assertExpr("mv_contains(['foo', null, 'bar'], 'baz')", 0L);
+    assertExpr("mv_contains(['foo', null, 'bar'], null)", 1L);
+    assertExpr("mv_contains(['foo', null, 'bar'], ['foo'])", 1L);
+    assertExpr("mv_contains(['foo', null, 'bar'], ['foo', 'bar'])", 1L);
+    assertExpr("mv_contains(['foo', null, 'bar'], ['foo', 'baz'])", 0L);
+    assertExpr("mv_contains(['foo', null, 'bar'], [null])", 1L);
+    assertExpr("mv_contains(['foo', null, 'bar'], ['foo', null])", 1L);
+    assertExpr("mv_contains([null, 'test'], ['test', 'other'])", 0L);
+
+    // Tests where the first argument is a non-null string
+    assertExpr("mv_contains('test', 'test')", 1L);
+    assertExpr("mv_contains('test', 'other')", 0L);
+    assertExpr("mv_contains('test', ['test'])", 1L);
+    assertExpr("mv_contains('test', ['other'])", 0L);
+    assertExpr("mv_contains('hello', 'hello')", 1L);
+    assertExpr("mv_contains('hello', 'world')", 0L);
+    assertExpr("mv_contains('hello', 42)", 0L);
+    assertExpr("mv_contains('hello', 3.14)", 0L);
+    assertExpr("mv_contains('hello', ['hello'])", 1L);
+    assertExpr("mv_contains('hello', ['hello', 'world'])", 0L);
+    assertExpr("mv_contains('hello', [42])", 0L);
+    assertExpr("mv_contains('hello', [3.14])", 0L);
+    assertExpr("mv_contains('hello', null)", 0L);
+
+    // Tests where the first argument is null
+    assertExpr("mv_contains(null, [3, 4])", 0L);
+    assertExpr("mv_contains(null, null)", 1L);
+    assertExpr("mv_contains(null, 1)", 0L);
+    assertExpr("mv_contains(null, 'test')", 0L);
+    assertExpr("mv_contains(null, [1, 2])", 0L);
+    assertExpr("mv_contains(null, [])", 1L);
+    assertExpr("mv_contains(null, [null])", 1L);
+    assertExpr("mv_contains(null, [null, 1])", 0L);
+
+    // Tests where the first argument is an empty array
+    assertExpr("mv_contains([], 1)", 0L);
+    assertExpr("mv_contains([], [1, 2])", 0L);
+    assertExpr("mv_contains([], [])", 1L);
+    assertExpr("mv_contains([], null)", 1L);
+    assertExpr("mv_contains([], [null])", 1L);
+
+    // Tests where the first argument is a long
+    assertExpr("mv_contains(42, 42)", 1L);
+    assertExpr("mv_contains(42, 43)", 0L);
+    assertExpr("mv_contains(42, 'test')", 0L);
+    assertExpr("mv_contains(42, 42.0)", 0L);
+    assertExpr("mv_contains(42, [42])", 1L);
+    assertExpr("mv_contains(42, [42, 43])", 0L);
+    assertExpr("mv_contains(42, [42, 43, null])", 0L);
+    assertExpr("mv_contains(42, ['test'])", 0L);
+    assertExpr("mv_contains(42, [42.0])", 0L);
+    assertExpr("mv_contains(42, null)", 0L);
+
+    // Tests where the first argument is a double
+    assertExpr("mv_contains(3.14, 3.14)", 1L);
+    assertExpr("mv_contains(3.14, 3)", 0L);
+    assertExpr("mv_contains(3.14, 'pi')", 0L);
+    assertExpr("mv_contains(3.14, 3.14)", 1L);
+    assertExpr("mv_contains(3.14, [3.14])", 1L);
+    assertExpr("mv_contains(3.14, [3.14])", 1L);
+    assertExpr("mv_contains(3.14, [3, 3.14])", 0L);
+    assertExpr("mv_contains(3.14, ['3.14'])", 1L);
+    assertExpr("mv_contains(3.14, [3.14, 6.28])", 0L);
+    assertExpr("mv_contains(3.14, [3.14, 6.28, null])", 0L);
+    assertExpr("mv_contains(3.14, null)", 0L);
   }
 
   @Test
@@ -292,6 +500,106 @@ public class FunctionTest extends InitializedNullHandlingTest
   {
     assertExpr("array_overlap([1, 2, 3], [2, 4, 6])", 1L);
     assertExpr("array_overlap([1, 2, 3], [4, 5, 6])", 0L);
+    assertExpr("array_overlap(null, [4, 5, 6])", null);
+    assertExpr("array_overlap([4, null], [4, 5, 6])", 1L);
+    assertExpr("array_overlap([4, 5, 6], null)", 0L);
+    assertExpr("array_overlap([4, 5, 6], [null])", 0L);
+    assertExpr("array_overlap([4, 5, null, 6], null)", 0L);
+    assertExpr("array_overlap([4, 5, null, 6], [null])", 1L);
+    assertExpr("array_overlap([1, 2, 3], [])", 0L);
+    assertExpr("array_overlap([], [])", 0L);
+    assertExpr("array_overlap([null], [])", 0L);
+    assertExpr("array_overlap(['foo', 'bar'], [])", 0L);
+    assertExpr("array_overlap(null, [])", null);
+    assertExpr("array_overlap([1, null, 3], [])", 0L);
+  }
+
+  @Test
+  public void testMvOverlap()
+  {
+    // Tests where the first argument is a numeric array that does not contain null
+    assertExpr("mv_overlap([1, 2, 3], [2, 4, 6])", 1L);
+    assertExpr("mv_overlap([1, 2, 3], [4, 5, 6])", 0L);
+    assertExpr("mv_overlap([4, 5, 6], null)", 0L);
+    assertExpr("mv_overlap([4, 5, 6], [null])", 0L);
+    assertExpr("mv_overlap(b, c)", 0L);
+    assertExpr("mv_overlap(c, b)", 0L); // (c, b) = 0L now that 2nd arg is cast to string array
+
+    // Tests where the first argument is a string array that does not contain null
+    assertExpr("mv_overlap(a, emptyArray)", 0L);
+    assertExpr("mv_overlap(a, a)", 1L);
+
+    // Tests where the first argument is a numeric array that does contain null
+    assertExpr("mv_overlap([4, null], [4, 5, 6])", 1L);
+    assertExpr("mv_overlap([7, null], [4, 5, 6])", null);
+    assertExpr("mv_overlap([4, 5, null, 6], [null])", 1L);
+    assertExpr("mv_overlap([4, 5, null, 6], null)", 1L);
+    assertExpr("mv_overlap([null, 1], [null, 2])", 1L);
+    assertExpr("mv_overlap([1, null, 2], b)", 1L);
+    assertExpr("mv_overlap([null, 6], c)", null);
+
+    // Tests where the first argument is a string array that does contain null
+    assertExpr("mv_overlap(['foo', null, 'bar'], ['foo', 'baz'])", 1L);
+    assertExpr("mv_overlap(['foo', null, 'bar'], ['baz', 'qux'])", null);
+    assertExpr("mv_overlap(['foo', null, 'bar'], [null])", 1L);
+    assertExpr("mv_overlap(['foo', null, 'bar'], ['foo', null])", 1L);
+    assertExpr("mv_overlap(['foo', null, 'bar'], null)", 1L);
+    assertExpr("mv_overlap([null, 'hello'], ['hello', 'world'])", 1L);
+    assertExpr("mv_overlap([null, 'hello'], ['world'])", null);
+
+    // Tests where the first argument is a non-null string
+    assertExpr("mv_overlap('test', ['test', 'other'])", 1L);
+    assertExpr("mv_overlap('test', ['other'])", 0L);
+    assertExpr("mv_overlap('hello', 'hello')", 1L);
+    assertExpr("mv_overlap('hello', 'world')", 0L);
+    assertExpr("mv_overlap('hello', 42)", 0L);
+    assertExpr("mv_overlap('hello', 3.14)", 0L);
+    assertExpr("mv_overlap('hello', ['hello', 'world'])", 1L);
+    assertExpr("mv_overlap('hello', ['foo', 'bar'])", 0L);
+    assertExpr("mv_overlap('hello', ['foo', 'bar', null])", 0L);
+    assertExpr("mv_overlap('hello', [42, 43])", 0L);
+    assertExpr("mv_overlap('hello', [42, 43, null])", 0L);
+    assertExpr("mv_overlap('hello', [3.14, 6.28])", 0L);
+    assertExpr("mv_overlap('hello', [3.14, 6.28, null])", 0L);
+    assertExpr("mv_overlap('hello', null)", 0L);
+
+    // Tests where the first argument is null
+    assertExpr("mv_overlap(null, [4, 5, 6])", null);
+    assertExpr("mv_overlap(null, [1, 2])", null);
+    assertExpr("mv_overlap(null, 1)", null);
+    assertExpr("mv_overlap(null, 'test')", null);
+    assertExpr("mv_overlap(null, [])", 0L);
+    assertExpr("mv_overlap(null, [null])", 1L);
+    assertExpr("mv_overlap(null, [null, 1])", 1L);
+
+    // Tests where the first argument is an empty array
+    assertExpr("mv_overlap([], [1, 2])", null);
+    assertExpr("mv_overlap([], [])", 0L);
+    assertExpr("mv_overlap([], [null])", 1L);
+    assertExpr("mv_overlap([], null)", 1L);
+
+    // Tests where the first argument is a long
+    assertExpr("mv_overlap(42, 42)", 1L);
+    assertExpr("mv_overlap(42, 43)", 0L);
+    assertExpr("mv_overlap(42, 'test')", 0L);
+    assertExpr("mv_overlap(42, 42.0)", 0L);
+    assertExpr("mv_overlap(42, [41, 42, 43])", 1L);
+    assertExpr("mv_overlap(42, [40, 41])", 0L);
+    assertExpr("mv_overlap(42, ['test', 'foo'])", 0L);
+    assertExpr("mv_overlap(42, [41.0, 42.0, 43.0])", 0L);
+    assertExpr("mv_overlap(42, null)", 0L);
+
+    // Tests where the first argument is a double
+    assertExpr("mv_overlap(3.14, 3.14)", 1L);
+    assertExpr("mv_overlap(3.14, 2.71)", 0L);
+    assertExpr("mv_overlap(3.14, 'pi')", 0L);
+    assertExpr("mv_overlap(3.14, 3)", 0L);
+    assertExpr("mv_overlap(3.14, [3.14, 6.28])", 1L);
+    assertExpr("mv_overlap(3.14, [3.14, 6.28, null])", 1L);
+    assertExpr("mv_overlap(3.14, [1, 2, 3])", 0L);
+    assertExpr("mv_overlap(3.14, ['pi', '3.14'])", 1L);
+    assertExpr("mv_overlap(3.14, [1.0, 2.0, 3.14])", 1L);
+    assertExpr("mv_overlap(3.14, null)", 0L);
   }
 
   @Test
@@ -492,23 +800,7 @@ public class FunctionTest extends InitializedNullHandlingTest
         Pair.of("a", "ARRAY<STRING>")
     );
     for (Pair<String, String> argAndType : invalidArguments) {
-      if (NullHandling.sqlCompatible()) {
-        assertExpr(StringUtils.format("round(%s)", argAndType.lhs), null);
-      } else {
-        try {
-          assertExpr(StringUtils.format("round(%s)", argAndType.lhs), null);
-          Assert.fail("Did not throw IllegalArgumentException");
-        }
-        catch (ExpressionValidationException e) {
-          Assert.assertEquals(
-              StringUtils.format(
-                  "Function[round] first argument should be a LONG or DOUBLE but got %s instead",
-                  argAndType.rhs
-              ),
-              e.getMessage()
-          );
-        }
-      }
+      assertExpr(StringUtils.format("round(%s)", argAndType.lhs), null);
     }
   }
 
@@ -523,19 +815,17 @@ public class FunctionTest extends InitializedNullHandlingTest
 
     );
     for (Pair<String, String> argAndType : invalidArguments) {
-      try {
-        assertExpr(StringUtils.format("round(d, %s)", argAndType.lhs), null);
-        Assert.fail("Did not throw IllegalArgumentException");
-      }
-      catch (ExpressionValidationException e) {
-        Assert.assertEquals(
-            StringUtils.format(
-                "Function[round] second argument should be a LONG but got %s instead",
-                argAndType.rhs
-            ),
-            e.getMessage()
-        );
-      }
+      Throwable t = Assertions.assertThrows(
+          DruidException.class,
+          () -> assertExpr(StringUtils.format("round(d, %s)", argAndType.lhs), null)
+      );
+      Assertions.assertEquals(
+          StringUtils.format(
+              "Function[round] second argument should be a LONG but got %s instead",
+              argAndType.rhs
+          ),
+          t.getMessage()
+      );
     }
   }
 
@@ -553,18 +843,17 @@ public class FunctionTest extends InitializedNullHandlingTest
     assertExpr("greatest(1, 'A')", "A");
 
     // Invalid types
-    try {
-      assertExpr("greatest(1, ['A'])", null);
-      Assert.fail("Did not throw IllegalArgumentException");
-    }
-    catch (ExpressionValidationException e) {
-      Assert.assertEquals("Function[greatest] does not accept ARRAY<STRING> types", e.getMessage());
-    }
+    Throwable t = Assertions.assertThrows(
+        DruidException.class,
+        () -> assertExpr("greatest(1, ['A'])", null)
+    );
+    Assertions.assertEquals("Function[greatest] does not accept ARRAY<STRING> types", t.getMessage());
 
     // Null handling
     assertExpr("greatest()", null);
     assertExpr("greatest(null, null)", null);
     assertExpr("greatest(1, null, 'A')", "A");
+    assertExpr("greatest(1.0, 1, null)", 1.0);
   }
 
   @Test
@@ -581,18 +870,17 @@ public class FunctionTest extends InitializedNullHandlingTest
     assertExpr("least(1, 'A')", "1");
 
     // Invalid types
-    try {
-      assertExpr("least(1, [2, 3])", null);
-      Assert.fail("Did not throw IllegalArgumentException");
-    }
-    catch (ExpressionValidationException e) {
-      Assert.assertEquals("Function[least] does not accept ARRAY<LONG> types", e.getMessage());
-    }
+    Throwable t = Assertions.assertThrows(
+        DruidException.class,
+        () -> assertExpr("least(1, [2, 3])", null)
+    );
+    Assertions.assertEquals("Function[least] does not accept ARRAY<LONG> types", t.getMessage());
 
     // Null handling
     assertExpr("least()", null);
     assertExpr("least(null, null)", null);
     assertExpr("least(1, null, 'A')", "1");
+    assertExpr("least(1.0, 1, null)", 1.0);
   }
 
   @Test
@@ -641,7 +929,7 @@ public class FunctionTest extends InitializedNullHandlingTest
   public void testSizeFormatWithEdgeCases()
   {
     //a nonexist value is null which is treated as 0
-    assertExpr("human_readable_binary_byte_format(nonexist)", NullHandling.sqlCompatible() ? null : "0 B");
+    assertExpr("human_readable_binary_byte_format(nonexist)", null);
 
     //f = 12.34
     assertExpr("human_readable_binary_byte_format(f)", "12 B");
@@ -666,129 +954,94 @@ public class FunctionTest extends InitializedNullHandlingTest
   }
 
   @Test
-  public void testSizeForatInvalidArgumentType()
+  public void testSizeFormatInvalidArgumentType()
   {
-    try {
-      //x = "foo"
-      Parser.parse("human_readable_binary_byte_format(x)", ExprMacroTable.nil())
-            .eval(bindings);
+    // x = "foo"
+    Throwable t = Assertions.assertThrows(
+        DruidException.class,
+        () -> Parser.parse("human_readable_binary_byte_format(1024, x)", ExprMacroTable.nil()).eval(bestEffortBindings)
+    );
+    Assertions.assertEquals(
+        "Function[human_readable_binary_byte_format] needs a LONG as its second argument but got STRING instead",
+        t.getMessage()
+    );
+    //of = 0F
+    t = Assertions.assertThrows(
+        DruidException.class,
+        () -> Parser.parse("human_readable_binary_byte_format(1024, of)", ExprMacroTable.nil()).eval(bestEffortBindings)
+    );
+    Assertions.assertEquals(
+        "Function[human_readable_binary_byte_format] needs a LONG as its second argument but got DOUBLE instead",
+        t.getMessage()
+    );
 
-      // for sqlCompatible, function above returns null and goes here
-      // but for non-sqlCompatible, it must not go to here
-      Assert.assertTrue(NullHandling.sqlCompatible() ? true : false);
-    }
-    catch (ExpressionValidationException e) {
-      Assert.assertEquals(
-          "Function[human_readable_binary_byte_format] needs a number as its first argument but got STRING instead",
-          e.getMessage()
-      );
-    }
-
-    try {
-      //x = "foo"
-      Parser.parse("human_readable_binary_byte_format(1024, x)", ExprMacroTable.nil())
-            .eval(bindings);
-
-      //must not go to here
-      Assert.assertTrue(false);
-    }
-    catch (ExpressionValidationException e) {
-      Assert.assertEquals(
-          "Function[human_readable_binary_byte_format] needs a LONG as its second argument but got STRING instead",
-          e.getMessage()
-      );
-    }
-
-    try {
-      //of = 0F
-      Parser.parse("human_readable_binary_byte_format(1024, of)", ExprMacroTable.nil())
-            .eval(bindings);
-
-      //must not go to here
-      Assert.assertTrue(false);
-    }
-    catch (ExpressionValidationException e) {
-      Assert.assertEquals(
-          "Function[human_readable_binary_byte_format] needs a LONG as its second argument but got DOUBLE instead",
-          e.getMessage()
-      );
-    }
-
-    try {
-      //of = 0F
-      Parser.parse("human_readable_binary_byte_format(1024, nonexist)", ExprMacroTable.nil())
-            .eval(bindings);
-
-      //must not go to here
-      Assert.assertTrue(false);
-    }
-    catch (ExpressionValidationException e) {
-      Assert.assertEquals(
-          "Function[human_readable_binary_byte_format] needs a LONG as its second argument but got STRING instead",
-          e.getMessage()
-      );
-    }
+    //of = 0F
+    t = Assertions.assertThrows(
+        DruidException.class,
+        () -> Parser.parse("human_readable_binary_byte_format(1024, nonexist)", ExprMacroTable.nil())
+                    .eval(bestEffortBindings)
+    );
+    Assertions.assertEquals(
+        "Function[human_readable_binary_byte_format] needs a LONG as its second argument but got null",
+        t.getMessage()
+    );
   }
 
   @Test
   public void testSizeFormatInvalidPrecision()
   {
-    try {
-      Parser.parse("human_readable_binary_byte_format(1024, maxLong)", ExprMacroTable.nil())
-            .eval(bindings);
-      Assert.assertTrue(false);
-    }
-    catch (ExpressionValidationException e) {
-      Assert.assertEquals(
-          "Function[human_readable_binary_byte_format] given precision[9223372036854775807] must be in the range of [0,3]",
-          e.getMessage()
-      );
-    }
+    Throwable t = Assertions.assertThrows(
+        DruidException.class,
+        () -> Parser.parse("human_readable_binary_byte_format(1024, maxLong)", ExprMacroTable.nil())
+                    .eval(bestEffortBindings)
+    );
 
-    try {
-      Parser.parse("human_readable_binary_byte_format(1024, minLong)", ExprMacroTable.nil())
-            .eval(bindings);
-      Assert.assertTrue(false);
-    }
-    catch (ExpressionValidationException e) {
-      Assert.assertEquals(
-          "Function[human_readable_binary_byte_format] given precision[-9223372036854775808] must be in the range of [0,3]",
-          e.getMessage()
-      );
-    }
+    Assertions.assertEquals(
+        "Function[human_readable_binary_byte_format] given precision[9223372036854775807] must be in the range of [0,3]",
+        t.getMessage()
+    );
 
-    try {
-      Parser.parse("human_readable_binary_byte_format(1024, -1)", ExprMacroTable.nil())
-            .eval(bindings);
-      Assert.assertTrue(false);
-    }
-    catch (ExpressionValidationException e) {
-      Assert.assertEquals(
-          "Function[human_readable_binary_byte_format] given precision[-1] must be in the range of [0,3]",
-          e.getMessage()
-      );
-    }
+    t = Assertions.assertThrows(
+        DruidException.class,
+        () -> Parser.parse("human_readable_binary_byte_format(1024, minLong)", ExprMacroTable.nil())
+                    .eval(bestEffortBindings)
+    );
+    Assertions.assertEquals(
+        "Function[human_readable_binary_byte_format] given precision[-9223372036854775808] must be in the range of [0,3]",
+        t.getMessage()
+    );
 
-    try {
-      Parser.parse("human_readable_binary_byte_format(1024, 4)", ExprMacroTable.nil())
-            .eval(bindings);
-      Assert.assertTrue(false);
-    }
-    catch (ExpressionValidationException e) {
-      Assert.assertEquals(
-          "Function[human_readable_binary_byte_format] given precision[4] must be in the range of [0,3]",
-          e.getMessage()
-      );
-    }
+    t = Assertions.assertThrows(
+        DruidException.class,
+        () -> Parser.parse("human_readable_binary_byte_format(1024, -1)", ExprMacroTable.nil()).eval(bestEffortBindings)
+    );
+    Assertions.assertEquals(
+        "Function[human_readable_binary_byte_format] given precision[-1] must be in the range of [0,3]",
+        t.getMessage()
+    );
+
+    t = Assertions.assertThrows(
+        DruidException.class,
+        () -> Parser.parse("human_readable_binary_byte_format(1024, 4)", ExprMacroTable.nil()).eval(bestEffortBindings)
+    );
+    Assertions.assertEquals(
+        "Function[human_readable_binary_byte_format] given precision[4] must be in the range of [0,3]",
+        t.getMessage()
+    );
   }
 
   @Test
   public void testSizeFormatInvalidArgumentSize()
   {
-    expectedException.expect(ExpressionValidationException.class);
-    expectedException.expectMessage("Function[human_readable_binary_byte_format] requires 1 or 2 arguments");
-    Parser.parse("human_readable_binary_byte_format(1024, 2, 3)", ExprMacroTable.nil())
-          .eval(bindings);
+    Throwable t = Assertions.assertThrows(
+        ExpressionValidationException.class,
+        () -> Parser.parse(
+            "human_readable_binary_byte_format(1024, 2, 3)",
+            ExprMacroTable.nil()
+        ).eval(bestEffortBindings)
+    );
+
+    Assertions.assertEquals("Function[human_readable_binary_byte_format] requires 1 or 2 arguments", t.getMessage());
   }
 
   @Test
@@ -799,11 +1052,14 @@ public class FunctionTest extends InitializedNullHandlingTest
     assertExpr("safe_divide(4.5, 2)", 2.25);
     assertExpr("safe_divide(3, 0)", null);
     assertExpr("safe_divide(1, 0.0)", null);
-    // NaN and Infinity cases
+    // NaN, Infinity and other weird cases
     assertExpr("safe_divide(NaN, 0.0)", null);
     assertExpr("safe_divide(0, NaN)", 0.0);
-    assertExpr("safe_divide(0, POSITIVE_INFINITY)", NullHandling.defaultLongValue());
-    assertExpr("safe_divide(POSITIVE_INFINITY,0)", NullHandling.defaultLongValue());
+    assertExpr("safe_divide(0, maxLong)", 0L);
+    assertExpr("safe_divide(maxLong,0)", null);
+    assertExpr("safe_divide(0.0, inf)", 0.0);
+    assertExpr("safe_divide(0.0, -inf)", -0.0);
+    assertExpr("safe_divide(0,0)", null);
   }
 
   @Test
@@ -825,23 +1081,21 @@ public class FunctionTest extends InitializedNullHandlingTest
     assertExpr("bitwiseAnd('2', '1')", null);
     // but one is ok, druid forgives you
     assertExpr("bitwiseAnd(3, '1')", 1L);
-    assertExpr("bitwiseAnd(2, null)", NullHandling.replaceWithDefault() ? 0L : null);
+    assertExpr("bitwiseAnd(2, null)", null);
 
     // unary doesn't accept any slop
     assertExpr("bitwiseComplement('1')", null);
     assertExpr("bitwiseComplement(null)", null);
 
     // data truncation
-    try {
-      assertExpr("bitwiseComplement(461168601842738800000000000000.000000)", null);
-      Assert.fail("Did not throw IllegalArgumentException");
-    }
-    catch (ExpressionValidationException e) {
-      Assert.assertEquals(
-          "Function[bitwiseComplement] Possible data truncation, param [461168601842738800000000000000.000000] is out of LONG value range",
-          e.getMessage()
-      );
-    }
+    Throwable t = Assertions.assertThrows(
+        DruidException.class,
+        () -> assertExpr("bitwiseComplement(461168601842738800000000000000.000000)", null)
+    );
+    Assertions.assertEquals(
+        "Function[bitwiseComplement] Possible data truncation, param [461168601842738800000000000000.000000] is out of LONG value range",
+        t.getMessage()
+    );
 
     // doubles are cast
     assertExpr("bitwiseOr(2.345, 1)", 3L);
@@ -872,12 +1126,76 @@ public class FunctionTest extends InitializedNullHandlingTest
   }
 
   @Test
+  public void testLeft()
+  {
+    assertExpr("left('hello', 0)", "");
+    assertExpr("left('hello', 2)", "he");
+    assertExpr("left('hello', '2')", "he");
+    assertExpr("left('hello', 'hello')", null);
+    assertExpr("left('hello', 10)", "hello");
+    assertExpr("left('hello', null)", null);
+    assertExpr("left(31337, 2)", "31");
+    assertExpr("left(null, 10)", null);
+    assertExpr("left(nonexistent, 10)", null);
+
+    Throwable t1 = Assertions.assertThrows(
+        DruidException.class,
+        () -> assertExpr("left('foo', -2)", null)
+    );
+    Assertions.assertEquals("Function[left] needs a positive integer as the second argument", t1.getMessage());
+  }
+
+  @Test
+  public void testRight()
+  {
+    assertExpr("right('hello', 0)", "");
+    assertExpr("right('hello', 2)", "lo");
+    assertExpr("right('hello', '2')", "lo");
+    assertExpr("right('hello', 'hello')", null);
+    assertExpr("right('hello', 10)", "hello");
+    assertExpr("right('hello', null)", null);
+    assertExpr("right(31337, 2)", "37");
+    assertExpr("right(null, 10)", null);
+    assertExpr("right(nonexistent, 10)", null);
+
+    Throwable t1 = Assertions.assertThrows(
+        DruidException.class,
+        () -> assertExpr("right('foo', -2)", null)
+    );
+    Assertions.assertEquals("Function[right] needs a positive integer as the second argument", t1.getMessage());
+  }
+
+  @Test
   public void testRepeat()
   {
+    assertExpr("repeat('hello', 0)", null);
     assertExpr("repeat('hello', 2)", "hellohello");
+    assertExpr("repeat('hello', '2')", "hellohello");
+    assertExpr("repeat('hello', 'hello')", null);
     assertExpr("repeat('hello', -1)", null);
+    assertExpr("repeat('hello', null)", null);
     assertExpr("repeat(null, 10)", null);
     assertExpr("repeat(nonexistent, 10)", null);
+    assertExpr("repeat(4, 3)", "444");
+    assertExpr("repeat(4.1, 3)", "4.14.14.1");
+
+    Throwable t = Assertions.assertThrows(
+        DruidException.class,
+        () -> assertExpr("repeat('foo', 9999999999)", null)
+    );
+    Assertions.assertEquals("Function[repeat] needs an integer as the second argument", t.getMessage());
+  }
+
+  @Test
+  public void testDecodeBase64UTF()
+  {
+    assertExpr("decode_base64_utf8('aGVsbG8=')", "hello");
+    assertExpr(
+        "decode_base64_utf8('V2hlbiBhbiBvbmlvbiBpcyBjdXQsIGNlcnRhaW4gKGxhY2hyeW1hdG9yKSBjb21wb3VuZHMgYXJlIHJlbGVhc2VkIGNhdXNpbmcgdGhlIG5lcnZlcyBhcm91bmQgdGhlIGV5ZXMgKGxhY3JpbWFsIGdsYW5kcykgdG8gYmVjb21lIGlycml0YXRlZC4=')",
+        "When an onion is cut, certain (lachrymator) compounds are released causing the nerves around the eyes (lacrimal glands) to become irritated."
+    );
+    assertExpr("decode_base64_utf8('eyJ0ZXN0IjogMX0=')", "{\"test\": 1}");
+    assertExpr("decode_base64_utf8('')", "");
   }
 
   @Test
@@ -889,7 +1207,7 @@ public class FunctionTest extends InitializedNullHandlingTest
     final byte[] bytes = new byte[strategy.estimateSizeBytes(expected)];
     ByteBuffer buffer = ByteBuffer.wrap(bytes);
     int written = strategy.write(buffer, expected, bytes.length);
-    Assert.assertEquals(bytes.length, written);
+    Assertions.assertEquals(bytes.length, written);
     assertExpr(
         StringUtils.format(
             "complex_decode_base64('%s', '%s')",
@@ -898,6 +1216,46 @@ public class FunctionTest extends InitializedNullHandlingTest
         ),
         expected
     );
+    // test with alias
+    assertExpr(
+        StringUtils.format(
+            "decode_base64_complex('%s', '%s')",
+            TypeStrategiesTest.NULLABLE_TEST_PAIR_TYPE.getComplexTypeName(),
+            StringUtils.encodeBase64String(bytes)
+        ),
+        expected
+    );
+  }
+
+  @Test
+  public void testMacrosWithMultipleAliases()
+  {
+    ExprMacroTable.ExprMacro drinkMacro = new ExprMacroTable.ExprMacro()
+    {
+      @Override
+      public Expr apply(List<Expr> args)
+      {
+        return new StringExpr("happiness");
+      }
+
+      @Override
+      public String name()
+      {
+        return "drink";
+      }
+    };
+    List<ExprMacroTable.ExprMacro> macros = new ArrayList<>();
+    macros.add(drinkMacro);
+    List<String> aliases = Arrays.asList("tea", "coffee", "chai", "chaha", "kevha", "chay");
+    for (String tea : aliases) {
+      macros.add(new ExprMacroTable.AliasExprMacro(drinkMacro, tea));
+    }
+    final ExprMacroTable exprMacroTable = new ExprMacroTable(macros);
+    final Expr happiness = new StringExpr("happiness");
+    Assertions.assertEquals(happiness, Parser.parse("drink(1,2)", exprMacroTable));
+    for (String tea : aliases) {
+      Assertions.assertEquals(happiness, Parser.parse(StringUtils.format("%s(1,2)", tea), exprMacroTable));
+    }
   }
 
   @Test
@@ -910,95 +1268,164 @@ public class FunctionTest extends InitializedNullHandlingTest
         ),
         null
     );
+    assertExpr(
+        StringUtils.format(
+            "decode_base64_complex('%s', null)",
+            TypeStrategiesTest.NULLABLE_TEST_PAIR_TYPE.getComplexTypeName()
+        ),
+        null
+    );
   }
 
   @Test
   public void testComplexDecodeBaseWrongArgCount()
   {
-    expectedException.expect(ExpressionValidationException.class);
-    expectedException.expectMessage("Function[complex_decode_base64] requires 2 arguments");
-    assertExpr(
-        "complex_decode_base64(string)",
-        null
+    Throwable t = Assertions.assertThrows(
+        ExpressionValidationException.class,
+        () -> assertExpr("complex_decode_base64(string)", null)
     );
+    Assertions.assertEquals("Function[complex_decode_base64] requires 2 arguments", t.getMessage());
   }
 
   @Test
   public void testComplexDecodeBaseArg0Null()
   {
-    expectedException.expect(ExpressionValidationException.class);
-    expectedException.expectMessage(
-        "Function[complex_decode_base64] first argument must be constant STRING expression containing a valid complex type name but got NULL instead"
+    Throwable t = Assertions.assertThrows(
+        ExpressionValidationException.class,
+        () -> assertExpr("complex_decode_base64(null, string)", null)
     );
-    assertExpr(
-        "complex_decode_base64(null, string)",
-        null
+    Assertions.assertEquals(
+        "Function[complex_decode_base64] first argument must be constant STRING expression containing a valid complex type name but got NULL instead",
+        t.getMessage()
     );
   }
 
   @Test
   public void testComplexDecodeBaseArg0BadType()
   {
-    expectedException.expect(ExpressionValidationException.class);
-    expectedException.expectMessage(
-        "Function[complex_decode_base64] first argument must be constant STRING expression containing a valid complex type name but got '1' instead"
+    Throwable t = Assertions.assertThrows(
+        ExpressionValidationException.class,
+        () -> assertExpr("complex_decode_base64(1, string)", null)
     );
-    assertExpr(
-        "complex_decode_base64(1, string)",
-        null
+    Assertions.assertEquals(
+        "Function[complex_decode_base64] first argument must be constant STRING expression containing a valid complex type name but got '1' instead",
+        t.getMessage()
     );
   }
 
   @Test
   public void testComplexDecodeBaseArg0Unknown()
   {
-    expectedException.expect(ExpressionValidationException.class);
-    expectedException.expectMessage(
-        "Function[complex_decode_base64] first argument must be a valid COMPLEX type name, got unknown COMPLEX type [COMPLEX<unknown>]"
+    Throwable t = Assertions.assertThrows(
+        ExpressionValidationException.class,
+        () -> assertExpr("complex_decode_base64('unknown', string)", null)
     );
-    assertExpr(
-        "complex_decode_base64('unknown', string)",
-        null
+    Assertions.assertEquals(
+        "Function[complex_decode_base64] first argument must be a valid COMPLEX type name, got unknown COMPLEX type [COMPLEX<unknown>]",
+        t.getMessage()
     );
   }
 
   @Test
-  public void testMVToArrayWithValidInputs()
+  public void testMultiValueStringToArrayWithValidInputs()
   {
     assertArrayExpr("mv_to_array(x)", new String[]{"foo"});
     assertArrayExpr("mv_to_array(a)", new String[]{"foo", "bar", "baz", "foobar"});
+    assertArrayExpr("mv_to_array(b)", new String[]{"1", "2", "3", "4", "5"});
+    assertArrayExpr("mv_to_array(c)", new String[]{"3.1", "4.2", "5.3"});
   }
 
   @Test
-  public void testMVToArrayWithConstantLiteral()
+  public void testMultiValueStringToArrayWithInvalidInputs()
   {
-    expectedException.expect(ExpressionValidationException.class);
-    expectedException.expectMessage("Function[mv_to_array] argument 1 should be an identifier expression. Use array() instead");
-    assertArrayExpr("mv_to_array('1')", null);
+    Throwable t = Assertions.assertThrows(
+        ExpressionValidationException.class,
+        () -> assertArrayExpr("mv_to_array('1')", null)
+    );
+    Assertions.assertEquals(
+        "Function[mv_to_array] argument 1 should be an identifier expression. Use array() instead",
+        t.getMessage()
+    );
+
+    t = Assertions.assertThrows(
+        ExpressionValidationException.class,
+        () -> assertArrayExpr("mv_to_array(repeat('hello', 2))", null)
+    );
+    Assertions.assertEquals(
+        "Function[mv_to_array] argument (repeat [hello, 2]) should be an identifier expression. Use array() instead",
+        t.getMessage()
+    );
+
+    t = Assertions.assertThrows(
+        ExpressionValidationException.class,
+        () -> assertArrayExpr("mv_to_array(x,y)", null)
+    );
+    Assertions.assertEquals(
+        "Function[mv_to_array] requires 1 argument",
+        t.getMessage()
+    );
+
+    t = Assertions.assertThrows(
+        ExpressionValidationException.class,
+        () -> assertArrayExpr("mv_to_array()", null)
+    );
+    Assertions.assertEquals(
+        "Function[mv_to_array] requires 1 argument",
+        t.getMessage()
+    );
   }
 
   @Test
-  public void testMVToArrayWithFunction()
+  public void testArrayToMultiValueStringWithValidInputs()
   {
-    expectedException.expect(ExpressionValidationException.class);
-    expectedException.expectMessage("Function[mv_to_array] argument (repeat [hello, 2]) should be an identifier expression. Use array() instead");
-    assertArrayExpr("mv_to_array(repeat('hello', 2))", null);
+    assertArrayExpr("array_to_mv(x)", new String[]{"foo"});
+    assertArrayExpr("array_to_mv(a)", new String[]{"foo", "bar", "baz", "foobar"});
+    assertArrayExpr("array_to_mv(b)", new String[]{"1", "2", "3", "4", "5"});
+    assertArrayExpr("array_to_mv(c)", new String[]{"3.1", "4.2", "5.3"});
+    assertArrayExpr("array_to_mv(array(y,z))", new String[]{"2.0", "3.1"});
+    // array type is determined by the first array type
+    assertArrayExpr("array_to_mv(array_concat(b,c))", new String[]{"1", "2", "3", "4", "5", "3", "4", "5"});
+    assertArrayExpr(
+        "array_to_mv(array_concat(c,b))",
+        new String[]{"3.1", "4.2", "5.3", "1.0", "2.0", "3.0", "4.0", "5.0"}
+    );
   }
 
   @Test
-  public void testMVToArrayWithMoreArgs()
+  public void testArrayToMultiValueStringWithInvalidInputs()
   {
-    expectedException.expect(ExpressionValidationException.class);
-    expectedException.expectMessage("Function[mv_to_array] requires 1 argument");
-    assertArrayExpr("mv_to_array(x,y)", null);
-  }
-
-  @Test
-  public void testMVToArrayWithNoArgs()
-  {
-    expectedException.expect(ExpressionValidationException.class);
-    expectedException.expectMessage("Function[mv_to_array] requires 1 argument");
-    assertArrayExpr("mv_to_array()", null);
+    Throwable t = Assertions.assertThrows(
+        ExpressionValidationException.class,
+        () -> assertArrayExpr("mv_to_array('1')", null)
+    );
+    Assertions.assertEquals(
+        "Function[mv_to_array] argument 1 should be an identifier expression. Use array() instead",
+        t.getMessage()
+    );
+    t = Assertions.assertThrows(
+        ExpressionValidationException.class,
+        () -> assertArrayExpr("mv_to_array(repeat('hello', 2))", null)
+    );
+    Assertions.assertEquals(
+        "Function[mv_to_array] argument (repeat [hello, 2]) should be an identifier expression. Use array() instead",
+        t.getMessage()
+    );
+    t = Assertions.assertThrows(
+        ExpressionValidationException.class,
+        () -> assertArrayExpr("mv_to_array(x,y)", null)
+    );
+    Assertions.assertEquals(
+        "Function[mv_to_array] requires 1 argument",
+        t.getMessage()
+    );
+    t = Assertions.assertThrows(
+        ExpressionValidationException.class,
+        () -> assertArrayExpr("mv_to_array()", null)
+    );
+    Assertions.assertEquals(
+        "Function[mv_to_array] requires 1 argument",
+        t.getMessage()
+    );
   }
 
   @Test
@@ -1010,60 +1437,192 @@ public class FunctionTest extends InitializedNullHandlingTest
   @Test
   public void testMultiplyOnString()
   {
-    expectedException.expect(IAE.class);
-    expectedException.expectMessage("operator '*' in expression (\"str1\" * \"str2\") is not supported on type STRING.");
-    assertExpr("str1 * str2", null);
+    Throwable t = Assertions.assertThrows(
+        IAE.class,
+        () -> assertExpr("str1 * str2", null)
+    );
+    Assertions.assertEquals(
+        "operator '*' in expression (\"str1\" * \"str2\") is not supported on type STRING.",
+        t.getMessage()
+    );
   }
 
   @Test
   public void testMinusOnString()
   {
-    expectedException.expect(IAE.class);
-    expectedException.expectMessage("operator '-' in expression (\"str1\" - \"str2\") is not supported on type STRING.");
-    assertExpr("str1 - str2", null);
+    Throwable t = Assertions.assertThrows(
+        IAE.class,
+        () -> assertExpr("str1 - str2", null)
+    );
+    Assertions.assertEquals(
+        "operator '-' in expression (\"str1\" - \"str2\") is not supported on type STRING.",
+        t.getMessage()
+    );
   }
 
   @Test
   public void testDivOnString()
   {
-    expectedException.expect(IAE.class);
-    expectedException.expectMessage("operator '/' in expression (\"str1\" / \"str2\") is not supported on type STRING.");
-    assertExpr("str1 / str2", null);
+    Throwable t = Assertions.assertThrows(
+        IAE.class,
+        () -> assertExpr("str1 / str2", null)
+    );
+    Assertions.assertEquals(
+        "operator '/' in expression (\"str1\" / \"str2\") is not supported on type STRING.",
+        t.getMessage()
+    );
+  }
+
+  @Test
+  public void testMvHarmonizeNulls()
+  {
+    assertArrayExpr("mv_harmonize_nulls(null)", new Object[]{null});
+    assertArrayExpr("mv_harmonize_nulls(emptyArray)", new Object[]{null});
+    // does nothing
+    assertArrayExpr("mv_harmonize_nulls(array(null))", new Object[]{null});
+    // does nothing
+    assertArrayExpr("mv_harmonize_nulls(a)", new Object[]{"foo", "bar", "baz", "foobar"});
   }
 
   private void assertExpr(final String expression, @Nullable final Object expectedResult)
   {
-    final Expr expr = Parser.parse(expression, ExprMacroTable.nil());
-    Assert.assertEquals(expression, expectedResult, expr.eval(bindings).value());
-
-    final Expr exprNoFlatten = Parser.parse(expression, ExprMacroTable.nil(), false);
-    final Expr roundTrip = Parser.parse(exprNoFlatten.stringify(), ExprMacroTable.nil());
-    Assert.assertEquals(expr.stringify(), expectedResult, roundTrip.eval(bindings).value());
-
-    final Expr roundTripFlatten = Parser.parse(expr.stringify(), ExprMacroTable.nil());
-    Assert.assertEquals(expr.stringify(), expectedResult, roundTripFlatten.eval(bindings).value());
-
-    Assert.assertEquals(expr.stringify(), roundTrip.stringify());
-    Assert.assertEquals(expr.stringify(), roundTripFlatten.stringify());
-    Assert.assertArrayEquals(expr.getCacheKey(), roundTrip.getCacheKey());
-    Assert.assertArrayEquals(expr.getCacheKey(), roundTripFlatten.getCacheKey());
+    for (Expr.ObjectBinding toUse : allBindings) {
+      assertExpr(expression, expectedResult, toUse, ExprMacroTable.nil());
+    }
   }
 
   private void assertArrayExpr(final String expression, @Nullable final Object[] expectedResult)
   {
-    final Expr expr = Parser.parse(expression, ExprMacroTable.nil());
-    Assert.assertArrayEquals(expression, expectedResult, expr.eval(bindings).asArray());
+    for (Expr.ObjectBinding toUse : allBindings) {
+      assertArrayExpr(expression, expectedResult, toUse, ExprMacroTable.nil());
+    }
+  }
 
-    final Expr exprNoFlatten = Parser.parse(expression, ExprMacroTable.nil(), false);
-    final Expr roundTrip = Parser.parse(exprNoFlatten.stringify(), ExprMacroTable.nil());
-    Assert.assertArrayEquals(expression, expectedResult, roundTrip.eval(bindings).asArray());
+  /**
+   * Check a bunch of stuff to make sure an expression produces the correct result upon evaluation and is chill
+   */
+  public static void assertExpr(
+      final String expression,
+      @Nullable final Object expectedResult,
+      Expr.ObjectBinding bindings,
+      ExprMacroTable macroTable
+  )
+  {
+    final Expr expr = Parser.parse(expression, macroTable);
+    Assertions.assertEquals(expectedResult, expr.eval(bindings).value(), expression);
 
-    final Expr roundTripFlatten = Parser.parse(expr.stringify(), ExprMacroTable.nil());
-    Assert.assertArrayEquals(expression, expectedResult, roundTripFlatten.eval(bindings).asArray());
+    final Expr exprNoFlatten = Parser.parse(expression, macroTable, false);
+    final Expr roundTrip = Parser.parse(exprNoFlatten.stringify(), macroTable);
+    Assertions.assertEquals(expectedResult, roundTrip.eval(bindings).value(), expr.stringify());
 
-    Assert.assertEquals(expr.stringify(), roundTrip.stringify());
-    Assert.assertEquals(expr.stringify(), roundTripFlatten.stringify());
-    Assert.assertArrayEquals(expr.getCacheKey(), roundTrip.getCacheKey());
-    Assert.assertArrayEquals(expr.getCacheKey(), roundTripFlatten.getCacheKey());
+    final Expr roundTripFlatten = Parser.parse(expr.stringify(), macroTable);
+    Assertions.assertEquals(expectedResult, roundTripFlatten.eval(bindings).value(), expr.stringify());
+
+    final Expr singleThreaded = Expr.singleThreaded(expr, bindings);
+    Assertions.assertEquals(expectedResult, singleThreaded.eval(bindings).value(), singleThreaded.stringify());
+
+    final Expr singleThreadedNoFlatten = Expr.singleThreaded(exprNoFlatten, bindings);
+    Assertions.assertEquals(
+        expectedResult,
+        singleThreadedNoFlatten.eval(bindings).value(),
+        singleThreadedNoFlatten.stringify()
+    );
+
+    Assertions.assertEquals(expr.stringify(), roundTrip.stringify());
+    Assertions.assertEquals(expr.stringify(), roundTripFlatten.stringify());
+    Assertions.assertArrayEquals(expr.getCacheKey(), roundTrip.getCacheKey());
+    Assertions.assertArrayEquals(expr.getCacheKey(), roundTripFlatten.getCacheKey());
+  }
+
+  /**
+   * Check a bunch of stuff to make sure an expression produces the correct array result upon evaluation and is chill
+   */
+  public static void assertArrayExpr(
+      final String expression,
+      @Nullable final Object[] expectedResult,
+      Expr.ObjectBinding bindings,
+      ExprMacroTable macroTable
+  )
+  {
+    final Expr expr = Parser.parse(expression, macroTable);
+    Assertions.assertArrayEquals(expectedResult, expr.eval(bindings).asArray(), expression);
+
+    final Expr exprNoFlatten = Parser.parse(expression, macroTable, false);
+    final Expr roundTrip = Parser.parse(exprNoFlatten.stringify(), macroTable);
+    Assertions.assertArrayEquals(expectedResult, roundTrip.eval(bindings).asArray(), expression);
+
+    final Expr roundTripFlatten = Parser.parse(expr.stringify(), macroTable);
+    Assertions.assertArrayEquals(expectedResult, roundTripFlatten.eval(bindings).asArray(), expression);
+
+    Assertions.assertEquals(expr.stringify(), roundTrip.stringify());
+    Assertions.assertEquals(expr.stringify(), roundTripFlatten.stringify());
+    Assertions.assertArrayEquals(expr.getCacheKey(), roundTrip.getCacheKey());
+    Assertions.assertArrayEquals(expr.getCacheKey(), roundTripFlatten.getCacheKey());
+  }
+
+  @Test
+  public void testNow()
+  {
+    long beforeCall = System.currentTimeMillis();
+
+    Expr expr = Parser.parse("now()", ExprMacroTable.nil());
+    ExprEval result = expr.eval(InputBindings.nilBindings());
+
+    long afterCall = System.currentTimeMillis();
+
+    Assertions.assertNotNull(result.value());
+    Assertions.assertEquals(ExpressionType.LONG, result.type());
+
+    long timestamp = result.asLong();
+    Assertions.assertTrue(
+        timestamp >= beforeCall && timestamp <= afterCall,
+        "Timestamp should be between before and after: " + beforeCall + " <= " + timestamp + " <= " + afterCall
+    );
+  }
+
+  @Test
+  public void testNowEvaluatedPerRow()
+  {
+    Expr expr = Parser.parse("now()", ExprMacroTable.nil());
+
+    // now() must not be treated as a literal, otherwise it would be constant-folded
+    // and not re-evaluated per row.
+    Assertions.assertFalse(expr.isLiteral());
+    Assertions.assertNull(expr.getLiteralValue());
+
+    long time1 = expr.eval(InputBindings.nilBindings()).asLong();
+    long time2 = expr.eval(InputBindings.nilBindings()).asLong();
+    Assertions.assertTrue(
+        time2 >= time1,
+        "Second call should return same or later timestamp: " + time1 + " <= " + time2
+    );
+  }
+
+  @Test
+  public void testNowRejectsArguments()
+  {
+    Throwable t = Assertions.assertThrows(
+        ExpressionValidationException.class,
+        () -> Parser.parse("now(123)", ExprMacroTable.nil()).eval(InputBindings.nilBindings())
+    );
+    Assertions.assertEquals("Function[now] does not accept arguments", t.getMessage());
+  }
+
+  @Test
+  public void testNowInExpression()
+  {
+    // Test using now() in a more complex expression
+    Expr expr = Parser.parse("now() - 1000", ExprMacroTable.nil());
+
+    long beforeCall = System.currentTimeMillis();
+    ExprEval result = expr.eval(InputBindings.nilBindings());
+    long afterCall = System.currentTimeMillis();
+
+    long computed = result.asLong();
+    Assertions.assertTrue(
+        computed >= (beforeCall - 1100) && computed <= (afterCall - 900),
+        "Result should be approximately 1 second before now: computed=" + computed
+            + ", expected range=[" + (beforeCall - 1000) + ", " + (afterCall - 1000) + "]"
+    );
   }
 }

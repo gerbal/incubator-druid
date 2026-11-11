@@ -20,7 +20,6 @@
 package org.apache.druid.metadata;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
 import org.apache.druid.java.util.common.DateTimes;
 import org.joda.time.DateTime;
 import org.joda.time.Duration;
@@ -43,6 +42,16 @@ public interface TaskLookup
     ACTIVE,
     COMPLETE
   }
+
+  static TaskLookup activeTasksOnly()
+  {
+    return ActiveTaskLookup.getInstance();
+  }
+
+  /**
+   * Whether this lookup is guaranteed to not return any tasks.
+   */
+  boolean isNil();
 
   TaskLookupType getType();
 
@@ -84,7 +93,7 @@ public interface TaskLookup
       return new CompleteTaskLookup(maxTaskStatuses, tasksCreatedPriorTo);
     }
 
-    private CompleteTaskLookup(
+    public CompleteTaskLookup(
         @Nullable Integer maxTaskStatuses,
         @Nullable DateTime tasksCreatedPriorTo
     )
@@ -98,12 +107,17 @@ public interface TaskLookup
       return tasksCreatedPriorTo != null;
     }
 
-    public CompleteTaskLookup withDurationBeforeNow(Duration durationBeforeNow)
+    /**
+     * If {@link #hasTaskCreatedTimeFilter()}, returns this instance. Otherwise, returns a copy with
+     * {@link #getTasksCreatedPriorTo()} based on the provided duration (before now).
+     */
+    public CompleteTaskLookup withMinTimestampIfAbsent(DateTime minTimestamp)
     {
-      return CompleteTaskLookup.of(
-          maxTaskStatuses,
-          Preconditions.checkNotNull(durationBeforeNow, "durationBeforeNow")
-      );
+      if (hasTaskCreatedTimeFilter()) {
+        return this;
+      } else {
+        return new CompleteTaskLookup(maxTaskStatuses, minTimestamp);
+      }
     }
 
     private static DateTime computeTimestampPriorToNow(Duration durationBeforeNow)
@@ -129,6 +143,12 @@ public interface TaskLookup
     public TaskLookupType getType()
     {
       return TaskLookupType.COMPLETE;
+    }
+
+    @Override
+    public boolean isNil()
+    {
+      return maxTaskStatuses != null && maxTaskStatuses == 0;
     }
 
     @Override
@@ -169,6 +189,12 @@ public interface TaskLookup
     public TaskLookupType getType()
     {
       return TaskLookupType.ACTIVE;
+    }
+
+    @Override
+    public boolean isNil()
+    {
+      return false;
     }
 
     @Override

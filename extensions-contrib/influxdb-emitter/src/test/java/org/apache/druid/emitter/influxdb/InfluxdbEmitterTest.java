@@ -25,16 +25,18 @@ import org.apache.druid.java.util.emitter.service.ServiceEventBuilder;
 import org.apache.druid.java.util.emitter.service.ServiceMetricEvent;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 public class InfluxdbEmitterTest
 {
 
   private ServiceMetricEvent event;
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
     DateTime date = new DateTime(2017,
@@ -56,7 +58,7 @@ public class InfluxdbEmitterTest
     ServiceMetricEvent.Builder builder = ServiceMetricEvent.builder();
     builder.setDimension("nonWhiteListedDim", "test");
     builder.setDimension("dataSource", "test_datasource");
-    ServiceEventBuilder eventBuilder = builder.build(date, metric, value);
+    ServiceEventBuilder eventBuilder = builder.setCreatedTime(date).setMetric(metric, value);
     event = (ServiceMetricEvent) eventBuilder.build(serviceDims);
   }
 
@@ -83,7 +85,7 @@ public class InfluxdbEmitterTest
         "druid_metric,service=druid/historical,metric=druid_te_st,hostname=localhost,dataSource=test_datasource druid_value=1234 1509357600000000000"
         + "\n";
     String actual = influxdbEmitter.transformForInfluxSystems(event);
-    Assert.assertEquals(expected, actual);
+    Assertions.assertEquals(expected, actual);
   }
 
   @Test
@@ -106,7 +108,7 @@ public class InfluxdbEmitterTest
         "0.10.0"
     );
     ServiceMetricEvent.Builder builder = ServiceMetricEvent.builder();
-    ServiceEventBuilder eventBuilder = builder.build(date, metric, value);
+    ServiceEventBuilder eventBuilder = builder.setCreatedTime(date).setMetric(metric, value);
     ServiceMetricEvent event = (ServiceMetricEvent) eventBuilder.build(serviceDims);
     InfluxdbEmitterConfig config = new InfluxdbEmitterConfig(
         "localhost",
@@ -127,7 +129,7 @@ public class InfluxdbEmitterTest
     String expected = "druid_metric,service=druid/historical,hostname=localhost druid_time=1234 1509357600000000000"
                       + "\n";
     String actual = influxdbEmitter.transformForInfluxSystems(event);
-    Assert.assertEquals(expected, actual);
+    Assertions.assertEquals(expected, actual);
   }
 
   @Test
@@ -150,7 +152,7 @@ public class InfluxdbEmitterTest
         "0.10.0"
     );
     ServiceMetricEvent.Builder builder = ServiceMetricEvent.builder();
-    ServiceEventBuilder eventBuilder = builder.build(date, metric, value);
+    ServiceEventBuilder eventBuilder = builder.setCreatedTime(date).setMetric(metric, value);
     builder.setDimension("dataSource", "wikipedia");
     builder.setDimension("taskType", "index");
     ServiceMetricEvent event = (ServiceMetricEvent) eventBuilder.build(serviceDims);
@@ -173,7 +175,7 @@ public class InfluxdbEmitterTest
     String expected = "druid_metric,service=druid/historical,hostname=localhost,dataSource=wikipedia druid_time=1234 1509357600000000000"
                       + "\n";
     String actual = influxdbEmitter.transformForInfluxSystems(event);
-    Assert.assertEquals(expected, actual);
+    Assertions.assertEquals(expected, actual);
   }
 
   @Test
@@ -196,7 +198,7 @@ public class InfluxdbEmitterTest
         "0.10.0"
     );
     ServiceMetricEvent.Builder builder = ServiceMetricEvent.builder();
-    ServiceEventBuilder eventBuilder = builder.build(date, metric, value);
+    ServiceEventBuilder eventBuilder = builder.setCreatedTime(date).setMetric(metric, value);
     builder.setDimension("dataSource", "wikipedia");
     builder.setDimension("taskType", "index");
     ServiceMetricEvent event = (ServiceMetricEvent) eventBuilder.build(serviceDims);
@@ -219,97 +221,105 @@ public class InfluxdbEmitterTest
     String expected = "druid_metric,service=druid/historical,hostname=localhost,dataSource=wikipedia,taskType=index druid_time=1234 1509357600000000000"
                       + "\n";
     String actual = influxdbEmitter.transformForInfluxSystems(event);
-    Assert.assertEquals(expected, actual);
+    Assertions.assertEquals(expected, actual);
   }
 
   @Test
   public void testJacksonModules()
   {
-    Assert.assertTrue(new InfluxdbEmitterModule().getJacksonModules().isEmpty());
+    Assertions.assertTrue(new InfluxdbEmitterModule().getJacksonModules().isEmpty());
   }
 
-  @Test(expected = IllegalStateException.class)
+  @Test
   public void testBuildInfluxdbClientWithHttpsProtocolAndNoTrustStore()
   {
-    InfluxdbEmitterConfig config = new InfluxdbEmitterConfig(
-        "localhost",
-        8086,
-        "https",
-        null,
-        null,
-        null,
-        "dbname",
-        10000,
-        15000,
-        30000,
-        "adam",
-        "password",
-        null
-    );
-    InfluxdbEmitter influxdbEmitter = new InfluxdbEmitter(config);
+    assertThrows(IllegalStateException.class, () -> {
+      InfluxdbEmitterConfig config = new InfluxdbEmitterConfig(
+          "localhost",
+          8086,
+          "https",
+          null,
+          null,
+          null,
+          "dbname",
+          10000,
+          15000,
+          30000,
+          "adam",
+          "password",
+          null
+      );
+      InfluxdbEmitter influxdbEmitter = new InfluxdbEmitter(config);
+    });
   }
 
-  @Test(expected = IllegalStateException.class)
+  @Test
   public void testBuildInfluxdbClientWithHttpsProtocolAndNullTrustStorePath()
   {
-    InfluxdbEmitterConfig config = new InfluxdbEmitterConfig(
-        "localhost",
-        8086,
-        "https",
-        null,
-        null,
-        "pass",
-        "dbname",
-        10000,
-        15000,
-        30000,
-        "adam",
-        "password",
-        null
-    );
-    InfluxdbEmitter influxdbEmitter = new InfluxdbEmitter(config);
+    assertThrows(IllegalStateException.class, () -> {
+      InfluxdbEmitterConfig config = new InfluxdbEmitterConfig(
+          "localhost",
+          8086,
+          "https",
+          null,
+          null,
+          "pass",
+          "dbname",
+          10000,
+          15000,
+          30000,
+          "adam",
+          "password",
+          null
+      );
+      InfluxdbEmitter influxdbEmitter = new InfluxdbEmitter(config);
+    });
   }
 
-  @Test(expected = IllegalStateException.class)
+  @Test
   public void testBuildInfluxdbClientWithHttpsProtocolAndNullTrustStorePassword()
   {
-    InfluxdbEmitterConfig config = new InfluxdbEmitterConfig(
-        "localhost",
-        8086,
-        "https",
-        "path",
-        null,
-        null,
-        "dbname",
-        10000,
-        15000,
-        30000,
-        "adam",
-        "password",
-        null
-    );
-    InfluxdbEmitter influxdbEmitter = new InfluxdbEmitter(config);
+    assertThrows(IllegalStateException.class, () -> {
+      InfluxdbEmitterConfig config = new InfluxdbEmitterConfig(
+          "localhost",
+          8086,
+          "https",
+          "path",
+          null,
+          null,
+          "dbname",
+          10000,
+          15000,
+          30000,
+          "adam",
+          "password",
+          null
+      );
+      InfluxdbEmitter influxdbEmitter = new InfluxdbEmitter(config);
+    });
   }
 
-  @Test(expected = IllegalStateException.class)
+  @Test
   public void testUnableToLoadTrustStore()
   {
-    InfluxdbEmitterConfig config = new InfluxdbEmitterConfig(
-        "localhost",
-        8086,
-        "https",
-        "path",
-        null,
-        "pass",
-        "dbname",
-        10000,
-        15000,
-        30000,
-        "adam",
-        "password",
-        null
-    );
-    InfluxdbEmitter influxdbEmitter = new InfluxdbEmitter(config);
+    assertThrows(IllegalStateException.class, () -> {
+      InfluxdbEmitterConfig config = new InfluxdbEmitterConfig(
+          "localhost",
+          8086,
+          "https",
+          "path",
+          null,
+          "pass",
+          "dbname",
+          10000,
+          15000,
+          30000,
+          "adam",
+          "password",
+          null
+      );
+      InfluxdbEmitter influxdbEmitter = new InfluxdbEmitter(config);
+    });
   }
 
 }

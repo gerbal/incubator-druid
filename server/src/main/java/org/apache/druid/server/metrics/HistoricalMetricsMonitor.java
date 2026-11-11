@@ -23,6 +23,8 @@ import com.google.inject.Inject;
 import it.unimi.dsi.fastutil.objects.Object2LongMap;
 import it.unimi.dsi.fastutil.objects.Object2LongOpenHashMap;
 import org.apache.druid.client.DruidServerConfig;
+import org.apache.druid.discovery.NodeRole;
+import org.apache.druid.guice.annotations.LoadScope;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.java.util.emitter.service.ServiceMetricEvent;
 import org.apache.druid.java.util.metrics.AbstractMonitor;
@@ -33,6 +35,7 @@ import org.apache.druid.timeline.DataSegment;
 
 import java.util.Map;
 
+@LoadScope(roles = NodeRole.HISTORICAL_JSON_NAME)
 public class HistoricalMetricsMonitor extends AbstractMonitor
 {
   private final DruidServerConfig serverConfig;
@@ -54,11 +57,16 @@ public class HistoricalMetricsMonitor extends AbstractMonitor
   @Override
   public boolean doMonitor(ServiceEmitter emitter)
   {
-    emitter.emit(new ServiceMetricEvent.Builder().build("segment/max", serverConfig.getMaxSize()));
+    emitter.emit(
+        new ServiceMetricEvent.Builder()
+            .setDimension("tier", serverConfig.getTier())
+            .setDimension("priority", String.valueOf(serverConfig.getPriority()))
+            .setMetric("segment/max", serverConfig.getMaxSize())
+    );
 
     final Object2LongOpenHashMap<String> pendingDeleteSizes = new Object2LongOpenHashMap<>();
 
-    for (DataSegment segment : segmentLoadDropMgr.getPendingDeleteSnapshot()) {
+    for (DataSegment segment : segmentLoadDropMgr.getSegmentsToDelete()) {
       pendingDeleteSizes.addTo(segment.getDataSource(), segment.getSize());
     }
 
@@ -71,7 +79,7 @@ public class HistoricalMetricsMonitor extends AbstractMonitor
               .setDimension(DruidMetrics.DATASOURCE, dataSource)
               .setDimension("tier", serverConfig.getTier())
               .setDimension("priority", String.valueOf(serverConfig.getPriority()))
-              .build("segment/pendingDelete", pendingDeleteSize)
+              .setMetric("segment/pendingDelete", pendingDeleteSize)
       );
     }
 
@@ -85,9 +93,9 @@ public class HistoricalMetricsMonitor extends AbstractMonitor
                                           .setDimension("priority", String.valueOf(serverConfig.getPriority()));
 
 
-      emitter.emit(builder.build("segment/used", used));
+      emitter.emit(builder.setMetric("segment/used", used));
       final double usedPercent = serverConfig.getMaxSize() == 0 ? 0 : used / (double) serverConfig.getMaxSize();
-      emitter.emit(builder.build("segment/usedPercent", usedPercent));
+      emitter.emit(builder.setMetric("segment/usedPercent", usedPercent));
     }
 
     for (Map.Entry<String, Long> entry : segmentManager.getDataSourceCounts().entrySet()) {
@@ -101,7 +109,7 @@ public class HistoricalMetricsMonitor extends AbstractMonitor
                                               String.valueOf(serverConfig.getPriority())
                                           );
 
-      emitter.emit(builder.build("segment/count", count));
+      emitter.emit(builder.setMetric("segment/count", count));
     }
 
     return true;

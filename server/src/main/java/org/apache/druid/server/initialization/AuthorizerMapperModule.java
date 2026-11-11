@@ -19,10 +19,8 @@
 
 package org.apache.druid.server.initialization;
 
-import com.google.common.base.Supplier;
 import com.google.inject.Binder;
 import com.google.inject.Inject;
-import com.google.inject.Injector;
 import com.google.inject.Provider;
 import org.apache.druid.guice.JsonConfigProvider;
 import org.apache.druid.guice.JsonConfigurator;
@@ -32,6 +30,7 @@ import org.apache.druid.initialization.DruidModule;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.server.security.AllowAllAuthorizer;
 import org.apache.druid.server.security.AuthConfig;
 import org.apache.druid.server.security.AuthValidator;
@@ -63,15 +62,20 @@ public class AuthorizerMapperModule implements DruidModule
   private static class AuthorizerMapperProvider implements Provider<AuthorizerMapper>
   {
     private AuthConfig authConfig;
-    private Injector injector;
+    private ServiceEmitter serviceEmitter;
     private Properties props;
     private JsonConfigurator configurator;
 
     @Inject
-    public void inject(Injector injector, Properties props, JsonConfigurator configurator)
+    public void inject(
+        AuthConfig authConfig,
+        ServiceEmitter serviceEmitter,
+        Properties props,
+        JsonConfigurator configurator
+    )
     {
-      this.authConfig = injector.getInstance(AuthConfig.class);
-      this.injector = injector;
+      this.authConfig = authConfig;
+      this.serviceEmitter = serviceEmitter;
       this.props = props;
       this.configurator = configurator;
     }
@@ -84,12 +88,19 @@ public class AuthorizerMapperModule implements DruidModule
 
       validateAuthorizers(authorizers);
 
+      final ServiceEmitter emitter;
+      if (authConfig.isEmitAuthMetrics()) {
+        emitter = serviceEmitter;
+      } else {
+        emitter = null;
+      }
+
       // Default is allow all
       if (authorizers == null) {
-        AllowAllAuthorizer allowAllAuthorizer = new AllowAllAuthorizer();
+        AllowAllAuthorizer allowAllAuthorizer = new AllowAllAuthorizer(null);
         authorizerMap.put(AuthConfig.ALLOW_ALL_NAME, allowAllAuthorizer);
 
-        return new AuthorizerMapper(null)
+        return new AuthorizerMapper(null, emitter)
         {
           @Override
           public Authorizer getAuthorizer(String name)
@@ -122,15 +133,11 @@ public class AuthorizerMapperModule implements DruidModule
 
         authorizerProvider.inject(adjustedProps, configurator);
 
-        Supplier<Authorizer> authorizerSupplier = authorizerProvider.get();
-        if (authorizerSupplier == null) {
-          throw new ISE("Could not create authorizer with name: %s", authorizerName);
-        }
-        Authorizer authorizer = authorizerSupplier.get();
+        Authorizer authorizer = authorizerProvider.get();
         authorizerMap.put(authorizerName, authorizer);
       }
 
-      return new AuthorizerMapper(authorizerMap);
+      return new AuthorizerMapper(authorizerMap, emitter);
     }
   }
 

@@ -24,19 +24,22 @@ import com.google.common.collect.ImmutableList;
 import org.apache.druid.data.input.StringTuple;
 import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.segment.VirtualColumns;
 import org.apache.druid.timeline.DataSegment;
-import org.junit.Assert;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.apache.druid.timeline.SegmentId;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.Collections;
 import java.util.List;
 
-@RunWith(Parameterized.class)
+@ParameterizedClass
+
+@MethodSource("constructorFeeder")
 public class PartitionHolderCompletenessTest
 {
-  @Parameterized.Parameters(name = "{1}")
   public static Iterable<Object[]> constructorFeeder()
   {
     return ImmutableList.of(
@@ -86,6 +89,7 @@ public class PartitionHolderCompletenessTest
             ImmutableList.of(
                 new DimensionRangeShardSpec(
                     Collections.singletonList("dim"),
+                    VirtualColumns.EMPTY,
                     null,
                     StringTuple.create("aaa"),
                     0,
@@ -93,6 +97,7 @@ public class PartitionHolderCompletenessTest
                 ),
                 new DimensionRangeShardSpec(
                     Collections.singletonList("dim"),
+                    VirtualColumns.EMPTY,
                     StringTuple.create("ttt"),
                     StringTuple.create("zzz"),
                     2,
@@ -100,6 +105,7 @@ public class PartitionHolderCompletenessTest
                 ),
                 new DimensionRangeShardSpec(
                     Collections.singletonList("dim"),
+                    VirtualColumns.EMPTY,
                     StringTuple.create("bbb"),
                     StringTuple.create("fff"),
                     1,
@@ -116,6 +122,7 @@ public class PartitionHolderCompletenessTest
             ImmutableList.of(
                 new DimensionRangeShardSpec(
                     Collections.singletonList("dim"),
+                    VirtualColumns.EMPTY,
                     StringTuple.create("bbb"),
                     StringTuple.create("fff"),
                     1,
@@ -123,6 +130,7 @@ public class PartitionHolderCompletenessTest
                 ),
                 new DimensionRangeShardSpec(
                     Collections.singletonList("dim"),
+                    VirtualColumns.EMPTY,
                     StringTuple.create("fff"),
                     null,
                     2,
@@ -130,6 +138,7 @@ public class PartitionHolderCompletenessTest
                 ),
                 new DimensionRangeShardSpec(
                     Collections.singletonList("dim"),
+                    VirtualColumns.EMPTY,
                     null,
                     StringTuple.create("bbb"),
                     0,
@@ -158,26 +167,23 @@ public class PartitionHolderCompletenessTest
         shardSpecs.get(0).createChunk(new OvershadowableInteger("version", shardSpecs.get(0).getPartitionNum(), 0))
     );
     for (int i = 0; i < shardSpecs.size() - 1; i++) {
-      Assert.assertFalse(holder.isComplete());
+      Assertions.assertFalse(holder.isComplete());
       final ShardSpec shardSpec = shardSpecs.get(i + 1);
       holder.add(shardSpec.createChunk(new OvershadowableInteger("version", shardSpec.getPartitionNum(), 0)));
     }
-    Assert.assertTrue(holder.isComplete());
-    Assert.assertTrue(holder.hasData());
+    Assertions.assertTrue(holder.isComplete());
+    Assertions.assertTrue(holder.hasData());
   }
 
   @Test
   public void testHasNoData()
   {
-    final DataSegment tombstone = DataSegment.builder()
-                                             .dataSource("foo")
-                                             .version("1")
-                                             .interval(Intervals.of("2021-01-01/P1D"))
+    final DataSegment tombstone = DataSegment.builder(SegmentId.of("foo", Intervals.of("2021-01-01/P1D"), "1", 0))
                                              .shardSpec(new TombstoneShardSpec())
                                              .size(1)
                                              .build();
     final PartitionChunk<DataSegment> partitionChunk = new TombstonePartitionedChunk<>(tombstone);
-    final PartitionHolder<DataSegment> partitionHolder = new PartitionHolder<DataSegment>(partitionChunk);
-    Assert.assertFalse(partitionHolder.hasData());
+    final PartitionHolder<DataSegment> partitionHolder = new PartitionHolder<>(partitionChunk);
+    Assertions.assertFalse(partitionHolder.hasData());
   }
 }

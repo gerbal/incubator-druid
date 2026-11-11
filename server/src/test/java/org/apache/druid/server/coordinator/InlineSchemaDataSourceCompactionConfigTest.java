@@ -1,0 +1,553 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package org.apache.druid.server.coordinator;
+
+import com.fasterxml.jackson.databind.InjectableValues;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import org.apache.druid.data.input.SegmentsSplitHintSpec;
+import org.apache.druid.data.input.impl.ClusteredValueGroupsBaseTableProjectionSpec;
+import org.apache.druid.data.input.impl.DimensionsSpec;
+import org.apache.druid.data.input.impl.LongDimensionSchema;
+import org.apache.druid.data.input.impl.StringDimensionSchema;
+import org.apache.druid.indexer.CompactionEngine;
+import org.apache.druid.indexer.partitions.DynamicPartitionsSpec;
+import org.apache.druid.jackson.DefaultObjectMapper;
+import org.apache.druid.java.util.common.HumanReadableBytes;
+import org.apache.druid.java.util.common.Intervals;
+import org.apache.druid.java.util.common.granularity.Granularities;
+import org.apache.druid.math.expr.ExprMacroTable;
+import org.apache.druid.query.aggregation.AggregatorFactory;
+import org.apache.druid.query.aggregation.CountAggregatorFactory;
+import org.apache.druid.query.expression.TestExprMacroTable;
+import org.apache.druid.query.filter.SelectorDimFilter;
+import org.apache.druid.segment.IndexSpec;
+import org.apache.druid.segment.VirtualColumns;
+import org.apache.druid.segment.column.ColumnType;
+import org.apache.druid.segment.data.CompressionFactory.LongEncodingStrategy;
+import org.apache.druid.segment.data.CompressionStrategy;
+import org.apache.druid.segment.incremental.OnheapIncrementalIndex;
+import org.apache.druid.segment.transform.CompactionTransformSpec;
+import org.apache.druid.segment.virtual.ExpressionVirtualColumn;
+import org.apache.druid.segment.writeout.TmpFileSegmentWriteOutMediumFactory;
+import org.apache.druid.testing.InitializedNullHandlingTest;
+import org.joda.time.Duration;
+import org.joda.time.Period;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+
+import java.io.IOException;
+import java.util.List;
+
+public class InlineSchemaDataSourceCompactionConfigTest extends InitializedNullHandlingTest
+{
+  private static final ObjectMapper OBJECT_MAPPER;
+
+  static {
+    OBJECT_MAPPER = new DefaultObjectMapper();
+    OBJECT_MAPPER.setInjectableValues(
+        new InjectableValues.Std().addValue(ExprMacroTable.class, TestExprMacroTable.INSTANCE)
+    );
+  }
+
+
+  @Test
+  public void testSerdeBasic() throws IOException
+  {
+    final InlineSchemaDataSourceCompactionConfig config = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource("dataSource")
+        .withSkipOffsetFromLatest(new Period(3600))
+        .withSkipIntervals(List.of(Intervals.of("2024-02-15/2024-02-16")))
+        .withTaskContext(ImmutableMap.of("key", "val"))
+        .build();
+    final String json = OBJECT_MAPPER.writeValueAsString(config);
+    final InlineSchemaDataSourceCompactionConfig fromJson = OBJECT_MAPPER.readValue(json, InlineSchemaDataSourceCompactionConfig.class);
+
+    Assertions.assertEquals(config.getDataSource(), fromJson.getDataSource());
+    Assertions.assertEquals(25, fromJson.getTaskPriority());
+    Assertions.assertEquals(100_000_000_000_000L, fromJson.getInputSegmentSizeBytes());
+    Assertions.assertEquals(config.getMaxRowsPerSegment(), fromJson.getMaxRowsPerSegment());
+    Assertions.assertEquals(config.getSkipOffsetFromLatest(), fromJson.getSkipOffsetFromLatest());
+    Assertions.assertEquals(config.getSkipIntervals(), fromJson.getSkipIntervals());
+    Assertions.assertEquals(config.getTuningConfig(), fromJson.getTuningConfig());
+    Assertions.assertEquals(config.getTaskContext(), fromJson.getTaskContext());
+    Assertions.assertEquals(config.getGranularitySpec(), fromJson.getGranularitySpec());
+    Assertions.assertEquals(config.getEngine(), fromJson.getEngine());
+  }
+
+  @Test
+  public void testSerdeWithMaxRowsPerSegment() throws IOException
+  {
+    final InlineSchemaDataSourceCompactionConfig config = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource("dataSource")
+        .withInputSegmentSizeBytes(500L)
+        .withMaxRowsPerSegment(30)
+        .withSkipOffsetFromLatest(new Period(3600))
+        .withSkipIntervals(List.of(Intervals.of("2024-01-01/2024-01-02")))
+        .withEngine(CompactionEngine.MSQ)
+        .withTaskContext(ImmutableMap.of("key", "val"))
+        .build();
+    final String json = OBJECT_MAPPER.writeValueAsString(config);
+    final InlineSchemaDataSourceCompactionConfig fromJson = OBJECT_MAPPER.readValue(json, InlineSchemaDataSourceCompactionConfig.class);
+
+    Assertions.assertEquals(config.getDataSource(), fromJson.getDataSource());
+    Assertions.assertEquals(25, fromJson.getTaskPriority());
+    Assertions.assertEquals(config.getInputSegmentSizeBytes(), fromJson.getInputSegmentSizeBytes());
+    Assertions.assertEquals(config.getMaxRowsPerSegment(), fromJson.getMaxRowsPerSegment());
+    Assertions.assertEquals(config.getSkipOffsetFromLatest(), fromJson.getSkipOffsetFromLatest());
+    Assertions.assertEquals(config.getTuningConfig(), fromJson.getTuningConfig());
+    Assertions.assertEquals(config.getTaskContext(), fromJson.getTaskContext());
+    Assertions.assertEquals(config.getEngine(), fromJson.getEngine());
+  }
+
+  @Test
+  public void testSerdeWithMaxTotalRows() throws IOException
+  {
+    final InlineSchemaDataSourceCompactionConfig config = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource("dataSource")
+        .withInputSegmentSizeBytes(500L)
+        .withSkipOffsetFromLatest(new Period(3600))
+        .withSkipIntervals(List.of(Intervals.of("2024-03-01/2024-03-02")))
+        .withEngine(CompactionEngine.NATIVE)
+        .withTaskContext(ImmutableMap.of("key", "val"))
+        .build();
+    final String json = OBJECT_MAPPER.writeValueAsString(config);
+    final InlineSchemaDataSourceCompactionConfig fromJson = OBJECT_MAPPER.readValue(json, InlineSchemaDataSourceCompactionConfig.class);
+
+    Assertions.assertEquals(config.getDataSource(), fromJson.getDataSource());
+    Assertions.assertEquals(25, fromJson.getTaskPriority());
+    Assertions.assertEquals(config.getInputSegmentSizeBytes(), fromJson.getInputSegmentSizeBytes());
+    Assertions.assertEquals(config.getMaxRowsPerSegment(), fromJson.getMaxRowsPerSegment());
+    Assertions.assertEquals(config.getSkipOffsetFromLatest(), fromJson.getSkipOffsetFromLatest());
+    Assertions.assertEquals(config.getTuningConfig(), fromJson.getTuningConfig());
+    Assertions.assertEquals(config.getTaskContext(), fromJson.getTaskContext());
+    Assertions.assertEquals(config.getEngine(), fromJson.getEngine());
+  }
+
+  @Test
+  public void testSerdeMaxTotalRowsWithMaxRowsPerSegment() throws IOException
+  {
+    final InlineSchemaDataSourceCompactionConfig config = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource("dataSource")
+        .withInputSegmentSizeBytes(500L)
+        .withMaxRowsPerSegment(10000)
+        .withSkipOffsetFromLatest(new Period(3600))
+        .withSkipIntervals(List.of(Intervals.of("2024-04-01/2024-04-02")))
+        .withTaskContext(ImmutableMap.of("key", "val"))
+        .build();
+    final String json = OBJECT_MAPPER.writeValueAsString(config);
+    final InlineSchemaDataSourceCompactionConfig fromJson = OBJECT_MAPPER.readValue(json, InlineSchemaDataSourceCompactionConfig.class);
+
+    Assertions.assertEquals(config.getDataSource(), fromJson.getDataSource());
+    Assertions.assertEquals(25, fromJson.getTaskPriority());
+    Assertions.assertEquals(config.getInputSegmentSizeBytes(), fromJson.getInputSegmentSizeBytes());
+    Assertions.assertEquals(config.getMaxRowsPerSegment(), fromJson.getMaxRowsPerSegment());
+    Assertions.assertEquals(config.getSkipOffsetFromLatest(), fromJson.getSkipOffsetFromLatest());
+    Assertions.assertEquals(config.getTuningConfig(), fromJson.getTuningConfig());
+    Assertions.assertEquals(config.getTaskContext(), fromJson.getTaskContext());
+  }
+
+  @Test
+  public void testSerdeUserCompactionTuningConfig() throws IOException
+  {
+    final UserCompactionTaskQueryTuningConfig tuningConfig = new UserCompactionTaskQueryTuningConfig(
+        40000,
+        null,
+        2000L,
+        null,
+        new SegmentsSplitHintSpec(new HumanReadableBytes(100000L), null),
+        new DynamicPartitionsSpec(1000, 20000L),
+        IndexSpec.builder()
+                 .withDimensionCompression(CompressionStrategy.LZ4)
+                 .withMetricCompression(CompressionStrategy.LZF)
+                 .withLongEncoding(LongEncodingStrategy.LONGS)
+                 .build(),
+        IndexSpec.builder()
+                 .withDimensionCompression(CompressionStrategy.LZ4)
+                 .withMetricCompression(CompressionStrategy.UNCOMPRESSED)
+                 .withLongEncoding(LongEncodingStrategy.AUTO)
+                 .build(),
+        2,
+        1000L,
+        TmpFileSegmentWriteOutMediumFactory.instance(),
+        100,
+        5,
+        1000L,
+        new Duration(3000L),
+        7,
+        1000,
+        100,
+        2
+    );
+
+    final String json = OBJECT_MAPPER.writeValueAsString(tuningConfig);
+    final UserCompactionTaskQueryTuningConfig fromJson =
+        OBJECT_MAPPER.readValue(json, UserCompactionTaskQueryTuningConfig.class);
+    Assertions.assertEquals(tuningConfig, fromJson);
+  }
+
+  @Test
+  public void testSerdeUserCompactionTuningConfigWithAppendableIndexSpec() throws IOException
+  {
+    final UserCompactionTaskQueryTuningConfig tuningConfig = new UserCompactionTaskQueryTuningConfig(
+        40000,
+        new OnheapIncrementalIndex.Spec(true),
+        2000L,
+        null,
+        new SegmentsSplitHintSpec(new HumanReadableBytes(100000L), null),
+        new DynamicPartitionsSpec(1000, 20000L),
+        IndexSpec.builder()
+                 .withDimensionCompression(CompressionStrategy.LZ4)
+                 .withMetricCompression(CompressionStrategy.LZ4)
+                 .withLongEncoding(LongEncodingStrategy.LONGS)
+                 .build(),
+        IndexSpec.builder()
+                 .withDimensionCompression(CompressionStrategy.LZ4)
+                 .withMetricCompression(CompressionStrategy.UNCOMPRESSED)
+                 .withLongEncoding(LongEncodingStrategy.AUTO)
+                 .build(),
+        2,
+        1000L,
+        TmpFileSegmentWriteOutMediumFactory.instance(),
+        100,
+        5,
+        1000L,
+        new Duration(3000L),
+        7,
+        1000,
+        100,
+        2
+    );
+
+    final String json = OBJECT_MAPPER.writeValueAsString(tuningConfig);
+    final UserCompactionTaskQueryTuningConfig fromJson =
+        OBJECT_MAPPER.readValue(json, UserCompactionTaskQueryTuningConfig.class);
+    Assertions.assertEquals(tuningConfig, fromJson);
+  }
+
+  @Test
+  public void testSerdeGranularitySpec() throws IOException
+  {
+    final InlineSchemaDataSourceCompactionConfig config = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource("dataSource")
+        .withInputSegmentSizeBytes(500L)
+        .withSkipOffsetFromLatest(new Period(3600))
+        .withSkipIntervals(List.of(Intervals.of("2024-01-15/2024-01-16")))
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.HOUR, null, null))
+        .withTaskContext(ImmutableMap.of("key", "val"))
+        .build();
+    final String json = OBJECT_MAPPER.writeValueAsString(config);
+    final InlineSchemaDataSourceCompactionConfig fromJson = OBJECT_MAPPER.readValue(json, InlineSchemaDataSourceCompactionConfig.class);
+
+    Assertions.assertEquals(config.getDataSource(), fromJson.getDataSource());
+    Assertions.assertEquals(25, fromJson.getTaskPriority());
+    Assertions.assertEquals(config.getInputSegmentSizeBytes(), fromJson.getInputSegmentSizeBytes());
+    Assertions.assertEquals(config.getMaxRowsPerSegment(), fromJson.getMaxRowsPerSegment());
+    Assertions.assertEquals(config.getSkipOffsetFromLatest(), fromJson.getSkipOffsetFromLatest());
+    Assertions.assertEquals(config.getTuningConfig(), fromJson.getTuningConfig());
+    Assertions.assertEquals(config.getTaskContext(), fromJson.getTaskContext());
+    Assertions.assertEquals(config.getGranularitySpec(), fromJson.getGranularitySpec());
+  }
+
+  @Test
+  public void testSerdeGranularitySpecWithQueryGranularity() throws Exception
+  {
+    final InlineSchemaDataSourceCompactionConfig config = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource("dataSource")
+        .withInputSegmentSizeBytes(500L)
+        .withSkipOffsetFromLatest(new Period(3600))
+        .withSkipIntervals(List.of(Intervals.of("2024-01-15/2024-01-16")))
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(null, Granularities.YEAR, null))
+        .withTaskContext(ImmutableMap.of("key", "val"))
+        .build();
+    final String json = OBJECT_MAPPER.writeValueAsString(config);
+    final InlineSchemaDataSourceCompactionConfig fromJson = OBJECT_MAPPER.readValue(json, InlineSchemaDataSourceCompactionConfig.class);
+
+    Assertions.assertEquals(config.getDataSource(), fromJson.getDataSource());
+    Assertions.assertEquals(25, fromJson.getTaskPriority());
+    Assertions.assertEquals(config.getInputSegmentSizeBytes(), fromJson.getInputSegmentSizeBytes());
+    Assertions.assertEquals(config.getMaxRowsPerSegment(), fromJson.getMaxRowsPerSegment());
+    Assertions.assertEquals(config.getSkipOffsetFromLatest(), fromJson.getSkipOffsetFromLatest());
+    Assertions.assertEquals(config.getTuningConfig(), fromJson.getTuningConfig());
+    Assertions.assertEquals(config.getTaskContext(), fromJson.getTaskContext());
+    Assertions.assertEquals(config.getGranularitySpec(), fromJson.getGranularitySpec());
+    Assertions.assertNotNull(config.getGranularitySpec());
+    Assertions.assertNotNull(fromJson.getGranularitySpec());
+    Assertions.assertEquals(config.getGranularitySpec().getQueryGranularity(), fromJson.getGranularitySpec().getQueryGranularity());
+  }
+
+  @Test
+  public void testSerdeWithNullGranularitySpec() throws IOException
+  {
+    final InlineSchemaDataSourceCompactionConfig config = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource("dataSource")
+        .withInputSegmentSizeBytes(500L)
+        .withSkipOffsetFromLatest(new Period(3600))
+        .withSkipIntervals(List.of(Intervals.of("2024-01-15/2024-01-16")))
+        .withTaskContext(ImmutableMap.of("key", "val"))
+        .build();
+    final String json = OBJECT_MAPPER.writeValueAsString(config);
+    final InlineSchemaDataSourceCompactionConfig fromJson = OBJECT_MAPPER.readValue(json, InlineSchemaDataSourceCompactionConfig.class);
+
+    Assertions.assertEquals(config.getDataSource(), fromJson.getDataSource());
+    Assertions.assertEquals(25, fromJson.getTaskPriority());
+    Assertions.assertEquals(config.getInputSegmentSizeBytes(), fromJson.getInputSegmentSizeBytes());
+    Assertions.assertEquals(config.getMaxRowsPerSegment(), fromJson.getMaxRowsPerSegment());
+    Assertions.assertEquals(config.getSkipOffsetFromLatest(), fromJson.getSkipOffsetFromLatest());
+    Assertions.assertEquals(config.getTuningConfig(), fromJson.getTuningConfig());
+    Assertions.assertEquals(config.getTaskContext(), fromJson.getTaskContext());
+    Assertions.assertEquals(config.getGranularitySpec(), fromJson.getGranularitySpec());
+  }
+
+  @Test
+  public void testSerdeGranularitySpecWithNullValues() throws IOException
+  {
+    final InlineSchemaDataSourceCompactionConfig config = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource("dataSource")
+        .withInputSegmentSizeBytes(500L)
+        .withSkipOffsetFromLatest(new Period(3600))
+        .withSkipIntervals(List.of(Intervals.of("2024-01-15/2024-01-16")))
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(null, null, null))
+        .withTaskContext(ImmutableMap.of("key", "val"))
+        .build();
+    final String json = OBJECT_MAPPER.writeValueAsString(config);
+    final InlineSchemaDataSourceCompactionConfig fromJson = OBJECT_MAPPER.readValue(json, InlineSchemaDataSourceCompactionConfig.class);
+
+    Assertions.assertEquals(config.getDataSource(), fromJson.getDataSource());
+    Assertions.assertEquals(25, fromJson.getTaskPriority());
+    Assertions.assertEquals(config.getInputSegmentSizeBytes(), fromJson.getInputSegmentSizeBytes());
+    Assertions.assertEquals(config.getMaxRowsPerSegment(), fromJson.getMaxRowsPerSegment());
+    Assertions.assertEquals(config.getSkipOffsetFromLatest(), fromJson.getSkipOffsetFromLatest());
+    Assertions.assertEquals(config.getTuningConfig(), fromJson.getTuningConfig());
+    Assertions.assertEquals(config.getTaskContext(), fromJson.getTaskContext());
+    Assertions.assertEquals(config.getGranularitySpec(), fromJson.getGranularitySpec());
+  }
+
+  @Test
+  public void testSerdeGranularitySpecWithRollup() throws IOException
+  {
+    final InlineSchemaDataSourceCompactionConfig config = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource("dataSource")
+        .withInputSegmentSizeBytes(500L)
+        .withSkipOffsetFromLatest(new Period(3600))
+        .withSkipIntervals(List.of(Intervals.of("2024-01-15/2024-01-16")))
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(null, null, true))
+        .withTaskContext(ImmutableMap.of("key", "val"))
+        .build();
+    final String json = OBJECT_MAPPER.writeValueAsString(config);
+    final InlineSchemaDataSourceCompactionConfig fromJson = OBJECT_MAPPER.readValue(json, InlineSchemaDataSourceCompactionConfig.class);
+
+    Assertions.assertEquals(config.getDataSource(), fromJson.getDataSource());
+    Assertions.assertEquals(25, fromJson.getTaskPriority());
+    Assertions.assertEquals(config.getInputSegmentSizeBytes(), fromJson.getInputSegmentSizeBytes());
+    Assertions.assertEquals(config.getMaxRowsPerSegment(), fromJson.getMaxRowsPerSegment());
+    Assertions.assertEquals(config.getSkipOffsetFromLatest(), fromJson.getSkipOffsetFromLatest());
+    Assertions.assertEquals(config.getTuningConfig(), fromJson.getTuningConfig());
+    Assertions.assertEquals(config.getTaskContext(), fromJson.getTaskContext());
+    Assertions.assertEquals(config.getGranularitySpec(), fromJson.getGranularitySpec());
+    Assertions.assertNotNull(config.getGranularitySpec());
+    Assertions.assertNotNull(fromJson.getGranularitySpec());
+    Assertions.assertEquals(config.getGranularitySpec().isRollup(), fromJson.getGranularitySpec().isRollup());
+  }
+
+  @Test
+  public void testSerdeIOConfigWithNonNullDropExisting() throws IOException
+  {
+    final InlineSchemaDataSourceCompactionConfig config = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource("dataSource")
+        .withInputSegmentSizeBytes(500L)
+        .withSkipOffsetFromLatest(new Period(3600))
+        .withSkipIntervals(List.of(Intervals.of("2024-01-15/2024-01-16")))
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.HOUR, null, null))
+        .withIoConfig(new UserCompactionTaskIOConfig(true))
+        .withTaskContext(ImmutableMap.of("key", "val"))
+        .build();
+    final String json = OBJECT_MAPPER.writeValueAsString(config);
+    final InlineSchemaDataSourceCompactionConfig fromJson = OBJECT_MAPPER.readValue(json, InlineSchemaDataSourceCompactionConfig.class);
+
+    Assertions.assertEquals(config.getDataSource(), fromJson.getDataSource());
+    Assertions.assertEquals(25, fromJson.getTaskPriority());
+    Assertions.assertEquals(config.getInputSegmentSizeBytes(), fromJson.getInputSegmentSizeBytes());
+    Assertions.assertEquals(config.getMaxRowsPerSegment(), fromJson.getMaxRowsPerSegment());
+    Assertions.assertEquals(config.getSkipOffsetFromLatest(), fromJson.getSkipOffsetFromLatest());
+    Assertions.assertEquals(config.getTuningConfig(), fromJson.getTuningConfig());
+    Assertions.assertEquals(config.getTaskContext(), fromJson.getTaskContext());
+    Assertions.assertEquals(config.getGranularitySpec(), fromJson.getGranularitySpec());
+    Assertions.assertEquals(config.getIoConfig(), fromJson.getIoConfig());
+  }
+
+  @Test
+  public void testSerdeIOConfigWithNullDropExisting() throws IOException
+  {
+    final InlineSchemaDataSourceCompactionConfig config = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource("dataSource")
+        .withInputSegmentSizeBytes(500L)
+        .withSkipOffsetFromLatest(new Period(3600))
+        .withSkipIntervals(List.of(Intervals.of("2024-01-15/2024-01-16")))
+        .withGranularitySpec(new UserCompactionTaskGranularityConfig(Granularities.HOUR, null, null))
+        .withIoConfig(new UserCompactionTaskIOConfig(null))
+        .withTaskContext(ImmutableMap.of("key", "val"))
+        .build();
+    final String json = OBJECT_MAPPER.writeValueAsString(config);
+    final InlineSchemaDataSourceCompactionConfig fromJson = OBJECT_MAPPER.readValue(json, InlineSchemaDataSourceCompactionConfig.class);
+
+    Assertions.assertEquals(config.getDataSource(), fromJson.getDataSource());
+    Assertions.assertEquals(25, fromJson.getTaskPriority());
+    Assertions.assertEquals(config.getInputSegmentSizeBytes(), fromJson.getInputSegmentSizeBytes());
+    Assertions.assertEquals(config.getMaxRowsPerSegment(), fromJson.getMaxRowsPerSegment());
+    Assertions.assertEquals(config.getSkipOffsetFromLatest(), fromJson.getSkipOffsetFromLatest());
+    Assertions.assertEquals(config.getTuningConfig(), fromJson.getTuningConfig());
+    Assertions.assertEquals(config.getTaskContext(), fromJson.getTaskContext());
+    Assertions.assertEquals(config.getGranularitySpec(), fromJson.getGranularitySpec());
+    Assertions.assertEquals(config.getIoConfig(), fromJson.getIoConfig());
+  }
+
+  @Test
+  public void testSerdeDimensionsSpec() throws IOException
+  {
+    final InlineSchemaDataSourceCompactionConfig config = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource("dataSource")
+        .withInputSegmentSizeBytes(500L)
+        .withSkipOffsetFromLatest(new Period(3600))
+        .withSkipIntervals(List.of(Intervals.of("2024-01-15/2024-01-16")))
+        .withDimensionsSpec(
+            new UserCompactionTaskDimensionsConfig(
+                DimensionsSpec.getDefaultSchemas(ImmutableList.of("foo"))
+            )
+        )
+        .withTaskContext(ImmutableMap.of("key", "val"))
+        .build();
+    final String json = OBJECT_MAPPER.writeValueAsString(config);
+    final InlineSchemaDataSourceCompactionConfig fromJson = OBJECT_MAPPER.readValue(json, InlineSchemaDataSourceCompactionConfig.class);
+
+    Assertions.assertEquals(config.getDataSource(), fromJson.getDataSource());
+    Assertions.assertEquals(25, fromJson.getTaskPriority());
+    Assertions.assertEquals(config.getInputSegmentSizeBytes(), fromJson.getInputSegmentSizeBytes());
+    Assertions.assertEquals(config.getMaxRowsPerSegment(), fromJson.getMaxRowsPerSegment());
+    Assertions.assertEquals(config.getSkipOffsetFromLatest(), fromJson.getSkipOffsetFromLatest());
+    Assertions.assertEquals(config.getTuningConfig(), fromJson.getTuningConfig());
+    Assertions.assertEquals(config.getTaskContext(), fromJson.getTaskContext());
+    Assertions.assertEquals(config.getDimensionsSpec(), fromJson.getDimensionsSpec());
+  }
+
+  @Test
+  public void testSerdeTransformSpec() throws IOException
+  {
+    final InlineSchemaDataSourceCompactionConfig config = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource("dataSource")
+        .withInputSegmentSizeBytes(500L)
+        .withSkipOffsetFromLatest(new Period(3600))
+        .withSkipIntervals(List.of(Intervals.of("2024-01-15/2024-01-16")))
+        .withTransformSpec(
+            new CompactionTransformSpec(
+                new SelectorDimFilter("dim1", "foo", null),
+                VirtualColumns.create(
+                    new ExpressionVirtualColumn(
+                        "isRobotFiltered",
+                        "concat(isRobot, '_filtered')",
+                        ColumnType.STRING,
+                        ExprMacroTable.nil()
+                    )
+                )
+            )
+        )
+        .withTaskContext(ImmutableMap.of("key", "val"))
+        .build();
+    final String json = OBJECT_MAPPER.writeValueAsString(config);
+    final InlineSchemaDataSourceCompactionConfig fromJson = OBJECT_MAPPER.readValue(json, InlineSchemaDataSourceCompactionConfig.class);
+
+    Assertions.assertEquals(config.getDataSource(), fromJson.getDataSource());
+    Assertions.assertEquals(25, fromJson.getTaskPriority());
+    Assertions.assertEquals(config.getInputSegmentSizeBytes(), fromJson.getInputSegmentSizeBytes());
+    Assertions.assertEquals(config.getMaxRowsPerSegment(), fromJson.getMaxRowsPerSegment());
+    Assertions.assertEquals(config.getSkipOffsetFromLatest(), fromJson.getSkipOffsetFromLatest());
+    Assertions.assertEquals(config.getTuningConfig(), fromJson.getTuningConfig());
+    Assertions.assertEquals(config.getTaskContext(), fromJson.getTaskContext());
+    Assertions.assertEquals(config.getTransformSpec(), fromJson.getTransformSpec());
+  }
+
+  @Test
+  public void testSerdeMetricsSpec() throws IOException
+  {
+    final InlineSchemaDataSourceCompactionConfig config = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource("dataSource")
+        .withInputSegmentSizeBytes(500L)
+        .withSkipOffsetFromLatest(new Period(3600))
+        .withSkipIntervals(List.of(Intervals.of("2024-01-15/2024-01-16")))
+        .withMetricsSpec(new AggregatorFactory[]{new CountAggregatorFactory("cnt")})
+        .withTaskContext(ImmutableMap.of("key", "val"))
+        .build();
+    final String json = OBJECT_MAPPER.writeValueAsString(config);
+    final InlineSchemaDataSourceCompactionConfig fromJson = OBJECT_MAPPER.readValue(json, InlineSchemaDataSourceCompactionConfig.class);
+
+    Assertions.assertEquals(config.getDataSource(), fromJson.getDataSource());
+    Assertions.assertEquals(25, fromJson.getTaskPriority());
+    Assertions.assertEquals(config.getInputSegmentSizeBytes(), fromJson.getInputSegmentSizeBytes());
+    Assertions.assertEquals(config.getMaxRowsPerSegment(), fromJson.getMaxRowsPerSegment());
+    Assertions.assertEquals(config.getSkipOffsetFromLatest(), fromJson.getSkipOffsetFromLatest());
+    Assertions.assertEquals(config.getTuningConfig(), fromJson.getTuningConfig());
+    Assertions.assertEquals(config.getTaskContext(), fromJson.getTaskContext());
+    Assertions.assertArrayEquals(config.getMetricsSpec(), fromJson.getMetricsSpec());
+  }
+
+  @Test
+  public void testSerdeBaseTable() throws IOException
+  {
+    final ClusteredValueGroupsBaseTableProjectionSpec baseTable =
+        ClusteredValueGroupsBaseTableProjectionSpec.builder()
+                                                   .columns(
+                                                       new StringDimensionSchema("tenant"),
+                                                       new LongDimensionSchema("__time")
+                                                   )
+                                                   .clusteringColumns("tenant")
+                                                   .build();
+    final InlineSchemaDataSourceCompactionConfig config = InlineSchemaDataSourceCompactionConfig
+        .builder()
+        .forDataSource("dataSource")
+        .withInputSegmentSizeBytes(500L)
+        .withSkipOffsetFromLatest(new Period(3600))
+        .withEngine(CompactionEngine.MSQ)
+        .withBaseTable(baseTable)
+        .withTaskContext(ImmutableMap.of("key", "val"))
+        .build();
+    final String json = OBJECT_MAPPER.writeValueAsString(config);
+    final InlineSchemaDataSourceCompactionConfig fromJson = OBJECT_MAPPER.readValue(json, InlineSchemaDataSourceCompactionConfig.class);
+
+    Assertions.assertEquals(config.getDataSource(), fromJson.getDataSource());
+    Assertions.assertEquals(config.getBaseTable(), fromJson.getBaseTable());
+    Assertions.assertEquals(baseTable, fromJson.getBaseTable());
+    Assertions.assertEquals(config, fromJson);
+  }
+}

@@ -27,6 +27,7 @@ import com.google.errorprone.annotations.concurrent.GuardedBy;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.UOE;
 import org.apache.druid.java.util.common.guava.Comparators;
+import org.apache.druid.java.util.common.logger.Logger;
 import org.apache.druid.timeline.partition.PartitionChunk;
 import org.apache.druid.timeline.partition.PartitionHolder;
 import org.apache.druid.utils.CollectionUtils;
@@ -35,6 +36,7 @@ import org.joda.time.Interval;
 import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
@@ -73,27 +75,29 @@ import java.util.stream.StreamSupport;
 public class VersionedIntervalTimeline<VersionType, ObjectType extends Overshadowable<ObjectType>>
     implements TimelineLookup<VersionType, ObjectType>
 {
+  private static final Logger logger = new Logger(VersionedIntervalTimeline.class);
   private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock(true);
 
   // Below timelines stores only *visible* timelineEntries
   // adjusted interval -> timelineEntry
-  private final NavigableMap<Interval, TimelineEntry> completePartitionsTimeline = new TreeMap<>(
-      Comparators.intervalsByStartThenEnd()
-  );
+  private final NavigableMap<Interval, TimelineEntry> completePartitionsTimeline;
   // IncompletePartitionsTimeline also includes completePartitionsTimeline
   // adjusted interval -> timelineEntry
   @VisibleForTesting
-  final NavigableMap<Interval, TimelineEntry> incompletePartitionsTimeline = new TreeMap<>(
-      Comparators.intervalsByStartThenEnd()
-  );
+  final NavigableMap<Interval, TimelineEntry> incompletePartitionsTimeline;
   // true interval -> version -> timelineEntry
   private final Map<Interval, TreeMap<VersionType, TimelineEntry>> allTimelineEntries = new HashMap<>();
+  // Only instantiated and used when fastIntervalSearch is enabled
+  private IntervalTreeMap<TreeMap<VersionType, TimelineEntry>> allTimeIntervals;
   private final AtomicInteger numObjects = new AtomicInteger();
 
   private final Comparator<? super VersionType> versionComparator;
 
   // Set this to true if the client needs to skip tombstones upon lookup (like the broker)
   private final boolean skipObjectsWithNoData;
+
+  // Set this to true to use an interval tree index for the segment intervals
+  private final boolean fastIntervalSearch;
 
   public VersionedIntervalTimeline(Comparator<? super VersionType> versionComparator)
   {
@@ -102,8 +106,28 @@ public class VersionedIntervalTimeline<VersionType, ObjectType extends Overshado
 
   public VersionedIntervalTimeline(Comparator<? super VersionType> versionComparator, boolean skipObjectsWithNoData)
   {
+    this(versionComparator, skipObjectsWithNoData, false);
+  }
+
+  /**
+   * Constructor
+   * @param versionComparator The version comparator
+   * @param skipObjectsWithNoData Skip tombstones during lookup
+   * @param fastIntervalSearch Use the faster segment retrieval index based on interval tree
+   */
+  public VersionedIntervalTimeline(Comparator<? super VersionType> versionComparator, boolean skipObjectsWithNoData, boolean fastIntervalSearch)
+  {
     this.versionComparator = versionComparator;
     this.skipObjectsWithNoData = skipObjectsWithNoData;
+    this.fastIntervalSearch = fastIntervalSearch;
+    if (fastIntervalSearch) {
+      allTimeIntervals = new IntervalTreeMap<>(Comparators.intervalsByStart(), Comparators.intervalsByEnd());
+      this.completePartitionsTimeline = new IntervalTreeMap<>(Comparators.intervalsByStart(), Comparators.intervalsByEnd());
+      this.incompletePartitionsTimeline = new IntervalTreeMap<>(Comparators.intervalsByStart(), Comparators.intervalsByEnd());
+    } else {
+      this.completePartitionsTimeline = new TreeMap<>(Comparators.intervalsByStartThenEnd());
+      this.incompletePartitionsTimeline = new TreeMap<>(Comparators.intervalsByStartThenEnd());
+    }
   }
 
   public static <VersionType, ObjectType extends Overshadowable<ObjectType>> Iterable<ObjectType> getAllObjects(
@@ -175,14 +199,21 @@ public class VersionedIntervalTimeline<VersionType, ObjectType extends Overshado
         .toSet();
   }
 
+  /**
+   * Add a single partition chunk entry to this timeline. Avoid calling this in a loop, since it
+   * is O(objects in holder), and can therefore creates O(N^2) situations. This happens due to calling
+   * {@link PartitionHolder#isComplete()} on each addition. Instead use {@link #addAll(Iterator)}
+   * if you have many objects to add.
+   */
   public void add(final Interval interval, VersionType version, PartitionChunk<ObjectType> object)
   {
     addAll(Iterators.singletonIterator(new PartitionChunkEntry<>(interval, version, object)));
   }
 
-  public void addAll(
-      final Iterator<PartitionChunkEntry<VersionType, ObjectType>> objects
-  )
+  /**
+   * Adds partition chunk entries to this timeline.
+   */
+  public void addAll(final Iterator<PartitionChunkEntry<VersionType, ObjectType>> objects)
   {
     lock.writeLock().lock();
 
@@ -202,6 +233,9 @@ public class VersionedIntervalTimeline<VersionType, ObjectType extends Overshado
           TreeMap<VersionType, TimelineEntry> versionEntry = new TreeMap<>(versionComparator);
           versionEntry.put(version, entry);
           allTimelineEntries.put(interval, versionEntry);
+          if (fastIntervalSearch) {
+            allTimeIntervals.put(interval, versionEntry);
+          }
           numObjects.incrementAndGet();
         } else {
           entry = exists.get(version);
@@ -261,6 +295,9 @@ public class VersionedIntervalTimeline<VersionType, ObjectType extends Overshado
         versionEntries.remove(version);
         if (versionEntries.isEmpty()) {
           allTimelineEntries.remove(interval);
+          if (fastIntervalSearch) {
+            allTimeIntervals.remove(interval);
+          }
         }
 
         remove(incompletePartitionsTimeline, interval, entry, true);
@@ -281,13 +318,40 @@ public class VersionedIntervalTimeline<VersionType, ObjectType extends Overshado
   {
     lock.readLock().lock();
     try {
-      for (Entry<Interval, TreeMap<VersionType, TimelineEntry>> entry : allTimelineEntries.entrySet()) {
-        if (entry.getKey().equals(interval) || entry.getKey().contains(interval)) {
-          TimelineEntry foundEntry = entry.getValue().get(version);
-          if (foundEntry != null) {
-            return foundEntry.getPartitionHolder().getChunk(partitionNum);
+
+      // Speed up search with an exact interval match lookup first
+      TreeMap<VersionType, TimelineEntry> versionEntries = allTimelineEntries.get(interval);
+      if (versionEntries != null) {
+        TimelineEntry foundEntry = versionEntries.get(version);
+        if (foundEntry != null) {
+          return foundEntry.getPartitionHolder().getChunk(partitionNum);
+        }
+      }
+
+      // If an exact interval match is not found search for an encapsulating interval
+
+      // If tree search is enabled use it else revert to checking all intervals
+      if (fastIntervalSearch) {
+        Map<Interval, TreeMap<VersionType, TimelineEntry>> possibleMatches = allTimeIntervals.findEncompassing(interval);
+        for (Entry<Interval, TreeMap<VersionType, TimelineEntry>> entry : possibleMatches.entrySet()) {
+          Interval possibleInterval = entry.getKey();
+          if (possibleInterval.contains(interval)) {
+            TimelineEntry foundEntry = entry.getValue().get(version);
+            if (foundEntry != null) {
+              return foundEntry.getPartitionHolder().getChunk(partitionNum);
+            }
           }
         }
+      } else {
+        for (Entry<Interval, TreeMap<VersionType, TimelineEntry>> entry : allTimelineEntries.entrySet()) {
+          if (entry.getKey().contains(interval)) {
+            TimelineEntry foundEntry = entry.getValue().get(version);
+            if (foundEntry != null) {
+              return foundEntry.getPartitionHolder().getChunk(partitionNum);
+            }
+          }
+        }
+
       }
 
       return null;
@@ -457,9 +521,14 @@ public class VersionedIntervalTimeline<VersionType, ObjectType extends Overshado
       if (entry != null) {
         final int majorVersionCompare = versionComparator.compare(version, entry.getVersion());
         if (majorVersionCompare == 0) {
-          for (PartitionChunk<ObjectType> chunk : entry.partitionHolder) {
-            if (chunk.getObject().overshadows(object)) {
-              return true;
+          // If the major versions of the timeline entry and target segment are equal, and
+          // the maximum minor version among the segments is not greater than the minor version of the target segment,
+          // none of the segments in the interval can overshadow it.
+          if (entry.getMaxMinorVersion() > object.getMinorVersion()) {
+            for (PartitionChunk<ObjectType> chunk : entry.partitionHolder) {
+              if (chunk.getObject().overshadows(object)) {
+                return true;
+              }
             }
           }
           return false;
@@ -722,6 +791,10 @@ public class VersionedIntervalTimeline<VersionType, ObjectType extends Overshado
   @GuardedBy("lock")
   private List<TimelineObjectHolder<VersionType, ObjectType>> lookup(Interval interval, Partitions completeness)
   {
+    if (interval.getStartMillis() == interval.getEndMillis()) {
+      return Collections.emptyList();
+    }
+
     List<TimelineObjectHolder<VersionType, ObjectType>> retVal = new ArrayList<>();
     NavigableMap<Interval, TimelineEntry> timeline;
     if (completeness == Partitions.INCOMPLETE_OK) {
@@ -730,21 +803,38 @@ public class VersionedIntervalTimeline<VersionType, ObjectType extends Overshado
       timeline = completePartitionsTimeline;
     }
 
-    for (Entry<Interval, TimelineEntry> entry : timeline.entrySet()) {
-      Interval timelineInterval = entry.getKey();
-      TimelineEntry val = entry.getValue();
+    if (fastIntervalSearch) {
+      IntervalTreeMap<TimelineEntry> tree = (IntervalTreeMap<TimelineEntry>) timeline;
+      tree.forEachMatching(timelineInterval -> timelineInterval.overlaps(interval),
+          (timelineInterval, val) -> {
+            if (!skipObjectsWithNoData || val.partitionHolder.hasData()) {
+              retVal.add(
+                      new TimelineObjectHolder<>(
+                              timelineInterval,
+                              val.getTrueInterval(),
+                              val.getVersion(),
+                              PartitionHolder.copyWithOnlyVisibleChunks(val.getPartitionHolder())
+                      )
+              );
+            }
+          });
+    } else {
+      for (Entry<Interval, TimelineEntry> entry : timeline.entrySet()) {
+        Interval timelineInterval = entry.getKey();
+        TimelineEntry val = entry.getValue();
 
-      // exclude empty partition holders (i.e. tombstones) since they do not add value
-      // for higher level code...they have no data rows...
-      if ((!skipObjectsWithNoData || val.partitionHolder.hasData()) && timelineInterval.overlaps(interval)) {
-        retVal.add(
-            new TimelineObjectHolder<>(
-                timelineInterval,
-                val.getTrueInterval(),
-                val.getVersion(),
-                PartitionHolder.copyWithOnlyVisibleChunks(val.getPartitionHolder())
-            )
-        );
+        // exclude empty partition holders (i.e. tombstones) since they do not add value
+        // for higher level code...they have no data rows...
+        if ((!skipObjectsWithNoData || val.partitionHolder.hasData()) && timelineInterval.overlaps(interval)) {
+          retVal.add(
+                  new TimelineObjectHolder<>(
+                          timelineInterval,
+                          val.getTrueInterval(),
+                          val.getVersion(),
+                          PartitionHolder.copyWithOnlyVisibleChunks(val.getPartitionHolder())
+                  )
+          );
+        }
       }
     }
 
@@ -808,6 +898,15 @@ public class VersionedIntervalTimeline<VersionType, ObjectType extends Overshado
     public PartitionHolder<ObjectType> getPartitionHolder()
     {
       return partitionHolder;
+    }
+
+    /**
+     * Returns the maximum minor version across all the added segments.
+     * We do not handle updates of this variable when segments are removed for the sake of simplicity.
+     */
+    private short getMaxMinorVersion()
+    {
+      return partitionHolder.getMaxMinorVersion();
     }
 
     @Override

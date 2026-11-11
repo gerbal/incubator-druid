@@ -23,12 +23,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
-import com.google.common.primitives.Ints;
 import io.netty.handler.codec.http.HttpHeaders;
 import org.apache.druid.concurrent.ConcurrentAwaitableCounter;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.RetryUtils;
 import org.apache.druid.java.util.common.StringUtils;
+import org.apache.druid.java.util.common.URIs;
 import org.apache.druid.java.util.common.lifecycle.LifecycleStart;
 import org.apache.druid.java.util.common.lifecycle.LifecycleStop;
 import org.apache.druid.java.util.common.logger.Logger;
@@ -42,9 +42,9 @@ import java.io.Closeable;
 import java.io.Flushable;
 import java.io.IOException;
 import java.net.MalformedURLException;
-import java.net.URL;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -170,7 +170,7 @@ public class HttpPostEmitter implements Flushable, Closeable, Emitter
     this.client = client;
     this.jsonMapper = jsonMapper;
     try {
-      this.url = new URL(config.getRecipientBaseUrl()).toString();
+      this.url = URIs.toURL(config.getRecipientBaseUrl()).toString();
     }
     catch (MalformedURLException e) {
       throw new ISE(e, "Bad URL: %s", config.getRecipientBaseUrl());
@@ -659,7 +659,7 @@ public class HttpPostEmitter implements Flushable, Closeable, Emitter
       long deadLineMillis = System.currentTimeMillis() + computeTimeoutForSendRequestInMillis(lastBatchFillTimeMillis);
       try {
         RetryUtils.retry(
-            new RetryUtils.Task<Object>()
+            new RetryUtils.Task<>()
             {
               @Override
               public Void perform() throws Exception
@@ -668,7 +668,7 @@ public class HttpPostEmitter implements Flushable, Closeable, Emitter
                 return null;
               }
             },
-            new Predicate<Throwable>()
+            new Predicate<>()
             {
               @Override
               public boolean apply(Throwable e)
@@ -773,7 +773,7 @@ public class HttpPostEmitter implements Flushable, Closeable, Emitter
         request.setHeader(HttpHeaders.Names.AUTHORIZATION, "Basic " + encoded);
       }
 
-      request.setRequestTimeout(Ints.saturatedCast(timeoutMillis));
+      request.setRequestTimeout(Duration.ofMillis(timeoutMillis));
 
       ListenableFuture<Response> future = client.executeRequest(request);
       Response response;

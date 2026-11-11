@@ -19,48 +19,71 @@
 
 package org.apache.druid.segment.realtime.appenderator;
 
-import com.google.common.base.Function;
 import com.google.common.base.Supplier;
 import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Lists;
-import org.apache.druid.common.config.NullHandling;
+import com.google.common.util.concurrent.ListenableFuture;
 import org.apache.druid.data.input.Committer;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.data.input.MapBasedInputRow;
+import org.apache.druid.error.DruidException;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.Intervals;
+import org.apache.druid.java.util.common.Pair;
 import org.apache.druid.java.util.common.granularity.Granularities;
+import org.apache.druid.java.util.metrics.StubServiceEmitter;
+import org.apache.druid.metadata.PendingSegmentRecord;
+import org.apache.druid.query.DefaultQueryMetrics;
 import org.apache.druid.query.Druids;
+import org.apache.druid.query.Order;
 import org.apache.druid.query.QueryPlus;
+import org.apache.druid.query.RestrictedDataSource;
 import org.apache.druid.query.Result;
 import org.apache.druid.query.SegmentDescriptor;
+import org.apache.druid.query.TableDataSource;
 import org.apache.druid.query.aggregation.LongSumAggregatorFactory;
 import org.apache.druid.query.context.ResponseContext;
+import org.apache.druid.query.policy.NoRestrictionPolicy;
+import org.apache.druid.query.policy.RestrictAllTablesPolicyEnforcer;
 import org.apache.druid.query.scan.ScanQuery;
 import org.apache.druid.query.scan.ScanResultValue;
 import org.apache.druid.query.spec.MultipleSpecificSegmentSpec;
 import org.apache.druid.query.timeseries.TimeseriesQuery;
 import org.apache.druid.query.timeseries.TimeseriesResultValue;
+import org.apache.druid.segment.column.ColumnType;
 import org.apache.druid.segment.incremental.RowIngestionMeters;
 import org.apache.druid.segment.incremental.SimpleRowIngestionMeters;
-import org.apache.druid.segment.indexing.RealtimeTuningConfig;
-import org.apache.druid.segment.realtime.plumber.Committers;
+import org.apache.druid.segment.metadata.CentralizedDatasourceSchemaConfig;
+import org.apache.druid.segment.realtime.SegmentGenerationMetrics;
+import org.apache.druid.segment.realtime.sink.Committers;
+import org.apache.druid.server.coordination.DataSegmentAnnouncer;
 import org.apache.druid.testing.InitializedNullHandlingTest;
+import org.apache.druid.testing.TemporaryFolderExtension;
 import org.apache.druid.timeline.DataSegment;
 import org.apache.druid.timeline.partition.LinearShardSpec;
-import org.junit.Assert;
-import org.junit.Rule;
-import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
+import org.joda.time.Interval;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
+import javax.annotation.Nullable;
+import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class StreamAppenderatorTest extends InitializedNullHandlingTest
@@ -71,15 +94,14 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
       si("2001/2002", "A", 0)
   );
 
-  @Rule
-  public TemporaryFolder temporaryFolder = new TemporaryFolder();
+  @RegisterExtension
+  public final TemporaryFolderExtension temporaryFolder = TemporaryFolderExtension.testCaseScoped();
 
   @Test
   public void testSimpleIngestion() throws Exception
   {
     try (final StreamAppenderatorTester tester =
              new StreamAppenderatorTester.Builder().maxRowsInMemory(2)
-                                                   .enablePushFailure(true)
                                                    .basePersistDirectory(temporaryFolder.newFolder())
                                                    .build()) {
       final Appenderator appenderator = tester.getAppenderator();
@@ -89,39 +111,39 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
       final Supplier<Committer> committerSupplier = committerSupplierFromConcurrentMap(commitMetadata);
 
       // startJob
-      Assert.assertEquals(null, appenderator.startJob());
+      Assertions.assertEquals(null, appenderator.startJob());
 
       // getDataSource
-      Assert.assertEquals(StreamAppenderatorTester.DATASOURCE, appenderator.getDataSource());
+      Assertions.assertEquals(StreamAppenderatorTester.DATASOURCE, appenderator.getDataSource());
 
       // add
       commitMetadata.put("x", "1");
-      Assert.assertEquals(
+      Assertions.assertEquals(
           1,
           appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), committerSupplier)
                       .getNumRowsInSegment()
       );
 
       commitMetadata.put("x", "2");
-      Assert.assertEquals(
+      Assertions.assertEquals(
           2,
           appenderator.add(IDENTIFIERS.get(0), ir("2000", "bar", 2), committerSupplier)
                       .getNumRowsInSegment()
       );
 
       commitMetadata.put("x", "3");
-      Assert.assertEquals(
+      Assertions.assertEquals(
           1,
           appenderator.add(IDENTIFIERS.get(1), ir("2000", "qux", 4), committerSupplier)
                       .getNumRowsInSegment()
       );
 
       // getSegments
-      Assert.assertEquals(IDENTIFIERS.subList(0, 2), sorted(appenderator.getSegments()));
+      Assertions.assertEquals(IDENTIFIERS.subList(0, 2), sorted(appenderator.getSegments()));
 
       // getRowCount
-      Assert.assertEquals(2, appenderator.getRowCount(IDENTIFIERS.get(0)));
-      Assert.assertEquals(1, appenderator.getRowCount(IDENTIFIERS.get(1)));
+      Assertions.assertEquals(2, appenderator.getRowCount(IDENTIFIERS.get(0)));
+      Assertions.assertEquals(1, appenderator.getRowCount(IDENTIFIERS.get(1)));
       thrown = false;
       try {
         appenderator.getRowCount(IDENTIFIERS.get(2));
@@ -129,7 +151,7 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
       catch (IllegalStateException e) {
         thrown = true;
       }
-      Assert.assertTrue(thrown);
+      Assertions.assertTrue(thrown);
 
       // push all
       final SegmentsAndCommitMetadata segmentsAndCommitMetadata = appenderator.push(
@@ -137,31 +159,130 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
           committerSupplier.get(),
           false
       ).get();
-      Assert.assertEquals(
+      Assertions.assertEquals(
           ImmutableMap.of("x", "3"),
-          (Map<String, String>) segmentsAndCommitMetadata.getCommitMetadata()
+          segmentsAndCommitMetadata.getCommitMetadata()
       );
-      Assert.assertEquals(
-          IDENTIFIERS.subList(0, 2),
-          sorted(
-              Lists.transform(
-                  segmentsAndCommitMetadata.getSegments(),
-                  new Function<DataSegment, SegmentIdWithShardSpec>()
-                  {
-                    @Override
-                    public SegmentIdWithShardSpec apply(DataSegment input)
-                    {
-                      return SegmentIdWithShardSpec.fromDataSegment(input);
-                    }
-                  }
-              )
-          )
+      final List<String> segments = Lists.transform(
+          sorted(segmentsAndCommitMetadata.getSegments()),
+          DataSegment::toString
       );
-      Assert.assertEquals(sorted(tester.getPushedSegments()), sorted(segmentsAndCommitMetadata.getSegments()));
+      Assertions.assertEquals(
+          List.of(
+              DataSegment.builder(IDENTIFIERS.get(0).asSegmentId())
+                         .shardSpec(IDENTIFIERS.get(0).getShardSpec())
+                         .dimensions(List.of("dim"))
+                         .metrics(List.of("count", "met"))
+                         .totalRows(2)
+                         .build()
+                         .toString(),
+              DataSegment.builder(IDENTIFIERS.get(1).asSegmentId())
+                         .shardSpec(IDENTIFIERS.get(1).getShardSpec())
+                         .dimensions(List.of("dim"))
+                         .metrics(List.of("count", "met"))
+                         .totalRows(1)
+                         .build()
+                         .toString()
+          ), segments);
+      Assertions.assertEquals(Lists.transform(sorted(tester.getPushedSegments()), DataSegment::toString), segments);
+
+      SegmentGenerationMetrics segmentGenerationMetrics = tester.getMetrics();
+      Assertions.assertEquals(2, segmentGenerationMetrics.numPersists());
+      Assertions.assertEquals(3, segmentGenerationMetrics.rowOutput());
+      Assertions.assertTrue(segmentGenerationMetrics.persistTimeNanos() > 0);
+      Assertions.assertEquals(
+          segmentGenerationMetrics.persistTimeNanos() / 1_000_000,
+          segmentGenerationMetrics.persistTimeMillis()
+      );
+      Assertions.assertTrue(segmentGenerationMetrics.persistCpuTime() > 0);
+
+      Assertions.assertTrue(segmentGenerationMetrics.mergeTimeNanos() > 0);
+      Assertions.assertEquals(
+          segmentGenerationMetrics.mergeTimeNanos() / 1_000_000,
+          segmentGenerationMetrics.mergeTimeMillis()
+      );
+      Assertions.assertTrue(segmentGenerationMetrics.mergeCpuTime() > 0);
 
       // clear
       appenderator.clear();
-      Assert.assertTrue(appenderator.getSegments().isEmpty());
+      Assertions.assertTrue(appenderator.getSegments().isEmpty());
+    }
+  }
+
+  @Test
+  public void testPushFailure() throws Exception
+  {
+    try (final StreamAppenderatorTester tester =
+             new StreamAppenderatorTester.Builder().maxRowsInMemory(2)
+                                                   .basePersistDirectory(temporaryFolder.newFolder())
+                                                   .enablePushFailure(true)
+                                                   .build()) {
+      final Appenderator appenderator = tester.getAppenderator();
+      boolean thrown;
+
+      final ConcurrentMap<String, String> commitMetadata = new ConcurrentHashMap<>();
+      final Supplier<Committer> committerSupplier = committerSupplierFromConcurrentMap(commitMetadata);
+
+      // startJob
+      Assertions.assertEquals(null, appenderator.startJob());
+
+      // getDataSource
+      Assertions.assertEquals(StreamAppenderatorTester.DATASOURCE, appenderator.getDataSource());
+
+      // add
+      commitMetadata.put("x", "1");
+      Assertions.assertEquals(
+          1,
+          appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), committerSupplier)
+                      .getNumRowsInSegment()
+      );
+
+      commitMetadata.put("x", "2");
+      Assertions.assertEquals(
+          2,
+          appenderator.add(IDENTIFIERS.get(0), ir("2000", "bar", 2), committerSupplier)
+                      .getNumRowsInSegment()
+      );
+
+      commitMetadata.put("x", "3");
+      Assertions.assertEquals(
+          1,
+          appenderator.add(IDENTIFIERS.get(1), ir("2000", "qux", 4), committerSupplier)
+                      .getNumRowsInSegment()
+      );
+
+      // getSegments
+      Assertions.assertEquals(IDENTIFIERS.subList(0, 2), sorted(appenderator.getSegments()));
+
+      // getRowCount
+      Assertions.assertEquals(2, appenderator.getRowCount(IDENTIFIERS.get(0)));
+      Assertions.assertEquals(1, appenderator.getRowCount(IDENTIFIERS.get(1)));
+      thrown = false;
+      try {
+        appenderator.getRowCount(IDENTIFIERS.get(2));
+      }
+      catch (IllegalStateException e) {
+        thrown = true;
+      }
+      Assertions.assertTrue(thrown);
+
+      // push all
+      final ListenableFuture<SegmentsAndCommitMetadata> segmentsAndCommitMetadata = appenderator.push(
+          appenderator.getSegments(),
+          committerSupplier.get(),
+          false
+      );
+
+      final ExecutionException e = Assertions.assertThrows(
+          ExecutionException.class,
+          segmentsAndCommitMetadata::get
+      );
+
+      final Throwable nestedCause = e.getCause().getCause();
+      Assertions.assertTrue(nestedCause instanceof IOException);
+      Assertions.assertTrue(nestedCause.getMessage().startsWith("Push failure test"));
+      SegmentGenerationMetrics segmentGenerationMetrics = tester.getMetrics();
+      Assertions.assertEquals(1, segmentGenerationMetrics.failedHandoffs());
     }
   }
 
@@ -173,7 +294,6 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
             new StreamAppenderatorTester.Builder().maxRowsInMemory(100)
                                                   .maxSizeInBytes(1024)
                                                   .basePersistDirectory(temporaryFolder.newFolder())
-                                                  .enablePushFailure(true)
                                                   .skipBytesInMemoryOverheadCheck(true)
                                                   .build()) {
       final Appenderator appenderator = tester.getAppenderator();
@@ -199,19 +319,18 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
 
       appenderator.startJob();
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), committerSupplier);
-      //expectedSizeInBytes = 44(map overhead) + 28 (TimeAndDims overhead) + 56 (aggregator metrics) + 54 (dimsKeySize) = 182 + 1 byte when null handling is enabled
-      int nullHandlingOverhead = NullHandling.sqlCompatible() ? 1 : 0;
-      Assert.assertEquals(
-          182 + nullHandlingOverhead,
+      int nullHandlingOverhead = 1;
+      Assertions.assertEquals(
+          190 + nullHandlingOverhead,
           ((StreamAppenderator) appenderator).getBytesInMemory(IDENTIFIERS.get(0))
       );
       appenderator.add(IDENTIFIERS.get(1), ir("2000", "bar", 1), committerSupplier);
-      Assert.assertEquals(
-          182 + nullHandlingOverhead,
+      Assertions.assertEquals(
+          190 + nullHandlingOverhead,
           ((StreamAppenderator) appenderator).getBytesInMemory(IDENTIFIERS.get(1))
       );
       appenderator.close();
-      Assert.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
     }
   }
 
@@ -223,7 +342,6 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
             new StreamAppenderatorTester.Builder().maxRowsInMemory(100)
                                                   .maxSizeInBytes(1024)
                                                   .basePersistDirectory(temporaryFolder.newFolder())
-                                                  .enablePushFailure(true)
                                                   .skipBytesInMemoryOverheadCheck(true)
                                                   .build()) {
       final Appenderator appenderator = tester.getAppenderator();
@@ -249,16 +367,16 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
 
       appenderator.startJob();
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), committerSupplier);
-      //expectedSizeInBytes = 44(map overhead) + 28 (TimeAndDims overhead) + 56 (aggregator metrics) + 54 (dimsKeySize) = 182
-      int nullHandlingOverhead = NullHandling.sqlCompatible() ? 1 : 0;
-      Assert.assertEquals(182 + nullHandlingOverhead, ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory());
+      //expectedSizeInBytes = 44(map overhead) + 28 (TimeAndDims overhead) + 56 (aggregator metrics) + 54 (dimsKeySize) = 190
+      int nullHandlingOverhead = 1;
+      Assertions.assertEquals(190 + nullHandlingOverhead, ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory());
       appenderator.add(IDENTIFIERS.get(1), ir("2000", "bar", 1), committerSupplier);
-      Assert.assertEquals(
-          364 + 2 * nullHandlingOverhead,
+      Assertions.assertEquals(
+          380 + 2 * nullHandlingOverhead,
           ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory()
       );
       appenderator.close();
-      Assert.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
     }
   }
 
@@ -270,7 +388,6 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
             new StreamAppenderatorTester.Builder().maxRowsInMemory(100)
                                                   .maxSizeInBytes(15000)
                                                   .basePersistDirectory(temporaryFolder.newFolder())
-                                                  .enablePushFailure(true)
                                                   .build()) {
       final Appenderator appenderator = tester.getAppenderator();
       final AtomicInteger eventCount = new AtomicInteger(0);
@@ -296,22 +413,22 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
       appenderator.startJob();
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), committerSupplier);
       // Still under maxSizeInBytes after the add. Hence, we do not persist yet
-      //expectedSizeInBytes = 44(map overhead) + 28 (TimeAndDims overhead) + 56 (aggregator metrics) + 54 (dimsKeySize) = 182 + 1 byte when null handling is enabled
-      int nullHandlingOverhead = NullHandling.sqlCompatible() ? 1 : 0;
-      int currentInMemoryIndexSize = 182 + nullHandlingOverhead;
+      //expectedSizeInBytes = 44(map overhead) + 28 (TimeAndDims overhead) + 56 (aggregator metrics) + 54 (dimsKeySize) = 190 + 1 byte when null handling is enabled
+      int nullHandlingOverhead = 1;
+      int currentInMemoryIndexSize = 190 + nullHandlingOverhead;
       int sinkSizeOverhead = 1 * StreamAppenderator.ROUGH_OVERHEAD_PER_SINK;
       // currHydrant in the sink still has > 0 bytesInMemory since we do not persist yet
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize,
           ((StreamAppenderator) appenderator).getBytesInMemory(IDENTIFIERS.get(0))
       );
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize + sinkSizeOverhead,
           ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory()
       );
 
       // We do multiple more adds to the same sink to cause persist.
-      for (int i = 0; i < 53; i++) {
+      for (int i = 0; i < 50; i++) {
         appenderator.add(IDENTIFIERS.get(0), ir("2000", "bar_" + i, 1), committerSupplier);
       }
       sinkSizeOverhead = 1 * StreamAppenderator.ROUGH_OVERHEAD_PER_SINK;
@@ -319,7 +436,7 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
       currentInMemoryIndexSize = 0;
       // We are now over maxSizeInBytes after the add. Hence, we do a persist.
       // currHydrant in the sink has 0 bytesInMemory since we just did a persist
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize,
           ((StreamAppenderator) appenderator).getBytesInMemory(IDENTIFIERS.get(0))
       );
@@ -328,7 +445,7 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
       int mappedIndexSize = 1012 + (2 * StreamAppenderator.ROUGH_OVERHEAD_PER_METRIC_COLUMN_HOLDER) +
                             StreamAppenderator.ROUGH_OVERHEAD_PER_DIMENSION_COLUMN_HOLDER +
                             StreamAppenderator.ROUGH_OVERHEAD_PER_TIME_COLUMN_HOLDER;
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize + sinkSizeOverhead + mappedIndexSize,
           ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory()
       );
@@ -336,25 +453,25 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
       // Add a single row after persisted
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "bob", 1), committerSupplier);
       // currHydrant in the sink still has > 0 bytesInMemory since we do not persist yet
-      currentInMemoryIndexSize = 182 + nullHandlingOverhead;
-      Assert.assertEquals(
+      currentInMemoryIndexSize = 190 + nullHandlingOverhead;
+      Assertions.assertEquals(
           currentInMemoryIndexSize,
           ((StreamAppenderator) appenderator).getBytesInMemory(IDENTIFIERS.get(0))
       );
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize + sinkSizeOverhead + mappedIndexSize,
           ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory()
       );
 
       // We do multiple more adds to the same sink to cause persist.
-      for (int i = 0; i < 31; i++) {
+      for (int i = 0; i < 30; i++) {
         appenderator.add(IDENTIFIERS.get(0), ir("2000", "bar_" + i, 1), committerSupplier);
       }
       // currHydrant size is 0 since we just persist all indexes to disk.
       currentInMemoryIndexSize = 0;
       // We are now over maxSizeInBytes after the add. Hence, we do a persist.
       // currHydrant in the sink has 0 bytesInMemory since we just did a persist
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize,
           ((StreamAppenderator) appenderator).getBytesInMemory(IDENTIFIERS.get(0))
       );
@@ -364,17 +481,17 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
       mappedIndexSize = 2 * (1012 + (2 * StreamAppenderator.ROUGH_OVERHEAD_PER_METRIC_COLUMN_HOLDER) +
                              StreamAppenderator.ROUGH_OVERHEAD_PER_DIMENSION_COLUMN_HOLDER +
                              StreamAppenderator.ROUGH_OVERHEAD_PER_TIME_COLUMN_HOLDER);
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize + sinkSizeOverhead + mappedIndexSize,
           ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory()
       );
       appenderator.close();
-      Assert.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
-      Assert.assertEquals(0, ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory());
+      Assertions.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(0, ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory());
     }
   }
 
-  @Test(expected = RuntimeException.class)
+  @Test
   public void testTaskFailAsPersistCannotFreeAnyMoreMemory() throws Exception
   {
     try (
@@ -382,7 +499,6 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
             new StreamAppenderatorTester.Builder().maxRowsInMemory(100)
                                                   .maxSizeInBytes(5180)
                                                   .basePersistDirectory(temporaryFolder.newFolder())
-                                                  .enablePushFailure(true)
                                                   .build()) {
       final Appenderator appenderator = tester.getAppenderator();
       final AtomicInteger eventCount = new AtomicInteger(0);
@@ -406,7 +522,10 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
       };
 
       appenderator.startJob();
-      appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), committerSupplier);
+      Assertions.assertThrows(
+          RuntimeException.class,
+          () -> appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), committerSupplier)
+      );
     }
   }
 
@@ -418,7 +537,6 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
             new StreamAppenderatorTester.Builder().maxRowsInMemory(100)
                                                   .maxSizeInBytes(10)
                                                   .basePersistDirectory(temporaryFolder.newFolder())
-                                                  .enablePushFailure(true)
                                                   .skipBytesInMemoryOverheadCheck(true)
                                                   .build()) {
       final Appenderator appenderator = tester.getAppenderator();
@@ -445,13 +563,13 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
       appenderator.startJob();
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), committerSupplier);
       // Expected 0 since we persisted after the add
-      Assert.assertEquals(
+      Assertions.assertEquals(
           0,
           ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory()
       );
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), committerSupplier);
       // Expected 0 since we persisted after the add
-      Assert.assertEquals(
+      Assertions.assertEquals(
           0,
           ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory()
       );
@@ -466,7 +584,6 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
             new StreamAppenderatorTester.Builder().maxRowsInMemory(100)
                                                   .maxSizeInBytes(10000)
                                                   .basePersistDirectory(temporaryFolder.newFolder())
-                                                  .enablePushFailure(true)
                                                   .build()) {
       final Appenderator appenderator = tester.getAppenderator();
       final AtomicInteger eventCount = new AtomicInteger(0);
@@ -493,10 +610,10 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), committerSupplier);
 
       // Still under maxSizeInBytes after the add. Hence, we do not persist yet
-      int nullHandlingOverhead = NullHandling.sqlCompatible() ? 1 : 0;
-      int currentInMemoryIndexSize = 182 + nullHandlingOverhead;
+      int nullHandlingOverhead = 1;
+      int currentInMemoryIndexSize = 190 + nullHandlingOverhead;
       int sinkSizeOverhead = 1 * StreamAppenderator.ROUGH_OVERHEAD_PER_SINK;
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize + sinkSizeOverhead,
           ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory()
       );
@@ -504,8 +621,8 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
       // Close with row still in memory (no persist)
       appenderator.close();
 
-      Assert.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
-      Assert.assertEquals(0, ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory());
+      Assertions.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(0, ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory());
     }
   }
 
@@ -517,7 +634,6 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
             new StreamAppenderatorTester.Builder().maxRowsInMemory(100)
                                                   .maxSizeInBytes(31100)
                                                   .basePersistDirectory(temporaryFolder.newFolder())
-                                                  .enablePushFailure(true)
                                                   .build()) {
       final Appenderator appenderator = tester.getAppenderator();
       final AtomicInteger eventCount = new AtomicInteger(0);
@@ -545,20 +661,20 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
       appenderator.add(IDENTIFIERS.get(1), ir("2000", "bar", 1), committerSupplier);
 
       // Still under maxSizeInBytes after the add. Hence, we do not persist yet
-      //expectedSizeInBytes = 44(map overhead) + 28 (TimeAndDims overhead) + 56 (aggregator metrics) + 54 (dimsKeySize) = 182 + 1 byte when null handling is enabled
-      int nullHandlingOverhead = NullHandling.sqlCompatible() ? 1 : 0;
-      int currentInMemoryIndexSize = 182 + nullHandlingOverhead;
+      //expectedSizeInBytes = 44(map overhead) + 28 (TimeAndDims overhead) + 56 (aggregator metrics) + 54 (dimsKeySize) = 190 + 1 byte when null handling is enabled
+      int nullHandlingOverhead = 1;
+      int currentInMemoryIndexSize = 190 + nullHandlingOverhead;
       int sinkSizeOverhead = 2 * StreamAppenderator.ROUGH_OVERHEAD_PER_SINK;
       // currHydrant in the sink still has > 0 bytesInMemory since we do not persist yet
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize,
           ((StreamAppenderator) appenderator).getBytesInMemory(IDENTIFIERS.get(0))
       );
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize,
           ((StreamAppenderator) appenderator).getBytesInMemory(IDENTIFIERS.get(1))
       );
-      Assert.assertEquals(
+      Assertions.assertEquals(
           (2 * currentInMemoryIndexSize) + sinkSizeOverhead,
           ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory()
       );
@@ -573,11 +689,11 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
       currentInMemoryIndexSize = 0;
       // We are now over maxSizeInBytes after the add. Hence, we do a persist.
       // currHydrant in the sink has 0 bytesInMemory since we just did a persist
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize,
           ((StreamAppenderator) appenderator).getBytesInMemory(IDENTIFIERS.get(0))
       );
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize,
           ((StreamAppenderator) appenderator).getBytesInMemory(IDENTIFIERS.get(1))
       );
@@ -586,7 +702,7 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
       int mappedIndexSize = 2 * (1012 + (2 * StreamAppenderator.ROUGH_OVERHEAD_PER_METRIC_COLUMN_HOLDER) +
                                  StreamAppenderator.ROUGH_OVERHEAD_PER_DIMENSION_COLUMN_HOLDER +
                                  StreamAppenderator.ROUGH_OVERHEAD_PER_TIME_COLUMN_HOLDER);
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize + sinkSizeOverhead + mappedIndexSize,
           ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory()
       );
@@ -594,48 +710,51 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
       // Add a single row after persisted to sink 0
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "bob", 1), committerSupplier);
       // currHydrant in the sink still has > 0 bytesInMemory since we do not persist yet
-      currentInMemoryIndexSize = 182 + nullHandlingOverhead;
-      Assert.assertEquals(
+      currentInMemoryIndexSize = 190 + nullHandlingOverhead;
+      Assertions.assertEquals(
           currentInMemoryIndexSize,
           ((StreamAppenderator) appenderator).getBytesInMemory(IDENTIFIERS.get(0))
       );
-      Assert.assertEquals(
+      Assertions.assertEquals(
           0,
           ((StreamAppenderator) appenderator).getBytesInMemory(IDENTIFIERS.get(1))
       );
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize + sinkSizeOverhead + mappedIndexSize,
           ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory()
       );
       // Now add a single row to sink 1
       appenderator.add(IDENTIFIERS.get(1), ir("2000", "bob", 1), committerSupplier);
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize,
           ((StreamAppenderator) appenderator).getBytesInMemory(IDENTIFIERS.get(0))
       );
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize,
           ((StreamAppenderator) appenderator).getBytesInMemory(IDENTIFIERS.get(1))
       );
-      Assert.assertEquals(
+      Assertions.assertEquals(
           (2 * currentInMemoryIndexSize) + sinkSizeOverhead + mappedIndexSize,
           ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory()
       );
 
       // We do multiple more adds to the both sink to cause persist.
-      for (int i = 0; i < 34; i++) {
+      for (int i = 0; i < 33; i++) {
         appenderator.add(IDENTIFIERS.get(0), ir("2000", "bar_" + i, 1), committerSupplier);
-        appenderator.add(IDENTIFIERS.get(1), ir("2000", "bar_" + i, 1), committerSupplier);
+        if (i < 32) {
+          // adding the last one puts us over the limit,
+          appenderator.add(IDENTIFIERS.get(1), ir("2000", "bar_" + i, 1), committerSupplier);
+        }
       }
       // currHydrant size is 0 since we just persist all indexes to disk.
       currentInMemoryIndexSize = 0;
       // We are now over maxSizeInBytes after the add. Hence, we do a persist.
       // currHydrant in the sink has 0 bytesInMemory since we just did a persist
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize,
           ((StreamAppenderator) appenderator).getBytesInMemory(IDENTIFIERS.get(0))
       );
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize,
           ((StreamAppenderator) appenderator).getBytesInMemory(IDENTIFIERS.get(1))
       );
@@ -645,13 +764,13 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
       mappedIndexSize = 2 * (2 * (1012 + (2 * StreamAppenderator.ROUGH_OVERHEAD_PER_METRIC_COLUMN_HOLDER) +
                                   StreamAppenderator.ROUGH_OVERHEAD_PER_DIMENSION_COLUMN_HOLDER +
                                   StreamAppenderator.ROUGH_OVERHEAD_PER_TIME_COLUMN_HOLDER));
-      Assert.assertEquals(
+      Assertions.assertEquals(
           currentInMemoryIndexSize + sinkSizeOverhead + mappedIndexSize,
           ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory()
       );
       appenderator.close();
-      Assert.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
-      Assert.assertEquals(0, ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory());
+      Assertions.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(0, ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory());
     }
   }
 
@@ -663,7 +782,6 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
             new StreamAppenderatorTester.Builder().maxRowsInMemory(100)
                                                   .maxSizeInBytes(-1)
                                                   .basePersistDirectory(temporaryFolder.newFolder())
-                                                  .enablePushFailure(true)
                                                   .build()) {
       final Appenderator appenderator = tester.getAppenderator();
       final AtomicInteger eventCount = new AtomicInteger(0);
@@ -686,26 +804,26 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
         };
       };
 
-      Assert.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.startJob();
-      Assert.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), committerSupplier);
       //we still calculate the size even when ignoring it to make persist decision
-      int nullHandlingOverhead = NullHandling.sqlCompatible() ? 1 : 0;
-      Assert.assertEquals(
-          182 + nullHandlingOverhead,
+      int nullHandlingOverhead = 1;
+      Assertions.assertEquals(
+          190 + nullHandlingOverhead,
           ((StreamAppenderator) appenderator).getBytesInMemory(IDENTIFIERS.get(0))
       );
-      Assert.assertEquals(1, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(1, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.add(IDENTIFIERS.get(1), ir("2000", "bar", 1), committerSupplier);
       int sinkSizeOverhead = 2 * StreamAppenderator.ROUGH_OVERHEAD_PER_SINK;
-      Assert.assertEquals(
-          (364 + 2 * nullHandlingOverhead) + sinkSizeOverhead,
+      Assertions.assertEquals(
+          (380 + 2 * nullHandlingOverhead) + sinkSizeOverhead,
           ((StreamAppenderator) appenderator).getBytesCurrentlyInMemory()
       );
-      Assert.assertEquals(2, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(2, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.close();
-      Assert.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
     }
   }
 
@@ -716,11 +834,10 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
         final StreamAppenderatorTester tester =
             new StreamAppenderatorTester.Builder().maxRowsInMemory(3)
                                                   .basePersistDirectory(temporaryFolder.newFolder())
-                                                  .enablePushFailure(true)
                                                   .build()) {
       final Appenderator appenderator = tester.getAppenderator();
       final AtomicInteger eventCount = new AtomicInteger(0);
-      final Supplier<Committer> committerSupplier = new Supplier<Committer>()
+      final Supplier<Committer> committerSupplier = new Supplier<>()
       {
         @Override
         public Committer get()
@@ -744,23 +861,23 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
         }
       };
 
-      Assert.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.startJob();
-      Assert.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), committerSupplier);
-      Assert.assertEquals(1, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(1, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.add(IDENTIFIERS.get(1), ir("2000", "bar", 1), committerSupplier);
-      Assert.assertEquals(2, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(2, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.add(IDENTIFIERS.get(1), ir("2000", "bar", 1), committerSupplier);
-      Assert.assertEquals(2, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(2, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "baz", 1), committerSupplier);
-      Assert.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.add(IDENTIFIERS.get(1), ir("2000", "qux", 1), committerSupplier);
-      Assert.assertEquals(1, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(1, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "bob", 1), committerSupplier);
-      Assert.assertEquals(2, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(2, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.persistAll(committerSupplier.get());
-      Assert.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.close();
     }
   }
@@ -794,23 +911,23 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
         };
       };
 
-      Assert.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.startJob();
-      Assert.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), committerSupplier, false);
-      Assert.assertEquals(1, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(1, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.add(IDENTIFIERS.get(1), ir("2000", "bar", 1), committerSupplier, false);
-      Assert.assertEquals(2, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(2, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.add(IDENTIFIERS.get(1), ir("2000", "bar", 1), committerSupplier, false);
-      Assert.assertEquals(2, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(2, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "baz", 1), committerSupplier, false);
-      Assert.assertEquals(3, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(3, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.add(IDENTIFIERS.get(1), ir("2000", "qux", 1), committerSupplier, false);
-      Assert.assertEquals(4, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(4, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "bob", 1), committerSupplier, false);
-      Assert.assertEquals(5, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(5, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.persistAll(committerSupplier.get());
-      Assert.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
+      Assertions.assertEquals(0, ((StreamAppenderator) appenderator).getRowsInMemory());
       appenderator.close();
     }
   }
@@ -818,18 +935,17 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
   @Test
   public void testRestoreFromDisk() throws Exception
   {
-    final RealtimeTuningConfig tuningConfig;
+    final AppenderatorConfig tuningConfig;
     try (
         final StreamAppenderatorTester tester =
             new StreamAppenderatorTester.Builder().maxRowsInMemory(2)
                                                   .basePersistDirectory(temporaryFolder.newFolder())
-                                                  .enablePushFailure(true)
                                                   .build()) {
       final Appenderator appenderator = tester.getAppenderator();
       tuningConfig = tester.getTuningConfig();
 
       final AtomicInteger eventCount = new AtomicInteger(0);
-      final Supplier<Committer> committerSupplier = new Supplier<Committer>()
+      final Supplier<Committer> committerSupplier = new Supplier<>()
       {
         @Override
         public Committer get()
@@ -870,60 +986,59 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
           final StreamAppenderatorTester tester2 =
               new StreamAppenderatorTester.Builder().maxRowsInMemory(2)
                                                     .basePersistDirectory(tuningConfig.getBasePersistDirectory())
-                                                    .enablePushFailure(true)
-                                                    .build()) {
+                                                     .build()) {
         final Appenderator appenderator2 = tester2.getAppenderator();
-        Assert.assertEquals(ImmutableMap.of("eventCount", 4), appenderator2.startJob());
-        Assert.assertEquals(ImmutableList.of(IDENTIFIERS.get(0)), appenderator2.getSegments());
-        Assert.assertEquals(4, appenderator2.getRowCount(IDENTIFIERS.get(0)));
+        Assertions.assertEquals(ImmutableMap.of("eventCount", 4), appenderator2.startJob());
+        Assertions.assertEquals(ImmutableList.of(IDENTIFIERS.get(0)), appenderator2.getSegments());
+        Assertions.assertEquals(4, appenderator2.getRowCount(IDENTIFIERS.get(0)));
       }
     }
   }
 
-  @Test(timeout = 60_000L)
+  @Test
+  @Timeout(value = 60_000L, unit = TimeUnit.MILLISECONDS)
   public void testTotalRowCount() throws Exception
   {
     try (
         final StreamAppenderatorTester tester =
             new StreamAppenderatorTester.Builder().maxRowsInMemory(3)
                                                   .basePersistDirectory(temporaryFolder.newFolder())
-                                                  .enablePushFailure(true)
                                                   .build()) {
       final Appenderator appenderator = tester.getAppenderator();
       final ConcurrentMap<String, String> commitMetadata = new ConcurrentHashMap<>();
       final Supplier<Committer> committerSupplier = committerSupplierFromConcurrentMap(commitMetadata);
 
-      Assert.assertEquals(0, appenderator.getTotalRowCount());
+      Assertions.assertEquals(0, appenderator.getTotalRowCount());
       appenderator.startJob();
-      Assert.assertEquals(0, appenderator.getTotalRowCount());
+      Assertions.assertEquals(0, appenderator.getTotalRowCount());
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), committerSupplier);
-      Assert.assertEquals(1, appenderator.getTotalRowCount());
+      Assertions.assertEquals(1, appenderator.getTotalRowCount());
       appenderator.add(IDENTIFIERS.get(1), ir("2000", "bar", 1), committerSupplier);
-      Assert.assertEquals(2, appenderator.getTotalRowCount());
+      Assertions.assertEquals(2, appenderator.getTotalRowCount());
 
       appenderator.persistAll(committerSupplier.get()).get();
-      Assert.assertEquals(2, appenderator.getTotalRowCount());
+      Assertions.assertEquals(2, appenderator.getTotalRowCount());
       appenderator.drop(IDENTIFIERS.get(0)).get();
-      Assert.assertEquals(1, appenderator.getTotalRowCount());
+      Assertions.assertEquals(1, appenderator.getTotalRowCount());
       appenderator.drop(IDENTIFIERS.get(1)).get();
-      Assert.assertEquals(0, appenderator.getTotalRowCount());
+      Assertions.assertEquals(0, appenderator.getTotalRowCount());
 
       appenderator.add(IDENTIFIERS.get(2), ir("2001", "bar", 1), committerSupplier);
-      Assert.assertEquals(1, appenderator.getTotalRowCount());
+      Assertions.assertEquals(1, appenderator.getTotalRowCount());
       appenderator.add(IDENTIFIERS.get(2), ir("2001", "baz", 1), committerSupplier);
-      Assert.assertEquals(2, appenderator.getTotalRowCount());
+      Assertions.assertEquals(2, appenderator.getTotalRowCount());
       appenderator.add(IDENTIFIERS.get(2), ir("2001", "qux", 1), committerSupplier);
-      Assert.assertEquals(3, appenderator.getTotalRowCount());
+      Assertions.assertEquals(3, appenderator.getTotalRowCount());
       appenderator.add(IDENTIFIERS.get(2), ir("2001", "bob", 1), committerSupplier);
-      Assert.assertEquals(4, appenderator.getTotalRowCount());
+      Assertions.assertEquals(4, appenderator.getTotalRowCount());
 
       appenderator.persistAll(committerSupplier.get()).get();
-      Assert.assertEquals(4, appenderator.getTotalRowCount());
+      Assertions.assertEquals(4, appenderator.getTotalRowCount());
       appenderator.drop(IDENTIFIERS.get(2)).get();
-      Assert.assertEquals(0, appenderator.getTotalRowCount());
+      Assertions.assertEquals(0, appenderator.getTotalRowCount());
 
       appenderator.close();
-      Assert.assertEquals(0, appenderator.getTotalRowCount());
+      Assertions.assertEquals(0, appenderator.getTotalRowCount());
     }
   }
 
@@ -943,23 +1058,51 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", "invalid_met"), Committers.nilSupplier());
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), Committers.nilSupplier());
 
-      Assert.assertEquals(1, rowIngestionMeters.getProcessed());
-      Assert.assertEquals(1, rowIngestionMeters.getProcessedWithError());
-      Assert.assertEquals(0, rowIngestionMeters.getUnparseable());
-      Assert.assertEquals(0, rowIngestionMeters.getThrownAway());
+      Assertions.assertEquals(1, rowIngestionMeters.getProcessed());
+      Assertions.assertEquals(1, rowIngestionMeters.getProcessedWithError());
+      Assertions.assertEquals(0, rowIngestionMeters.getUnparseable());
+      Assertions.assertEquals(0, rowIngestionMeters.getThrownAway());
     }
   }
 
   @Test
-  public void testQueryByIntervals() throws Exception
+  public void testDelayedDrop() throws Exception
   {
+    class TestScheduledThreadPoolExecutor extends ScheduledThreadPoolExecutor
+    {
+      ScheduledFuture<?> scheduledFuture;
+
+      public TestScheduledThreadPoolExecutor()
+      {
+        super(1);
+      }
+
+      @Override
+      public ScheduledFuture<?> schedule(
+          Runnable command,
+          long delay, TimeUnit unit
+      )
+      {
+        ScheduledFuture<?> future = super.schedule(command, delay, unit);
+        scheduledFuture = future;
+        return future;
+      }
+
+      ScheduledFuture<?> getLastScheduledFuture()
+      {
+        return scheduledFuture;
+      }
+    }
+
     try (
         final StreamAppenderatorTester tester =
             new StreamAppenderatorTester.Builder().maxRowsInMemory(2)
                                                   .basePersistDirectory(temporaryFolder.newFolder())
-                                                  .enablePushFailure(true)
+                                                  .withSegmentDropDelayInMilli(1000)
                                                   .build()) {
       final Appenderator appenderator = tester.getAppenderator();
+      TestScheduledThreadPoolExecutor testExec = new TestScheduledThreadPoolExecutor();
+      ((StreamAppenderator) appenderator).setExec(testExec);
 
       appenderator.startJob();
       appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), Suppliers.ofInstance(Committers.nil()));
@@ -983,17 +1126,653 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
                                            .granularity(Granularities.DAY)
                                            .build();
 
+      appenderator.drop(IDENTIFIERS.get(0)).get();
+
+      // segment 0 won't be dropped immediately
       final List<Result<TimeseriesResultValue>> results1 =
           QueryPlus.wrap(query1).run(appenderator, ResponseContext.createEmpty()).toList();
-      Assert.assertEquals(
-          "query1",
+      Assertions.assertEquals(
           ImmutableList.of(
               new Result<>(
                   DateTimes.of("2000"),
                   new TimeseriesResultValue(ImmutableMap.of("count", 3L, "met", 7L))
               )
           ),
-          results1
+          results1,
+          "query1"
+      );
+
+      // segment 0 would eventually be dropped at some time after 1 secs drop delay
+      testExec.getLastScheduledFuture().get(5000, TimeUnit.MILLISECONDS);
+
+      final List<Result<TimeseriesResultValue>> results = QueryPlus.wrap(query1)
+                                                                   .run(appenderator, ResponseContext.createEmpty())
+                                                                   .toList();
+      List<Result<TimeseriesResultValue>> expectedResults =
+          ImmutableList.of(
+              new Result<>(
+                  DateTimes.of("2000"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 1L, "met", 4L))
+              )
+          );
+      Assertions.assertEquals(expectedResults, results, "query after dropped");
+    }
+  }
+
+  @Test
+  public void testRegisterUpgradedPendingSegmentReturnsAnnouncedWhenBaseSinkExists() throws Exception
+  {
+    try (
+        final StreamAppenderatorTester tester =
+            new StreamAppenderatorTester.Builder().maxRowsInMemory(2)
+                                                  .basePersistDirectory(temporaryFolder.newFolder())
+                                                  .build()) {
+      final StreamAppenderator appenderator = (StreamAppenderator) tester.getAppenderator();
+      appenderator.startJob();
+      // Create the base sink for IDENTIFIERS.get(0) so the upgrade can be announced against it.
+      appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), Suppliers.ofInstance(Committers.nil()));
+
+      final StreamAppenderator.PendingSegmentUpgradeResult outcome = appenderator.registerUpgradedPendingSegment(
+          PendingSegmentRecord.create(
+              si("2000/2001", "B", 1),
+              si("2000/2001", "B", 1).asSegmentId().toString(),
+              IDENTIFIERS.get(0).asSegmentId().toString(),
+              IDENTIFIERS.get(0).asSegmentId().toString(),
+              StreamAppenderatorTester.DATASOURCE
+          )
+      );
+
+      Assertions.assertEquals(StreamAppenderator.PendingSegmentUpgradeResult.ANNOUNCED, outcome);
+    }
+  }
+
+  @Test
+  public void testRegisterUpgradedPendingSegmentReturnsSkippedUnknownBaseWhenBaseNotHeld() throws Exception
+  {
+    try (
+        final StreamAppenderatorTester tester =
+            new StreamAppenderatorTester.Builder().maxRowsInMemory(2)
+                                                  .basePersistDirectory(temporaryFolder.newFolder())
+                                                  .build()) {
+      final StreamAppenderator appenderator = (StreamAppenderator) tester.getAppenderator();
+      appenderator.startJob();
+
+      // No sink has ever been created for the upgradedFromSegmentId below, so this task cannot announce it.
+      // This is the case where the upgrade request reached the wrong task.
+      final StreamAppenderator.PendingSegmentUpgradeResult outcome = appenderator.registerUpgradedPendingSegment(
+          PendingSegmentRecord.create(
+              si("2050/2051", "Z", 1),
+              si("2050/2051", "Z", 1).asSegmentId().toString(),
+              si("2050/2051", "Y", 0).asSegmentId().toString(),
+              si("2050/2051", "Y", 0).asSegmentId().toString(),
+              StreamAppenderatorTester.DATASOURCE
+          )
+      );
+
+      Assertions.assertEquals(StreamAppenderator.PendingSegmentUpgradeResult.SKIPPED_UNKNOWN_BASE, outcome);
+    }
+  }
+
+  @Test
+  public void testQueryBySegments_withSegmentVersionUpgrades() throws Exception
+  {
+    try (
+        final StreamAppenderatorTester tester =
+            new StreamAppenderatorTester.Builder().maxRowsInMemory(2)
+                                                  .basePersistDirectory(temporaryFolder.newFolder())
+                                                  .build()) {
+
+      final StreamAppenderator appenderator = (StreamAppenderator) tester.getAppenderator();
+      appenderator.startJob();
+
+      appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), Suppliers.ofInstance(Committers.nil()));
+      appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 2), Suppliers.ofInstance(Committers.nil()));
+      // Segment0 for interval upgraded after appends
+      appenderator.registerUpgradedPendingSegment(
+          PendingSegmentRecord.create(
+              si("2000/2001", "B", 1),
+              si("2000/2001", "B", 1).asSegmentId().toString(),
+              IDENTIFIERS.get(0).asSegmentId().toString(),
+              IDENTIFIERS.get(0).asSegmentId().toString(),
+              StreamAppenderatorTester.DATASOURCE
+          )
+      );
+
+      // Segment1 allocated for version B
+      appenderator.add(si("2000/2001", "B", 2), ir("2000", "foo", 4), Suppliers.ofInstance(Committers.nil()));
+
+      appenderator.add(IDENTIFIERS.get(2), ir("2001", "foo", 8), Suppliers.ofInstance(Committers.nil()));
+      appenderator.add(IDENTIFIERS.get(2), ir("2001T01", "foo", 16), Suppliers.ofInstance(Committers.nil()));
+      // Concurrent replace registers a segment version upgrade for the second interval
+      appenderator.registerUpgradedPendingSegment(
+          PendingSegmentRecord.create(
+              si("2001/2002", "B", 1),
+              si("2001/2002", "B", 1).asSegmentId().toString(),
+              IDENTIFIERS.get(2).asSegmentId().toString(),
+              IDENTIFIERS.get(2).asSegmentId().toString(),
+              StreamAppenderatorTester.DATASOURCE
+          )
+      );
+      appenderator.add(IDENTIFIERS.get(2), ir("2001T02", "foo", 32), Suppliers.ofInstance(Committers.nil()));
+      appenderator.add(IDENTIFIERS.get(2), ir("2001T03", "foo", 64), Suppliers.ofInstance(Committers.nil()));
+      // Another Concurrent replace registers upgrade with version C for the second interval
+      appenderator.registerUpgradedPendingSegment(
+          PendingSegmentRecord.create(
+              si("2001/2002", "C", 7),
+              si("2001/2002", "C", 7).asSegmentId().toString(),
+              IDENTIFIERS.get(2).asSegmentId().toString(),
+              IDENTIFIERS.get(2).asSegmentId().toString(),
+              StreamAppenderatorTester.DATASOURCE
+          )
+      );
+
+
+      // Query1: segment #2
+      final TimeseriesQuery query1 = Druids.newTimeseriesQueryBuilder()
+                                           .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                           .aggregators(
+                                               Arrays.asList(
+                                                   new LongSumAggregatorFactory("count", "count"),
+                                                   new LongSumAggregatorFactory("met", "met")
+                                               )
+                                           )
+                                           .granularity(Granularities.DAY)
+                                           .intervals(
+                                               new MultipleSpecificSegmentSpec(
+                                                   ImmutableList.of(
+                                                       new SegmentDescriptor(
+                                                           IDENTIFIERS.get(2).getInterval(),
+                                                           IDENTIFIERS.get(2).getVersion(),
+                                                           IDENTIFIERS.get(2).getShardSpec().getPartitionNum()
+                                                       )
+                                                   )
+                                               )
+                                           )
+                                           .build();
+      final TimeseriesQuery query1_B = Druids.newTimeseriesQueryBuilder()
+                                           .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                           .aggregators(
+                                               Arrays.asList(
+                                                   new LongSumAggregatorFactory("count", "count"),
+                                                   new LongSumAggregatorFactory("met", "met")
+                                               )
+                                           )
+                                           .granularity(Granularities.DAY)
+                                           .intervals(
+                                               new MultipleSpecificSegmentSpec(
+                                                   ImmutableList.of(
+                                                       new SegmentDescriptor(
+                                                           IDENTIFIERS.get(2).getInterval(),
+                                                           "B",
+                                                           1
+                                                       )
+                                                   )
+                                               )
+                                           )
+                                           .build();
+      final TimeseriesQuery query1_C = Druids.newTimeseriesQueryBuilder()
+                                           .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                           .aggregators(
+                                               Arrays.asList(
+                                                   new LongSumAggregatorFactory("count", "count"),
+                                                   new LongSumAggregatorFactory("met", "met")
+                                               )
+                                           )
+                                           .granularity(Granularities.DAY)
+                                           .intervals(
+                                               new MultipleSpecificSegmentSpec(
+                                                   ImmutableList.of(
+                                                       new SegmentDescriptor(
+                                                           IDENTIFIERS.get(2).getInterval(),
+                                                           "C",
+                                                           7
+                                                       )
+                                                   )
+                                               )
+                                           )
+                                           .build();
+
+      final List<Result<TimeseriesResultValue>> results1 =
+          QueryPlus.wrap(query1).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(
+          ImmutableList.of(
+              new Result<>(
+                  DateTimes.of("2001"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 4L, "met", 120L))
+              )
+          ),
+          results1,
+          "query1"
+      );
+      final List<Result<TimeseriesResultValue>> results1_B =
+          QueryPlus.wrap(query1_B).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(
+          ImmutableList.of(
+              new Result<>(
+                  DateTimes.of("2001"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 4L, "met", 120L))
+              )
+          ),
+          results1_B,
+          "query1_B"
+      );
+      final List<Result<TimeseriesResultValue>> results1_C =
+          QueryPlus.wrap(query1_C).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(
+          ImmutableList.of(
+              new Result<>(
+                  DateTimes.of("2001"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 4L, "met", 120L))
+              )
+          ),
+          results1_C,
+          "query1_C"
+      );
+
+      // Query2: segment #2, partial
+      final TimeseriesQuery query2 = Druids.newTimeseriesQueryBuilder()
+                                           .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                           .aggregators(
+                                               Arrays.asList(
+                                                   new LongSumAggregatorFactory("count", "count"),
+                                                   new LongSumAggregatorFactory("met", "met")
+                                               )
+                                           )
+                                           .granularity(Granularities.DAY)
+                                           .intervals(
+                                               new MultipleSpecificSegmentSpec(
+                                                   ImmutableList.of(
+                                                       new SegmentDescriptor(
+                                                           Intervals.of("2001/PT1H"),
+                                                           IDENTIFIERS.get(2).getVersion(),
+                                                           IDENTIFIERS.get(2).getShardSpec().getPartitionNum()
+                                                       )
+                                                   )
+                                               )
+                                           )
+                                           .build();
+      final TimeseriesQuery query2_B = Druids.newTimeseriesQueryBuilder()
+                                           .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                           .aggregators(
+                                               Arrays.asList(
+                                                   new LongSumAggregatorFactory("count", "count"),
+                                                   new LongSumAggregatorFactory("met", "met")
+                                               )
+                                           )
+                                           .granularity(Granularities.DAY)
+                                           .intervals(
+                                               new MultipleSpecificSegmentSpec(
+                                                   ImmutableList.of(
+                                                       new SegmentDescriptor(
+                                                           Intervals.of("2001/PT1H"),
+                                                           "B",
+                                                           1
+                                                       )
+                                                   )
+                                               )
+                                           )
+                                           .build();
+      final TimeseriesQuery query2_C = Druids.newTimeseriesQueryBuilder()
+                                           .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                           .aggregators(
+                                               Arrays.asList(
+                                                   new LongSumAggregatorFactory("count", "count"),
+                                                   new LongSumAggregatorFactory("met", "met")
+                                               )
+                                           )
+                                           .granularity(Granularities.DAY)
+                                           .intervals(
+                                               new MultipleSpecificSegmentSpec(
+                                                   ImmutableList.of(
+                                                       new SegmentDescriptor(
+                                                           Intervals.of("2001/PT1H"),
+                                                           "C",
+                                                           7
+                                                       )
+                                                   )
+                                               )
+                                           )
+                                           .build();
+
+      final List<Result<TimeseriesResultValue>> results2 =
+          QueryPlus.wrap(query2).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(
+          ImmutableList.of(
+              new Result<>(
+                  DateTimes.of("2001"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 1L, "met", 8L))
+              )
+          ),
+          results2,
+          "query2"
+      );
+      final List<Result<TimeseriesResultValue>> results2_B =
+          QueryPlus.wrap(query2_B).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(
+          ImmutableList.of(
+              new Result<>(
+                  DateTimes.of("2001"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 1L, "met", 8L))
+              )
+          ),
+          results2_B,
+          "query2_B"
+      );
+      final List<Result<TimeseriesResultValue>> results2_C =
+          QueryPlus.wrap(query2_C).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(
+          ImmutableList.of(
+              new Result<>(
+                  DateTimes.of("2001"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 1L, "met", 8L))
+              )
+          ),
+          results2_C,
+          "query2_C"
+      );
+
+      // Query3: segment #2, two disjoint intervals
+      final TimeseriesQuery query3 = Druids.newTimeseriesQueryBuilder()
+                                           .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                           .aggregators(
+                                               Arrays.asList(
+                                                   new LongSumAggregatorFactory("count", "count"),
+                                                   new LongSumAggregatorFactory("met", "met")
+                                               )
+                                           )
+                                           .granularity(Granularities.DAY)
+                                           .intervals(
+                                               new MultipleSpecificSegmentSpec(
+                                                   ImmutableList.of(
+                                                       new SegmentDescriptor(
+                                                           Intervals.of("2001/PT1H"),
+                                                           IDENTIFIERS.get(2).getVersion(),
+                                                           IDENTIFIERS.get(2).getShardSpec().getPartitionNum()
+                                                       ),
+                                                       new SegmentDescriptor(
+                                                           Intervals.of("2001T03/PT1H"),
+                                                           IDENTIFIERS.get(2).getVersion(),
+                                                           IDENTIFIERS.get(2).getShardSpec().getPartitionNum()
+                                                       )
+                                                   )
+                                               )
+                                           )
+                                           .build();
+      final TimeseriesQuery query3_B = Druids.newTimeseriesQueryBuilder()
+                                           .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                           .aggregators(
+                                               Arrays.asList(
+                                                   new LongSumAggregatorFactory("count", "count"),
+                                                   new LongSumAggregatorFactory("met", "met")
+                                               )
+                                           )
+                                           .granularity(Granularities.DAY)
+                                           .intervals(
+                                               new MultipleSpecificSegmentSpec(
+                                                   ImmutableList.of(
+                                                       new SegmentDescriptor(
+                                                           Intervals.of("2001/PT1H"),
+                                                           "B",
+                                                           1
+                                                       ),
+                                                       new SegmentDescriptor(
+                                                           Intervals.of("2001T03/PT1H"),
+                                                           "B",
+                                                           1
+                                                       )
+                                                   )
+                                               )
+                                           )
+                                           .build();
+      final TimeseriesQuery query3_C = Druids.newTimeseriesQueryBuilder()
+                                           .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                           .aggregators(
+                                               Arrays.asList(
+                                                   new LongSumAggregatorFactory("count", "count"),
+                                                   new LongSumAggregatorFactory("met", "met")
+                                               )
+                                           )
+                                           .granularity(Granularities.DAY)
+                                           .intervals(
+                                               new MultipleSpecificSegmentSpec(
+                                                   ImmutableList.of(
+                                                       new SegmentDescriptor(
+                                                           Intervals.of("2001/PT1H"),
+                                                           "C",
+                                                           7
+                                                       ),
+                                                       new SegmentDescriptor(
+                                                           Intervals.of("2001T03/PT1H"),
+                                                           "C",
+                                                           7
+                                                       )
+                                                   )
+                                               )
+                                           )
+                                           .build();
+
+      final List<Result<TimeseriesResultValue>> results3 =
+          QueryPlus.wrap(query3).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(
+          ImmutableList.of(
+              new Result<>(
+                  DateTimes.of("2001"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 2L, "met", 72L))
+              )
+          ),
+          results3,
+          "query3"
+      );
+      final List<Result<TimeseriesResultValue>> results3_B =
+          QueryPlus.wrap(query3_B).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(
+          ImmutableList.of(
+              new Result<>(
+                  DateTimes.of("2001"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 2L, "met", 72L))
+              )
+          ),
+          results3_B,
+          "query3_B"
+      );
+      final List<Result<TimeseriesResultValue>> results3_C =
+          QueryPlus.wrap(query3_C).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(
+          ImmutableList.of(
+              new Result<>(
+                  DateTimes.of("2001"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 2L, "met", 72L))
+              )
+          ),
+          results3_C,
+          "query3_C"
+      );
+
+      final ScanQuery query4 = Druids.newScanQueryBuilder()
+                                     .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                     .intervals(
+                                         new MultipleSpecificSegmentSpec(
+                                             ImmutableList.of(
+                                                 new SegmentDescriptor(
+                                                     Intervals.of("2001/PT1H"),
+                                                     IDENTIFIERS.get(2).getVersion(),
+                                                     IDENTIFIERS.get(2).getShardSpec().getPartitionNum()
+                                                 ),
+                                                 new SegmentDescriptor(
+                                                     Intervals.of("2001T03/PT1H"),
+                                                     IDENTIFIERS.get(2).getVersion(),
+                                                     IDENTIFIERS.get(2).getShardSpec().getPartitionNum()
+                                                 )
+                                             )
+                                         )
+                                     )
+                                     .order(Order.ASCENDING)
+                                     .batchSize(10)
+                                     .resultFormat(ScanQuery.ResultFormat.RESULT_FORMAT_COMPACTED_LIST)
+                                     .build();
+      final ScanQuery query4_B = Druids.newScanQueryBuilder()
+                                     .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                     .intervals(
+                                         new MultipleSpecificSegmentSpec(
+                                             ImmutableList.of(
+                                                 new SegmentDescriptor(
+                                                     Intervals.of("2001/PT1H"),
+                                                     "B",
+                                                     1
+                                                 ),
+                                                 new SegmentDescriptor(
+                                                     Intervals.of("2001T03/PT1H"),
+                                                     "B",
+                                                     1
+                                                 )
+                                             )
+                                         )
+                                     )
+                                     .order(Order.ASCENDING)
+                                     .batchSize(10)
+                                     .resultFormat(ScanQuery.ResultFormat.RESULT_FORMAT_COMPACTED_LIST)
+                                     .build();
+      final ScanQuery query4_C = Druids.newScanQueryBuilder()
+                                     .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                     .intervals(
+                                         new MultipleSpecificSegmentSpec(
+                                             ImmutableList.of(
+                                                 new SegmentDescriptor(
+                                                     Intervals.of("2001/PT1H"),
+                                                     "C",
+                                                     7
+                                                 ),
+                                                 new SegmentDescriptor(
+                                                     Intervals.of("2001T03/PT1H"),
+                                                     "C",
+                                                     7
+                                                 )
+                                             )
+                                         )
+                                     )
+                                     .order(Order.ASCENDING)
+                                     .batchSize(10)
+                                     .resultFormat(ScanQuery.ResultFormat.RESULT_FORMAT_COMPACTED_LIST)
+                                     .build();
+      final List<ScanResultValue> results4 =
+          QueryPlus.wrap(query4).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(2, results4.size()); // 2 segments, 1 row per segment
+      Assertions.assertArrayEquals(new String[]{"__time", "dim", "count", "met"}, results4.get(0).getColumns().toArray());
+      Assertions.assertArrayEquals(
+          new Object[]{DateTimes.of("2001").getMillis(), "foo", 1L, 8L},
+          ((List<Object>) ((List<Object>) results4.get(0).getEvents()).get(0)).toArray()
+      );
+      Assertions.assertArrayEquals(new String[]{"__time", "dim", "count", "met"}, results4.get(0).getColumns().toArray());
+      Assertions.assertArrayEquals(
+          new Object[]{DateTimes.of("2001T03").getMillis(), "foo", 1L, 64L},
+          ((List<Object>) ((List<Object>) results4.get(1).getEvents()).get(0)).toArray()
+      );
+      final List<ScanResultValue> results4_B =
+          QueryPlus.wrap(query4_B).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(2, results4_B.size()); // 2 segments, 1 row per segment
+      Assertions.assertArrayEquals(new String[]{"__time", "dim", "count", "met"}, results4_B.get(0).getColumns().toArray());
+      Assertions.assertArrayEquals(
+          new Object[]{DateTimes.of("2001").getMillis(), "foo", 1L, 8L},
+          ((List<Object>) ((List<Object>) results4_B.get(0).getEvents()).get(0)).toArray()
+      );
+      Assertions.assertArrayEquals(new String[]{"__time", "dim", "count", "met"}, results4_B.get(0).getColumns().toArray());
+      Assertions.assertArrayEquals(
+          new Object[]{DateTimes.of("2001T03").getMillis(), "foo", 1L, 64L},
+          ((List<Object>) ((List<Object>) results4_B.get(1).getEvents()).get(0)).toArray()
+      );
+      final List<ScanResultValue> results4_C =
+          QueryPlus.wrap(query4_C).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(2, results4_C.size()); // 2 segments, 1 row per segment
+      Assertions.assertArrayEquals(new String[]{"__time", "dim", "count", "met"}, results4_C.get(0).getColumns().toArray());
+      Assertions.assertArrayEquals(
+          new Object[]{DateTimes.of("2001").getMillis(), "foo", 1L, 8L},
+          ((List<Object>) ((List<Object>) results4_C.get(0).getEvents()).get(0)).toArray()
+      );
+      Assertions.assertArrayEquals(new String[]{"__time", "dim", "count", "met"}, results4_C.get(0).getColumns().toArray());
+      Assertions.assertArrayEquals(
+          new Object[]{DateTimes.of("2001T03").getMillis(), "foo", 1L, 64L},
+          ((List<Object>) ((List<Object>) results4_C.get(1).getEvents()).get(0)).toArray()
+      );
+    }
+  }
+
+  @Test
+  public void testQueryByIntervals_withSegmentVersionUpgrades() throws Exception
+  {
+    try (
+        final StreamAppenderatorTester tester =
+            new StreamAppenderatorTester.Builder().maxRowsInMemory(2)
+                                                  .basePersistDirectory(temporaryFolder.newFolder())
+                                                  .build()) {
+      final StreamAppenderator appenderator = (StreamAppenderator) tester.getAppenderator();
+
+      appenderator.startJob();
+
+      appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), Suppliers.ofInstance(Committers.nil()));
+      appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 2), Suppliers.ofInstance(Committers.nil()));
+      // Segment0 for interval upgraded after appends
+      appenderator.registerUpgradedPendingSegment(
+          PendingSegmentRecord.create(
+              si("2000/2001", "B", 1),
+              si("2000/2001", "B", 1).asSegmentId().toString(),
+              IDENTIFIERS.get(0).asSegmentId().toString(),
+              IDENTIFIERS.get(0).asSegmentId().toString(),
+              StreamAppenderatorTester.DATASOURCE
+          )
+      );
+
+      // Segment1 allocated for version B
+      appenderator.add(si("2000/2001", "B", 2), ir("2000", "foo", 4), Suppliers.ofInstance(Committers.nil()));
+
+      appenderator.add(IDENTIFIERS.get(2), ir("2001", "foo", 8), Suppliers.ofInstance(Committers.nil()));
+      appenderator.add(IDENTIFIERS.get(2), ir("2001T01", "foo", 16), Suppliers.ofInstance(Committers.nil()));
+      // Concurrent replace registers a segment version upgrade for the second interval
+      appenderator.registerUpgradedPendingSegment(
+          PendingSegmentRecord.create(
+              si("2001/2002", "B", 1),
+              si("2001/2002", "B", 1).asSegmentId().toString(),
+              IDENTIFIERS.get(2).asSegmentId().toString(),
+              IDENTIFIERS.get(2).asSegmentId().toString(),
+              StreamAppenderatorTester.DATASOURCE
+          )
+      );
+      appenderator.add(IDENTIFIERS.get(2), ir("2001T02", "foo", 32), Suppliers.ofInstance(Committers.nil()));
+      appenderator.add(IDENTIFIERS.get(2), ir("2001T03", "foo", 64), Suppliers.ofInstance(Committers.nil()));
+      // Another Concurrent replace registers upgrade with version C for the second interval
+      appenderator.registerUpgradedPendingSegment(
+          PendingSegmentRecord.create(
+              si("2001/2002", "C", 7),
+              si("2001/2002", "C", 7).asSegmentId().toString(),
+              IDENTIFIERS.get(2).asSegmentId().toString(),
+              IDENTIFIERS.get(2).asSegmentId().toString(),
+              StreamAppenderatorTester.DATASOURCE
+          )
+      );
+
+      // Query1: 2000/2001
+      final TimeseriesQuery query1 = Druids.newTimeseriesQueryBuilder()
+                                           .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                           .intervals(ImmutableList.of(Intervals.of("2000/2001")))
+                                           .aggregators(
+                                               Arrays.asList(
+                                                   new LongSumAggregatorFactory("count", "count"),
+                                                   new LongSumAggregatorFactory("met", "met")
+                                               )
+                                           )
+                                           .granularity(Granularities.DAY)
+                                           .build();
+
+      final List<Result<TimeseriesResultValue>> results1 =
+          QueryPlus.wrap(query1).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(
+          ImmutableList.of(
+              new Result<>(
+                  DateTimes.of("2000"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 3L, "met", 7L))
+              )
+          ),
+          results1,
+          "query1"
       );
 
       // Query2: 2000/2002
@@ -1011,8 +1790,7 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
 
       final List<Result<TimeseriesResultValue>> results2 =
           QueryPlus.wrap(query2).run(appenderator, ResponseContext.createEmpty()).toList();
-      Assert.assertEquals(
-          "query2",
+      Assertions.assertEquals(
           ImmutableList.of(
               new Result<>(
                   DateTimes.of("2000"),
@@ -1023,7 +1801,8 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
                   new TimeseriesResultValue(ImmutableMap.of("count", 4L, "met", 120L))
               )
           ),
-          results2
+          results2,
+          "query2"
       );
 
       // Query3: 2000/2001T01
@@ -1041,7 +1820,7 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
 
       final List<Result<TimeseriesResultValue>> results3 =
           QueryPlus.wrap(query3).run(appenderator, ResponseContext.createEmpty()).toList();
-      Assert.assertEquals(
+      Assertions.assertEquals(
           ImmutableList.of(
               new Result<>(
                   DateTimes.of("2000"),
@@ -1075,7 +1854,7 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
 
       final List<Result<TimeseriesResultValue>> results4 =
           QueryPlus.wrap(query4).run(appenderator, ResponseContext.createEmpty()).toList();
-      Assert.assertEquals(
+      Assertions.assertEquals(
           ImmutableList.of(
               new Result<>(
                   DateTimes.of("2000"),
@@ -1088,6 +1867,266 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
           ),
           results4
       );
+
+      // Drop segment
+      appenderator.drop(IDENTIFIERS.get(0)).get();
+      // Drop its upgraded version (Drop happens for each version on handoff)
+      appenderator.drop(si("2000/2001", "B", 1)).get();
+
+      final List<Result<TimeseriesResultValue>> resultsAfterDrop1 =
+          QueryPlus.wrap(query1).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(
+          ImmutableList.of(
+              new Result<>(
+                  DateTimes.of("2000"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 1L, "met", 4L))
+              )
+          ),
+          resultsAfterDrop1
+      );
+
+      final List<Result<TimeseriesResultValue>> resultsAfterDrop2 =
+          QueryPlus.wrap(query2).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(
+          ImmutableList.of(
+              new Result<>(
+                  DateTimes.of("2000"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 1L, "met", 4L))
+              ),
+              new Result<>(
+                  DateTimes.of("2001"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 4L, "met", 120L))
+              )
+          ),
+          resultsAfterDrop2,
+          "query2"
+      );
+
+      final List<Result<TimeseriesResultValue>> resultsAfterDrop3 =
+          QueryPlus.wrap(query3).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(
+          ImmutableList.of(
+              new Result<>(
+                  DateTimes.of("2000"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 1L, "met", 4L))
+              ),
+              new Result<>(
+                  DateTimes.of("2001"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 1L, "met", 8L))
+              )
+          ),
+          resultsAfterDrop3
+      );
+
+      final List<Result<TimeseriesResultValue>> resultsAfterDrop4 =
+          QueryPlus.wrap(query4).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(
+          ImmutableList.of(
+              new Result<>(
+                  DateTimes.of("2000"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 1L, "met", 4L))
+              ),
+              new Result<>(
+                  DateTimes.of("2001"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 2L, "met", 72L))
+              )
+          ),
+          resultsAfterDrop4
+      );
+    }
+  }
+
+  @Test
+  public void testQueryFailWithSecurityValidation() throws Exception
+  {
+    final StubServiceEmitter serviceEmitter = new StubServiceEmitter();
+    final StreamAppenderatorTester tester =
+        new StreamAppenderatorTester.Builder().maxRowsInMemory(2)
+                                              .basePersistDirectory(temporaryFolder.newFolder())
+                                              .withServiceEmitter(serviceEmitter)
+                                              .withPolicyEnforcer(new RestrictAllTablesPolicyEnforcer(null))
+                                              .build();
+    final Appenderator appenderator = tester.getAppenderator();
+
+    appenderator.startJob();
+    appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), Suppliers.ofInstance(Committers.nil()));
+
+    // Query1: no policy restriction, fail
+    final TimeseriesQuery query1 = Druids.newTimeseriesQueryBuilder()
+                                         .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                         .intervals(ImmutableList.of(Intervals.of("2000/2001")))
+                                         .aggregators(ImmutableList.of(new LongSumAggregatorFactory("count", "count")))
+                                         .granularity(Granularities.DAY)
+                                         .build();
+    DruidException e = Assertions.assertThrows(
+        DruidException.class,
+        () -> QueryPlus.wrap(query1)
+                       .run(appenderator, ResponseContext.createEmpty())
+                       .toList()
+    );
+    Assertions.assertEquals(DruidException.Category.FORBIDDEN, e.getCategory());
+    Assertions.assertEquals(DruidException.Persona.OPERATOR, e.getTargetPersona());
+    Assertions.assertEquals(
+        "Failed security validation with segment [foo_2000-01-01T00:00:00.000Z_2001-01-01T00:00:00.000Z_A]",
+        e.getMessage()
+    );
+
+    // Query2: with policy restriction, success
+    RestrictedDataSource restrictedDataSource = RestrictedDataSource.create(
+        TableDataSource.create(StreamAppenderatorTester.DATASOURCE), NoRestrictionPolicy.instance());
+    final TimeseriesQuery query2 = Druids.newTimeseriesQueryBuilder()
+                                         .dataSource(restrictedDataSource)
+                                         .intervals(ImmutableList.of(Intervals.of("2000/2001")))
+                                         .aggregators(ImmutableList.of(new LongSumAggregatorFactory("count", "count")))
+                                         .granularity(Granularities.DAY)
+                                         .build();
+    QueryPlus.wrap(query2).run(appenderator, ResponseContext.createEmpty()).toList();
+  }
+
+  @Test
+  public void testQueryByIntervals() throws Exception
+  {
+    try (
+        final StubServiceEmitter serviceEmitter = new StubServiceEmitter();
+        final StreamAppenderatorTester tester =
+            new StreamAppenderatorTester.Builder().maxRowsInMemory(2)
+                                                  .basePersistDirectory(temporaryFolder.newFolder())
+                                                  .withServiceEmitter(serviceEmitter)
+                                                  .build()) {
+      final Appenderator appenderator = tester.getAppenderator();
+
+      appenderator.startJob();
+      appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), Suppliers.ofInstance(Committers.nil()));
+      appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 2), Suppliers.ofInstance(Committers.nil()));
+      appenderator.add(IDENTIFIERS.get(1), ir("2000", "foo", 4), Suppliers.ofInstance(Committers.nil()));
+      appenderator.add(IDENTIFIERS.get(2), ir("2001", "foo", 8), Suppliers.ofInstance(Committers.nil()));
+      appenderator.add(IDENTIFIERS.get(2), ir("2001T01", "foo", 16), Suppliers.ofInstance(Committers.nil()));
+      appenderator.add(IDENTIFIERS.get(2), ir("2001T02", "foo", 32), Suppliers.ofInstance(Committers.nil()));
+      appenderator.add(IDENTIFIERS.get(2), ir("2001T03", "foo", 64), Suppliers.ofInstance(Committers.nil()));
+
+      // Query1: 2000/2001
+      final TimeseriesQuery query1 = Druids.newTimeseriesQueryBuilder()
+                                           .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                           .intervals(ImmutableList.of(Intervals.of("2000/2001")))
+                                           .aggregators(
+                                               Arrays.asList(
+                                                   new LongSumAggregatorFactory("count", "count"),
+                                                   new LongSumAggregatorFactory("met", "met")
+                                               )
+                                           )
+                                           .granularity(Granularities.DAY)
+                                           .build();
+
+      final List<Result<TimeseriesResultValue>> results1 =
+          QueryPlus.wrap(query1).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(
+          ImmutableList.of(
+              new Result<>(
+                  DateTimes.of("2000"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 3L, "met", 7L))
+              )
+          ),
+          results1,
+          "query1"
+      );
+
+      verifySinkMetrics(
+          serviceEmitter,
+          new HashSet<>(
+              Arrays.asList(
+                  IDENTIFIERS.get(0).asSegmentId().toString(),
+                  IDENTIFIERS.get(1).asSegmentId().toString()
+              )
+          )
+      );
+
+      serviceEmitter.flush();
+
+      // Query3: 2000/2001T01
+      final TimeseriesQuery query3 = Druids.newTimeseriesQueryBuilder()
+                                           .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                           .intervals(ImmutableList.of(Intervals.of("2000/2001T01")))
+                                           .aggregators(
+                                               Arrays.asList(
+                                                   new LongSumAggregatorFactory("count", "count"),
+                                                   new LongSumAggregatorFactory("met", "met")
+                                               )
+                                           )
+                                           .granularity(Granularities.DAY)
+                                           .build();
+
+      final List<Result<TimeseriesResultValue>> results3 =
+          QueryPlus.wrap(query3).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(
+          ImmutableList.of(
+              new Result<>(
+                  DateTimes.of("2000"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 3L, "met", 7L))
+              ),
+              new Result<>(
+                  DateTimes.of("2001"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 1L, "met", 8L))
+              )
+          ),
+          results3
+      );
+
+      verifySinkMetrics(
+          serviceEmitter,
+          new HashSet<>(
+              Arrays.asList(
+                  IDENTIFIERS.get(0).asSegmentId().toString(),
+                  IDENTIFIERS.get(1).asSegmentId().toString(),
+                  IDENTIFIERS.get(2).asSegmentId().toString()
+              )
+          )
+      );
+
+      serviceEmitter.flush();
+
+      // Query4: 2000/2001T01, 2001T03/2001T04
+      final TimeseriesQuery query4 = Druids.newTimeseriesQueryBuilder()
+                                           .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                           .intervals(
+                                               ImmutableList.of(
+                                                   Intervals.of("2000/2001T01"),
+                                                   Intervals.of("2001T03/2001T04")
+                                               )
+                                           )
+                                           .aggregators(
+                                               Arrays.asList(
+                                                   new LongSumAggregatorFactory("count", "count"),
+                                                   new LongSumAggregatorFactory("met", "met")
+                                               )
+                                           )
+                                           .granularity(Granularities.DAY)
+                                           .build();
+
+      final List<Result<TimeseriesResultValue>> results4 =
+          QueryPlus.wrap(query4).run(appenderator, ResponseContext.createEmpty()).toList();
+      Assertions.assertEquals(
+          ImmutableList.of(
+              new Result<>(
+                  DateTimes.of("2000"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 3L, "met", 7L))
+              ),
+              new Result<>(
+                  DateTimes.of("2001"),
+                  new TimeseriesResultValue(ImmutableMap.of("count", 2L, "met", 72L))
+              )
+          ),
+          results4
+      );
+      verifySinkMetrics(
+          serviceEmitter,
+          new HashSet<>(
+              Arrays.asList(
+                  IDENTIFIERS.get(0).asSegmentId().toString(),
+                  IDENTIFIERS.get(1).asSegmentId().toString(),
+                  IDENTIFIERS.get(2).asSegmentId().toString()
+              )
+          )
+      );
     }
   }
 
@@ -1095,10 +2134,11 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
   public void testQueryBySegments() throws Exception
   {
     try (
+        StubServiceEmitter serviceEmitter = new StubServiceEmitter();
         final StreamAppenderatorTester tester =
             new StreamAppenderatorTester.Builder().maxRowsInMemory(2)
                                                   .basePersistDirectory(temporaryFolder.newFolder())
-                                                  .enablePushFailure(true)
+                                                  .withServiceEmitter(serviceEmitter)
                                                   .build()) {
       final Appenderator appenderator = tester.getAppenderator();
 
@@ -1136,16 +2176,27 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
 
       final List<Result<TimeseriesResultValue>> results1 =
           QueryPlus.wrap(query1).run(appenderator, ResponseContext.createEmpty()).toList();
-      Assert.assertEquals(
-          "query1",
+      Assertions.assertEquals(
           ImmutableList.of(
               new Result<>(
                   DateTimes.of("2001"),
                   new TimeseriesResultValue(ImmutableMap.of("count", 4L, "met", 120L))
               )
           ),
-          results1
+          results1,
+          "query1"
       );
+
+      verifySinkMetrics(
+          serviceEmitter,
+          new HashSet<>(
+              Collections.singletonList(
+                  IDENTIFIERS.get(2).asSegmentId().toString()
+              )
+          )
+      );
+
+      serviceEmitter.flush();
 
       // Query2: segment #2, partial
       final TimeseriesQuery query2 = Druids.newTimeseriesQueryBuilder()
@@ -1172,16 +2223,27 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
 
       final List<Result<TimeseriesResultValue>> results2 =
           QueryPlus.wrap(query2).run(appenderator, ResponseContext.createEmpty()).toList();
-      Assert.assertEquals(
-          "query2",
+      Assertions.assertEquals(
           ImmutableList.of(
               new Result<>(
                   DateTimes.of("2001"),
                   new TimeseriesResultValue(ImmutableMap.of("count", 1L, "met", 8L))
               )
           ),
-          results2
+          results2,
+          "query2"
       );
+
+      verifySinkMetrics(
+          serviceEmitter,
+          new HashSet<>(
+              Collections.singletonList(
+                  IDENTIFIERS.get(2).asSegmentId().toString()
+              )
+          )
+      );
+
+      serviceEmitter.flush();
 
       // Query3: segment #2, two disjoint intervals
       final TimeseriesQuery query3 = Druids.newTimeseriesQueryBuilder()
@@ -1213,16 +2275,27 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
 
       final List<Result<TimeseriesResultValue>> results3 =
           QueryPlus.wrap(query3).run(appenderator, ResponseContext.createEmpty()).toList();
-      Assert.assertEquals(
-          "query3",
+      Assertions.assertEquals(
           ImmutableList.of(
               new Result<>(
                   DateTimes.of("2001"),
                   new TimeseriesResultValue(ImmutableMap.of("count", 2L, "met", 72L))
               )
           ),
-          results3
+          results3,
+          "query3"
       );
+
+      verifySinkMetrics(
+          serviceEmitter,
+          new HashSet<>(
+              Collections.singletonList(
+                  IDENTIFIERS.get(2).asSegmentId().toString()
+              )
+          )
+      );
+
+      serviceEmitter.flush();
 
       final ScanQuery query4 = Druids.newScanQueryBuilder()
                                      .dataSource(StreamAppenderatorTester.DATASOURCE)
@@ -1242,23 +2315,377 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
                                              )
                                          )
                                      )
-                                     .order(ScanQuery.Order.ASCENDING)
+                                     .order(Order.ASCENDING)
                                      .batchSize(10)
                                      .resultFormat(ScanQuery.ResultFormat.RESULT_FORMAT_COMPACTED_LIST)
                                      .build();
       final List<ScanResultValue> results4 =
           QueryPlus.wrap(query4).run(appenderator, ResponseContext.createEmpty()).toList();
-      Assert.assertEquals(2, results4.size()); // 2 segments, 1 row per segment
-      Assert.assertArrayEquals(new String[]{"__time", "dim", "count", "met"}, results4.get(0).getColumns().toArray());
-      Assert.assertArrayEquals(
+      Assertions.assertEquals(2, results4.size()); // 2 segments, 1 row per segment
+      Assertions.assertArrayEquals(new String[]{"__time", "dim", "count", "met"}, results4.get(0).getColumns().toArray());
+      Assertions.assertArrayEquals(
           new Object[]{DateTimes.of("2001").getMillis(), "foo", 1L, 8L},
           ((List<Object>) ((List<Object>) results4.get(0).getEvents()).get(0)).toArray()
       );
-      Assert.assertArrayEquals(new String[]{"__time", "dim", "count", "met"}, results4.get(0).getColumns().toArray());
-      Assert.assertArrayEquals(
+      Assertions.assertArrayEquals(new String[]{"__time", "dim", "count", "met"}, results4.get(0).getColumns().toArray());
+      Assertions.assertArrayEquals(
           new Object[]{DateTimes.of("2001T03").getMillis(), "foo", 1L, 64L},
           ((List<Object>) ((List<Object>) results4.get(1).getEvents()).get(0)).toArray()
       );
+
+      verifySinkMetrics(
+          serviceEmitter,
+          new HashSet<>(
+              Collections.singletonList(
+                  IDENTIFIERS.get(2).asSegmentId().toString()
+              )
+          )
+      );
+
+      serviceEmitter.flush();
+    }
+  }
+
+  @Test
+  public void testQueryByIntervalsEmitsQueriedSegmentCountMetric() throws Exception
+  {
+    try (
+        StubServiceEmitter serviceEmitter = new StubServiceEmitter();
+        final StreamAppenderatorTester tester =
+            new StreamAppenderatorTester.Builder().maxRowsInMemory(100)
+                                                  .basePersistDirectory(temporaryFolder.newFolder())
+                                                  .withServiceEmitter(serviceEmitter)
+                                                  .build()) {
+      final Appenderator appenderator = tester.getAppenderator();
+
+      appenderator.startJob();
+      appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), Suppliers.ofInstance(Committers.nil()));
+      appenderator.add(IDENTIFIERS.get(1), ir("2000", "foo", 4), Suppliers.ofInstance(Committers.nil()));
+
+      final TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
+                                          .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                          .intervals(ImmutableList.of(Intervals.of("2000/2001")))
+                                          .aggregators(
+                                              Collections.singletonList(
+                                                  new LongSumAggregatorFactory("count", "count")
+                                              )
+                                          )
+                                          .granularity(Granularities.DAY)
+                                          .build();
+
+      QueryPlus.wrap(query).run(appenderator, ResponseContext.createEmpty()).toList();
+
+      serviceEmitter.verifyEmitted(DefaultQueryMetrics.QUERY_SEGMENTS_COUNT, 1);
+      serviceEmitter.verifyValue(DefaultQueryMetrics.QUERY_SEGMENTS_COUNT, 2L);
+    }
+  }
+
+  @Test
+  public void testQueryEmitsQueriedSegmentCountCountsSinksNotHydrants() throws Exception
+  {
+    try (
+        StubServiceEmitter serviceEmitter = new StubServiceEmitter();
+        final StreamAppenderatorTester tester =
+            new StreamAppenderatorTester.Builder().maxRowsInMemory(100)
+                                                  .basePersistDirectory(temporaryFolder.newFolder())
+                                                  .withServiceEmitter(serviceEmitter)
+                                                  .build()) {
+      final Appenderator appenderator = tester.getAppenderator();
+
+      appenderator.startJob();
+      // Persisting between adds to the same identifier swaps the current FireHydrant for a new one, so this single
+      // Sink ends up with multiple hydrants. query/segments/count must report 1 (the Sink/segment), not the hydrant count.
+      appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), Suppliers.ofInstance(Committers.nil()));
+      appenderator.persistAll(Committers.nil()).get();
+      appenderator.add(IDENTIFIERS.get(0), ir("2000", "bar", 2), Suppliers.ofInstance(Committers.nil()));
+      appenderator.persistAll(Committers.nil()).get();
+      appenderator.add(IDENTIFIERS.get(0), ir("2000", "baz", 3), Suppliers.ofInstance(Committers.nil()));
+
+      final TimeseriesQuery query = Druids.newTimeseriesQueryBuilder()
+                                          .dataSource(StreamAppenderatorTester.DATASOURCE)
+                                          .intervals(ImmutableList.of(Intervals.of("2000/2001")))
+                                          .aggregators(
+                                              Collections.singletonList(
+                                                  new LongSumAggregatorFactory("count", "count")
+                                              )
+                                          )
+                                          .granularity(Granularities.DAY)
+                                          .build();
+
+      QueryPlus.wrap(query).run(appenderator, ResponseContext.createEmpty()).toList();
+
+      serviceEmitter.verifyEmitted(DefaultQueryMetrics.QUERY_SEGMENTS_COUNT, 1);
+      serviceEmitter.verifyValue(DefaultQueryMetrics.QUERY_SEGMENTS_COUNT, 1L);
+    }
+  }
+
+  private void verifySinkMetrics(StubServiceEmitter emitter, Set<String> segmentIds)
+  {
+    final int segments = segmentIds.size();
+    emitter.verifyEmitted(DefaultQueryMetrics.QUERY_CPU_TIME, 1);
+    emitter.verifyEmitted(DefaultQueryMetrics.QUERY_SEGMENTS_COUNT, 1);
+    Assertions.assertEquals(segments, emitter.getMetricEvents(DefaultQueryMetrics.QUERY_SEGMENT_TIME).size());
+    Assertions.assertEquals(segments, emitter.getMetricEvents(DefaultQueryMetrics.QUERY_SEGMENT_AND_CACHE_TIME).size());
+    Assertions.assertEquals(segments, emitter.getMetricEvents(DefaultQueryMetrics.QUERY_WAIT_TIME).size());
+    for (String id : segmentIds) {
+      Assertions.assertTrue(emitter.getMetricEvents(DefaultQueryMetrics.QUERY_SEGMENT_TIME).stream().anyMatch(value -> value.getUserDims().containsValue(id)));
+      Assertions.assertTrue(emitter.getMetricEvents(DefaultQueryMetrics.QUERY_SEGMENT_AND_CACHE_TIME).stream().anyMatch(value -> value.getUserDims().containsValue(id)));
+      Assertions.assertTrue(emitter.getMetricEvents(DefaultQueryMetrics.QUERY_WAIT_TIME).stream().anyMatch(value -> value.getUserDims().containsValue(id)));
+    }
+  }
+
+  @Test
+  public void testSchemaAnnouncement() throws Exception
+  {
+    TestSchemaAnnouncer dataSegmentAnnouncer = new TestSchemaAnnouncer();
+
+    try (final StreamAppenderatorTester tester =
+             new StreamAppenderatorTester.Builder().maxRowsInMemory(2)
+                                                   .basePersistDirectory(temporaryFolder.newFolder())
+                                                   .build(dataSegmentAnnouncer, CentralizedDatasourceSchemaConfig.create())) {
+      final StreamAppenderator appenderator = (StreamAppenderator) tester.getAppenderator();
+
+      final ConcurrentMap<String, String> commitMetadata = new ConcurrentHashMap<>();
+      final Supplier<Committer> committerSupplier = committerSupplierFromConcurrentMap(commitMetadata);
+      StreamAppenderator.SinkSchemaAnnouncer sinkSchemaAnnouncer = appenderator.getSinkSchemaAnnouncer();
+
+      // startJob
+      Assertions.assertEquals(null, appenderator.startJob());
+
+      // getDataSource
+      Assertions.assertEquals(StreamAppenderatorTester.DATASOURCE, appenderator.getDataSource());
+
+      // add first row
+      commitMetadata.put("x", "1");
+      appenderator.add(IDENTIFIERS.get(0), ir("2000", "foo", 1), committerSupplier);
+
+      // trigger schema computation
+      sinkSchemaAnnouncer.computeAndAnnounce();
+
+      // verify schema
+      List<Pair<String, SegmentSchemas>> announcedAbsoluteSchema = dataSegmentAnnouncer.getAnnouncedAbsoluteSchema();
+      List<Pair<String, SegmentSchemas>> announcedDeltaSchema = dataSegmentAnnouncer.getAnnouncedDeltaSchema();
+
+      Assertions.assertEquals(1, announcedAbsoluteSchema.size());
+      Assertions.assertEquals(1, announcedDeltaSchema.size());
+
+      // verify absolute schema
+      Assertions.assertEquals(appenderator.getId(), announcedAbsoluteSchema.get(0).lhs);
+      List<SegmentSchemas.SegmentSchema> segmentSchemas = announcedAbsoluteSchema.get(0).rhs.getSegmentSchemaList();
+      Assertions.assertEquals(1, segmentSchemas.size());
+      SegmentSchemas.SegmentSchema absoluteSchemaId1Row1 = segmentSchemas.get(0);
+      Assertions.assertEquals(IDENTIFIERS.get(0).asSegmentId().toString(), absoluteSchemaId1Row1.getSegmentId());
+      Assertions.assertEquals(1, absoluteSchemaId1Row1.getNumRows().intValue());
+      Assertions.assertFalse(absoluteSchemaId1Row1.isDelta());
+      Assertions.assertEquals(Collections.emptyList(), absoluteSchemaId1Row1.getUpdatedColumns());
+      Assertions.assertEquals(Lists.newArrayList("__time", "dim", "count", "met"), absoluteSchemaId1Row1.getNewColumns());
+      Assertions.assertEquals(
+          ImmutableMap.of("__time", ColumnType.LONG, "count", ColumnType.LONG, "dim", ColumnType.STRING, "met", ColumnType.LONG),
+          absoluteSchemaId1Row1.getColumnTypeMap());
+
+      // verify delta schema
+      Assertions.assertEquals(appenderator.getId(), announcedDeltaSchema.get(0).lhs);
+      segmentSchemas = announcedDeltaSchema.get(0).rhs.getSegmentSchemaList();
+      SegmentSchemas.SegmentSchema deltaSchemaId1Row1 = segmentSchemas.get(0);
+      Assertions.assertEquals(1, segmentSchemas.size());
+      Assertions.assertEquals(IDENTIFIERS.get(0).asSegmentId().toString(), deltaSchemaId1Row1.getSegmentId());
+      Assertions.assertEquals(1, deltaSchemaId1Row1.getNumRows().intValue());
+      // absolute schema is sent for a new sink
+      Assertions.assertFalse(deltaSchemaId1Row1.isDelta());
+      Assertions.assertEquals(Collections.emptyList(), deltaSchemaId1Row1.getUpdatedColumns());
+      Assertions.assertEquals(Lists.newArrayList("__time", "dim", "count", "met"), deltaSchemaId1Row1.getNewColumns());
+      Assertions.assertEquals(
+          ImmutableMap.of("__time", ColumnType.LONG, "count", ColumnType.LONG, "dim", ColumnType.STRING, "met", ColumnType.LONG),
+          deltaSchemaId1Row1.getColumnTypeMap());
+
+      dataSegmentAnnouncer.clear();
+
+      // add second row
+      commitMetadata.put("x", "2");
+      appenderator.add(IDENTIFIERS.get(0), ir("2000", "bar", 2), committerSupplier);
+
+      // trigger schema computation
+      sinkSchemaAnnouncer.computeAndAnnounce();
+
+      // verify schema
+      announcedAbsoluteSchema = dataSegmentAnnouncer.getAnnouncedAbsoluteSchema();
+      announcedDeltaSchema = dataSegmentAnnouncer.getAnnouncedDeltaSchema();
+
+      Assertions.assertEquals(1, announcedAbsoluteSchema.size());
+      Assertions.assertEquals(1, announcedDeltaSchema.size());
+
+      // verify absolute schema
+      Assertions.assertEquals(appenderator.getId(), announcedAbsoluteSchema.get(0).lhs);
+      segmentSchemas = announcedAbsoluteSchema.get(0).rhs.getSegmentSchemaList();
+      Assertions.assertEquals(1, segmentSchemas.size());
+      SegmentSchemas.SegmentSchema absoluteSchemaId1Row2 = segmentSchemas.get(0);
+      Assertions.assertEquals(IDENTIFIERS.get(0).asSegmentId().toString(), absoluteSchemaId1Row2.getSegmentId());
+      Assertions.assertEquals(2, absoluteSchemaId1Row2.getNumRows().intValue());
+      Assertions.assertFalse(absoluteSchemaId1Row2.isDelta());
+      Assertions.assertEquals(Collections.emptyList(), absoluteSchemaId1Row2.getUpdatedColumns());
+      Assertions.assertEquals(Lists.newArrayList("__time", "dim", "count", "met"), absoluteSchemaId1Row2.getNewColumns());
+      Assertions.assertEquals(
+          ImmutableMap.of("__time", ColumnType.LONG, "count", ColumnType.LONG, "dim", ColumnType.STRING, "met", ColumnType.LONG),
+          absoluteSchemaId1Row2.getColumnTypeMap());
+
+      // verify delta
+      Assertions.assertEquals(appenderator.getId(), announcedDeltaSchema.get(0).lhs);
+      segmentSchemas = announcedDeltaSchema.get(0).rhs.getSegmentSchemaList();
+      SegmentSchemas.SegmentSchema deltaSchemaId1Row2 = segmentSchemas.get(0);
+      Assertions.assertEquals(1, segmentSchemas.size());
+      Assertions.assertEquals(IDENTIFIERS.get(0).asSegmentId().toString(), deltaSchemaId1Row2.getSegmentId());
+      Assertions.assertEquals(2, deltaSchemaId1Row2.getNumRows().intValue());
+      Assertions.assertTrue(deltaSchemaId1Row2.isDelta());
+      Assertions.assertEquals(Collections.emptyList(), deltaSchemaId1Row2.getUpdatedColumns());
+      Assertions.assertEquals(Collections.emptyList(), deltaSchemaId1Row2.getNewColumns());
+      Assertions.assertEquals(Collections.emptyMap(), deltaSchemaId1Row2.getColumnTypeMap());
+
+      dataSegmentAnnouncer.clear();
+
+      // add first row for second segment
+      commitMetadata.put("x", "3");
+      appenderator.add(IDENTIFIERS.get(1), ir("2000", "qux", 4), committerSupplier);
+
+      sinkSchemaAnnouncer.computeAndAnnounce();
+
+      // verify schema
+      announcedAbsoluteSchema = dataSegmentAnnouncer.getAnnouncedAbsoluteSchema();
+      announcedDeltaSchema = dataSegmentAnnouncer.getAnnouncedDeltaSchema();
+
+      Assertions.assertEquals(1, announcedAbsoluteSchema.size());
+      Assertions.assertEquals(1, announcedDeltaSchema.size());
+
+      // verify absolute schema
+      Assertions.assertEquals(appenderator.getId(), announcedAbsoluteSchema.get(0).lhs);
+      segmentSchemas = announcedAbsoluteSchema.get(0).rhs.getSegmentSchemaList();
+      Assertions.assertEquals(2, segmentSchemas.size());
+      SegmentSchemas.SegmentSchema absoluteSchemaId2Row1 =
+          segmentSchemas.stream()
+                        .filter(v -> v.getSegmentId().equals(IDENTIFIERS.get(1).asSegmentId().toString()))
+                        .findFirst()
+                        .get();
+      Assertions.assertEquals(IDENTIFIERS.get(1).asSegmentId().toString(), absoluteSchemaId2Row1.getSegmentId());
+      Assertions.assertEquals(1, absoluteSchemaId2Row1.getNumRows().intValue());
+      Assertions.assertFalse(absoluteSchemaId2Row1.isDelta());
+      Assertions.assertEquals(Collections.emptyList(), absoluteSchemaId2Row1.getUpdatedColumns());
+      Assertions.assertEquals(Lists.newArrayList("__time", "dim", "count", "met"), absoluteSchemaId2Row1.getNewColumns());
+      Assertions.assertEquals(
+          ImmutableMap.of("__time", ColumnType.LONG, "count", ColumnType.LONG, "dim", ColumnType.STRING, "met", ColumnType.LONG),
+          absoluteSchemaId2Row1.getColumnTypeMap());
+
+      // verify delta
+      Assertions.assertEquals(appenderator.getId(), announcedDeltaSchema.get(0).lhs);
+      segmentSchemas = announcedDeltaSchema.get(0).rhs.getSegmentSchemaList();
+      SegmentSchemas.SegmentSchema deltaSchemaId2Row1 =
+          segmentSchemas.stream()
+                        .filter(v -> v.getSegmentId().equals(IDENTIFIERS.get(1).asSegmentId().toString()))
+                        .findFirst()
+                        .get();
+      Assertions.assertEquals(1, segmentSchemas.size());
+      Assertions.assertEquals(IDENTIFIERS.get(1).asSegmentId().toString(), deltaSchemaId2Row1.getSegmentId());
+      Assertions.assertEquals(1, deltaSchemaId2Row1.getNumRows().intValue());
+      Assertions.assertFalse(deltaSchemaId2Row1.isDelta());
+      Assertions.assertEquals(Collections.emptyList(), deltaSchemaId2Row1.getUpdatedColumns());
+      Assertions.assertEquals(Lists.newArrayList("__time", "dim", "count", "met"), deltaSchemaId2Row1.getNewColumns());
+      Assertions.assertEquals(
+          ImmutableMap.of("__time", ColumnType.LONG, "count", ColumnType.LONG, "dim", ColumnType.STRING, "met", ColumnType.LONG),
+          deltaSchemaId2Row1.getColumnTypeMap());
+    }
+  }
+
+
+  @Test
+  public void test_dropSegment_unlocksInterval() throws Exception
+  {
+    final List<Interval> unlockedIntervals = Collections.synchronizedList(new ArrayList<>());
+    final TaskIntervalUnlocker intervalUnlocker = unlockedIntervals::add;
+
+    try (final StreamAppenderatorTester tester = new StreamAppenderatorTester.Builder()
+        .basePersistDirectory(temporaryFolder.newFolder())
+        .maxRowsInMemory(2)
+        .releaseLocksOnHandoff(true)
+        .taskIntervalUnlocker(intervalUnlocker)
+        .build()) {
+      final Appenderator appenderator = tester.getAppenderator();
+
+      appenderator.startJob();
+
+      final SegmentIdWithShardSpec segmentId1 = si("2000-01-01T00:00/2000-01-01T01:00", "version1", 0);
+      final SegmentIdWithShardSpec segmentId2 = si("2000-01-01T01:00/2000-01-01T02:00", "version1", 0);
+
+      final InputRow row1 = new MapBasedInputRow(
+          DateTimes.of("2000"),
+          List.of("dim1"),
+          Map.of("dim1", "bar", "met1", 1)
+      );
+
+      final InputRow row2 = new MapBasedInputRow(
+          DateTimes.of("2000-01-01T02:30"),
+          List.of("dim1"),
+          Map.of("dim1", "baz", "met1", 1)
+      );
+
+      appenderator.add(segmentId1, row1, Suppliers.ofInstance(Committers.nil()), false);
+      appenderator.add(segmentId2, row2, Suppliers.ofInstance(Committers.nil()), false);
+
+      Assertions.assertEquals(2, appenderator.getSegments().size());
+
+      appenderator.drop(segmentId1).get();
+
+      synchronized (unlockedIntervals) {
+        Assertions.assertEquals(1, unlockedIntervals.size());
+        Assertions.assertEquals(segmentId1.getInterval(), unlockedIntervals.get(0));
+      }
+
+      Assertions.assertEquals(1, appenderator.getSegments().size());
+      Assertions.assertTrue(appenderator.getSegments().contains(segmentId2));
+    }
+  }
+
+  @Test
+  public void test_dropSegment_skipsUnlockInterval_ifOverlappingSinkIsActive() throws Exception
+  {
+    final List<Interval> unlockedIntervals = Collections.synchronizedList(new ArrayList<>());
+    final TaskIntervalUnlocker intervalUnlocker = unlockedIntervals::add;
+
+    try (final StreamAppenderatorTester tester = new StreamAppenderatorTester.Builder()
+        .basePersistDirectory(temporaryFolder.newFolder())
+        .maxRowsInMemory(2)
+        .releaseLocksOnHandoff(true)
+        .taskIntervalUnlocker(intervalUnlocker)
+        .build()) {
+      final Appenderator appenderator = tester.getAppenderator();
+
+      appenderator.startJob();
+
+      final SegmentIdWithShardSpec segmentId1 = si("2000-01-01T00:00/2000-01-01T01:00", "version1", 0);
+      final SegmentIdWithShardSpec segmentId2 = si("2000-01-01T00:30/2000-01-01T01:30", "version2", 0);
+
+      final InputRow row1 = new MapBasedInputRow(
+          DateTimes.of("2000"),
+          List.of("dim1"),
+          Map.of("dim1", "bar", "met1", 1)
+      );
+
+      final InputRow row2 = new MapBasedInputRow(
+          DateTimes.of("2000-01-01T02:30"),
+          List.of("dim1"),
+          Map.of("dim1", "baz", "met1", 1)
+      );
+
+      appenderator.add(segmentId1, row1, Suppliers.ofInstance(Committers.nil()), false);
+      appenderator.add(segmentId2, row2, Suppliers.ofInstance(Committers.nil()), false);
+
+      Assertions.assertEquals(2, appenderator.getSegments().size());
+
+      appenderator.drop(segmentId1).get();
+
+      synchronized (unlockedIntervals) {
+        Assertions.assertEquals(0, unlockedIntervals.size());
+      }
+
+      Assertions.assertEquals(1, appenderator.getSegments().size());
+      Assertions.assertTrue(appenderator.getSegments().contains(segmentId2));
     }
   }
 
@@ -1288,7 +2715,7 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
 
   private static Supplier<Committer> committerSupplierFromConcurrentMap(final ConcurrentMap<String, String> map)
   {
-    return new Supplier<Committer>()
+    return new Supplier<>()
     {
       @Override
       public Committer get()
@@ -1331,4 +2758,73 @@ public class StreamAppenderatorTest extends InitializedNullHandlingTest
     return xsSorted;
   }
 
+  static class TestSchemaAnnouncer implements DataSegmentAnnouncer
+  {
+    private List<Pair<String, SegmentSchemas>> announcedAbsoluteSchema = new ArrayList<>();
+    private List<Pair<String, SegmentSchemas>> announcedDeltaSchema = new ArrayList<>();
+    private List<String> unnanouncementEvents = new ArrayList<>();
+
+    @Override
+    public void announceSegment(DataSegment segment)
+    {
+      // noop
+    }
+
+    @Override
+    public void unannounceSegment(DataSegment segment)
+    {
+      // noop
+    }
+
+    @Override
+    public void announceSegments(Iterable<DataSegment> segments)
+    {
+      // noop
+    }
+
+    @Override
+    public void unannounceSegments(Iterable<DataSegment> segments)
+    {
+      // noop
+    }
+
+    @Override
+    public void announceSegmentSchemas(
+        String taskId,
+        SegmentSchemas segmentSchemas,
+        @Nullable SegmentSchemas segmentSchemasChange
+    )
+    {
+      announcedAbsoluteSchema.add(Pair.of(taskId, segmentSchemas));
+      announcedDeltaSchema.add(Pair.of(taskId, segmentSchemasChange));
+    }
+
+    @Override
+    public void removeSegmentSchemasForTask(String taskId)
+    {
+      unnanouncementEvents.add(taskId);
+    }
+
+    public List<Pair<String, SegmentSchemas>> getAnnouncedAbsoluteSchema()
+    {
+      return announcedAbsoluteSchema;
+    }
+
+    public List<Pair<String, SegmentSchemas>> getAnnouncedDeltaSchema()
+    {
+      return announcedDeltaSchema;
+    }
+
+    public List<String> getUnnanouncementEvents()
+    {
+      return unnanouncementEvents;
+    }
+
+    public void clear()
+    {
+      announcedAbsoluteSchema.clear();
+      announcedDeltaSchema.clear();
+      unnanouncementEvents.clear();
+    }
+  }
 }

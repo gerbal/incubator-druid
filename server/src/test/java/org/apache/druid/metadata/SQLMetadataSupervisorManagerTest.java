@@ -31,14 +31,12 @@ import org.apache.druid.indexing.overlord.supervisor.autoscaler.SupervisorTaskAu
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.StringUtils;
-import org.junit.After;
-import org.junit.Assert;
-import org.junit.Before;
-import org.junit.BeforeClass;
-import org.junit.Rule;
-import org.junit.Test;
-import org.skife.jdbi.v2.Handle;
-import org.skife.jdbi.v2.tweak.HandleCallback;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.util.Collections;
 import java.util.List;
@@ -52,33 +50,26 @@ public class SQLMetadataSupervisorManagerTest
   private MetadataStorageTablesConfig tablesConfig;
   private SQLMetadataSupervisorManager supervisorManager;
 
-  @Rule
+  @RegisterExtension
   public final TestDerbyConnector.DerbyConnectorRule derbyConnectorRule = new TestDerbyConnector.DerbyConnectorRule();
 
-  @BeforeClass
+  @BeforeAll
   public static void setupStatic()
   {
     MAPPER.registerSubtypes(TestSupervisorSpec.class);
   }
 
-  @After
+  @AfterEach
   public void cleanup()
   {
     connector.getDBI().withHandle(
-        new HandleCallback<Void>()
-        {
-          @Override
-          public Void withHandle(Handle handle)
-          {
-            handle.createStatement(StringUtils.format("DROP TABLE %s", tablesConfig.getSupervisorTable()))
-                  .execute();
-            return null;
-          }
-        }
+        handle -> handle.createStatement(StringUtils.format("DROP TABLE %s", tablesConfig.getSupervisorTable()))
+                .execute()
+
     );
   }
 
-  @Before
+  @BeforeEach
   public void setUp()
   {
     connector = derbyConnectorRule.getConnector();
@@ -93,21 +84,21 @@ public class SQLMetadataSupervisorManagerTest
   {
     final String supervisor1 = "test-supervisor-1";
     final Map<String, String> data1rev1 = ImmutableMap.of("key1-1", "value1-1-1", "key1-2", "value1-2-1");
-    Assert.assertTrue(supervisorManager.getAll().isEmpty());
+    Assertions.assertTrue(supervisorManager.getAll().isEmpty());
     supervisorManager.insert(supervisor1, new TestSupervisorSpec(supervisor1, data1rev1));
     // Test that supervisor was inserted
     Map<String, List<VersionedSupervisorSpec>> supervisorSpecs = supervisorManager.getAll();
-    Assert.assertEquals(1, supervisorSpecs.size());
+    Assertions.assertEquals(1, supervisorSpecs.size());
     Map<String, SupervisorSpec> latestSpecs = supervisorManager.getLatest();
-    Assert.assertEquals(1, latestSpecs.size());
+    Assertions.assertEquals(1, latestSpecs.size());
     // Try delete. Supervisor should not be deleted as it is still active
     int deleteCount = supervisorManager.removeTerminatedSupervisorsOlderThan(System.currentTimeMillis());
     // Test that supervisor was not deleted
-    Assert.assertEquals(0, deleteCount);
+    Assertions.assertEquals(0, deleteCount);
     supervisorSpecs = supervisorManager.getAll();
-    Assert.assertEquals(1, supervisorSpecs.size());
+    Assertions.assertEquals(1, supervisorSpecs.size());
     latestSpecs = supervisorManager.getLatest();
-    Assert.assertEquals(1, latestSpecs.size());
+    Assertions.assertEquals(1, latestSpecs.size());
   }
 
   @Test
@@ -116,24 +107,24 @@ public class SQLMetadataSupervisorManagerTest
     final String supervisor1 = "test-supervisor-1";
     final String datasource1 = "datasource-1";
     final Map<String, String> data1rev1 = ImmutableMap.of("key1-1", "value1-1-1", "key1-2", "value1-2-1");
-    Assert.assertTrue(supervisorManager.getAll().isEmpty());
+    Assertions.assertTrue(supervisorManager.getAll().isEmpty());
     supervisorManager.insert(supervisor1, new TestSupervisorSpec(supervisor1, data1rev1));
     supervisorManager.insert(supervisor1, new NoopSupervisorSpec(supervisor1, ImmutableList.of(datasource1)));
     // Test that supervisor was inserted
     Map<String, List<VersionedSupervisorSpec>> supervisorSpecs = supervisorManager.getAll();
-    Assert.assertEquals(1, supervisorSpecs.size());
-    Assert.assertEquals(2, supervisorSpecs.get(supervisor1).size());
+    Assertions.assertEquals(1, supervisorSpecs.size());
+    Assertions.assertEquals(2, supervisorSpecs.get(supervisor1).size());
     Map<String, SupervisorSpec> latestSpecs = supervisorManager.getLatest();
-    Assert.assertEquals(1, latestSpecs.size());
-    Assert.assertEquals(ImmutableList.of(datasource1), ((NoopSupervisorSpec) latestSpecs.get(supervisor1)).getDataSources());
+    Assertions.assertEquals(1, latestSpecs.size());
+    Assertions.assertEquals(ImmutableList.of(datasource1), ((NoopSupervisorSpec) latestSpecs.get(supervisor1)).getDataSources());
     // Do delete. Supervisor should be deleted as it is terminated
     int deleteCount = supervisorManager.removeTerminatedSupervisorsOlderThan(System.currentTimeMillis());
     // Verify that supervisor was actually deleted
-    Assert.assertEquals(2, deleteCount);
+    Assertions.assertEquals(2, deleteCount);
     supervisorSpecs = supervisorManager.getAll();
-    Assert.assertEquals(0, supervisorSpecs.size());
+    Assertions.assertEquals(0, supervisorSpecs.size());
     latestSpecs = supervisorManager.getLatest();
-    Assert.assertEquals(0, latestSpecs.size());
+    Assertions.assertEquals(0, latestSpecs.size());
   }
 
   @Test
@@ -142,27 +133,27 @@ public class SQLMetadataSupervisorManagerTest
     final String supervisor1 = "test-supervisor-1";
     final String datasource1 = "datasource-1";
     final Map<String, String> data1rev1 = ImmutableMap.of("key1-1", "value1-1-1", "key1-2", "value1-2-1");
-    Assert.assertTrue(supervisorManager.getAll().isEmpty());
+    Assertions.assertTrue(supervisorManager.getAll().isEmpty());
     supervisorManager.insert(supervisor1, new TestSupervisorSpec(supervisor1, data1rev1));
     supervisorManager.insert(supervisor1, new NoopSupervisorSpec(supervisor1, ImmutableList.of(datasource1)));
     // Test that supervisor was inserted
     Map<String, List<VersionedSupervisorSpec>> supervisorSpecs = supervisorManager.getAll();
-    Assert.assertEquals(1, supervisorSpecs.size());
-    Assert.assertEquals(2, supervisorSpecs.get(supervisor1).size());
+    Assertions.assertEquals(1, supervisorSpecs.size());
+    Assertions.assertEquals(2, supervisorSpecs.get(supervisor1).size());
     Map<String, SupervisorSpec> latestSpecs = supervisorManager.getLatest();
-    Assert.assertEquals(1, latestSpecs.size());
-    Assert.assertEquals(ImmutableList.of(datasource1), ((NoopSupervisorSpec) latestSpecs.get(supervisor1)).getDataSources());
+    Assertions.assertEquals(1, latestSpecs.size());
+    Assertions.assertEquals(ImmutableList.of(datasource1), ((NoopSupervisorSpec) latestSpecs.get(supervisor1)).getDataSources());
     // Do delete. Supervisor should not be deleted. Supervisor is terminated but it was created just now so it's
     // created timestamp will be later than the timestamp 2012-01-01T00:00:00Z
     int deleteCount = supervisorManager.removeTerminatedSupervisorsOlderThan(DateTimes.of("2012-01-01T00:00:00Z").getMillis());
     // Verify that supervisor was not deleted
-    Assert.assertEquals(0, deleteCount);
+    Assertions.assertEquals(0, deleteCount);
     supervisorSpecs = supervisorManager.getAll();
-    Assert.assertEquals(1, supervisorSpecs.size());
-    Assert.assertEquals(2, supervisorSpecs.get(supervisor1).size());
+    Assertions.assertEquals(1, supervisorSpecs.size());
+    Assertions.assertEquals(2, supervisorSpecs.get(supervisor1).size());
     latestSpecs = supervisorManager.getLatest();
-    Assert.assertEquals(1, latestSpecs.size());
-    Assert.assertEquals(ImmutableList.of(datasource1), ((NoopSupervisorSpec) latestSpecs.get(supervisor1)).getDataSources());
+    Assertions.assertEquals(1, latestSpecs.size());
+    Assertions.assertEquals(ImmutableList.of(datasource1), ((NoopSupervisorSpec) latestSpecs.get(supervisor1)).getDataSources());
   }
 
   @Test
@@ -176,7 +167,7 @@ public class SQLMetadataSupervisorManagerTest
     final Map<String, String> data2rev1 = ImmutableMap.of("key2-1", "value2-1-1", "key2-2", "value2-2-1");
     final Map<String, String> data2rev2 = ImmutableMap.of("key2-3", "value2-3-2", "key2-4", "value2-4-2");
 
-    Assert.assertTrue(supervisorManager.getAll().isEmpty());
+    Assertions.assertTrue(supervisorManager.getAll().isEmpty());
 
     // add 2 supervisors, one revision each, and make sure the state is as expected
     supervisorManager.insert(supervisor1, new TestSupervisorSpec(supervisor1, data1rev1));
@@ -184,16 +175,16 @@ public class SQLMetadataSupervisorManagerTest
 
     Map<String, List<VersionedSupervisorSpec>> supervisorSpecs = supervisorManager.getAll();
     Map<String, SupervisorSpec> latestSpecs = supervisorManager.getLatest();
-    Assert.assertEquals(2, supervisorSpecs.size());
-    Assert.assertEquals(1, supervisorSpecs.get(supervisor1).size());
-    Assert.assertEquals(1, supervisorSpecs.get(supervisor2).size());
-    Assert.assertEquals(supervisor1, supervisorSpecs.get(supervisor1).get(0).getSpec().getId());
-    Assert.assertEquals(supervisor2, supervisorSpecs.get(supervisor2).get(0).getSpec().getId());
-    Assert.assertEquals(data1rev1, ((TestSupervisorSpec) supervisorSpecs.get(supervisor1).get(0).getSpec()).getData());
-    Assert.assertEquals(data2rev1, ((TestSupervisorSpec) supervisorSpecs.get(supervisor2).get(0).getSpec()).getData());
-    Assert.assertEquals(2, latestSpecs.size());
-    Assert.assertEquals(data1rev1, ((TestSupervisorSpec) latestSpecs.get(supervisor1)).getData());
-    Assert.assertEquals(data2rev1, ((TestSupervisorSpec) latestSpecs.get(supervisor2)).getData());
+    Assertions.assertEquals(2, supervisorSpecs.size());
+    Assertions.assertEquals(1, supervisorSpecs.get(supervisor1).size());
+    Assertions.assertEquals(1, supervisorSpecs.get(supervisor2).size());
+    Assertions.assertEquals(supervisor1, supervisorSpecs.get(supervisor1).get(0).getSpec().getId());
+    Assertions.assertEquals(supervisor2, supervisorSpecs.get(supervisor2).get(0).getSpec().getId());
+    Assertions.assertEquals(data1rev1, ((TestSupervisorSpec) supervisorSpecs.get(supervisor1).get(0).getSpec()).getData());
+    Assertions.assertEquals(data2rev1, ((TestSupervisorSpec) supervisorSpecs.get(supervisor2).get(0).getSpec()).getData());
+    Assertions.assertEquals(2, latestSpecs.size());
+    Assertions.assertEquals(data1rev1, ((TestSupervisorSpec) latestSpecs.get(supervisor1)).getData());
+    Assertions.assertEquals(data2rev1, ((TestSupervisorSpec) latestSpecs.get(supervisor2)).getData());
 
     // add more revisions to the supervisors
     supervisorManager.insert(supervisor1, new TestSupervisorSpec(supervisor1, data1rev2));
@@ -202,20 +193,20 @@ public class SQLMetadataSupervisorManagerTest
 
     supervisorSpecs = supervisorManager.getAll();
     latestSpecs = supervisorManager.getLatest();
-    Assert.assertEquals(2, supervisorSpecs.size());
-    Assert.assertEquals(3, supervisorSpecs.get(supervisor1).size());
-    Assert.assertEquals(2, supervisorSpecs.get(supervisor2).size());
+    Assertions.assertEquals(2, supervisorSpecs.size());
+    Assertions.assertEquals(3, supervisorSpecs.get(supervisor1).size());
+    Assertions.assertEquals(2, supervisorSpecs.get(supervisor2).size());
 
     // make sure getAll() returns each spec in descending order
-    Assert.assertEquals(data1rev3, ((TestSupervisorSpec) supervisorSpecs.get(supervisor1).get(0).getSpec()).getData());
-    Assert.assertEquals(data1rev2, ((TestSupervisorSpec) supervisorSpecs.get(supervisor1).get(1).getSpec()).getData());
-    Assert.assertEquals(data1rev1, ((TestSupervisorSpec) supervisorSpecs.get(supervisor1).get(2).getSpec()).getData());
-    Assert.assertEquals(data2rev2, ((TestSupervisorSpec) supervisorSpecs.get(supervisor2).get(0).getSpec()).getData());
-    Assert.assertEquals(data2rev1, ((TestSupervisorSpec) supervisorSpecs.get(supervisor2).get(1).getSpec()).getData());
+    Assertions.assertEquals(data1rev3, ((TestSupervisorSpec) supervisorSpecs.get(supervisor1).get(0).getSpec()).getData());
+    Assertions.assertEquals(data1rev2, ((TestSupervisorSpec) supervisorSpecs.get(supervisor1).get(1).getSpec()).getData());
+    Assertions.assertEquals(data1rev1, ((TestSupervisorSpec) supervisorSpecs.get(supervisor1).get(2).getSpec()).getData());
+    Assertions.assertEquals(data2rev2, ((TestSupervisorSpec) supervisorSpecs.get(supervisor2).get(0).getSpec()).getData());
+    Assertions.assertEquals(data2rev1, ((TestSupervisorSpec) supervisorSpecs.get(supervisor2).get(1).getSpec()).getData());
 
     // make sure getLatest() returns the last revision
-    Assert.assertEquals(data1rev3, ((TestSupervisorSpec) latestSpecs.get(supervisor1)).getData());
-    Assert.assertEquals(data2rev2, ((TestSupervisorSpec) latestSpecs.get(supervisor2)).getData());
+    Assertions.assertEquals(data1rev3, ((TestSupervisorSpec) latestSpecs.get(supervisor1)).getData());
+    Assertions.assertEquals(data2rev2, ((TestSupervisorSpec) latestSpecs.get(supervisor2)).getData());
   }
 
   @Test
@@ -229,8 +220,8 @@ public class SQLMetadataSupervisorManagerTest
     final Map<String, String> data2rev1 = ImmutableMap.of("key2-1", "value2-1-1", "key2-2", "value2-2-1");
     final Map<String, String> data2rev2 = ImmutableMap.of("key2-3", "value2-3-2", "key2-4", "value2-4-2");
 
-    Assert.assertTrue(supervisorManager.getAllForId(supervisor1).isEmpty());
-    Assert.assertTrue(supervisorManager.getAllForId(supervisor2).isEmpty());
+    Assertions.assertTrue(supervisorManager.getAllForId(supervisor1, null).isEmpty());
+    Assertions.assertTrue(supervisorManager.getAllForId(supervisor2, null).isEmpty());
 
     // add 2 supervisors, with revisions
     supervisorManager.insert(supervisor1, new TestSupervisorSpec(supervisor1, data1rev1));
@@ -239,17 +230,17 @@ public class SQLMetadataSupervisorManagerTest
     supervisorManager.insert(supervisor2, new TestSupervisorSpec(supervisor2, data2rev1));
     supervisorManager.insert(supervisor2, new TestSupervisorSpec(supervisor2, data2rev2));
 
-    List<VersionedSupervisorSpec> supervisor1Specs = supervisorManager.getAllForId(supervisor1);
-    List<VersionedSupervisorSpec> supervisor2Specs = supervisorManager.getAllForId(supervisor2);
+    List<VersionedSupervisorSpec> supervisor1Specs = supervisorManager.getAllForId(supervisor1, null);
+    List<VersionedSupervisorSpec> supervisor2Specs = supervisorManager.getAllForId(supervisor2, null);
 
-    Assert.assertEquals(3, supervisor1Specs.size());
-    Assert.assertEquals(2, supervisor2Specs.size());
+    Assertions.assertEquals(3, supervisor1Specs.size());
+    Assertions.assertEquals(2, supervisor2Specs.size());
     // make sure getAll() returns each spec in descending order
-    Assert.assertEquals(data1rev3, ((TestSupervisorSpec) supervisor1Specs.get(0).getSpec()).getData());
-    Assert.assertEquals(data1rev2, ((TestSupervisorSpec) supervisor1Specs.get(1).getSpec()).getData());
-    Assert.assertEquals(data1rev1, ((TestSupervisorSpec) supervisor1Specs.get(2).getSpec()).getData());
-    Assert.assertEquals(data2rev2, ((TestSupervisorSpec) supervisor2Specs.get(0).getSpec()).getData());
-    Assert.assertEquals(data2rev1, ((TestSupervisorSpec) supervisor2Specs.get(1).getSpec()).getData());
+    Assertions.assertEquals(data1rev3, ((TestSupervisorSpec) supervisor1Specs.get(0).getSpec()).getData());
+    Assertions.assertEquals(data1rev2, ((TestSupervisorSpec) supervisor1Specs.get(1).getSpec()).getData());
+    Assertions.assertEquals(data1rev1, ((TestSupervisorSpec) supervisor1Specs.get(2).getSpec()).getData());
+    Assertions.assertEquals(data2rev2, ((TestSupervisorSpec) supervisor2Specs.get(0).getSpec()).getData());
+    Assertions.assertEquals(data2rev1, ((TestSupervisorSpec) supervisor2Specs.get(1).getSpec()).getData());
   }
 
   @Test
@@ -266,15 +257,18 @@ public class SQLMetadataSupervisorManagerTest
 
     final Map<String, List<VersionedSupervisorSpec>> allSpecs = supervisorManager.getAll();
 
-    Assert.assertEquals(2, allSpecs.size());
+    Assertions.assertEquals(2, allSpecs.size());
     List<VersionedSupervisorSpec> specs = allSpecs.get(supervisor1);
-    Assert.assertEquals(2, specs.size());
-    Assert.assertEquals(new TestSupervisorSpec(supervisor1, data1rev2), specs.get(0).getSpec());
-    Assert.assertEquals(new TestSupervisorSpec(supervisor1, data1rev1), specs.get(1).getSpec());
+    Assertions.assertEquals(2, specs.size());
+    Assertions.assertEquals(new TestSupervisorSpec(supervisor1, data1rev2), specs.get(0).getSpec());
+    Assertions.assertEquals(new TestSupervisorSpec(supervisor1, data1rev1), specs.get(1).getSpec());
 
     specs = allSpecs.get(supervisor2);
-    Assert.assertEquals(1, specs.size());
-    Assert.assertNull(specs.get(0).getSpec());
+    Assertions.assertEquals(1, specs.size());
+    Assertions.assertNull(specs.get(0).getSpec());
+
+    Map<String, SupervisorSpec> latestSupervisorSpec = supervisorManager.getLatest();
+    Assertions.assertEquals(1, latestSupervisorSpec.size());
   }
 
   @Test
@@ -284,7 +278,7 @@ public class SQLMetadataSupervisorManagerTest
     final String datasource1 = "datasource-1";
     final String supervisor2 = "test-supervisor-2";
     final Map<String, String> data1rev1 = ImmutableMap.of("key1-1", "value1-1-1", "key1-2", "value1-2-1");
-    Assert.assertTrue(supervisorManager.getAll().isEmpty());
+    Assertions.assertTrue(supervisorManager.getAll().isEmpty());
     supervisorManager.insert(supervisor1, new TestSupervisorSpec(supervisor1, data1rev1));
     // supervisor1 is terminated
     supervisorManager.insert(supervisor1, new NoopSupervisorSpec(supervisor1, ImmutableList.of(datasource1)));
@@ -292,8 +286,8 @@ public class SQLMetadataSupervisorManagerTest
     supervisorManager.insert(supervisor2, new TestSupervisorSpec(supervisor2, data1rev1));
     // get latest active should only return supervisor2
     Map<String, SupervisorSpec> actual = supervisorManager.getLatestActiveOnly();
-    Assert.assertEquals(1, actual.size());
-    Assert.assertTrue(actual.containsKey(supervisor2));
+    Assertions.assertEquals(1, actual.size());
+    Assertions.assertTrue(actual.containsKey(supervisor2));
   }
 
 
@@ -304,7 +298,7 @@ public class SQLMetadataSupervisorManagerTest
     final String datasource1 = "datasource-1";
     final String supervisor2 = "test-supervisor-2";
     final Map<String, String> data1rev1 = ImmutableMap.of("key1-1", "value1-1-1", "key1-2", "value1-2-1");
-    Assert.assertTrue(supervisorManager.getAll().isEmpty());
+    Assertions.assertTrue(supervisorManager.getAll().isEmpty());
     supervisorManager.insert(supervisor1, new TestSupervisorSpec(supervisor1, data1rev1));
     // supervisor1 is terminated
     supervisorManager.insert(supervisor1, new NoopSupervisorSpec(supervisor1, ImmutableList.of(datasource1)));
@@ -312,10 +306,63 @@ public class SQLMetadataSupervisorManagerTest
     supervisorManager.insert(supervisor2, new TestSupervisorSpec(supervisor2, data1rev1));
     // get latest terminated should only return supervisor1
     Map<String, SupervisorSpec> actual = supervisorManager.getLatestTerminatedOnly();
-    Assert.assertEquals(1, actual.size());
-    Assert.assertTrue(actual.containsKey(supervisor1));
+    Assertions.assertEquals(1, actual.size());
+    Assertions.assertTrue(actual.containsKey(supervisor1));
   }
 
+  @Test
+  public void testGetAllForIdWithLimit()
+  {
+    final String supervisor1 = "test-supervisor-1";
+    final Map<String, String> data1rev1 = ImmutableMap.of("key1-1", "value1-1-1", "key1-2", "value1-2-1");
+    final Map<String, String> data1rev2 = ImmutableMap.of("key1-1", "value1-1-2", "key1-2", "value1-2-2");
+    final Map<String, String> data1rev3 = ImmutableMap.of("key1-1", "value1-1-3", "key1-2", "value1-2-3");
+
+    Assertions.assertTrue(supervisorManager.getAll().isEmpty());
+
+    // Insert 3 versions
+    supervisorManager.insert(supervisor1, new TestSupervisorSpec(supervisor1, data1rev1));
+    supervisorManager.insert(supervisor1, new TestSupervisorSpec(supervisor1, data1rev2));
+    supervisorManager.insert(supervisor1, new TestSupervisorSpec(supervisor1, data1rev3));
+
+    // Test with limit=2
+    List<VersionedSupervisorSpec> limitedResults = supervisorManager.getAllForId(supervisor1, 2);
+    Assertions.assertEquals(2, limitedResults.size());
+    // Results should be in descending order (newest first)
+    Assertions.assertEquals(data1rev3, ((TestSupervisorSpec) limitedResults.get(0).getSpec()).getData());
+    Assertions.assertEquals(data1rev2, ((TestSupervisorSpec) limitedResults.get(1).getSpec()).getData());
+
+    // Test with limit=1
+    limitedResults = supervisorManager.getAllForId(supervisor1, 1);
+    Assertions.assertEquals(1, limitedResults.size());
+    Assertions.assertEquals(data1rev3, ((TestSupervisorSpec) limitedResults.get(0).getSpec()).getData());
+
+    // Test with limit=0 (should throw exception)
+    try {
+      supervisorManager.getAllForId(supervisor1, 0);
+      Assertions.fail("Expected IllegalArgumentException for limit=0");
+    }
+    catch (IllegalArgumentException e) {
+      Assertions.assertEquals("Limit must be greater than zero if set", e.getMessage());
+    }
+
+    // Test with limit=null (should return all)
+    List<VersionedSupervisorSpec> allResults = supervisorManager.getAllForId(supervisor1, null);
+    Assertions.assertEquals(3, allResults.size());
+
+    // Test with limit larger than available records
+    limitedResults = supervisorManager.getAllForId(supervisor1, 10);
+    Assertions.assertEquals(3, limitedResults.size());
+
+    // Test with negative limit (should throw exception)
+    try {
+      supervisorManager.getAllForId(supervisor1, -1);
+      Assertions.fail("Expected IllegalArgumentException for limit=-1");
+    }
+    catch (IllegalArgumentException e) {
+      Assertions.assertEquals("Limit must be greater than zero if set", e.getMessage());
+    }
+  }
 
   private static class BadSupervisorSpec implements SupervisorSpec
   {

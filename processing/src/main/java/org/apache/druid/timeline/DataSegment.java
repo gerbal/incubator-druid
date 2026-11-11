@@ -37,19 +37,25 @@ import it.unimi.dsi.fastutil.objects.Object2ObjectArrayMap;
 import org.apache.druid.guice.annotations.PublicApi;
 import org.apache.druid.jackson.CommaListJoinDeserializer;
 import org.apache.druid.jackson.CommaListJoinSerializer;
+import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.query.SegmentDescriptor;
+import org.apache.druid.segment.VirtualColumn;
+import org.apache.druid.segment.VirtualColumns;
 import org.apache.druid.timeline.partition.NumberedShardSpec;
 import org.apache.druid.timeline.partition.ShardSpec;
 import org.joda.time.Interval;
 
 import javax.annotation.Nullable;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
+import java.util.Set;
+
 
 /**
  * Metadata of Druid's data segment. An immutable object.
- *
+ * <p>
  * DataSegment's equality ({@link #equals}/{@link #hashCode}) and {@link #compareTo} methods consider only the
  * {@link SegmentId} of the segment.
  */
@@ -58,6 +64,43 @@ public class DataSegment implements Comparable<DataSegment>, Overshadowable<Data
 {
 
   public static final String TOMBSTONE_LOADSPEC_TYPE = "tombstone";
+
+  public static Interner<String> stringInterner()
+  {
+    return STRING_INTERNER;
+  }
+
+  /**
+   * Shared canonical interner for {@link VirtualColumn} instances embedded in segment-side
+   * metadata that lives in broker/coordinator memory. Used by callers that carry virtual columns through
+   * {@link DataSegment}'s wire form (clustering virtual columns on {@link ClusterGroupTuples},
+   * {@link org.apache.druid.timeline.partition.BaseDimensionRangeShardSpec}'s range-clustering virtual columns) so
+   * identical VC definitions across segments collapse to a single instance in memory. Callers holding a whole
+   * {@link VirtualColumns} should use {@link #internVirtualColumns}.
+   */
+  public static Interner<VirtualColumn> virtualColumnInterner()
+  {
+    return VIRTUAL_COLUMN_INTERNER;
+  }
+
+  /**
+   * Returns a shared {@link VirtualColumns} instance equal to the given one, so segments with the same virtual column
+   * definitions reuse one object in memory instead of each holding its own copy. Returns {@link VirtualColumns#EMPTY}
+   * if the input is null or empty.
+   */
+  public static VirtualColumns internVirtualColumns(@Nullable VirtualColumns virtualColumns)
+  {
+    if (virtualColumns == null || virtualColumns.isEmpty()) {
+      return VirtualColumns.EMPTY;
+    }
+    return VIRTUAL_COLUMNS_INTERNER.intern(
+        VirtualColumns.create(
+            Arrays.stream(virtualColumns.getVirtualColumns())
+                  .map(VIRTUAL_COLUMN_INTERNER::intern)
+                  .toList()
+        )
+    );
+  }
 
   /*
    * The difference between this class and org.apache.druid.segment.Segment is that this class contains the segment
@@ -86,10 +129,34 @@ public class DataSegment implements Comparable<DataSegment>, Overshadowable<Data
   private static final Interner<String> STRING_INTERNER = Interners.newWeakInterner();
   private static final Interner<List<String>> DIMENSIONS_INTERNER = Interners.newWeakInterner();
   private static final Interner<List<String>> METRICS_INTERNER = Interners.newWeakInterner();
+  private static final Interner<List<String>> PROJECTIONS_INTERNER = Interners.newWeakInterner();
+  private static final Interner<ClusterGroupTuples> CLUSTER_GROUPS_INTERNER = Interners.newWeakInterner();
+  private static final Interner<VirtualColumn> VIRTUAL_COLUMN_INTERNER = Interners.newWeakInterner();
+  private static final Interner<VirtualColumns> VIRTUAL_COLUMNS_INTERNER = Interners.newWeakInterner();
   private static final Interner<CompactionState> COMPACTION_STATE_INTERNER = Interners.newWeakInterner();
   private static final Map<String, Object> PRUNED_LOAD_SPEC = ImmutableMap.of(
       "load spec is pruned, because it's not needed on Brokers, but eats a lot of heap space",
       ""
+  );
+
+  /**
+   * Load spec keys, at any nesting level, whose values repeat across segments and so are interned, such as the type of
+   * the deep storage or the bucket it writes to. Values that are unique to each segment (such as the S3 {@code key}, or
+   * the {@code path} of HDFS and Google) are deliberately left out, since interning a string nothing else shares costs
+   * more than it saves.
+   */
+  private static final Set<String> INTERNED_LOAD_SPEC_VALUE_KEYS = Set.of(
+      // every load spec, including the partial load wrappers and their delegates
+      "type",
+      // S3, Google, and Aliyun OSS
+      "bucket",
+      // S3
+      "S3Schema",
+      // Azure
+      "containerName",
+      // partial load specs: the request fingerprint, and the selected projection names
+      "fingerprint",
+      "projections"
   );
 
   private final Integer binaryVersion;
@@ -98,6 +165,14 @@ public class DataSegment implements Comparable<DataSegment>, Overshadowable<Data
   private final Map<String, Object> loadSpec;
   private final List<String> dimensions;
   private final List<String> metrics;
+  private final List<String> projections;
+  /**
+   * Typed clustering tuples for clustered base-table segments, or {@code null} for non-clustered segments. Each tuple
+   * is one cluster group's clustering-column values in the order declared by
+   * {@link ClusterGroupTuples#clusteringColumns()}. Consumed by cluster-group partial-load matchers.
+   */
+  @Nullable
+  private final ClusterGroupTuples clusterGroups;
   private final ShardSpec shardSpec;
 
   /**
@@ -110,116 +185,87 @@ public class DataSegment implements Comparable<DataSegment>, Overshadowable<Data
   @Nullable
   private final CompactionState lastCompactionState;
   private final long size;
+  private final Integer totalRows;
 
-  @VisibleForTesting
-  public DataSegment(
-      SegmentId segmentId,
-      Map<String, Object> loadSpec,
-      List<String> dimensions,
-      List<String> metrics,
-      ShardSpec shardSpec,
-      CompactionState lastCompactionState,
-      Integer binaryVersion,
-      long size
-  )
-  {
-    this(
-        segmentId.getDataSource(),
-        segmentId.getInterval(),
-        segmentId.getVersion(),
-        loadSpec,
-        dimensions,
-        metrics,
-        shardSpec,
-        lastCompactionState,
-        binaryVersion,
-        size
-    );
-  }
-
-  public DataSegment(
-      String dataSource,
-      Interval interval,
-      String version,
-      Map<String, Object> loadSpec,
-      List<String> dimensions,
-      List<String> metrics,
-      ShardSpec shardSpec,
-      Integer binaryVersion,
-      long size
-  )
-  {
-    this(
-        dataSource,
-        interval,
-        version,
-        loadSpec,
-        dimensions,
-        metrics,
-        shardSpec,
-        null,
-        binaryVersion,
-        size
-    );
-  }
-
-  public DataSegment(
-      String dataSource,
-      Interval interval,
-      String version,
-      Map<String, Object> loadSpec,
-      List<String> dimensions,
-      List<String> metrics,
-      ShardSpec shardSpec,
-      @Nullable CompactionState lastCompactionState,
-      Integer binaryVersion,
-      long size
-  )
-  {
-    this(
-        dataSource,
-        interval,
-        version,
-        loadSpec,
-        dimensions,
-        metrics,
-        shardSpec,
-        lastCompactionState,
-        binaryVersion,
-        size,
-        PruneSpecsHolder.DEFAULT
-    );
-  }
+  /**
+   * SHA-256 fingerprint representation of the CompactionState.
+   * <p>
+   * A null fingerprint indicates that this segment either has not been compacted, or was compacted before indexing
+   * state fingerprinting existed. In the latter case, the segment would have a non-null {@link #lastCompactionState}.
+   * </p>
+   */
+  @Nullable
+  private final String indexingStateFingerprint;
 
   @JsonCreator
-  public DataSegment(
+  private DataSegment(
       @JsonProperty("dataSource") String dataSource,
-      @JsonProperty("interval") Interval interval,
+      // We take interval input as a String so we can deserialize it optimally via Intervals.fromString(interval).
+      @JsonProperty("interval") String interval,
       @JsonProperty("version") String version,
       // use `Map` *NOT* `LoadSpec` because we want to do lazy materialization to prevent dependency pollution
       @JsonProperty("loadSpec") @Nullable Map<String, Object> loadSpec,
-      @JsonProperty("dimensions")
-      @JsonDeserialize(using = CommaListJoinDeserializer.class)
-      @Nullable
-          List<String> dimensions,
-      @JsonProperty("metrics")
-      @JsonDeserialize(using = CommaListJoinDeserializer.class)
-      @Nullable
-          List<String> metrics,
+      @JsonProperty("dimensions") @JsonDeserialize(using = CommaListJoinDeserializer.class) @Nullable
+      List<String> dimensions,
+      @JsonProperty("metrics") @JsonDeserialize(using = CommaListJoinDeserializer.class) @Nullable List<String> metrics,
+      @JsonProperty("projections") @JsonDeserialize(using = CommaListJoinDeserializer.class) @Nullable
+      List<String> projections,
+      @JsonProperty("clusterGroups") @Nullable ClusterGroupTuples clusterGroups,
       @JsonProperty("shardSpec") @Nullable ShardSpec shardSpec,
       @JsonProperty("lastCompactionState") @Nullable CompactionState lastCompactionState,
       @JsonProperty("binaryVersion") Integer binaryVersion,
       @JsonProperty("size") long size,
+      @JsonProperty("totalRows") Integer totalRows,
+      @JsonProperty("indexingStateFingerprint") @Nullable String indexingStateFingerprint,
       @JacksonInject PruneSpecsHolder pruneSpecsHolder
+  )
+  {
+    this(
+        dataSource,
+        Intervals.fromString(interval),
+        version,
+        loadSpec,
+        dimensions,
+        metrics,
+        projections,
+        clusterGroups,
+        shardSpec,
+        lastCompactionState,
+        binaryVersion,
+        size,
+        totalRows,
+        indexingStateFingerprint,
+        pruneSpecsHolder
+    );
+  }
+
+  public DataSegment(
+      String dataSource,
+      Interval interval,
+      String version,
+      @Nullable Map<String, Object> loadSpec,
+      @Nullable List<String> dimensions,
+      @Nullable List<String> metrics,
+      @Nullable List<String> projections,
+      @Nullable ClusterGroupTuples clusterGroups,
+      @Nullable ShardSpec shardSpec,
+      @Nullable CompactionState lastCompactionState,
+      Integer binaryVersion,
+      long size,
+      Integer totalRows,
+      String indexingStateFingerprint,
+      PruneSpecsHolder pruneSpecsHolder
   )
   {
     this.id = SegmentId.of(dataSource, interval, version, shardSpec);
     // prune loadspec if needed
     this.loadSpec = pruneSpecsHolder.pruneLoadSpec ? PRUNED_LOAD_SPEC : prepareLoadSpec(loadSpec);
-    // Deduplicating dimensions and metrics lists as a whole because they are very likely the same for the same
-    // dataSource
-    this.dimensions = prepareDimensionsOrMetrics(dimensions, DIMENSIONS_INTERNER);
-    this.metrics = prepareDimensionsOrMetrics(metrics, METRICS_INTERNER);
+    this.dimensions = dimensions == null ? ImmutableList.of() : prepareWithInterner(dimensions, DIMENSIONS_INTERNER);
+    this.metrics = metrics == null ? ImmutableList.of() : prepareWithInterner(metrics, METRICS_INTERNER);
+    // A null value for projections means that this segment is not aware of projections (launched in druid 32).
+    // An empty list means that this segment is projection-aware, but has no projections.
+    this.projections = projections == null ? null : prepareWithInterner(projections, PROJECTIONS_INTERNER);
+    this.clusterGroups = prepareClusterGroups(clusterGroups);
     this.shardSpec = (shardSpec == null) ? new NumberedShardSpec(0, 1) : shardSpec;
     this.lastCompactionState = pruneSpecsHolder.pruneLastCompactionState
                                ? null
@@ -227,46 +273,30 @@ public class DataSegment implements Comparable<DataSegment>, Overshadowable<Data
     this.binaryVersion = binaryVersion;
     Preconditions.checkArgument(size >= 0);
     this.size = size;
+    this.totalRows = totalRows;
+    this.indexingStateFingerprint = indexingStateFingerprint == null ?
+                                    null :
+                                    STRING_INTERNER.intern(indexingStateFingerprint);
   }
 
-  @Nullable
-  private Map<String, Object> prepareLoadSpec(@Nullable Map<String, Object> loadSpec)
+  /**
+   * Copies {@code other} by reference, for subclasses that decorate an existing segment. The copy shares the
+   * original's state rather than rebuilding it.
+   */
+  protected DataSegment(DataSegment other)
   {
-    if (loadSpec == null) {
-      return null;
-    }
-    // Load spec is just of 3 entries on average; HashMap/LinkedHashMap consumes much more memory than ArrayMap
-    Map<String, Object> result = new Object2ObjectArrayMap<>(loadSpec.size());
-    for (Map.Entry<String, Object> e : loadSpec.entrySet()) {
-      result.put(STRING_INTERNER.intern(e.getKey()), e.getValue());
-    }
-    return result;
-  }
-
-  @Nullable
-  private CompactionState prepareCompactionState(@Nullable CompactionState lastCompactionState)
-  {
-    if (lastCompactionState == null) {
-      return null;
-    }
-    return COMPACTION_STATE_INTERNER.intern(lastCompactionState);
-  }
-
-  private List<String> prepareDimensionsOrMetrics(@Nullable List<String> list, Interner<List<String>> interner)
-  {
-    if (list == null) {
-      return ImmutableList.of();
-    } else {
-      List<String> result = list
-          .stream()
-          .filter(s -> !Strings.isNullOrEmpty(s))
-          // dimensions & metrics are stored as canonical string values to decrease memory required for storing
-          // large numbers of segments.
-          .map(STRING_INTERNER::intern)
-          // TODO replace with ImmutableList.toImmutableList() when updated to Guava 21+
-          .collect(Collectors.collectingAndThen(Collectors.toList(), ImmutableList::copyOf));
-      return interner.intern(result);
-    }
+    this.binaryVersion = other.binaryVersion;
+    this.id = other.id;
+    this.loadSpec = other.loadSpec;
+    this.dimensions = other.dimensions;
+    this.metrics = other.metrics;
+    this.projections = other.projections;
+    this.clusterGroups = other.clusterGroups;
+    this.shardSpec = other.shardSpec;
+    this.lastCompactionState = other.lastCompactionState;
+    this.size = other.size;
+    this.totalRows = other.totalRows;
+    this.indexingStateFingerprint = other.indexingStateFingerprint;
   }
 
   /**
@@ -314,6 +344,23 @@ public class DataSegment implements Comparable<DataSegment>, Overshadowable<Data
     return metrics;
   }
 
+  @Nullable
+  @JsonProperty
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  @JsonSerialize(using = CommaListJoinSerializer.class)
+  public List<String> getProjections()
+  {
+    return projections;
+  }
+
+  @Nullable
+  @JsonProperty
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public ClusterGroupTuples getClusterGroups()
+  {
+    return clusterGroups;
+  }
+
   @JsonProperty
   public ShardSpec getShardSpec()
   {
@@ -340,6 +387,14 @@ public class DataSegment implements Comparable<DataSegment>, Overshadowable<Data
     return size;
   }
 
+  @Nullable
+  @JsonProperty("totalRows")
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public Integer getTotalRows()
+  {
+    return totalRows;
+  }
+
   // "identifier" for backward compatibility of JSON API
   @JsonProperty(value = "identifier", access = JsonProperty.Access.READ_ONLY)
   public SegmentId getId()
@@ -350,6 +405,21 @@ public class DataSegment implements Comparable<DataSegment>, Overshadowable<Data
   public boolean isTombstone()
   {
     return getShardSpec().getType().equals(ShardSpec.Type.TOMBSTONE);
+  }
+
+  /**
+   * Get the inexing state fingerprint associated with this segment.
+   * <p>
+   * A null fingerprint indicates that this segment either has not been compacted, or was compacted before compaction
+   * fingerprinting existed. In the latter case, the segment would have a non-null {@link #lastCompactionState}.
+   * </p>
+   */
+  @Nullable
+  @JsonProperty
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public String getIndexingStateFingerprint()
+  {
+    return indexingStateFingerprint;
   }
 
   @Override
@@ -416,6 +486,16 @@ public class DataSegment implements Comparable<DataSegment>, Overshadowable<Data
     return builder(this).metrics(metrics).build();
   }
 
+  public DataSegment withProjections(List<String> projections)
+  {
+    return builder(this).projections(projections).build();
+  }
+
+  public DataSegment withClusterGroups(@Nullable ClusterGroupTuples clusterGroups)
+  {
+    return builder(this).clusterGroups(clusterGroups).build();
+  }
+
   public DataSegment withShardSpec(ShardSpec newSpec)
   {
     return builder(this).shardSpec(newSpec).build();
@@ -439,6 +519,42 @@ public class DataSegment implements Comparable<DataSegment>, Overshadowable<Data
   public DataSegment withLastCompactionState(CompactionState compactionState)
   {
     return builder(this).lastCompactionState(compactionState).build();
+  }
+
+  public DataSegment withIndexingStateFingerprint(String indexingStateFingerprint)
+  {
+    return builder(this).indexingStateFingerprint(indexingStateFingerprint).build();
+  }
+
+  /**
+   * Returns a copy of this segment with every optional top-level field that is not listed in {@code details} removed.
+   * The fields that are not optional are always retained; see {@link SegmentDetail} for the full split.
+   *
+   * @param details the optional details to retain; null retains all details and an empty set retains none
+   */
+  public DataSegment retainOnlyDetails(@Nullable final Set<SegmentDetail> details)
+  {
+    if (details == null) {
+      return this;
+    } else {
+      return builder(this)
+          .dimensions(details.contains(SegmentDetail.DIMENSIONS) ? dimensions : null)
+          .metrics(details.contains(SegmentDetail.METRICS) ? metrics : null)
+          .projections(details.contains(SegmentDetail.PROJECTIONS) ? projections : null)
+          .clusterGroups(details.contains(SegmentDetail.CLUSTER_GROUPS) ? clusterGroups : null)
+          .lastCompactionState(details.contains(SegmentDetail.COMPACTION_STATE) ? lastCompactionState : null)
+          .loadSpec(details.contains(SegmentDetail.LOAD_SPEC) ? loadSpec : null)
+          .totalRows(details.contains(SegmentDetail.ROW_COUNT) ? totalRows : null)
+          .indexingStateFingerprint(
+              details.contains(SegmentDetail.INDEXING_STATE_FINGERPRINT) ? indexingStateFingerprint : null
+          )
+          .build();
+    }
+  }
+
+  public DataSegment.Builder toBuilder()
+  {
+    return builder(this);
   }
 
   @Override
@@ -471,20 +587,106 @@ public class DataSegment implements Comparable<DataSegment>, Overshadowable<Data
            ", loadSpec=" + loadSpec +
            ", dimensions=" + dimensions +
            ", metrics=" + metrics +
+           ", projections=" + projections +
+           ", clusterGroups=" + clusterGroups +
            ", shardSpec=" + shardSpec +
            ", lastCompactionState=" + lastCompactionState +
            ", size=" + size +
+           ", totalRows=" + totalRows +
+           ", indexingStateFingerprint=" + indexingStateFingerprint +
            '}';
   }
 
-  public static Builder builder()
+
+  @Nullable
+  private static Map<String, Object> prepareLoadSpec(@Nullable Map<String, Object> loadSpec)
   {
-    return new Builder();
+    if (loadSpec == null) {
+      return null;
+    }
+    return prepareLoadSpecMap(loadSpec);
+  }
+
+  /**
+   * Compacts one level of a load spec, recursing into nested maps and lists (such as the {@code delegate} of a partial
+   * load spec, or the {@code members} of a composite one). Keys are interned, and so are the values of
+   * {@link #INTERNED_LOAD_SPEC_VALUE_KEYS}.
+   */
+  private static Map<String, Object> prepareLoadSpecMap(Map<?, ?> map)
+  {
+    // Load spec is just of 3 entries on average; HashMap/LinkedHashMap consumes much more memory than ArrayMap
+    final Map<String, Object> result = new Object2ObjectArrayMap<>(map.size());
+    for (Map.Entry<?, ?> e : map.entrySet()) {
+      final String key = STRING_INTERNER.intern((String) e.getKey());
+      result.put(key, prepareLoadSpecValue(e.getValue(), INTERNED_LOAD_SPEC_VALUE_KEYS.contains(key)));
+    }
+    return result;
+  }
+
+  @Nullable
+  private static Object prepareLoadSpecValue(@Nullable Object value, boolean intern)
+  {
+    if (value instanceof Map<?, ?> map) {
+      return prepareLoadSpecMap(map);
+    }
+    if (value instanceof List<?> list) {
+      final List<Object> result = new ArrayList<>(list.size());
+      for (Object element : list) {
+        result.add(prepareLoadSpecValue(element, intern));
+      }
+      return result;
+    }
+    if (intern && value instanceof String s) {
+      return STRING_INTERNER.intern(s);
+    }
+    return value;
+  }
+
+  @Nullable
+  private static CompactionState prepareCompactionState(@Nullable CompactionState lastCompactionState)
+  {
+    if (lastCompactionState == null) {
+      return null;
+    }
+    return COMPACTION_STATE_INTERNER.intern(lastCompactionState);
+  }
+
+  @Nullable
+  private static ClusterGroupTuples prepareClusterGroups(@Nullable ClusterGroupTuples clusterGroups)
+  {
+    if (clusterGroups == null) {
+      return null;
+    }
+    return CLUSTER_GROUPS_INTERNER.intern(clusterGroups);
+  }
+
+  /**
+   * Returns a list of strings with all empty strings removed and all strings interned.
+   * <p>
+   * The dimensions, metrics, and projections are stored as canonical string values to decrease memory required for
+   * storing large numbers of segments.
+   */
+  private static List<String> prepareWithInterner(List<String> list, Interner<List<String>> interner)
+  {
+    return interner.intern(list.stream()
+                               .filter(s -> !Strings.isNullOrEmpty(s))
+                               .map(STRING_INTERNER::intern)
+                               .collect(ImmutableList.toImmutableList()));
+  }
+
+  public static Builder builder(SegmentId segmentId)
+  {
+    return new Builder(segmentId);
   }
 
   public static Builder builder(DataSegment segment)
   {
     return new Builder(segment);
+  }
+
+  public static Builder builder(DataSegment.Builder segmentBuilder)
+  {
+    return new Builder(segmentBuilder);
   }
 
   public static class Builder
@@ -495,21 +697,30 @@ public class DataSegment implements Comparable<DataSegment>, Overshadowable<Data
     private Map<String, Object> loadSpec;
     private List<String> dimensions;
     private List<String> metrics;
+    private List<String> projections;
+    @Nullable
+    private ClusterGroupTuples clusterGroups;
     private ShardSpec shardSpec;
     private CompactionState lastCompactionState;
     private Integer binaryVersion;
     private long size;
+    private Integer totalRows;
+    private String indexingStateFingerprint;
 
-    public Builder()
+    private Builder(SegmentId segmentId)
     {
-      this.loadSpec = ImmutableMap.of();
-      this.dimensions = ImmutableList.of();
-      this.metrics = ImmutableList.of();
+      this.dataSource = segmentId.getDataSource();
+      this.interval = segmentId.getInterval();
+      this.version = segmentId.getVersion();
       this.shardSpec = new NumberedShardSpec(0, 1);
-      this.size = -1;
+      this.binaryVersion = 0;
+      this.size = 0;
+      this.totalRows = null;
+      this.lastCompactionState = null;
+      this.indexingStateFingerprint = null;
     }
 
-    public Builder(DataSegment segment)
+    private Builder(DataSegment segment)
     {
       this.dataSource = segment.getDataSource();
       this.interval = segment.getInterval();
@@ -517,10 +728,32 @@ public class DataSegment implements Comparable<DataSegment>, Overshadowable<Data
       this.loadSpec = segment.getLoadSpec();
       this.dimensions = segment.getDimensions();
       this.metrics = segment.getMetrics();
+      this.projections = segment.getProjections();
+      this.clusterGroups = segment.getClusterGroups();
       this.shardSpec = segment.getShardSpec();
       this.lastCompactionState = segment.getLastCompactionState();
       this.binaryVersion = segment.getBinaryVersion();
       this.size = segment.getSize();
+      this.totalRows = segment.getTotalRows();
+      this.indexingStateFingerprint = segment.getIndexingStateFingerprint();
+    }
+
+    private Builder(DataSegment.Builder segmentBuilder)
+    {
+      this.dataSource = segmentBuilder.dataSource;
+      this.interval = segmentBuilder.interval;
+      this.version = segmentBuilder.version;
+      this.loadSpec = segmentBuilder.loadSpec;
+      this.dimensions = segmentBuilder.dimensions;
+      this.metrics = segmentBuilder.metrics;
+      this.projections = segmentBuilder.projections;
+      this.clusterGroups = segmentBuilder.clusterGroups;
+      this.shardSpec = segmentBuilder.shardSpec;
+      this.lastCompactionState = segmentBuilder.lastCompactionState;
+      this.binaryVersion = segmentBuilder.binaryVersion;
+      this.size = segmentBuilder.size;
+      this.totalRows = segmentBuilder.totalRows;
+      this.indexingStateFingerprint = segmentBuilder.indexingStateFingerprint;
     }
 
     public Builder dataSource(String dataSource)
@@ -559,6 +792,18 @@ public class DataSegment implements Comparable<DataSegment>, Overshadowable<Data
       return this;
     }
 
+    public Builder projections(List<String> projections)
+    {
+      this.projections = projections;
+      return this;
+    }
+
+    public Builder clusterGroups(@Nullable ClusterGroupTuples clusterGroups)
+    {
+      this.clusterGroups = clusterGroups;
+      return this;
+    }
+
     public Builder shardSpec(ShardSpec shardSpec)
     {
       this.shardSpec = shardSpec;
@@ -583,6 +828,18 @@ public class DataSegment implements Comparable<DataSegment>, Overshadowable<Data
       return this;
     }
 
+    public Builder totalRows(Integer totalRows)
+    {
+      this.totalRows = totalRows;
+      return this;
+    }
+
+    public Builder indexingStateFingerprint(String indexingStateFingerprint)
+    {
+      this.indexingStateFingerprint = indexingStateFingerprint;
+      return this;
+    }
+
     public DataSegment build()
     {
       // Check stuff that goes into the id, at least.
@@ -598,10 +855,15 @@ public class DataSegment implements Comparable<DataSegment>, Overshadowable<Data
           loadSpec,
           dimensions,
           metrics,
+          projections,
+          clusterGroups,
           shardSpec,
           lastCompactionState,
           binaryVersion,
-          size
+          size,
+          totalRows,
+          indexingStateFingerprint,
+          PruneSpecsHolder.DEFAULT
       );
     }
   }

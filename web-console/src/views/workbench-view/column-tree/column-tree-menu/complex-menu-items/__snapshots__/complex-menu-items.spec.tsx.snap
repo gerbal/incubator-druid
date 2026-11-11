@@ -1,0 +1,54 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`ComplexMenuItems matches snapshot when menu is opened for column not inside group by 1`] = `
+<div>
+  <li
+    class="bp6-submenu"
+    role="none"
+  >
+    <span
+      class="bp6-popover-target"
+      role="menuitem"
+      tabindex="0"
+    >
+      <a
+        aria-haspopup="menu"
+        class="bp6-menu-item"
+        role="none"
+        tabindex="-1"
+      >
+        <span
+          aria-hidden="true"
+          class="bp6-menu-item-icon"
+        >
+          <span
+            aria-hidden="true"
+            class="bp6-icon bp6-icon-function"
+            tabindex="-1"
+          >
+            <svg
+              data-icon="function"
+            />
+          </span>
+        </span>
+        <div
+          class="bp6-text-overflow-ellipsis bp6-fill"
+        >
+          Aggregate
+        </div>
+        <span
+          class="bp6-icon bp6-icon-caret-right bp6-submenu-icon"
+        >
+          <svg
+            data-icon="caret-right"
+          />
+        </span>
+      </a>
+    </span>
+    <div
+      aria-live="polite"
+      class="bp6-overlay bp6-overlay-inline"
+    />
+  </li>
+</div>
+`;

@@ -21,80 +21,181 @@ package org.apache.druid.client;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Maps;
-import org.apache.druid.metadata.SqlSegmentsMetadataManager;
+import org.apache.druid.java.util.common.DateTimes;
+import org.apache.druid.metadata.SegmentsMetadataManager;
 import org.apache.druid.timeline.DataSegment;
+import org.apache.druid.timeline.Partitions;
 import org.apache.druid.timeline.SegmentTimeline;
 import org.apache.druid.timeline.VersionedIntervalTimeline;
 import org.apache.druid.utils.CollectionUtils;
+import org.joda.time.DateTime;
+import org.joda.time.Interval;
 
 import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * An immutable snapshot of metadata information about used segments and overshadowed segments, coming from
- * {@link SqlSegmentsMetadataManager}.
+ * {@link SegmentsMetadataManager}.
  */
 public class DataSourcesSnapshot
 {
+  public static DataSourcesSnapshot fromUsedSegments(Iterable<DataSegment> segments)
+  {
+    return fromUsedSegments(segments, DateTimes.nowUtc());
+  }
+
+  /**
+   * Creates a snapshot of all "used" segments that existed in the database at
+   * the {@code snapshotTime}.
+   */
   public static DataSourcesSnapshot fromUsedSegments(
-      Iterable<DataSegment> segments,
-      ImmutableMap<String, String> dataSourceProperties
+      Map<String, Set<DataSegment>> datasourceToUsedSegments,
+      DateTime snapshotTime
   )
   {
-    Map<String, DruidDataSource> dataSources = new HashMap<>();
-    segments.forEach(segment -> {
-      dataSources
-          .computeIfAbsent(segment.getDataSource(), dsName -> new DruidDataSource(dsName, dataSourceProperties))
-          .addSegmentIfAbsent(segment);
-    });
-    return new DataSourcesSnapshot(CollectionUtils.mapValues(dataSources, DruidDataSource::toImmutableDruidDataSource));
-  }
+    final Map<String, String> properties = Map.of("created", snapshotTime.toString());
 
-  public static DataSourcesSnapshot fromUsedSegmentsTimelines(
-      Map<String, SegmentTimeline> usedSegmentsTimelinesPerDataSource,
-      ImmutableMap<String, String> dataSourceProperties
-  )
-  {
-    Map<String, ImmutableDruidDataSource> dataSourcesWithAllUsedSegments =
-        Maps.newHashMapWithExpectedSize(usedSegmentsTimelinesPerDataSource.size());
-    usedSegmentsTimelinesPerDataSource.forEach(
-        (dataSourceName, usedSegmentsTimeline) -> {
-          DruidDataSource dataSource = new DruidDataSource(dataSourceName, dataSourceProperties);
-          usedSegmentsTimeline.iterateAllObjects().forEach(dataSource::addSegment);
-          dataSourcesWithAllUsedSegments.put(dataSourceName, dataSource.toImmutableDruidDataSource());
-        }
+    final Map<String, ImmutableDruidDataSource> dataSources = new HashMap<>();
+    datasourceToUsedSegments.forEach(
+        (dataSource, segments) -> dataSources.put(
+            dataSource,
+            new ImmutableDruidDataSource(dataSource, properties, segments)
+        )
     );
-    return new DataSourcesSnapshot(dataSourcesWithAllUsedSegments, usedSegmentsTimelinesPerDataSource);
+
+    return new DataSourcesSnapshot(snapshotTime, dataSources);
   }
 
+  /**
+   * Creates a snapshot of all "used" segments that existed in the database at
+   * the {@code snapshotTime}.
+   */
+  public static DataSourcesSnapshot fromUsedSegments(Iterable<DataSegment> segments, DateTime snapshotTime)
+  {
+    final Map<String, String> dataSourceProperties = ImmutableMap.of("created", DateTimes.nowUtc().toString());
+    Map<String, DruidDataSource> dataSources = new HashMap<>();
+    segments.forEach(
+        segment -> dataSources
+            .computeIfAbsent(segment.getDataSource(), dsName -> new DruidDataSource(dsName, dataSourceProperties))
+            .addSegmentIfAbsent(segment)
+    );
+    return new DataSourcesSnapshot(
+        snapshotTime,
+        CollectionUtils.mapValues(dataSources, DruidDataSource::toImmutableDruidDataSource)
+    );
+  }
+
+  /**
+   * Builds a new snapshot from this one by recomputing only the datasources that
+   * changed, reusing this snapshot's {@link ImmutableDruidDataSource}, timeline,
+   * and overshadowed-segment computation for every unchanged datasource.
+   * <p>
+   * Note that a changed datasource has its entire timeline rebuilt even if only a
+   * single one of its segments changed; the saving is that untouched datasources
+   * are reused as is. Overshadowing is computed per-datasource, so reusing the
+   * prior overshadowed segments for unchanged datasources is correct. The result
+   * is identical to a full {@link #fromUsedSegments} rebuild of the same final
+   * state, at a cost proportional to the changed datasources rather than all of them.
+   *
+   * @param datasourcesToRefresh Datasource → its complete current set of used
+   *                             segments, for each datasource that changed. Sets
+   *                             must be non-empty; removals are conveyed via
+   *                             {@code removedDataSources}.
+   * @param removedDataSources   Datasources whose caches are now empty/gone.
+   * @param snapshotTime         Time of this snapshot (poll start time).
+   */
+  public DataSourcesSnapshot updateSnapshotForDataSources(
+      Map<String, Set<DataSegment>> datasourcesToRefresh,
+      Set<String> removedDataSources,
+      DateTime snapshotTime
+  )
+  {
+    final Map<String, String> properties = Map.of("created", snapshotTime.toString());
+    final Map<String, ImmutableDruidDataSource> dataSources = new HashMap<>(dataSourcesWithAllUsedSegments);
+    final Map<String, SegmentTimeline> timelines = new HashMap<>(usedSegmentsTimelinesPerDataSource);
+
+    final Set<String> changedDataSources = new HashSet<>(removedDataSources);
+    changedDataSources.addAll(datasourcesToRefresh.keySet());
+
+    removedDataSources.forEach(ds -> {
+      dataSources.remove(ds);
+      timelines.remove(ds);
+    });
+    datasourcesToRefresh.forEach((ds, segments) -> {
+      dataSources.put(ds, new ImmutableDruidDataSource(ds, properties, segments));
+      timelines.put(ds, SegmentTimeline.forSegments(segments));
+    });
+
+    // Reuse prior overshadowed segments for unchanged datasources; recompute only the changed ones.
+    final List<DataSegment> overshadowed = new ArrayList<>();
+    for (DataSegment segment : overshadowedSegments) {
+      if (!changedDataSources.contains(segment.getDataSource())) {
+        overshadowed.add(segment);
+      }
+    }
+    for (String ds : datasourcesToRefresh.keySet()) {
+      final ImmutableDruidDataSource dataSource = dataSources.get(ds);
+      final SegmentTimeline timeline = timelines.get(ds);
+      for (DataSegment segment : dataSource.getSegments()) {
+        if (timeline.isOvershadowed(segment)) {
+          overshadowed.add(segment);
+        }
+      }
+    }
+
+    return new DataSourcesSnapshot(snapshotTime, dataSources, timelines, overshadowed);
+  }
+
+  private final DateTime snapshotTime;
   private final Map<String, ImmutableDruidDataSource> dataSourcesWithAllUsedSegments;
   private final Map<String, SegmentTimeline> usedSegmentsTimelinesPerDataSource;
   private final ImmutableSet<DataSegment> overshadowedSegments;
 
-  public DataSourcesSnapshot(Map<String, ImmutableDruidDataSource> dataSourcesWithAllUsedSegments)
-  {
-    this(
-        dataSourcesWithAllUsedSegments,
-        CollectionUtils.mapValues(
-            dataSourcesWithAllUsedSegments,
-            dataSource -> SegmentTimeline.forSegments(dataSource.getSegments())
-        )
-    );
-  }
-
   private DataSourcesSnapshot(
-      Map<String, ImmutableDruidDataSource> dataSourcesWithAllUsedSegments,
-      Map<String, SegmentTimeline> usedSegmentsTimelinesPerDataSource
+      DateTime snapshotTime,
+      Map<String, ImmutableDruidDataSource> dataSourcesWithAllUsedSegments
   )
   {
+    this.snapshotTime = snapshotTime;
+    this.dataSourcesWithAllUsedSegments = dataSourcesWithAllUsedSegments;
+    this.usedSegmentsTimelinesPerDataSource = CollectionUtils.mapValues(
+        dataSourcesWithAllUsedSegments,
+        dataSource -> SegmentTimeline.forSegments(dataSource.getSegments())
+    );
+    this.overshadowedSegments = ImmutableSet.copyOf(determineOvershadowedSegments());
+  }
+
+  /**
+   * Constructor used by {@link #updateSnapshotForDataSources} where timelines and
+   * overshadowed segments have already been computed incrementally.
+   */
+  private DataSourcesSnapshot(
+      DateTime snapshotTime,
+      Map<String, ImmutableDruidDataSource> dataSourcesWithAllUsedSegments,
+      Map<String, SegmentTimeline> usedSegmentsTimelinesPerDataSource,
+      Collection<DataSegment> overshadowedSegments
+  )
+  {
+    this.snapshotTime = snapshotTime;
     this.dataSourcesWithAllUsedSegments = dataSourcesWithAllUsedSegments;
     this.usedSegmentsTimelinesPerDataSource = usedSegmentsTimelinesPerDataSource;
-    this.overshadowedSegments = ImmutableSet.copyOf(determineOvershadowedSegments());
+    this.overshadowedSegments = ImmutableSet.copyOf(overshadowedSegments);
+  }
+
+  /**
+   * Time when this snapshot was taken. Since polling segments from the database
+   * may be a slow operation, this represents the poll start time.
+   */
+  public DateTime getSnapshotTime()
+  {
+    return snapshotTime;
   }
 
   public Collection<ImmutableDruidDataSource> getDataSourcesWithAllUsedSegments()
@@ -121,6 +222,23 @@ public class DataSourcesSnapshot
   public ImmutableSet<DataSegment> getOvershadowedSegments()
   {
     return overshadowedSegments;
+  }
+
+  /**
+   * Gets all the used segments for the datasource that overlap with the given
+   * interval and are not completely overshadowed.
+   */
+  public Set<DataSegment> getAllUsedNonOvershadowedSegments(
+      String dataSource,
+      Interval interval
+  )
+  {
+    final SegmentTimeline timeline = usedSegmentsTimelinesPerDataSource.get(dataSource);
+    if (timeline == null) {
+      return Set.of();
+    }
+
+    return timeline.findNonOvershadowedObjectsInInterval(interval, Partitions.ONLY_COMPLETE);
   }
 
   /**

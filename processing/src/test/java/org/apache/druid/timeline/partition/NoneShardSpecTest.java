@@ -20,43 +20,43 @@
 package org.apache.druid.timeline.partition;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.druid.TestObjectMapper;
-import org.junit.Assert;
-import org.junit.Test;
+import org.apache.druid.jackson.DefaultObjectMapper;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 
 public class NoneShardSpecTest
 {
+  private final ObjectMapper jsonMapper = new DefaultObjectMapper();
+
   @Test
   public void testEqualsAndHashCode()
   {
     final ShardSpec one = NoneShardSpec.instance();
     final ShardSpec two = NoneShardSpec.instance();
-    Assert.assertEquals(one, two);
-    Assert.assertEquals(one.hashCode(), two.hashCode());
+    Assertions.assertEquals(one, two);
+    Assertions.assertEquals(one.hashCode(), two.hashCode());
   }
 
   @Test
   public void testSerde() throws Exception
   {
     final NoneShardSpec one = NoneShardSpec.instance();
-    ObjectMapper mapper = new TestObjectMapper();
-    NoneShardSpec serde1 = mapper.readValue(mapper.writeValueAsString(one), NoneShardSpec.class);
-    NoneShardSpec serde2 = mapper.readValue(mapper.writeValueAsString(one), NoneShardSpec.class);
+    NoneShardSpec serde1 = jsonMapper.readValue(jsonMapper.writeValueAsString(one), NoneShardSpec.class);
+    NoneShardSpec serde2 = jsonMapper.readValue(jsonMapper.writeValueAsString(one), NoneShardSpec.class);
 
     // Serde should return same object instead of creating new one every time.
-    Assert.assertTrue(serde1 == serde2);
-    Assert.assertTrue(one == serde1);
-    Assert.assertEquals(ShardSpec.Type.NONE, serde1.getType());
+    Assertions.assertTrue(serde1 == serde2);
+    Assertions.assertTrue(one == serde1);
+    Assertions.assertEquals(ShardSpec.Type.NONE, serde1.getType());
   }
 
   @Test
   public void testPartitionFieldIgnored() throws IOException
   {
     final String jsonStr = "{\"type\": \"none\",\"partitionNum\": 2}";
-    ObjectMapper mapper = new TestObjectMapper();
-    final ShardSpec noneShardSpec = mapper.readValue(jsonStr, ShardSpec.class);
-    Assert.assertEquals(NoneShardSpec.instance(), noneShardSpec);
+    final ShardSpec noneShardSpec = jsonMapper.readValue(jsonStr, ShardSpec.class);
+    Assertions.assertEquals(NoneShardSpec.instance(), noneShardSpec);
   }
 }

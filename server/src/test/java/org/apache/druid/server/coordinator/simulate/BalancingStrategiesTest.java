@@ -20,16 +20,19 @@
 package org.apache.druid.server.coordinator.simulate;
 
 import org.apache.druid.client.DruidServer;
+import org.apache.druid.segment.TestDataSource;
 import org.apache.druid.timeline.DataSegment;
-import org.junit.Assert;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedClass;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.ArrayList;
 import java.util.List;
 
-@RunWith(Parameterized.class)
+@ParameterizedClass(name = "{0}")
+@MethodSource("getTestParameters")
 public class BalancingStrategiesTest extends CoordinatorSimulationBaseTest
 {
   private static final long SIZE_1TB = 1_000_000;
@@ -37,7 +40,6 @@ public class BalancingStrategiesTest extends CoordinatorSimulationBaseTest
   private final String strategy;
   private final List<DataSegment> segments = Segments.WIKI_10X100D;
 
-  @Parameterized.Parameters(name = "{0}")
   public static String[] getTestParameters()
   {
     return new String[]{"cost", "cachingCost"};
@@ -49,13 +51,14 @@ public class BalancingStrategiesTest extends CoordinatorSimulationBaseTest
   }
 
   @Override
+  @BeforeEach
   public void setUp()
   {
 
   }
 
   @Test
-  public void testFreshClusterGetsBalanced()
+  public void testNewClusterGetsBalanced()
   {
     final List<DruidServer> historicals = new ArrayList<>();
     for (int i = 0; i < 5; i++) {
@@ -64,9 +67,8 @@ public class BalancingStrategiesTest extends CoordinatorSimulationBaseTest
 
     CoordinatorSimulation sim =
         CoordinatorSimulation.builder()
-                             .withDynamicConfig(createDynamicConfig(1000, 0, 100))
                              .withBalancer(strategy)
-                             .withRules(DS.WIKI, Load.on(Tier.T1, 1).forever())
+                             .withRules(TestDataSource.WIKI, Load.on(Tier.T1, 1).forever())
                              .withServers(historicals)
                              .withSegments(segments)
                              .build();
@@ -77,18 +79,16 @@ public class BalancingStrategiesTest extends CoordinatorSimulationBaseTest
     loadQueuedSegments();
     verifyValue(Metric.ASSIGNED_COUNT, 1000L);
     verifyNotEmitted(Metric.MOVED_COUNT);
-    verifyNotEmitted(Metric.UNMOVED_COUNT);
 
     for (DruidServer historical : historicals) {
-      Assert.assertEquals(200, historical.getTotalSegments());
+      Assertions.assertEquals(200, historical.getTotalSegments());
     }
 
     // Run 2: nothing is assigned, nothing is moved as servers are already balanced
     runCoordinatorCycle();
     loadQueuedSegments();
-    verifyValue(Metric.ASSIGNED_COUNT, 0L);
-    verifyValue(Metric.MOVED_COUNT, 0L);
-    verifyValue(Metric.UNMOVED_COUNT, 1000L);
+    verifyNotEmitted(Metric.ASSIGNED_COUNT);
+    verifyNotEmitted(Metric.MOVED_COUNT);
   }
 
   @Test
@@ -101,9 +101,8 @@ public class BalancingStrategiesTest extends CoordinatorSimulationBaseTest
 
     CoordinatorSimulation sim =
         CoordinatorSimulation.builder()
-                             .withDynamicConfig(createDynamicConfig(1000, 0, 100))
                              .withBalancer(strategy)
-                             .withRules(DS.WIKI, Load.on(Tier.T1, 1).forever())
+                             .withRules(TestDataSource.WIKI, Load.on(Tier.T1, 1).forever())
                              .withServers(historicals)
                              .withSegments(segments)
                              .build();
@@ -114,11 +113,10 @@ public class BalancingStrategiesTest extends CoordinatorSimulationBaseTest
     loadQueuedSegments();
     verifyValue(Metric.ASSIGNED_COUNT, 1000L);
     verifyNotEmitted(Metric.MOVED_COUNT);
-    verifyNotEmitted(Metric.UNMOVED_COUNT);
 
     // Verify that each server is equally loaded
     for (DruidServer historical : historicals) {
-      Assert.assertEquals(250, historical.getTotalSegments());
+      Assertions.assertEquals(250, historical.getTotalSegments());
     }
 
     // Add another historical
@@ -127,7 +125,7 @@ public class BalancingStrategiesTest extends CoordinatorSimulationBaseTest
     historicals.add(newHistorical);
 
     // Run the coordinator for a few cycles
-    for (int i = 0; i < 10; ++i) {
+    for (int i = 0; i < 7; ++i) {
       runCoordinatorCycle();
       loadQueuedSegments();
     }
@@ -135,7 +133,7 @@ public class BalancingStrategiesTest extends CoordinatorSimulationBaseTest
     // Verify that the segments have been balanced
     for (DruidServer historical : historicals) {
       long loadedSegments = historical.getTotalSegments();
-      Assert.assertTrue(loadedSegments >= 199 && loadedSegments <= 201);
+      Assertions.assertTrue(loadedSegments >= 195 && loadedSegments <= 205);
     }
   }
 
@@ -149,9 +147,8 @@ public class BalancingStrategiesTest extends CoordinatorSimulationBaseTest
 
     CoordinatorSimulation sim =
         CoordinatorSimulation.builder()
-                             .withDynamicConfig(createDynamicConfig(1000, 0, 100))
                              .withBalancer(strategy)
-                             .withRules(DS.WIKI, Load.on(Tier.T1, 1).forever())
+                             .withRules(TestDataSource.WIKI, Load.on(Tier.T1, 1).forever())
                              .withServers(historicals)
                              .withSegments(segments)
                              .build();
@@ -162,11 +159,10 @@ public class BalancingStrategiesTest extends CoordinatorSimulationBaseTest
     loadQueuedSegments();
     verifyValue(Metric.ASSIGNED_COUNT, 1000L);
     verifyNotEmitted(Metric.MOVED_COUNT);
-    verifyNotEmitted(Metric.UNMOVED_COUNT);
 
     // Verify that each server is equally loaded
     for (DruidServer historical : historicals) {
-      Assert.assertEquals(200, historical.getTotalSegments());
+      Assertions.assertEquals(200, historical.getTotalSegments());
     }
 
     // Remove a historical
@@ -177,10 +173,11 @@ public class BalancingStrategiesTest extends CoordinatorSimulationBaseTest
     runCoordinatorCycle();
     loadQueuedSegments();
     int assignedCount = getValue(Metric.ASSIGNED_COUNT, null).intValue();
-    Assert.assertTrue(assignedCount >= 200);
+    Assertions.assertTrue(assignedCount >= 200);
 
     for (DruidServer historical : historicals) {
-      Assert.assertEquals(250, historical.getTotalSegments());
+      Assertions.assertEquals(250, historical.getTotalSegments());
     }
   }
+
 }

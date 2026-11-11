@@ -25,6 +25,8 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonTypeName;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Ordering;
+import org.apache.commons.lang3.StringUtils;
 import org.apache.druid.java.util.common.granularity.Granularity;
 import org.apache.druid.query.BaseQuery;
 import org.apache.druid.query.DataSource;
@@ -35,10 +37,14 @@ import org.apache.druid.query.Query;
 import org.apache.druid.query.Result;
 import org.apache.druid.query.aggregation.AggregatorFactory;
 import org.apache.druid.query.aggregation.PostAggregator;
+import org.apache.druid.query.context.QueryContextParameters;
 import org.apache.druid.query.filter.DimFilter;
 import org.apache.druid.query.groupby.orderby.DefaultLimitSpec.LimitJsonIncludeFilter;
 import org.apache.druid.query.spec.QuerySegmentSpec;
 import org.apache.druid.segment.VirtualColumns;
+import org.apache.druid.segment.column.ColumnType;
+import org.apache.druid.segment.column.RowSignature;
+import org.apache.druid.segment.column.RowSignature.Finalization;
 
 import javax.annotation.Nullable;
 import java.util.ArrayList;
@@ -53,18 +59,27 @@ import java.util.Set;
 @JsonTypeName("timeseries")
 public class TimeseriesQuery extends BaseQuery<Result<TimeseriesResultValue>>
 {
+  /**
+   * @deprecated Use {@link QueryContextParameters#GRAND_TOTAL} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
   public static final String CTX_GRAND_TOTAL = "grandTotal";
+  /**
+   * @deprecated Use {@link QueryContextParameters#SKIP_EMPTY_BUCKETS} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
   public static final String SKIP_EMPTY_BUCKETS = "skipEmptyBuckets";
-  // "timestampResultField" is an undocumented parameter used internally by the SQL layer.
-  // It is necessary because when the SQL layer generates a Timeseries query for a group-by-time-floor SQL query,
-  // it expects the result of the time-floor to have a specific name. That name is provided using this parameter.
-  // TODO: We can remove this once https://github.com/apache/druid/issues/9974 is done.
+  /**
+   * @deprecated Use {@link QueryContextParameters#TIMESTAMP_RESULT_FIELD} instead.
+   */
+  @Deprecated(since = "39.0.0", forRemoval = true)
   public static final String CTX_TIMESTAMP_RESULT_FIELD = "timestampResultField";
 
   private final VirtualColumns virtualColumns;
   private final DimFilter dimFilter;
   private final List<AggregatorFactory> aggregatorSpecs;
   private final List<PostAggregator> postAggregatorSpecs;
+  private final boolean descending;
   private final int limit;
 
   @JsonCreator
@@ -81,7 +96,7 @@ public class TimeseriesQuery extends BaseQuery<Result<TimeseriesResultValue>>
       @JsonProperty("context") Map<String, Object> context
   )
   {
-    super(dataSource, querySegmentSpec, descending, context, granularity);
+    super(dataSource, querySegmentSpec, context, granularity);
 
     // The below should be executed after context is initialized.
     final String timestampField = getTimestampResultField();
@@ -94,6 +109,7 @@ public class TimeseriesQuery extends BaseQuery<Result<TimeseriesResultValue>>
         this.aggregatorSpecs,
         postAggregatorSpecs == null ? ImmutableList.of() : postAggregatorSpecs
     );
+    this.descending = descending;
     this.limit = (limit == 0) ? Integer.MAX_VALUE : limit;
     Preconditions.checkArgument(this.limit > 0, "limit must be greater than 0");
   }
@@ -145,6 +161,13 @@ public class TimeseriesQuery extends BaseQuery<Result<TimeseriesResultValue>>
     return postAggregatorSpecs;
   }
 
+  @JsonProperty
+  @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+  public boolean isDescending()
+  {
+    return descending;
+  }
+
   @JsonProperty("limit")
   @JsonInclude(value = JsonInclude.Include.CUSTOM, valueFilter = LimitJsonIncludeFilter.class)
   public int getLimit()
@@ -152,19 +175,37 @@ public class TimeseriesQuery extends BaseQuery<Result<TimeseriesResultValue>>
     return limit;
   }
 
+
   public boolean isGrandTotal()
   {
-    return context().getBoolean(CTX_GRAND_TOTAL, false);
+    return context().getOrDefault(QueryContextParameters.GRAND_TOTAL);
   }
 
+  // The SQL layer sets this parameter because, when it generates a Timeseries query for a group-by-time-floor SQL
+  // query, it expects the result of the time-floor to have a specific name.
+  // TODO: We can remove this once https://github.com/apache/druid/issues/9974 is done.
   public String getTimestampResultField()
   {
-    return context().getString(CTX_TIMESTAMP_RESULT_FIELD);
+    return context().get(QueryContextParameters.TIMESTAMP_RESULT_FIELD);
   }
 
   public boolean isSkipEmptyBuckets()
   {
-    return context().getBoolean(SKIP_EMPTY_BUCKETS, false);
+    return context().getOrDefault(QueryContextParameters.SKIP_EMPTY_BUCKETS);
+  }
+
+  @Override
+  public RowSignature getResultRowSignature(Finalization finalization)
+  {
+    final RowSignature.Builder builder = RowSignature.builder();
+    builder.addTimeColumn();
+    String timestampResultField = getTimestampResultField();
+    if (StringUtils.isNotEmpty(timestampResultField)) {
+      builder.add(timestampResultField, ColumnType.LONG);
+    }
+    builder.addAggregators(aggregatorSpecs, finalization);
+    builder.addPostAggregators(postAggregatorSpecs);
+    return builder.build();
   }
 
   @Nullable
@@ -175,9 +216,15 @@ public class TimeseriesQuery extends BaseQuery<Result<TimeseriesResultValue>>
         virtualColumns,
         dimFilter,
         Collections.emptyList(),
-        aggregatorSpecs,
-        Collections.emptyList()
+        aggregatorSpecs
     );
+  }
+
+  @Override
+  public Ordering<Result<TimeseriesResultValue>> getResultOrdering()
+  {
+    Ordering<Result<TimeseriesResultValue>> retVal = Ordering.natural();
+    return descending ? retVal.reverse() : retVal;
   }
 
   @Override
@@ -195,6 +242,9 @@ public class TimeseriesQuery extends BaseQuery<Result<TimeseriesResultValue>>
   @Override
   public Query<Result<TimeseriesResultValue>> optimizeForSegment(PerSegmentQueryOptimizationContext optimizationContext)
   {
+    if (!context().isOptimizeAggregators()) {
+      return this;
+    }
     return Druids.TimeseriesQueryBuilder.copy(this).aggregators(optimizeAggs(optimizationContext)).build();
   }
 
@@ -208,6 +258,11 @@ public class TimeseriesQuery extends BaseQuery<Result<TimeseriesResultValue>>
   public TimeseriesQuery withDimFilter(DimFilter dimFilter)
   {
     return Druids.TimeseriesQueryBuilder.copy(this).filters(dimFilter).build();
+  }
+
+  public TimeseriesQuery withAggregatorSpecs(List<AggregatorFactory> aggregatorSpecs)
+  {
+    return Druids.TimeseriesQueryBuilder.copy(this).aggregators(aggregatorSpecs).build();
   }
 
   public TimeseriesQuery withPostAggregatorSpecs(final List<PostAggregator> postAggregatorSpecs)

@@ -29,15 +29,16 @@ import './execution-timer-panel.scss';
 
 export interface ExecutionTimerPanelProps {
   execution: Execution | undefined;
+  startTime: Date | undefined;
   onCancel(): void;
 }
 
 export const ExecutionTimerPanel = React.memo(function ExecutionTimerPanel(
   props: ExecutionTimerPanelProps,
 ) {
-  const { execution, onCancel } = props;
+  const { execution, startTime, onCancel } = props;
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
-  const [mountTime] = useState(Date.now());
+  const [mountTime] = useState(startTime?.valueOf() ?? Date.now());
   const [currentTime, setCurrentTime] = useState(Date.now());
 
   useInterval(() => {
@@ -60,9 +61,9 @@ export const ExecutionTimerPanel = React.memo(function ExecutionTimerPanel(
         className="timer"
         icon={IconNames.STOPWATCH}
         text={formatDurationHybrid(elapsed)}
-        minimal
+        variant="minimal"
       />
-      <Button icon={IconNames.CROSS} minimal onClick={cancelMaybeConfirm} />
+      <Button icon={IconNames.CROSS} variant="minimal" onClick={cancelMaybeConfirm} />
       {showCancelConfirm && (
         <CancelQueryDialog onCancel={onCancel} onDismiss={() => setShowCancelConfirm(false)} />
       )}

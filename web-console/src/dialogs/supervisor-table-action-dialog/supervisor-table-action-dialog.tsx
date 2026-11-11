@@ -26,10 +26,14 @@ import type { BasicAction } from '../../utils/basic-action';
 import type { SideButtonMetaData } from '../table-action-dialog/table-action-dialog';
 import { TableActionDialog } from '../table-action-dialog/table-action-dialog';
 
+import { AutoScalerPanel } from './auto-scaler-panel/auto-scaler-panel';
 import { SupervisorStatisticsTable } from './supervisor-statistics-table/supervisor-statistics-table';
+
+type SupervisorTableActionDialogTab = 'status' | 'stats' | 'spec' | 'history' | 'auto-scaler';
 
 interface SupervisorTableActionDialogProps {
   supervisorId: string;
+  supervisorType?: string;
   actions: BasicAction[];
   onClose: () => void;
 }
@@ -37,8 +41,10 @@ interface SupervisorTableActionDialogProps {
 export const SupervisorTableActionDialog = React.memo(function SupervisorTableActionDialog(
   props: SupervisorTableActionDialogProps,
 ) {
-  const { supervisorId, actions, onClose } = props;
-  const [activeTab, setActiveTab] = useState('status');
+  const { supervisorId, supervisorType, actions, onClose } = props;
+  const [activeTab, setActiveTab] = useState<SupervisorTableActionDialogTab>('status');
+
+  const isKafka = supervisorType === 'kafka';
 
   const supervisorTableSideButtonMetadata: SideButtonMetaData[] = [
     {
@@ -49,15 +55,15 @@ export const SupervisorTableActionDialog = React.memo(function SupervisorTableAc
     },
     {
       icon: 'chart',
-      text: 'Statistics',
+      text: 'Task stats',
       active: activeTab === 'stats',
       onClick: () => setActiveTab('stats'),
     },
     {
       icon: 'align-left',
-      text: 'Payload',
-      active: activeTab === 'payload',
-      onClick: () => setActiveTab('payload'),
+      text: 'Spec',
+      active: activeTab === 'spec',
+      onClick: () => setActiveTab('spec'),
     },
     {
       icon: 'history',
@@ -65,6 +71,16 @@ export const SupervisorTableActionDialog = React.memo(function SupervisorTableAc
       active: activeTab === 'history',
       onClick: () => setActiveTab('history'),
     },
+    ...(isKafka
+      ? [
+          {
+            icon: 'predictive-analysis' as const,
+            text: 'Simulate auto-scaler',
+            active: activeTab === 'auto-scaler',
+            onClick: () => setActiveTab('auto-scaler'),
+          },
+        ]
+      : []),
   ];
 
   const supervisorEndpointBase = `/druid/indexer/v1/supervisor/${Api.encodePath(supervisorId)}`;
@@ -88,14 +104,15 @@ export const SupervisorTableActionDialog = React.memo(function SupervisorTableAc
           downloadFilename={`supervisor-stats-${supervisorId}.json`}
         />
       )}
-      {activeTab === 'payload' && (
+      {activeTab === 'spec' && (
         <ShowJson
           endpoint={supervisorEndpointBase}
-          transform={x => cleanSpec(x, true)}
+          transform={cleanSpec}
           downloadFilename={`supervisor-payload-${supervisorId}.json`}
         />
       )}
       {activeTab === 'history' && <SupervisorHistoryPanel supervisorId={supervisorId} />}
+      {activeTab === 'auto-scaler' && isKafka && <AutoScalerPanel supervisorId={supervisorId} />}
     </TableActionDialog>
   );
 });

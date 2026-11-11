@@ -21,8 +21,8 @@ package org.apache.druid.java.util.http.client;
 
 import org.apache.druid.java.util.common.StringUtils;
 import org.asynchttpclient.DefaultAsyncHttpClient;
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -30,6 +30,7 @@ import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -81,16 +82,16 @@ public class AsyncHttpClientTest
       requestStart = System.currentTimeMillis();
       Future<?> future = client
           .prepareGet(StringUtils.format("http://localhost:%d/", serverSocket.getLocalPort()))
-          .setRequestTimeout(2000)
+          .setRequestTimeout(Duration.ofMillis(2000))
           .execute();
       System.out.println("created future in: " + (System.currentTimeMillis() - requestStart));
       future.get(3000, TimeUnit.MILLISECONDS);
-      Assert.fail("Expected timeout");
+      Assertions.fail("Expected timeout");
     }
     catch (ExecutionException | TimeoutException e) {
       long elapsed = System.currentTimeMillis() - requestStart;
       // Within 10% of timeout
-      Assert.assertTrue("elapsed: " + elapsed, elapsed < 2200);
+      Assertions.assertTrue(elapsed < 2200, "elapsed: " + elapsed);
     }
     finally {
       exec.shutdownNow();
@@ -103,7 +104,7 @@ public class AsyncHttpClientTest
     try {
       Future<?> future = client
           .prepareGet(StringUtils.format("http://localhost:%d/", serverSocket.getLocalPort()))
-          .setRequestTimeout(100)
+          .setRequestTimeout(Duration.ofMillis(100))
           .execute();
       future.get();
     }

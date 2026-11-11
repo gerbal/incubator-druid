@@ -24,20 +24,17 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.query.filter.DimFilter;
-import org.apache.druid.query.planning.DataSourceAnalysis;
-import org.apache.druid.segment.SegmentReference;
-import org.apache.druid.segment.UnnestSegmentReference;
+import org.apache.druid.query.filter.SegmentPruner;
+import org.apache.druid.segment.SegmentMapFunction;
+import org.apache.druid.segment.UnnestSegment;
 import org.apache.druid.segment.VirtualColumn;
-import org.apache.druid.utils.JvmUtils;
-
+import org.apache.druid.segment.VirtualColumns;
 
 import javax.annotation.Nullable;
-
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Function;
 
 /**
  * The data source for representing an unnest operation.
@@ -130,37 +127,42 @@ public class UnnestDataSource implements DataSource
   }
 
   @Override
-  public boolean isConcrete()
+  public boolean isProcessable()
   {
-    return base.isConcrete();
+    return base.isProcessable();
   }
 
   @Override
-  public Function<SegmentReference, SegmentReference> createSegmentMapFunction(
-      Query query,
-      AtomicLong cpuTimeAccumulator
-  )
+  public SegmentMapFunction createSegmentMapFunction(Query query)
   {
-    final Function<SegmentReference, SegmentReference> segmentMapFn = base.createSegmentMapFunction(
-        query,
-        cpuTimeAccumulator
-    );
-    return JvmUtils.safeAccumulateThreadCpuTime(
-        cpuTimeAccumulator,
-        () ->
-            baseSegment ->
-                new UnnestSegmentReference(
-                    segmentMapFn.apply(baseSegment),
-                    virtualColumn,
-                    unnestFilter
-                )
-    );
+    return base.createSegmentMapFunction(query)
+               .thenMap(segment -> new UnnestSegment(segment, virtualColumn, unnestFilter));
+  }
+
+  @Nullable
+  @Override
+  public SegmentPruner createSegmentPruner(@Nullable DimFilter filter, VirtualColumns virtualColumns)
+  {
+    return base.createSegmentPruner(filter, VirtualColumns.create(virtualColumn).plus(virtualColumns));
   }
 
   @Override
-  public DataSource withUpdatedDataSource(DataSource newSource)
+  public Set<String> getReservedColumns()
   {
-    return new UnnestDataSource(newSource, virtualColumn, unnestFilter);
+    // base.getReservedColumns() is not included, because UnnestCursorFactory applies virtual columns
+    // in an isolated namespace (using PostJoinCursor) that would not interfere with the base.
+    final Set<String> names = new HashSet<>(virtualColumn.requiredColumns());
+    names.add(virtualColumn.getOutputName());
+    if (unnestFilter != null) {
+      names.addAll(unnestFilter.getRequiredColumns());
+    }
+    return names;
+  }
+
+  @Override
+  public boolean mayFilterRows()
+  {
+    return true;
   }
 
   @Override
@@ -173,14 +175,6 @@ public class UnnestDataSource implements DataSource
     // create an appropriate cac
     return null;
   }
-
-  @Override
-  public DataSourceAnalysis getAnalysis()
-  {
-    final DataSource current = this.getBase();
-    return current.getAnalysis();
-  }
-
 
   @Override
   public String toString()
